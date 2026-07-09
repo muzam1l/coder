@@ -1,0 +1,18 @@
+{
+  "name": "wular-plugins",
+  "interface": {
+    "displayName": "Wular Plugins"
+  },
+  "plugins": [
+    {
+      "name": "Coder",
+      "source": {
+        "source": "local",
+        "path": "./codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE"
+      }
+    }
+  ]
+}

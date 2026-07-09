@@ -1,0 +1,9 @@
+{
+  "name": "Coder",
+  "version": "0.0.0",
+  "interface": {
+    "displayName": "Coder (plugin)"
+  },
+  "description": "Delegate coding tasks to a Coder subagent. Your main context stays clean.",
+  "skills": "./skills/"
+}

@@ -1,0 +1,30 @@
+{
+  "name": "@wular/coder",
+  "version": "0.1.7",
+  "description": "Delegating coding-agent runtime",
+  "type": "module",
+  "bin": {
+    "coder": "bin/coder.mjs"
+  },
+  "scripts": {
+    "build": "bun build src/cli.ts src/lib/broker.ts --outdir dist --root src --target node --format esm --minify",
+    "dev": "bun run build --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepublishOnly": "bun run build && bun run typecheck"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "plugins",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "zod": "^4.4.3"
+  }
+}

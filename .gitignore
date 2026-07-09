@@ -1,0 +1,1 @@
+# dist is build output: not tracked in git, shipped to npm via prepublishOnly.
