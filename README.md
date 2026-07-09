@@ -61,6 +61,16 @@ coder setup --codex
 
 Restart Codex and it dispatches coding tasks through the same runtime, with Claude run directly by Coder when it is the selected or fallback engine.
 
+## Staying up to date
+
+```bash
+coder upgrade
+```
+
+It updates the CLI through whichever package manager installed it (npm, pnpm, yarn, or bun, auto-detected) and refreshes the host plugins to match. Narrow it with `--cli-only`, `--plugins-only`, `--codex`, `--claude`, or force a manager with `--pm <npm|pnpm|yarn|bun>`.
+
+Set `CODER_NO_UPDATE_CHECK=1` to silence the update notice.
+
 ## Configuration
 
 Machine defaults live in `~/.coder/config.json`; drop a `coder.config.json` in a repo to override per project.

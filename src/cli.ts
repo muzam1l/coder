@@ -37,6 +37,12 @@ import {
 import { getClaudeAvailability, runClaudeTurn } from './lib/claude-core.js';
 import { answerApproval, createApprovalHandler, listPendingApprovals } from './lib/approvals.js';
 import {
+  clearUpdateCache,
+  detectPackageManager,
+  maybeNotifyUpdate,
+  refreshUpdateCache,
+} from './lib/update-check.js';
+import {
   CLAUDE_EFFORTS,
   CLAUDE_MODELS,
   CLAUDE_SANDBOX_UNAVAILABLE_PATTERN,
@@ -710,6 +716,53 @@ async function commandConfig(argv) {
   });
 }
 
+// The two marketplace manifests live at the package root (= the public repo
+// root muzam1l/coder), so the marketplace dir a host installs from is the
+// package root itself.
+function resolveMarketplaceDir() {
+  return fileURLToPath(new URL('..', import.meta.url));
+}
+
+// Register the packaged marketplace with codex and install the coder plugin
+// from it, exactly what a user would type by hand. Re-adding refreshes both the
+// marketplace snapshot and the cached plugin copy (codex caches installs per
+// version). "." is added from inside the dir because codex parses "@" in a path
+// argument (node_modules/@wular/...) as a git owner/repo@ref source.
+function installCodexPlugin(marketplaceDir) {
+  spawnSync('codex', ['plugin', 'remove', 'coder@coder'], { encoding: 'utf8' });
+  spawnSync('codex', ['plugin', 'marketplace', 'remove', 'coder'], { encoding: 'utf8' });
+  const addMarketplace = spawnSync('codex', ['plugin', 'marketplace', 'add', '.'], {
+    cwd: marketplaceDir,
+    encoding: 'utf8',
+  });
+  const addPlugin = spawnSync('codex', ['plugin', 'add', 'coder@coder'], { encoding: 'utf8' });
+  const installed = addMarketplace.status === 0 && addPlugin.status === 0;
+  return {
+    marketplace: marketplaceDir,
+    installed,
+    note: installed
+      ? 'Plugin installed; restart any running codex session to load it.'
+      : `Automatic install failed (${(addPlugin.stderr || addMarketplace.stderr || 'codex not found').trim()}); run: codex plugin marketplace add "${marketplaceDir}" && codex plugin add coder@coder`,
+  };
+}
+
+// Same through the claude CLI's plugin commands.
+function installClaudePlugin(marketplaceDir) {
+  spawnSync('claude', ['plugin', 'marketplace', 'remove', 'coder'], { encoding: 'utf8' });
+  const addMarketplace = spawnSync('claude', ['plugin', 'marketplace', 'add', marketplaceDir], {
+    encoding: 'utf8',
+  });
+  const install = spawnSync('claude', ['plugin', 'install', 'coder@coder'], { encoding: 'utf8' });
+  const installed = addMarketplace.status === 0 && install.status === 0;
+  return {
+    marketplace: marketplaceDir,
+    installed,
+    note: installed
+      ? 'Plugin installed; restart any running Claude Code session to load it.'
+      : `Automatic install failed (${(install.stderr || addMarketplace.stderr || 'claude not found').trim()}); run: claude plugin marketplace add "${marketplaceDir}" && claude plugin install coder@coder`,
+  };
+}
+
 async function commandSetup(argv) {
   const { options } = parseArgs(argv, {
     valueOptions: ['cwd'],
@@ -737,54 +790,9 @@ async function commandSetup(argv) {
     writeUserConfig({ ...DEFAULT_CONFIG, chain });
   }
 
-  // --codex registers the packaged marketplace with codex and installs the
-  // coder plugin from it, exactly what a user would type by hand.
-  let codexPlugin = null;
-  if (options.codex) {
-    const marketplaceDir = fileURLToPath(new URL('..', import.meta.url));
-    // Re-adding refreshes both the marketplace snapshot and the cached
-    // plugin copy (codex caches installs per version).
-    spawnSync('codex', ['plugin', 'remove', 'coder@coder'], { encoding: 'utf8' });
-    spawnSync('codex', ['plugin', 'marketplace', 'remove', 'coder'], { encoding: 'utf8' });
-    // Add as "." from inside the directory: codex parses "@" in a path
-    // argument (node_modules/@wular/...) as a git owner/repo@ref source.
-    const addMarketplace = spawnSync('codex', ['plugin', 'marketplace', 'add', '.'], {
-      cwd: marketplaceDir,
-      encoding: 'utf8',
-    });
-    const addPlugin = spawnSync('codex', ['plugin', 'add', 'coder@coder'], {
-      encoding: 'utf8',
-    });
-    const installed = addMarketplace.status === 0 && addPlugin.status === 0;
-    codexPlugin = {
-      marketplace: marketplaceDir,
-      installed,
-      note: installed
-        ? 'Plugin installed; restart any running codex session to load it.'
-        : `Automatic install failed (${(addPlugin.stderr || addMarketplace.stderr || 'codex not found').trim()}); run: codex plugin marketplace add "${marketplaceDir}" && codex plugin add coder@coder`,
-    };
-  }
-
-  // --claude does the same through the claude CLI's plugin commands.
-  let claudePlugin = null;
-  if (options.claude) {
-    const marketplaceDir = fileURLToPath(new URL('..', import.meta.url));
-    spawnSync('claude', ['plugin', 'marketplace', 'remove', 'coder'], { encoding: 'utf8' });
-    const addMarketplace = spawnSync('claude', ['plugin', 'marketplace', 'add', marketplaceDir], {
-      encoding: 'utf8',
-    });
-    const install = spawnSync('claude', ['plugin', 'install', 'coder@coder'], {
-      encoding: 'utf8',
-    });
-    const installed = addMarketplace.status === 0 && install.status === 0;
-    claudePlugin = {
-      marketplace: marketplaceDir,
-      installed,
-      note: installed
-        ? 'Plugin installed; restart any running Claude Code session to load it.'
-        : `Automatic install failed (${(install.stderr || addMarketplace.stderr || 'claude not found').trim()}); run: claude plugin marketplace add "${marketplaceDir}" && claude plugin install coder@coder`,
-    };
-  }
+  const marketplaceDir = resolveMarketplaceDir();
+  const codexPlugin = options.codex ? installCodexPlugin(marketplaceDir) : null;
+  const claudePlugin = options.claude ? installClaudePlugin(marketplaceDir) : null;
 
   const config = loadConfig(cwd);
   const ready = availability.available && auth.loggedIn;
@@ -838,10 +846,11 @@ async function commandSetup(argv) {
     '',
   );
 
-  for (const [label, plugin] of [
+  const pluginSummaries: [string, { installed: boolean; note: string } | null][] = [
     ['codex plugin ', codexPlugin],
     ['claude plugin', claudePlugin],
-  ]) {
+  ];
+  for (const [label, plugin] of pluginSummaries) {
     if (plugin) {
       lines.push(
         plugin.installed ? good(`${label} ${gray(plugin.note)}`) : bad(`${label} ${plugin.note}`),
@@ -860,9 +869,84 @@ async function commandSetup(argv) {
   process.stdout.write(`${lines.join('\n')}\n`);
 }
 
+async function commandUpgrade(argv) {
+  const { options } = parseArgs(argv, {
+    valueOptions: ['pm'],
+    booleanOptions: ['cli-only', 'plugins-only', 'codex', 'claude'],
+  });
+  const doCli = !options['plugins-only'];
+  const doPlugins = !options['cli-only'];
+
+  const tty = process.stdout.isTTY && !process.env.NO_COLOR;
+  const paint = (code, text) => (tty ? `\x1b[${code}m${text}\x1b[0m` : text);
+  const head = text => paint('1', text);
+  const gray = text => paint('38;5;245', text);
+  const good = text => `  ${paint('32', '✔')} ${text}`;
+  const bad = text => `  ${paint('31', '✘')} ${text}`;
+
+  // 1. Update the CLI through whichever package manager installed it, so the
+  //    command works regardless of install source (npm/pnpm/yarn/bun).
+  if (doCli) {
+    const detected = detectPackageManager(CLI_PATH);
+    const [pmBin, ...pmArgs] =
+      options.pm === 'npm'
+        ? ['npm', 'install', '-g', '@wular/coder@latest']
+        : options.pm === 'pnpm'
+          ? ['pnpm', 'add', '-g', '@wular/coder@latest']
+          : options.pm === 'yarn'
+            ? ['yarn', 'global', 'add', '@wular/coder@latest']
+            : options.pm === 'bun'
+              ? ['bun', 'add', '-g', '@wular/coder@latest']
+              : detected.command;
+    const pm = options.pm ?? detected.pm;
+    process.stdout.write(`${head('Updating coder CLI')} ${gray(`(${pm}: ${pmBin} ${pmArgs.join(' ')})`)}\n`);
+    const result = spawnSync(pmBin, pmArgs, { stdio: 'inherit' });
+    if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
+      fail(
+        `${pm} not found on PATH. Re-run with --pm <npm|pnpm|yarn|bun>, or update manually: ${pmBin} ${pmArgs.join(' ')}`,
+      );
+    }
+    if (result.status !== 0) {
+      fail(`CLI update failed (${pm}). Run manually: ${pmBin} ${pmArgs.join(' ')}`);
+    }
+    // The on-disk package (and its bundled plugins) is now the new version.
+    // Drop the stale notice cache; the next run re-checks fresh.
+    clearUpdateCache();
+    process.stdout.write(`${good('coder CLI updated')}\n`);
+  }
+
+  // 2. Refresh the host plugins from the freshly installed package. Re-adding
+  //    the local marketplace picks up the new plugin files on disk (both hosts
+  //    cache their installed copy). Default to whichever host CLIs are present;
+  //    --codex/--claude narrow it.
+  if (doPlugins) {
+    const marketplaceDir = resolveMarketplaceDir();
+    const explicit = options.codex || options.claude;
+    const wantCodex = explicit ? options.codex : getCodexAvailability(process.cwd()).available;
+    const wantClaude = explicit ? options.claude : getClaudeAvailability().available;
+
+    if (!wantCodex && !wantClaude) {
+      process.stdout.write(`${gray('No host CLI (codex/claude) found to refresh plugins for.')}\n`);
+    }
+    const refreshers: [string, (() => { installed: boolean; note: string }) | null][] = [
+      ['codex plugin ', wantCodex ? () => installCodexPlugin(marketplaceDir) : null],
+      ['claude plugin', wantClaude ? () => installClaudePlugin(marketplaceDir) : null],
+    ];
+    for (const [label, run] of refreshers) {
+      if (!run) continue;
+      const plugin = run();
+      process.stdout.write(
+        `${plugin.installed ? good(`${label} refreshed ${gray(plugin.note)}`) : bad(`${label} ${plugin.note}`)}\n`,
+      );
+    }
+  }
+}
+
 const COMMANDS = {
   task: commandTask,
   _worker: commandWorker,
+  _refreshUpdate: async () => refreshUpdateCache(readVersion()),
+  upgrade: commandUpgrade,
   status: commandStatus,
   result: commandResult,
   steer: commandSteer,
@@ -890,6 +974,11 @@ async function main() {
   if (subcommand === '--version' || subcommand === '-v') {
     process.stdout.write(`${readVersion()}\n`);
     return;
+  }
+  // Passive, non-blocking update notice. Skip internal/refresh commands so the
+  // detached refresher never re-triggers itself.
+  if (subcommand !== '_worker' && subcommand !== '_refreshUpdate') {
+    maybeNotifyUpdate(readVersion(), CLI_PATH);
   }
   const handler = COMMANDS[subcommand];
   if (!handler) {
@@ -920,6 +1009,7 @@ async function main() {
           'read or write config (e.g. set chain claude,codex)',
         ),
         row('setup [--claude|--codex]', 'check engines, write config, install the host plugin'),
+        row('upgrade [--cli-only|--plugins-only]', 'update the coder CLI and host plugins to latest'),
         row('--version, -v', 'print the coder version'),
         '',
         bold('Task flags:') + dim(' (task and steer)'),
