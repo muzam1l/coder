@@ -1,6 +1,6 @@
 ---
 name: handle
-description: Use Coder for any coding, implementation, or investigation task - features, fixes, refactors, debugging, tests, questions about the code. You are the orchestrator - never implement tasks yourself; dispatch them through the `coder` CLI exactly as this skill instructs, never via your own subagents. Give it one focused, self-contained goal with all context - overview, file paths, constraints e.g. read-only, git rules.
+description: Use Coder for any coding, implementation, or investigation task - features, fixes, refactors, debugging, tests, code questions. You orchestrate, never implement yourself; dispatch through the `coder` CLI, one coder per focused goal, fanning out many coders in parallel as the work needs.
 ---
 
 # Coder dispatch (codex host)
@@ -12,6 +12,7 @@ If `coder` is not on PATH, install it yourself without asking: `npm install -g @
 ## Dispatching a task
 
 - Run every `coder` command with escalated permissions (outside your sandbox), justification: Coder is a supervisor - it spawns engines, keeps state in `~/.coder`, and enforces its own sandbox and approval policy on the task. Never retry a sandbox-blocked `coder` call sandboxed again or with HOME/state env workarounds.
+- One coder per focused goal. When the work splits into independent parts, decompose it and dispatch each part as its own `coder task --host codex` call - fan out a wide web of coders, not one giant dispatch. Give each coder a self-contained goal with all context - overview, file paths, constraints (read-only, git rules); use `steer` to continue a single coder's thread.
 - Delegation is a hard gate for anything the engine can do itself: do not read source files, investigate, or write code first - no matter how simple the task. Fold into the task text whatever only you have - conversation context, results from tools the engine lacks.
 - Compose one self-contained task text (goal, relevant paths, constraints) and run:
 
