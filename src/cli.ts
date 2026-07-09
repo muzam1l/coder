@@ -883,6 +883,24 @@ async function commandUpgrade(argv) {
   const gray = text => paint('38;5;245', text);
   const good = text => `  ${paint('32', '✔')} ${text}`;
   const bad = text => `  ${paint('31', '✘')} ${text}`;
+  // "0.1.7 -> 0.1.8" when the version moved, else "0.1.8 (unchanged)".
+  const transition = (before, after) =>
+    after && before && after !== before
+      ? `${before} ${gray('->')} ${head(after)}`
+      : `${after ?? before ?? '?'} ${gray('(unchanged)')}`;
+
+  // Read versions off disk BEFORE updating; npm/pnpm/etc. replace the package
+  // (CLI bundle + bundled plugin manifests) in place, so re-reading the same
+  // paths afterward reports the new versions even though this process is still
+  // running the old code.
+  const marketplaceDir = resolveMarketplaceDir();
+  const codexManifest = path.join(marketplaceDir, 'plugins/codex/.codex-plugin/plugin.json');
+  const claudeManifest = path.join(marketplaceDir, 'plugins/claude/.claude-plugin/plugin.json');
+  const before = {
+    cli: readVersion(),
+    codex: readManifestVersion(codexManifest),
+    claude: readManifestVersion(claudeManifest),
+  };
 
   // 1. Update the CLI through whichever package manager installed it, so the
   //    command works regardless of install source (npm/pnpm/yarn/bun).
@@ -899,20 +917,31 @@ async function commandUpgrade(argv) {
               ? ['bun', 'add', '-g', '@wular/coder@latest']
               : detected.command;
     const pm = options.pm ?? detected.pm;
-    process.stdout.write(`${head('Updating coder CLI')} ${gray(`(${pm}: ${pmBin} ${pmArgs.join(' ')})`)}\n`);
-    const result = spawnSync(pmBin, pmArgs, { stdio: 'inherit' });
+    process.stdout.write(`${head('Updating coder CLI')} ${gray(`via ${pm}...`)}\n`);
+    // Capture output (instead of inherit) so the package manager's own noise
+    // ("changed 2 packages", funding notices) does not drown the summary; show
+    // it only if the update fails.
+    const result = spawnSync(pmBin, pmArgs, { encoding: 'utf8' });
     if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
       fail(
         `${pm} not found on PATH. Re-run with --pm <npm|pnpm|yarn|bun>, or update manually: ${pmBin} ${pmArgs.join(' ')}`,
       );
     }
     if (result.status !== 0) {
-      fail(`CLI update failed (${pm}). Run manually: ${pmBin} ${pmArgs.join(' ')}`);
+      const detail = (result.stderr || result.stdout || '').trim();
+      fail(
+        `CLI update failed (${pm}).${detail ? `\n${detail}` : ''}\nRun manually: ${pmBin} ${pmArgs.join(' ')}`,
+      );
     }
     // The on-disk package (and its bundled plugins) is now the new version.
     // Drop the stale notice cache; the next run re-checks fresh.
     clearUpdateCache();
-    process.stdout.write(`${good('coder CLI updated')}\n`);
+    const afterCli = readVersion();
+    process.stdout.write(
+      afterCli !== before.cli
+        ? `${good(`coder CLI  ${transition(before.cli, afterCli)}`)}\n`
+        : `${good(`coder CLI  ${before.cli} ${gray('(already latest)')}`)}\n`,
+    );
   }
 
   // 2. Refresh the host plugins from the freshly installed package. Re-adding
@@ -920,7 +949,6 @@ async function commandUpgrade(argv) {
   //    cache their installed copy). Default to whichever host CLIs are present;
   //    --codex/--claude narrow it.
   if (doPlugins) {
-    const marketplaceDir = resolveMarketplaceDir();
     const explicit = options.codex || options.claude;
     const wantCodex = explicit ? options.codex : getCodexAvailability(process.cwd()).available;
     const wantClaude = explicit ? options.claude : getClaudeAvailability().available;
@@ -928,15 +956,25 @@ async function commandUpgrade(argv) {
     if (!wantCodex && !wantClaude) {
       process.stdout.write(`${gray('No host CLI (codex/claude) found to refresh plugins for.')}\n`);
     }
-    const refreshers: [string, (() => { installed: boolean; note: string }) | null][] = [
-      ['codex plugin ', wantCodex ? () => installCodexPlugin(marketplaceDir) : null],
-      ['claude plugin', wantClaude ? () => installClaudePlugin(marketplaceDir) : null],
+    const refreshers: [
+      string,
+      string,
+      string,
+      (() => { installed: boolean; note: string }) | null,
+    ][] = [
+      ['codex plugin ', before.codex, codexManifest, wantCodex ? () => installCodexPlugin(marketplaceDir) : null],
+      ['claude plugin', before.claude, claudeManifest, wantClaude ? () => installClaudePlugin(marketplaceDir) : null],
     ];
-    for (const [label, run] of refreshers) {
+    for (const [label, beforeVer, manifest, run] of refreshers) {
       if (!run) continue;
       const plugin = run();
+      const afterVer = readManifestVersion(manifest);
       process.stdout.write(
-        `${plugin.installed ? good(`${label} refreshed ${gray(plugin.note)}`) : bad(`${label} ${plugin.note}`)}\n`,
+        `${
+          plugin.installed
+            ? good(`${label} ${transition(beforeVer, afterVer)} ${gray(`- ${plugin.note}`)}`)
+            : bad(`${label} ${plugin.note}`)
+        }\n`,
       );
     }
   }
@@ -947,6 +985,7 @@ const COMMANDS = {
   _worker: commandWorker,
   _refreshUpdate: async () => refreshUpdateCache(readVersion()),
   upgrade: commandUpgrade,
+  update: commandUpgrade,
   status: commandStatus,
   result: commandResult,
   steer: commandSteer,
@@ -966,6 +1005,16 @@ function readVersion() {
     return pkg.version ?? 'unknown';
   } catch {
     return 'unknown';
+  }
+}
+
+// Read a plugin manifest's version off disk (fresh each call, so it reflects a
+// just-completed package update). Null when the file is missing/unreadable.
+function readManifestVersion(file) {
+  try {
+    return JSON.parse(fs.readFileSync(file, 'utf8')).version ?? null;
+  } catch {
+    return null;
   }
 }
 
@@ -1009,7 +1058,7 @@ async function main() {
           'read or write config (e.g. set chain claude,codex)',
         ),
         row('setup [--claude|--codex]', 'check engines, write config, install the host plugin'),
-        row('upgrade [--cli-only|--plugins-only]', 'update the coder CLI and host plugins to latest'),
+        row('upgrade [--cli-only|--plugins-only]', 'update the coder CLI and host plugins to latest (alias: update)'),
         row('--version, -v', 'print the coder version'),
         '',
         bold('Task flags:') + dim(' (task and steer)'),

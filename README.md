@@ -39,9 +39,13 @@ npm install -g @wular/coder
 coder setup --claude
 ```
 
-It shall use Coder automatically or you can also manually ask like:
+Then you can ask like:
 
-> Use Coder to fix the failing date tests in packages/utils.
+> Use Coder to explain the directory structure of the workspace.
+
+You can also add this to CLAUDE.md.
+
+> Always use Coder for all implementation and system exploring tasks.
 
 The work happens in the engine, and your session gets the result. Codex is the primary engine when available, with a Claude subagent as fallback.
 
@@ -58,6 +62,10 @@ Or from the npm directly:
 npm install -g @wular/coder
 coder setup --codex
 ```
+
+Then ask like:
+
+> Use $coder:handle to explain the directory structure of the workspace.
 
 Restart Codex and it dispatches coding tasks through the same runtime, with Claude run directly by Coder when it is the selected or fallback engine.
 
@@ -100,11 +108,11 @@ coder approve <job> <id>         # answer an escalated permission (--deny)
 
 Common flags:
 
-| Flag             | Values                                                          | Default         |
-| ---------------- | --------------------------------------------------------------- | --------------- |
-| `--wait`         | run in the foreground and print the answer                      | background      |
-| `--agent`        | `codex`, `claude`                                               | first in`chain` |
-| `--model`        | `5.5`, `spark`, `opus`, `sonnet`, `fable` or any raw model slug | from config     |
-| `--effort`       | `low`, `medium`, `high`                                         | from config     |
-| `--permissions`  | `read-only`, `workspace-write`, `auto`                          | `auto`          |
-| `--resume <job>` | continue that job's thread instead of starting fresh            | fresh run       |
+| Flag               | Values                                                                    | Default           |
+| ------------------ | ------------------------------------------------------------------------- | ----------------- |
+| `--wait`         | run in the foreground and print the answer                                | background        |
+| `--agent`        | `codex`, `claude`                                                     | first in`chain` |
+| `--model`        | `5.5`, `spark`, `opus`, `sonnet`, `fable` or any raw model slug | from config       |
+| `--effort`       | `low`, `medium`, `high`                                             | from config       |
+| `--permissions`  | `read-only`, `workspace-write`, `auto`                              | `auto`          |
+| `--resume <job>` | continue that job's thread instead of starting fresh                      | fresh run         |
