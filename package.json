@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "bin": {
@@ -13,7 +13,8 @@
     "version-bump:patch": "node scripts/bump.mjs patch",
     "version-bump:minor": "node scripts/bump.mjs minor",
     "version-bump:major": "node scripts/bump.mjs major",
-    "prepublishOnly": "bun run build && bun run typecheck"
+    "prepublishOnly": "bun run build && bun run typecheck",
+    "npm-publish": "npm publish --access public --tag latest --registry=https://registry.npmjs.org --//registry.npmjs.org/:_authToken=\"$NPM_TOKEN\""
   },
   "files": [
     "bin",

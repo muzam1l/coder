@@ -268,7 +268,7 @@ async function commandTask(argv) {
 
   if (resolved.agent === 'claude' && host === 'claude') {
     printJson(claudeDispatchPayload(config, prompt, 'configured', resolved.permissions));
-    process.exit(3);
+    process.exit(0);
   }
 
   // An agent could not start (missing, auth, quota): hand off to the next
@@ -287,7 +287,9 @@ async function commandTask(argv) {
       });
       process.exit(3);
     }
-    process.stderr.write(`[coder] ${agent} failed to start (${detail}); falling back to ${next}.\n`);
+    process.stderr.write(
+      `[coder] ${agent} failed to start (${detail}); falling back to ${next}.\n`,
+    );
     await commandTask([
       prompt,
       '--agent',
@@ -962,8 +964,18 @@ async function commandUpgrade(argv) {
       string,
       (() => { installed: boolean; note: string }) | null,
     ][] = [
-      ['codex plugin ', before.codex, codexManifest, wantCodex ? () => installCodexPlugin(marketplaceDir) : null],
-      ['claude plugin', before.claude, claudeManifest, wantClaude ? () => installClaudePlugin(marketplaceDir) : null],
+      [
+        'codex plugin ',
+        before.codex,
+        codexManifest,
+        wantCodex ? () => installCodexPlugin(marketplaceDir) : null,
+      ],
+      [
+        'claude plugin',
+        before.claude,
+        claudeManifest,
+        wantClaude ? () => installClaudePlugin(marketplaceDir) : null,
+      ],
     ];
     for (const [label, beforeVer, manifest, run] of refreshers) {
       if (!run) continue;
@@ -1058,12 +1070,18 @@ async function main() {
           'read or write config (e.g. set chain claude,codex)',
         ),
         row('setup [--claude|--codex]', 'check engines, write config, install the host plugin'),
-        row('upgrade [--cli-only|--plugins-only]', 'update the coder CLI and host plugins to latest (alias: update)'),
+        row(
+          'upgrade [--cli-only|--plugins-only]',
+          'update the coder CLI and host plugins to latest (alias: update)',
+        ),
         row('--version, -v', 'print the coder version'),
         '',
         bold('Task flags:') + dim(' (task and steer)'),
         row('--agent <codex|claude>', 'engine (default: first in configured chain)'),
-        row('--model <alias|slug>', 'spark, 5.5 (codex) | opus, sonnet, fable (claude); alias picks engine'),
+        row(
+          '--model <alias|slug>',
+          'spark, 5.5 (codex) | opus, sonnet, fable (claude); alias picks engine',
+        ),
         row('--effort <low|medium|high>', 'reasoning effort'),
         row('--permissions <mode>', 'read-only | workspace-write | auto (default: auto)'),
         row('--resume <job>', "continue that job's thread instead of starting fresh"),
