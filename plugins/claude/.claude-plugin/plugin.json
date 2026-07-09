@@ -1,6 +1,6 @@
 {
   "name": "coder",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Delegate coding tasks to a Coder subagent. Codex first, Claude fallback; your main context stays clean.",
   "author": {
     "name": "muzam1l"
