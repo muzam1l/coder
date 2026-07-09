@@ -23,9 +23,9 @@ Plugs into Claude Code or Codex to enable the harness with Coder instances.
 ### Claude Code
 
 ```
-/plugin marketplace add muzam1l/wular-plugins
+/plugin marketplace add muzam1l/coder
 
-/plugin install Coder@wular-plugins
+/plugin install coder@coder
 
 /reload-plugins
 
@@ -48,8 +48,8 @@ The work happens in the engine, and your session gets the result. Codex is the p
 ### Codex
 
 ```
-codex plugin marketplace add muzam1l/wular-plugins
-codex plugin add Coder@wular-plugins
+codex plugin marketplace add muzam1l/coder
+codex plugin add coder@coder
 ```
 
 Or from the npm directly:

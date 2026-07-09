@@ -1,12 +1,12 @@
 {
-  "name": "wular-plugins",
+  "name": "coder",
   "owner": {
-    "name": "wular"
+    "name": "muzam1l"
   },
   "plugins": [
     {
-      "name": "Coder",
-      "source": "./claude",
+      "name": "coder",
+      "source": "./plugins/claude",
       "description": "Delegate coding tasks to a Coder subagent. Codex first, Claude fallback; your main context stays clean."
     }
   ]

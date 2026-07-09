@@ -1,5 +1,5 @@
 ---
-name: coder
+name: handle
 description: Use Coder for any coding, implementation, or investigation task - features, fixes, refactors, debugging, tests, questions about the code. You are the orchestrator - never implement tasks yourself; dispatch them through the `coder` CLI exactly as this skill instructs, never via your own subagents. Give it one focused, self-contained goal with all context - overview, file paths, constraints e.g. read-only, git rules.
 ---
 

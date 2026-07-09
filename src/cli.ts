@@ -741,48 +741,48 @@ async function commandSetup(argv) {
   // coder plugin from it, exactly what a user would type by hand.
   let codexPlugin = null;
   if (options.codex) {
-    const pluginsDir = fileURLToPath(new URL('../plugins', import.meta.url));
+    const marketplaceDir = fileURLToPath(new URL('..', import.meta.url));
     // Re-adding refreshes both the marketplace snapshot and the cached
     // plugin copy (codex caches installs per version).
-    spawnSync('codex', ['plugin', 'remove', 'Coder@wular-plugins'], { encoding: 'utf8' });
-    spawnSync('codex', ['plugin', 'marketplace', 'remove', 'wular-plugins'], { encoding: 'utf8' });
+    spawnSync('codex', ['plugin', 'remove', 'coder@coder'], { encoding: 'utf8' });
+    spawnSync('codex', ['plugin', 'marketplace', 'remove', 'coder'], { encoding: 'utf8' });
     // Add as "." from inside the directory: codex parses "@" in a path
     // argument (node_modules/@wular/...) as a git owner/repo@ref source.
     const addMarketplace = spawnSync('codex', ['plugin', 'marketplace', 'add', '.'], {
-      cwd: pluginsDir,
+      cwd: marketplaceDir,
       encoding: 'utf8',
     });
-    const addPlugin = spawnSync('codex', ['plugin', 'add', 'Coder@wular-plugins'], {
+    const addPlugin = spawnSync('codex', ['plugin', 'add', 'coder@coder'], {
       encoding: 'utf8',
     });
     const installed = addMarketplace.status === 0 && addPlugin.status === 0;
     codexPlugin = {
-      marketplace: pluginsDir,
+      marketplace: marketplaceDir,
       installed,
       note: installed
         ? 'Plugin installed; restart any running codex session to load it.'
-        : `Automatic install failed (${(addPlugin.stderr || addMarketplace.stderr || 'codex not found').trim()}); run: codex plugin marketplace add "${pluginsDir}" && codex plugin add Coder@wular-plugins`,
+        : `Automatic install failed (${(addPlugin.stderr || addMarketplace.stderr || 'codex not found').trim()}); run: codex plugin marketplace add "${marketplaceDir}" && codex plugin add coder@coder`,
     };
   }
 
   // --claude does the same through the claude CLI's plugin commands.
   let claudePlugin = null;
   if (options.claude) {
-    const pluginsDir = fileURLToPath(new URL('../plugins', import.meta.url));
-    spawnSync('claude', ['plugin', 'marketplace', 'remove', 'wular-plugins'], { encoding: 'utf8' });
-    const addMarketplace = spawnSync('claude', ['plugin', 'marketplace', 'add', pluginsDir], {
+    const marketplaceDir = fileURLToPath(new URL('..', import.meta.url));
+    spawnSync('claude', ['plugin', 'marketplace', 'remove', 'coder'], { encoding: 'utf8' });
+    const addMarketplace = spawnSync('claude', ['plugin', 'marketplace', 'add', marketplaceDir], {
       encoding: 'utf8',
     });
-    const install = spawnSync('claude', ['plugin', 'install', 'Coder@wular-plugins'], {
+    const install = spawnSync('claude', ['plugin', 'install', 'coder@coder'], {
       encoding: 'utf8',
     });
     const installed = addMarketplace.status === 0 && install.status === 0;
     claudePlugin = {
-      marketplace: pluginsDir,
+      marketplace: marketplaceDir,
       installed,
       note: installed
         ? 'Plugin installed; restart any running Claude Code session to load it.'
-        : `Automatic install failed (${(install.stderr || addMarketplace.stderr || 'claude not found').trim()}); run: claude plugin marketplace add "${pluginsDir}" && claude plugin install Coder@wular-plugins`,
+        : `Automatic install failed (${(install.stderr || addMarketplace.stderr || 'claude not found').trim()}); run: claude plugin marketplace add "${marketplaceDir}" && claude plugin install coder@coder`,
     };
   }
 

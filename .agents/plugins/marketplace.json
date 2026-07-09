@@ -1,14 +1,14 @@
 {
-  "name": "wular-plugins",
+  "name": "coder",
   "interface": {
-    "displayName": "Wular Plugins"
+    "displayName": "Coder"
   },
   "plugins": [
     {
-      "name": "Coder",
+      "name": "coder",
       "source": {
         "source": "local",
-        "path": "./codex"
+        "path": "./plugins/codex"
       },
       "policy": {
         "installation": "AVAILABLE"
