@@ -25,7 +25,7 @@ Plugs into Claude Code or Codex to enable the harness with Coder instances.
 ```
 /plugin marketplace add muzam1l/coder
 
-/plugin install coder@coder
+/plugin install coder@coder-plugins
 
 /reload-plugins
 
@@ -53,7 +53,7 @@ The work happens in the engine, and your session gets the result. Codex is the p
 
 ```
 codex plugin marketplace add muzam1l/coder
-codex plugin add coder@coder
+codex plugin add coder@coder-plugins
 ```
 
 Or from the npm directly:

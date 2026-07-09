@@ -731,37 +731,41 @@ function resolveMarketplaceDir() {
 // version). "." is added from inside the dir because codex parses "@" in a path
 // argument (node_modules/@wular/...) as a git owner/repo@ref source.
 function installCodexPlugin(marketplaceDir) {
-  spawnSync('codex', ['plugin', 'remove', 'coder@coder'], { encoding: 'utf8' });
-  spawnSync('codex', ['plugin', 'marketplace', 'remove', 'coder'], { encoding: 'utf8' });
+  spawnSync('codex', ['plugin', 'remove', 'coder@coder-plugins'], { encoding: 'utf8' });
+  spawnSync('codex', ['plugin', 'marketplace', 'remove', 'coder-plugins'], { encoding: 'utf8' });
   const addMarketplace = spawnSync('codex', ['plugin', 'marketplace', 'add', '.'], {
     cwd: marketplaceDir,
     encoding: 'utf8',
   });
-  const addPlugin = spawnSync('codex', ['plugin', 'add', 'coder@coder'], { encoding: 'utf8' });
+  const addPlugin = spawnSync('codex', ['plugin', 'add', 'coder@coder-plugins'], {
+    encoding: 'utf8',
+  });
   const installed = addMarketplace.status === 0 && addPlugin.status === 0;
   return {
     marketplace: marketplaceDir,
     installed,
     note: installed
       ? 'Plugin installed; restart any running codex session to load it.'
-      : `Automatic install failed (${(addPlugin.stderr || addMarketplace.stderr || 'codex not found').trim()}); run: codex plugin marketplace add "${marketplaceDir}" && codex plugin add coder@coder`,
+      : `Automatic install failed (${(addPlugin.stderr || addMarketplace.stderr || 'codex not found').trim()}); run: codex plugin marketplace add "${marketplaceDir}" && codex plugin add coder@coder-plugins`,
   };
 }
 
 // Same through the claude CLI's plugin commands.
 function installClaudePlugin(marketplaceDir) {
-  spawnSync('claude', ['plugin', 'marketplace', 'remove', 'coder'], { encoding: 'utf8' });
+  spawnSync('claude', ['plugin', 'marketplace', 'remove', 'coder-plugins'], { encoding: 'utf8' });
   const addMarketplace = spawnSync('claude', ['plugin', 'marketplace', 'add', marketplaceDir], {
     encoding: 'utf8',
   });
-  const install = spawnSync('claude', ['plugin', 'install', 'coder@coder'], { encoding: 'utf8' });
+  const install = spawnSync('claude', ['plugin', 'install', 'coder@coder-plugins'], {
+    encoding: 'utf8',
+  });
   const installed = addMarketplace.status === 0 && install.status === 0;
   return {
     marketplace: marketplaceDir,
     installed,
     note: installed
       ? 'Plugin installed; restart any running Claude Code session to load it.'
-      : `Automatic install failed (${(install.stderr || addMarketplace.stderr || 'claude not found').trim()}); run: claude plugin marketplace add "${marketplaceDir}" && claude plugin install coder@coder`,
+      : `Automatic install failed (${(install.stderr || addMarketplace.stderr || 'claude not found').trim()}); run: claude plugin marketplace add "${marketplaceDir}" && claude plugin install coder@coder-plugins`,
   };
 }
 
