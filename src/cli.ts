@@ -38,6 +38,7 @@ import { getClaudeAvailability, runClaudeTurn } from './lib/claude-core.js';
 import { answerApproval, createApprovalHandler, listPendingApprovals } from './lib/approvals.js';
 import {
   clearUpdateCache,
+  compareVersions,
   detectPackageManager,
   maybeNotifyUpdate,
   refreshUpdateCache,
@@ -770,6 +771,44 @@ function installClaudePlugin(marketplaceDir) {
   };
 }
 
+// GPT-5.6 codex models are gated server-side on the codex CLI version: older
+// codex returns "requires a newer version of Codex". The default codex model is
+// a 5.6 tier, so setup keeps codex current. Bump when a newer model raises the
+// floor. (compareVersions ignores prerelease tags, so an alpha reads as >= this.)
+const MIN_CODEX_VERSION = '0.144.0';
+
+function parseCodexVersion(detail) {
+  const match = /(\d+\.\d+\.\d+)/.exec(String(detail ?? ''));
+  return match ? match[1] : null;
+}
+
+// Auto-update codex in place when it is too old for the configured GPT-5.6
+// model. Prefer codex's own updater: it detects how codex was installed (npm,
+// brew, native) and does the right thing - including refetching the binary a
+// bun global install leaves missing. Fall back to npm when `codex update` is
+// absent (older codex predating the subcommand) or fails. Returns a result to
+// surface, or null when codex is absent or already new enough.
+function ensureCodexUpToDate(availability) {
+  if (!availability.available) {
+    return null;
+  }
+  const version = parseCodexVersion(availability.detail);
+  if (!version || compareVersions(version, MIN_CODEX_VERSION) >= 0) {
+    return null;
+  }
+  let result = spawnSync('codex', ['update'], { encoding: 'utf8' });
+  if (result.status !== 0) {
+    result = spawnSync('npm', ['install', '-g', '@openai/codex@latest'], { encoding: 'utf8' });
+  }
+  return result.status === 0
+    ? { updated: true, from: version }
+    : {
+        updated: false,
+        from: version,
+        note: `codex ${version} is too old for the default GPT-5.6 model (needs >= ${MIN_CODEX_VERSION}); auto-update failed: ${(result.stderr || 'codex/npm not found').trim()}. Run: codex update`,
+      };
+}
+
 async function commandSetup(argv) {
   const { options } = parseArgs(argv, {
     valueOptions: ['cwd'],
@@ -777,7 +816,13 @@ async function commandSetup(argv) {
   });
   const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
 
-  const availability = getCodexAvailability(cwd);
+  let availability = getCodexAvailability(cwd);
+  const codexUpdate = ensureCodexUpToDate(availability);
+  if (codexUpdate?.updated) {
+    // Re-read so the rest of setup (auth, chain seeding, output) reflects the
+    // freshly-installed codex rather than the stale version we just replaced.
+    availability = getCodexAvailability(cwd);
+  }
   const auth = availability.available
     ? await getCodexAuthStatus(cwd)
     : { loggedIn: false, detail: availability.detail };
@@ -812,6 +857,7 @@ async function commandSetup(argv) {
         auth: auth.detail,
         loggedIn: auth.loggedIn,
       },
+      ...(codexUpdate ? { codexUpdate } : {}),
       claude: { available: claude.available, detail: claude.detail },
       configFile,
       runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
@@ -840,7 +886,13 @@ async function commandSetup(argv) {
   const claudeLine = claude.available
     ? good(`claude  ${gray(claude.detail)}`)
     : bad(`claude  not installed - run: npm install -g @anthropic-ai/claude-code`);
-  lines.push(head('Available Engines'), codexLine, claudeLine, '');
+  lines.push(head('Available Engines'), codexLine, claudeLine);
+  if (codexUpdate?.updated) {
+    lines.push(good(`codex   ${gray(`updated ${codexUpdate.from} -> ${availability.detail} (GPT-5.6 support)`)}`));
+  } else if (codexUpdate) {
+    lines.push(bad(`codex   ${codexUpdate.note}`));
+  }
+  lines.push('');
 
   const agentSummary = agent => {
     const entry = config.agents?.[agent] ?? {};

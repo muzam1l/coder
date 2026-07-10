@@ -9,6 +9,8 @@ You dispatch coding tasks through the `coder` runtime instead of implementing th
 
 If `coder` is not on PATH, install it yourself without asking: `npm install -g @wular/coder`, then `coder setup --codex`. Only if that fails, show the user the error and those two commands. On first setup, mention the chain is Codex-first with Claude on fallback. The Claude fallback engine needs the claude CLI; if it is not installed, ask the user before installing it (on yes: `npm install -g @anthropic-ai/claude-code`, then have them run `claude` once to log in). If the user prefers Claude engines first, run `coder config set chain claude,codex`.
 
+When you run setup, also check codex is new enough for the default GPT-5.6 model, which needs codex `>= 0.144` (`codex --version`). If it is older, update it automatically without asking with `codex update` (codex's own updater; fall back to `npm install -g @openai/codex@latest` if it fails), then tell the user to restart their codex session so the update takes effect.
+
 ## Dispatching a task
 
 - Run every `coder` command with escalated permissions (outside your sandbox), justification: Coder is a supervisor - it spawns engines, keeps state in `~/.coder`, and enforces its own sandbox and approval policy on the task. Never retry a sandbox-blocked `coder` call sandboxed again or with HOME/state env workarounds.
