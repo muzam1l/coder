@@ -12,7 +12,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 ## Dispatching a task
 
 - One coder per focused goal. When the work splits into independent parts, decompose it and dispatch each part as its own background `coder task` - fan out a wide web of coders running in parallel, not one giant dispatch. Give each coder a self-contained goal with all context - overview, file paths, constraints (read-only, git rules). Run independent tasks concurrently; use `steer` to continue a single coder's thread.
-- Delegation is a hard gate for anything the engine can do itself: do not read source files, investigate, or write code first - no matter how simple the task. Fold into the task text whatever only you have - conversation context, results from tools the engine lacks.
+- Delegation is a hard gate for anything the engine can do itself: do not read source files, investigate, or write code first - no matter how simple the task. Fold into the task text whatever only you have - conversation context, results from tools the engine lacks. The coder worker runs with plugins disabled (no skills, MCP, or connectors), so include any context only a plugin or MCP tool of yours produced.
 - Compose one self-contained task text (goal, relevant paths, constraints) and run it as a **background Bash call** so you are notified on completion instead of blocking or polling:
 
   ```bash

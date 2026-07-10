@@ -247,7 +247,8 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    this.proc = spawn('codex', ['app-server'], {
+    // Disable plugins in the worker session.
+    this.proc = spawn('codex', ['app-server', '--disable', 'plugins'], {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
       stdio: ['pipe', 'pipe', 'pipe'],

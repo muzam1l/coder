@@ -15,7 +15,7 @@ When you run setup, also check codex is new enough for the default GPT-5.6 model
 
 - Run every `coder` command with escalated permissions (outside your sandbox), justification: Coder is a supervisor - it spawns engines, keeps state in `~/.coder`, and enforces its own sandbox and approval policy on the task. Never retry a sandbox-blocked `coder` call sandboxed again or with HOME/state env workarounds.
 - One coder per focused goal. When the work splits into independent parts, decompose it and dispatch each part as its own `coder task --host codex` call - fan out a wide web of coders, not one giant dispatch. Give each coder a self-contained goal with all context - overview, file paths, constraints (read-only, git rules); use `steer` to continue a single coder's thread.
-- Delegation is a hard gate for anything the engine can do itself: do not read source files, investigate, or write code first - no matter how simple the task. Fold into the task text whatever only you have - conversation context, results from tools the engine lacks.
+- Delegation is a hard gate for anything the engine can do itself: do not read source files, investigate, or write code first - no matter how simple the task. Fold into the task text whatever only you have - conversation context, results from tools the engine lacks. The coder worker runs with plugins disabled (no skills, MCP, or connectors), so include any context only a plugin or MCP tool of yours produced.
 - Compose one self-contained task text (goal, relevant paths, constraints) and run:
 
   ```bash
