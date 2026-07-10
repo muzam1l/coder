@@ -8,12 +8,106 @@
 import { spawnSync } from "node:child_process";
 
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.js";
+import type { ProtocolError } from "./app-server.js";
 import { binaryAvailable } from "./process.js";
+import type { Availability, AuthStatus, Effort, ProgressUpdate, TurnResult } from "./types.js";
 
 const SERVICE_NAME = "coder_runtime";
 const TASK_THREAD_PREFIX = "Coder Task";
 
-function cleanCodexStderr(stderr) {
+/** The connected app-server client (spawned or broker transport). */
+type AppServerClient = Awaited<ReturnType<typeof CodexAppServerClient.connect>>;
+
+/** A progress reporter passed by callers to observe a turn. */
+type ProgressReporter = (update: ProgressUpdate) => void;
+
+/** A single item emitted by the app-server (command, file change, message, ...). */
+interface TurnItem {
+  id?: string;
+  type?: string;
+  status?: string;
+  text?: string;
+  phase?: string;
+  command?: string;
+  exitCode?: number | null;
+  changes?: Array<{ path?: string }>;
+  server?: string;
+  tool?: string;
+  query?: string;
+  summary?: unknown;
+  receiverThreadIds?: string[];
+  [key: string]: unknown;
+}
+
+/** A turn descriptor from turn/started and turn/completed. */
+interface Turn {
+  id?: string;
+  status?: string;
+  [key: string]: unknown;
+}
+
+/** A JSON-RPC notification/request frame from the app-server. */
+interface AppServerMessage {
+  method?: string;
+  params?: any;
+  [key: string]: unknown;
+}
+
+type Lifecycle = "started" | "completed";
+
+/**
+ * An approval callback: answers a server-initiated request during a turn. The
+ * third arg is the live turn-capture state, passed opaquely to external handlers
+ * (e.g. the approvals module), so it is typed loosely at this boundary.
+ */
+type ApprovalRequestHandler = (method: string, params: any, state?: any) => unknown;
+
+/** Mutable state accumulated while capturing a single turn. */
+interface TurnCaptureState {
+  threadId: string;
+  rootThreadId: string;
+  threadIds: Set<string>;
+  threadTurnIds: Map<string, string>;
+  turnId: string | null;
+  bufferedNotifications: AppServerMessage[];
+  completion: Promise<TurnCaptureState>;
+  resolveCompletion: (state: TurnCaptureState) => void;
+  rejectCompletion: (error: unknown) => void;
+  finalTurn: Turn | null;
+  completed: boolean;
+  finalAnswerSeen: boolean;
+  pendingCollaborations: Set<string>;
+  activeSubagentTurns: Set<string>;
+  completionTimer: ReturnType<typeof setTimeout> | null;
+  lastAgentMessage: string;
+  reasoningSummary: string[];
+  error: { message?: string } | null;
+  fileChanges: TurnItem[];
+  commandExecutions: TurnItem[];
+  itemIndex: Map<string, TurnItem>;
+  onProgress: ProgressReporter | null;
+}
+
+interface CaptureTurnOptions {
+  onProgress?: ProgressReporter | null;
+  onApprovalRequest?: ApprovalRequestHandler;
+}
+
+/** Options accepted by runTurn. */
+export interface RunTurnOptions {
+  prompt?: string;
+  model?: string | null;
+  effort?: Effort | null;
+  sandbox?: string;
+  approvalPolicy?: string;
+  onApprovalRequest?: ApprovalRequestHandler;
+  resumeThreadId?: string | null;
+  onProgress?: ProgressReporter;
+  ephemeral?: boolean;
+  outputSchema?: unknown;
+}
+
+function cleanCodexStderr(stderr: string) {
   return stderr
     .split(/\r?\n/)
     .map((line) => line.trimEnd())
@@ -21,7 +115,7 @@ function cleanCodexStderr(stderr) {
     .join("\n");
 }
 
-function shorten(text, limit = 72) {
+function shorten(text: unknown, limit = 72) {
   const normalized = String(text ?? "").trim().replace(/\s+/g, " ");
   if (!normalized) {
     return "";
@@ -32,16 +126,16 @@ function shorten(text, limit = 72) {
   return `${normalized.slice(0, limit - 3)}...`;
 }
 
-function buildTaskThreadName(prompt) {
+function buildTaskThreadName(prompt: string) {
   const excerpt = shorten(prompt, 56);
   return excerpt ? `${TASK_THREAD_PREFIX}: ${excerpt}` : TASK_THREAD_PREFIX;
 }
 
-function extractThreadId(message) {
+function extractThreadId(message: AppServerMessage): string | null {
   return message?.params?.threadId ?? null;
 }
 
-function extractTurnId(message) {
+function extractTurnId(message: AppServerMessage): string | null {
   if (message?.params?.turnId) {
     return message.params.turnId;
   }
@@ -51,8 +145,8 @@ function extractTurnId(message) {
   return null;
 }
 
-function collectTouchedFiles(fileChanges) {
-  const paths = new Set();
+function collectTouchedFiles(fileChanges: TurnItem[]): string[] {
+  const paths = new Set<string>();
   for (const fileChange of fileChanges) {
     for (const change of fileChange.changes ?? []) {
       if (change.path) {
@@ -63,11 +157,11 @@ function collectTouchedFiles(fileChanges) {
   return [...paths];
 }
 
-function normalizeReasoningText(text) {
+function normalizeReasoningText(text: unknown) {
   return String(text ?? "").replace(/\s+/g, " ").trim();
 }
 
-function extractReasoningSections(value) {
+function extractReasoningSections(value: unknown): string[] {
   if (!value) {
     return [];
   }
@@ -79,24 +173,25 @@ function extractReasoningSections(value) {
     return value.flatMap((entry) => extractReasoningSections(entry));
   }
   if (typeof value === "object") {
-    if (typeof value.text === "string") {
-      return extractReasoningSections(value.text);
+    const record = value as Record<string, unknown>;
+    if (typeof record.text === "string") {
+      return extractReasoningSections(record.text);
     }
-    if ("summary" in value) {
-      return extractReasoningSections(value.summary);
+    if ("summary" in record) {
+      return extractReasoningSections(record.summary);
     }
-    if ("content" in value) {
-      return extractReasoningSections(value.content);
+    if ("content" in record) {
+      return extractReasoningSections(record.content);
     }
-    if ("parts" in value) {
-      return extractReasoningSections(value.parts);
+    if ("parts" in record) {
+      return extractReasoningSections(record.parts);
     }
   }
   return [];
 }
 
-function mergeReasoningSections(existingSections, nextSections) {
-  const merged = [];
+function mergeReasoningSections(existingSections: string[], nextSections: string[]): string[] {
+  const merged: string[] = [];
   for (const section of [...existingSections, ...nextSections]) {
     const normalized = normalizeReasoningText(section);
     if (!normalized || merged.includes(normalized)) {
@@ -107,19 +202,24 @@ function mergeReasoningSections(existingSections, nextSections) {
   return merged;
 }
 
-function emitProgress(onProgress, message, phase = null, extra = {}) {
+function emitProgress(
+  onProgress: ProgressReporter | null | undefined,
+  message: string | null | undefined,
+  phase: string | null = null,
+  extra: Record<string, unknown> = {}
+) {
   if (!onProgress || !message) {
     return;
   }
   onProgress({ message, phase, ...extra });
 }
 
-function describeStartedItem(item) {
+function describeStartedItem(item: TurnItem) {
   switch (item.type) {
     case "commandExecution":
       return { message: `Running command: ${shorten(item.command, 96)}`, phase: "running" };
     case "fileChange":
-      return { message: `Applying ${item.changes.length} file change(s).`, phase: "editing" };
+      return { message: `Applying ${item.changes!.length} file change(s).`, phase: "editing" };
     case "mcpToolCall":
       return { message: `Calling ${item.server}/${item.tool}.`, phase: "investigating" };
     case "dynamicToolCall":
@@ -131,7 +231,7 @@ function describeStartedItem(item) {
   }
 }
 
-function describeCompletedItem(item) {
+function describeCompletedItem(item: TurnItem) {
   switch (item.type) {
     case "commandExecution":
       return {
@@ -149,10 +249,10 @@ function describeCompletedItem(item) {
   }
 }
 
-function createTurnCaptureState(threadId, options: any = {}) {
-  let resolveCompletion;
-  let rejectCompletion;
-  const completion = new Promise<any>((resolve, reject) => {
+function createTurnCaptureState(threadId: string, options: CaptureTurnOptions = {}): TurnCaptureState {
+  let resolveCompletion!: (state: TurnCaptureState) => void;
+  let rejectCompletion!: (error: unknown) => void;
+  const completion = new Promise<TurnCaptureState>((resolve, reject) => {
     resolveCompletion = resolve;
     rejectCompletion = reject;
   });
@@ -185,14 +285,14 @@ function createTurnCaptureState(threadId, options: any = {}) {
   };
 }
 
-function clearCompletionTimer(state) {
+function clearCompletionTimer(state: TurnCaptureState) {
   if (state.completionTimer) {
     clearTimeout(state.completionTimer);
     state.completionTimer = null;
   }
 }
 
-function completeTurn(state, turn = null) {
+function completeTurn(state: TurnCaptureState, turn: Turn | null = null) {
   if (state.completed) {
     return;
   }
@@ -202,7 +302,7 @@ function completeTurn(state, turn = null) {
   if (turn) {
     state.finalTurn = turn;
     if (!state.turnId) {
-      state.turnId = turn.id;
+      state.turnId = turn.id ?? null;
     }
   } else if (!state.finalTurn) {
     state.finalTurn = { id: state.turnId ?? "inferred-turn", status: "completed" };
@@ -210,7 +310,7 @@ function completeTurn(state, turn = null) {
   state.resolveCompletion(state);
 }
 
-function scheduleInferredCompletion(state) {
+function scheduleInferredCompletion(state: TurnCaptureState) {
   if (state.completed || state.finalTurn || !state.finalAnswerSeen) {
     return;
   }
@@ -231,7 +331,7 @@ function scheduleInferredCompletion(state) {
   state.completionTimer.unref?.();
 }
 
-function belongsToTurn(state, message) {
+function belongsToTurn(state: TurnCaptureState, message: AppServerMessage) {
   const messageThreadId = extractThreadId(message);
   if (!messageThreadId || !state.threadIds.has(messageThreadId)) {
     return false;
@@ -241,7 +341,7 @@ function belongsToTurn(state, message) {
   return trackedTurnId === null || messageTurnId === null || messageTurnId === trackedTurnId;
 }
 
-function recordItem(state, item, lifecycle, threadId = null) {
+function recordItem(state: TurnCaptureState, item: TurnItem, lifecycle: Lifecycle, threadId: string | null = null) {
   if (item.id) {
     state.itemIndex.set(item.id, item);
   }
@@ -249,9 +349,9 @@ function recordItem(state, item, lifecycle, threadId = null) {
   if (item.type === "collabAgentToolCall") {
     if (!threadId || threadId === state.threadId) {
       if (lifecycle === "started" || item.status === "inProgress") {
-        state.pendingCollaborations.add(item.id);
+        state.pendingCollaborations.add(item.id as string);
       } else if (lifecycle === "completed") {
-        state.pendingCollaborations.delete(item.id);
+        state.pendingCollaborations.delete(item.id as string);
         scheduleInferredCompletion(state);
       }
     }
@@ -286,7 +386,7 @@ function recordItem(state, item, lifecycle, threadId = null) {
   }
 }
 
-function applyTurnNotification(state, message) {
+function applyTurnNotification(state: TurnCaptureState, message: AppServerMessage) {
   switch (message.method) {
     case "thread/started":
       state.threadIds.add(message.params.thread.id);
@@ -334,11 +434,16 @@ function applyTurnNotification(state, message) {
   }
 }
 
-async function captureTurn(client, threadId, startRequest, options: any = {}) {
+async function captureTurn(
+  client: AppServerClient,
+  threadId: string,
+  startRequest: () => Promise<any>,
+  options: CaptureTurnOptions = {}
+): Promise<TurnCaptureState> {
   const state = createTurnCaptureState(threadId, options);
   const previousHandler = client.notificationHandler;
 
-  client.setNotificationHandler((message) => {
+  client.setNotificationHandler((message: AppServerMessage) => {
     if (!state.turnId) {
       state.bufferedNotifications.push(message);
       return;
@@ -354,8 +459,9 @@ async function captureTurn(client, threadId, startRequest, options: any = {}) {
     applyTurnNotification(state, message);
   });
 
-  if (options.onApprovalRequest) {
-    client.setServerRequestHandler((method, params) => options.onApprovalRequest(method, params, state));
+  const onApprovalRequest = options.onApprovalRequest;
+  if (onApprovalRequest) {
+    client.setServerRequestHandler((method: string, params: any) => onApprovalRequest(method, params, state));
   }
 
   try {
@@ -385,18 +491,19 @@ async function captureTurn(client, threadId, startRequest, options: any = {}) {
   }
 }
 
-async function withAppServer(cwd, fn) {
-  let client = null;
+async function withAppServer<T>(cwd: string, fn: (client: AppServerClient) => Promise<T>): Promise<T> {
+  let client: AppServerClient | null = null;
   try {
     client = await CodexAppServerClient.connect(cwd);
     const result = await fn(client);
     await client.close();
     return result;
   } catch (error) {
+    const err = error as ProtocolError & NodeJS.ErrnoException;
     const brokerRequested = client?.transport === "broker" || Boolean(process.env[BROKER_ENDPOINT_ENV]);
     const shouldRetryDirect =
-      (client?.transport === "broker" && error?.rpcCode === BROKER_BUSY_RPC_CODE) ||
-      (brokerRequested && (error?.code === "ENOENT" || error?.code === "ECONNREFUSED"));
+      (client?.transport === "broker" && err?.rpcCode === BROKER_BUSY_RPC_CODE) ||
+      (brokerRequested && (err?.code === "ENOENT" || err?.code === "ECONNREFUSED"));
 
     if (client) {
       await client.close().catch(() => {});
@@ -416,7 +523,7 @@ async function withAppServer(cwd, fn) {
   }
 }
 
-export function getCodexAvailability(cwd) {
+export function getCodexAvailability(cwd: string): Availability {
   const versionStatus = binaryAvailable("codex", ["--version"], { cwd });
   if (!versionStatus.available) {
     return versionStatus;
@@ -431,13 +538,13 @@ export function getCodexAvailability(cwd) {
   return { available: true, detail: `${versionStatus.detail}; app-server runtime available` };
 }
 
-export async function getCodexAuthStatus(cwd) {
+export async function getCodexAuthStatus(cwd: string): Promise<AuthStatus & { available: boolean }> {
   const availability = getCodexAvailability(cwd);
   if (!availability.available) {
     return { available: false, loggedIn: false, detail: availability.detail };
   }
 
-  let client = null;
+  let client: AppServerClient | null = null;
   try {
     client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
     const accountResponse = await client.request("account/read", { refreshToken: false });
@@ -474,11 +581,14 @@ export async function getCodexAuthStatus(cwd) {
   }
 }
 
-export async function interruptTurn(cwd, { threadId, turnId }) {
+export async function interruptTurn(
+  cwd: string,
+  { threadId, turnId }: { threadId?: string | null; turnId?: string | null }
+): Promise<{ interrupted: boolean; detail: string }> {
   if (!threadId || !turnId) {
     return { interrupted: false, detail: "missing threadId or turnId" };
   }
-  let client = null;
+  let client: AppServerClient | null = null;
   try {
     client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
     await client.request("turn/interrupt", { threadId, turnId });
@@ -499,7 +609,7 @@ export async function interruptTurn(cwd, { threadId, turnId }) {
  * - resumeThreadId: continue an existing thread (steering)
  * - onProgress: progress reporter
  */
-export async function runTurn(cwd, options: any = {}) {
+export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promise<TurnResult> {
   const availability = getCodexAvailability(cwd);
   if (!availability.available) {
     throw new Error(`Codex CLI is not available: ${availability.detail}`);
@@ -510,8 +620,8 @@ export async function runTurn(cwd, options: any = {}) {
     throw new Error("A prompt is required.");
   }
 
-  return withAppServer(cwd, async (client) => {
-    let threadId;
+  return withAppServer(cwd, async (client): Promise<TurnResult> => {
+    let threadId: string;
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
@@ -538,7 +648,7 @@ export async function runTurn(cwd, options: any = {}) {
       try {
         await client.request("thread/name/set", { threadId, name: buildTaskThreadName(prompt) });
       } catch (err) {
-        const msg = String(err?.message ?? err ?? "");
+        const msg = String((err as Error)?.message ?? err ?? "");
         if (!msg.includes("unknown variant") && !msg.includes("unknown method")) {
           throw err;
         }

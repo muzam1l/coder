@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export function ensureAbsolutePath(cwd, maybePath) {
+export function ensureAbsolutePath(cwd: string, maybePath: string) {
   return path.isAbsolute(maybePath) ? maybePath : path.resolve(cwd, maybePath);
 }
 
@@ -10,19 +10,19 @@ export function createTempDir(prefix = "codex-plugin-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-export function readJsonFile(filePath) {
+export function readJsonFile(filePath: string) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
-export function writeJsonFile(filePath, value) {
+export function writeJsonFile(filePath: string, value: unknown) {
   fs.writeFileSync(filePath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }
 
-export function safeReadFile(filePath) {
+export function safeReadFile(filePath: string) {
   return fs.existsSync(filePath) ? fs.readFileSync(filePath, "utf8") : "";
 }
 
-export function isProbablyText(buffer) {
+export function isProbablyText(buffer: Buffer) {
   const sample = buffer.subarray(0, Math.min(buffer.length, 4096));
   for (const value of sample) {
     if (value === 0) {

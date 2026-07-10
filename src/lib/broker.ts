@@ -11,14 +11,29 @@ import net from "node:net";
 import path from "node:path";
 import process from "node:process";
 
+import type { Socket } from "node:net";
+
 import { parseArgs } from "./args.js";
-import { BROKER_BUSY_RPC_CODE, CodexAppServerClient } from "./app-server.js";
+import { BROKER_BUSY_RPC_CODE, CodexAppServerClient, ProtocolError } from "./app-server.js";
 import { parseBrokerEndpoint } from "./broker-endpoint.js";
+
+/** A JSON-RPC frame passing through the broker (request, response, or notification). */
+interface JsonRpcMessage {
+  id?: number | string | null;
+  method?: string;
+  params?: Record<string, any>;
+  result?: unknown;
+  error?: { code: number; message: string; data?: unknown };
+}
 
 const STREAMING_METHODS = new Set(["turn/start", "review/start", "thread/compact/start"]);
 
-function buildStreamThreadIds(method, params, result) {
-  const threadIds = new Set();
+function buildStreamThreadIds(
+  method: string,
+  params: Record<string, any> | undefined,
+  result: Record<string, any> | null
+): Set<string> {
+  const threadIds = new Set<string>();
   if (params?.threadId) {
     threadIds.add(params.threadId);
   }
@@ -32,18 +47,18 @@ function buildJsonRpcError(code: number, message: string, data?: unknown) {
   return data === undefined ? { code, message } : { code, message, data };
 }
 
-function send(socket, message) {
+function send(socket: Socket, message: JsonRpcMessage) {
   if (socket.destroyed) {
     return;
   }
   socket.write(`${JSON.stringify(message)}\n`);
 }
 
-function isInterruptRequest(message) {
+function isInterruptRequest(message: JsonRpcMessage) {
   return message?.method === "turn/interrupt";
 }
 
-function writePidFile(pidFile) {
+function writePidFile(pidFile: string | null) {
   if (!pidFile) {
     return;
   }
@@ -72,14 +87,14 @@ async function main() {
   writePidFile(pidFile);
 
   const appClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
-  let activeRequestSocket = null;
-  let activeStreamSocket = null;
-  let activeStreamThreadIds = null;
-  const sockets = new Set<any>();
+  let activeRequestSocket: Socket | null = null;
+  let activeStreamSocket: Socket | null = null;
+  let activeStreamThreadIds: Set<string> | null = null;
+  const sockets = new Set<Socket>();
   // Server-request id -> socket that must answer it.
-  const pendingServerRequests = new Map();
+  const pendingServerRequests = new Map<JsonRpcMessage["id"], Socket>();
 
-  function failPendingServerRequests(socket) {
+  function failPendingServerRequests(socket: Socket) {
     for (const [id, owner] of pendingServerRequests) {
       if (owner === socket) {
         pendingServerRequests.delete(id);
@@ -91,7 +106,7 @@ async function main() {
     }
   }
 
-  function clearSocketOwnership(socket) {
+  function clearSocketOwnership(socket: Socket) {
     failPendingServerRequests(socket);
     if (activeRequestSocket === socket) {
       activeRequestSocket = null;
@@ -102,7 +117,7 @@ async function main() {
     }
   }
 
-  function routeNotification(message) {
+  function routeNotification(message: JsonRpcMessage) {
     const target = activeRequestSocket ?? activeStreamSocket;
     if (!target) {
       return;
@@ -120,7 +135,7 @@ async function main() {
     }
   }
 
-  async function shutdown(server) {
+  async function shutdown(server: import("node:net").Server) {
     for (const socket of sockets) {
       socket.end();
     }
@@ -139,7 +154,7 @@ async function main() {
   // Approval callbacks and other server requests: forward the raw message to the
   // owning client and remember who must answer. The raw JSON-RPC id is preserved
   // so the client's response can be piped straight back to the app-server.
-  appClient.handleServerRequest = (message) => {
+  appClient.handleServerRequest = (message: JsonRpcMessage) => {
     const target = activeStreamSocket ?? activeRequestSocket;
     if (!target || target.destroyed) {
       appClient.sendMessage({
@@ -169,13 +184,13 @@ async function main() {
           continue;
         }
 
-        let message;
+        let message: JsonRpcMessage;
         try {
           message = JSON.parse(line);
         } catch (error) {
           send(socket, {
             id: null,
-            error: buildJsonRpcError(-32700, `Invalid JSON: ${error.message}`)
+            error: buildJsonRpcError(-32700, `Invalid JSON: ${error instanceof Error ? error.message : String(error)}`)
           });
           continue;
         }
@@ -230,9 +245,10 @@ async function main() {
             const result = await appClient.request(message.method, message.params ?? {});
             send(socket, { id: message.id, result });
           } catch (error) {
+            const err = error as ProtocolError;
             send(socket, {
               id: message.id,
-              error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
+              error: buildJsonRpcError(err.rpcCode ?? -32000, err.message)
             });
           }
           continue;
@@ -257,9 +273,10 @@ async function main() {
             activeRequestSocket = null;
           }
         } catch (error) {
+          const err = error as ProtocolError;
           send(socket, {
             id: message.id,
-            error: buildJsonRpcError(error.rpcCode ?? -32000, error.message)
+            error: buildJsonRpcError(err.rpcCode ?? -32000, err.message)
           });
           if (activeRequestSocket === socket) {
             activeRequestSocket = null;

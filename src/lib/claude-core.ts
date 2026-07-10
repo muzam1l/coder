@@ -8,6 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { CLAUDE_PERMISSION_FLAGS, claudeSandboxSettings } from "./config.js";
+import type { Availability, Effort, Permission, TurnResult } from "./types.js";
 
 // Flatten a tool_result block's content (string, or array of text parts) to
 // raw text for progress output.
@@ -21,7 +22,7 @@ function toolResultText(content: any): string {
   return content == null ? "" : JSON.stringify(content);
 }
 
-export function getClaudeAvailability(): { available: boolean; detail: string } {
+export function getClaudeAvailability(): Availability {
   const probe = spawnSync("claude", ["--version"], { encoding: "utf8" });
   if (probe.error || probe.status !== 0) {
     return { available: false, detail: "claude CLI not found on PATH (npm install -g @anthropic-ai/claude-code)" };
@@ -32,14 +33,13 @@ export function getClaudeAvailability(): { available: boolean; detail: string } 
 export interface ClaudeTurnOptions {
   prompt: string;
   model?: string | null;
-  effort?: string | null;
-  permissions?: string | null;
+  effort?: Effort | null;
+  permissions?: Permission | null;
   resumeSessionId?: string | null;
   onProgress?: (update: { message: string; threadId?: string }) => void;
 }
 
-export interface ClaudeTurnResult {
-  status: number;
+export interface ClaudeTurnResult extends TurnResult {
   threadId: string;
   turnId: string | null;
   finalMessage: string;

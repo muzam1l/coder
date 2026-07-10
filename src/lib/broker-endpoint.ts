@@ -1,13 +1,20 @@
 import path from "node:path";
 import process from "node:process";
 
-function sanitizePipeName(value) {
+function sanitizePipeName(value: string) {
   return String(value ?? "")
     .replace(/[^A-Za-z0-9._-]/g, "-")
     .replace(/^-+|-+$/g, "");
 }
 
-export function createBrokerEndpoint(sessionDir, platform = process.platform) {
+export type BrokerEndpointKind = "pipe" | "unix";
+
+export interface BrokerEndpointTarget {
+  kind: BrokerEndpointKind;
+  path: string;
+}
+
+export function createBrokerEndpoint(sessionDir: string, platform: NodeJS.Platform = process.platform): string {
   if (platform === "win32") {
     const pipeName = sanitizePipeName(`${path.win32.basename(sessionDir)}-codex-app-server`);
     return `pipe:\\\\.\\pipe\\${pipeName}`;
@@ -16,7 +23,7 @@ export function createBrokerEndpoint(sessionDir, platform = process.platform) {
   return `unix:${path.join(sessionDir, "broker.sock")}`;
 }
 
-export function parseBrokerEndpoint(endpoint) {
+export function parseBrokerEndpoint(endpoint: string | null | undefined): BrokerEndpointTarget {
   if (typeof endpoint !== "string" || endpoint.length === 0) {
     throw new Error("Missing broker endpoint.");
   }

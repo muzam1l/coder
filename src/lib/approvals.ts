@@ -13,6 +13,80 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import type { Approval } from "./types.js";
+
+/** A policy verdict: accept/decline outright, or escalate to a human. */
+type VerdictDecision = "accept" | "decline" | "escalate";
+interface Verdict {
+  decision: VerdictDecision;
+  reason: string;
+}
+
+/** Extra context for a command decision (network escalations). */
+interface DecideContext {
+  networkHost?: string | null;
+  allowedNetworkHosts?: string[];
+}
+
+/** An event emitted to the caller as approvals are decided/escalated. */
+interface ApprovalEvent {
+  kind: string;
+  approvalId?: string;
+  summary?: string;
+  message?: string;
+  decision?: string;
+  reason?: string;
+  method?: string;
+}
+type ApprovalEventHandler = (event: ApprovalEvent) => void;
+
+/** Params for a codex app-server approval request. */
+interface ApprovalRequestParams {
+  command?: string;
+  itemId?: string;
+  reason?: string;
+  networkApprovalContext?: { host?: string | null } | null;
+  [key: string]: unknown;
+}
+
+/** A pending item (command or file change) tracked by the codex run state. */
+interface ApprovalItem {
+  command?: string;
+  changes?: Array<{ path?: string }>;
+  [key: string]: unknown;
+}
+
+/** The codex run state passed to the handler (holds the item index). */
+interface ApprovalState {
+  itemIndex?: Map<string, ApprovalItem>;
+  [key: string]: unknown;
+}
+
+/** The persisted request written to disk when an ambiguous ask is escalated. */
+interface EscalateRequest {
+  method: string;
+  summary: string;
+  command?: string;
+  paths?: string[];
+  params?: ApprovalRequestParams;
+}
+
+/** Options for createApprovalHandler. */
+interface ApprovalHandlerOptions {
+  workspaceRoot: string;
+  jobDir: string;
+  mode?: "auto" | "deny" | null;
+  escalationTimeoutMs?: number;
+  allowedNetworkHosts?: string[];
+  onEvent?: ApprovalEventHandler | null;
+}
+
+type ApprovalRequestHandler = (
+  method: string,
+  params: ApprovalRequestParams,
+  state?: ApprovalState
+) => Promise<{ decision: string }>;
+
 const COMMAND_APPROVAL_METHOD = "item/commandExecution/requestApproval";
 const FILE_CHANGE_APPROVAL_METHOD = "item/fileChange/requestApproval";
 
@@ -143,17 +217,17 @@ const RUNNER_SAFE_SUBCOMMANDS = new Map([
   ["turbo", null]
 ]);
 
-function firstShellCommand(command) {
+function firstShellCommand(command: string): string {
   // Unwrap `bash -lc "..."` / `sh -c '...'` wrappers so the inner command is judged.
   const wrapped = command.match(/^\s*(?:ba|z|da)?sh\s+(?:-[a-zA-Z]+\s+)*(?:-c\s+)?(["'])([\s\S]*)\1\s*$/);
   return wrapped ? wrapped[2] : command;
 }
 
-function tokenize(command) {
+function tokenize(command: string): string[] {
   return command.trim().split(/\s+/).filter(Boolean);
 }
 
-function classifyGit(tokens) {
+function classifyGit(tokens: string[]): Verdict {
   const sub = tokens.find((token, index) => index > 0 && !token.startsWith("-"));
   if (!sub) {
     return { decision: "accept", reason: "bare git" };
@@ -181,7 +255,7 @@ function classifyGit(tokens) {
  * Decide a command approval without human input.
  * Returns { decision: "accept" | "decline" | "escalate", reason }.
  */
-export function decideCommand(rawCommand, context: any = {}) {
+export function decideCommand(rawCommand: unknown, context: DecideContext = {}): Verdict {
   const command = firstShellCommand(String(rawCommand ?? ""));
   if (!command.trim()) {
     return { decision: "escalate", reason: "empty command" };
@@ -202,7 +276,7 @@ export function decideCommand(rawCommand, context: any = {}) {
   // Compound commands: every segment must be individually acceptable.
   const segments = command.split(/&&|\|\||;|\||\r?\n/).map((segment) => segment.trim()).filter(Boolean);
   if (segments.length > 1) {
-    let worst = { decision: "accept", reason: "all segments safe" };
+    let worst: Verdict = { decision: "accept", reason: "all segments safe" };
     for (const segment of segments) {
       const result = decideCommand(segment, context);
       if (result.decision === "decline") {
@@ -223,12 +297,13 @@ export function decideCommand(rawCommand, context: any = {}) {
   }
 
   // Network escalations are their own category: only allow allowlisted hosts.
-  if (context.networkHost) {
+  const networkHost = context.networkHost;
+  if (networkHost) {
     const allowedHosts = context.allowedNetworkHosts ?? [];
-    if (allowedHosts.some((host) => context.networkHost === host || context.networkHost.endsWith(`.${host}`))) {
-      return { decision: "accept", reason: `network host ${context.networkHost} is allowlisted` };
+    if (allowedHosts.some((host) => networkHost === host || networkHost.endsWith(`.${host}`))) {
+      return { decision: "accept", reason: `network host ${networkHost} is allowlisted` };
     }
-    return { decision: "escalate", reason: `network access to ${context.networkHost}` };
+    return { decision: "escalate", reason: `network access to ${networkHost}` };
   }
 
   if (SAFE_BINARIES.has(binary)) {
@@ -254,7 +329,7 @@ export function decideCommand(rawCommand, context: any = {}) {
  * Decide a file-change approval: accept edits inside the workspace, escalate
  * anything that reaches outside it or touches .git/.
  */
-export function decideFileChange(paths, workspaceRoot) {
+export function decideFileChange(paths: string[], workspaceRoot: string): Verdict {
   if (!paths.length) {
     return { decision: "escalate", reason: "file change with no resolvable paths" };
   }
@@ -271,11 +346,11 @@ export function decideFileChange(paths, workspaceRoot) {
   return { decision: "accept", reason: "all paths inside workspace" };
 }
 
-function approvalsDir(jobDir) {
+function approvalsDir(jobDir: string): string {
   return path.join(jobDir, "approvals");
 }
 
-export function listPendingApprovals(jobDir) {
+export function listPendingApprovals(jobDir: string): Approval[] {
   const dir = approvalsDir(jobDir);
   if (!fs.existsSync(dir)) {
     return [];
@@ -283,17 +358,19 @@ export function listPendingApprovals(jobDir) {
   return fs
     .readdirSync(dir)
     .filter((name) => name.endsWith(".request.json"))
-    .map((name) => {
+    .map((name): Approval => {
       const id = name.replace(/\.request\.json$/, "");
-      const request = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8"));
+      const request = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as Record<string, unknown>;
       const responseFile = path.join(dir, `${id}.response.json`);
-      const response = fs.existsSync(responseFile) ? JSON.parse(fs.readFileSync(responseFile, "utf8")) : null;
-      return { id, ...request, response };
+      const response = fs.existsSync(responseFile)
+        ? (JSON.parse(fs.readFileSync(responseFile, "utf8")) as { decision: string })
+        : null;
+      return { ...request, id, response } as Approval;
     })
     .sort((left, right) => String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? "")));
 }
 
-export function answerApproval(jobDir, approvalId, decision) {
+export function answerApproval(jobDir: string, approvalId: string, decision: "accept" | "decline"): void {
   const dir = approvalsDir(jobDir);
   const requestFile = path.join(dir, `${approvalId}.request.json`);
   if (!fs.existsSync(requestFile)) {
@@ -306,7 +383,11 @@ export function answerApproval(jobDir, approvalId, decision) {
   );
 }
 
-async function escalate(jobDir, request, { timeoutMs, onEvent }) {
+async function escalate(
+  jobDir: string,
+  request: EscalateRequest,
+  { timeoutMs, onEvent }: { timeoutMs: number; onEvent?: ApprovalEventHandler | null }
+): Promise<"accept" | "decline"> {
   const dir = approvalsDir(jobDir);
   fs.mkdirSync(dir, { recursive: true });
   const id = `apr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -356,10 +437,10 @@ export function createApprovalHandler({
   escalationTimeoutMs = 120_000,
   allowedNetworkHosts = [],
   onEvent = null
-}) {
+}: ApprovalHandlerOptions): ApprovalRequestHandler {
   return async (method, params, state) => {
     if (method === COMMAND_APPROVAL_METHOD) {
-      const command = params.command ?? state?.itemIndex?.get(params.itemId)?.command ?? "";
+      const command = params.command ?? state?.itemIndex?.get(params.itemId ?? "")?.command ?? "";
       const summary = `run command: ${command || "(unknown command)"}${params.reason ? ` — ${params.reason}` : ""}`;
 
       if (mode === "deny") {
@@ -381,8 +462,10 @@ export function createApprovalHandler({
     }
 
     if (method === FILE_CHANGE_APPROVAL_METHOD) {
-      const item = state?.itemIndex?.get(params.itemId);
-      const paths = (item?.changes ?? []).map((change) => change.path).filter(Boolean);
+      const item = state?.itemIndex?.get(params.itemId ?? "");
+      const paths = (item?.changes ?? [])
+        .map((change) => change.path)
+        .filter((changePath): changePath is string => Boolean(changePath));
       const summary = `apply file changes: ${paths.join(", ") || "(unknown paths)"}${params.reason ? ` — ${params.reason}` : ""}`;
 
       if (mode === "deny") {

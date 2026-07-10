@@ -110,15 +110,15 @@ export class AppServerClientBase {
     });
   }
 
-  setNotificationHandler(handler) {
+  setNotificationHandler(handler: NotificationHandler | null) {
     this.notificationHandler = handler;
   }
 
-  setServerRequestHandler(handler) {
+  setServerRequestHandler(handler: ServerRequestHandler | null) {
     this.serverRequestHandler = handler;
   }
 
-  request(method, params) {
+  request<T = any>(method: string, params?: unknown): Promise<T> {
     if (this.closed) {
       throw new Error('codex app-server client is closed.');
     }
@@ -126,20 +126,20 @@ export class AppServerClientBase {
     const id = this.nextId;
     this.nextId += 1;
 
-    return new Promise((resolve, reject) => {
+    return new Promise<T>((resolve, reject) => {
       this.pending.set(id, { resolve, reject, method });
       this.sendMessage({ id, method, params });
     });
   }
 
-  notify(method, params = {}) {
+  notify(method: string, params: unknown = {}) {
     if (this.closed) {
       return;
     }
     this.sendMessage({ method, params });
   }
 
-  handleChunk(chunk) {
+  handleChunk(chunk: string | Buffer) {
     this.lineBuffer += chunk;
     let newlineIndex = this.lineBuffer.indexOf('\n');
     while (newlineIndex !== -1) {
@@ -150,17 +150,20 @@ export class AppServerClientBase {
     }
   }
 
-  handleLine(line) {
+  handleLine(line: string) {
     if (!line.trim()) {
       return;
     }
 
-    let message;
+    let message: any;
     try {
       message = JSON.parse(line);
     } catch (error) {
       this.handleExit(
-        createProtocolError(`Failed to parse codex app-server JSONL: ${error.message}`, { line }),
+        createProtocolError(
+          `Failed to parse codex app-server JSONL: ${error instanceof Error ? error.message : String(error)}`,
+          { line },
+        ),
       );
       return;
     }
@@ -195,8 +198,9 @@ export class AppServerClientBase {
     }
   }
 
-  defaultHandleServerRequest(message) {
-    if (!this.serverRequestHandler) {
+  defaultHandleServerRequest(message: any) {
+    const handler = this.serverRequestHandler;
+    if (!handler) {
       this.sendMessage({
         id: message.id,
         error: buildJsonRpcError(-32601, `Unsupported server request: ${message.method}`),
@@ -205,7 +209,7 @@ export class AppServerClientBase {
     }
 
     Promise.resolve()
-      .then(() => this.serverRequestHandler(message.method, message.params ?? {}))
+      .then(() => handler(message.method, message.params ?? {}))
       .then(result => {
         this.sendMessage({ id: message.id, result: result ?? {} });
       })
@@ -217,7 +221,7 @@ export class AppServerClientBase {
       });
   }
 
-  handleExit(error) {
+  handleExit(error: Error | null) {
     if (this.exitResolved) {
       return;
     }
@@ -232,7 +236,7 @@ export class AppServerClientBase {
     this.resolveExit(undefined);
   }
 
-  sendMessage(_message) {
+  sendMessage(_message: any): void {
     throw new Error('sendMessage must be implemented by subclasses.');
   }
 }
@@ -256,10 +260,15 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       windowsHide: true,
     });
 
-    this.proc.stdout.setEncoding('utf8');
-    this.proc.stderr.setEncoding('utf8');
+    const stdout = this.proc.stdout;
+    const stderr = this.proc.stderr;
+    if (!stdout || !stderr) {
+      throw new Error('codex app-server did not expose stdio streams.');
+    }
+    stdout.setEncoding('utf8');
+    stderr.setEncoding('utf8');
 
-    this.proc.stderr.on('data', chunk => {
+    stderr.on('data', chunk => {
       this.stderr += chunk;
     });
 
@@ -278,7 +287,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       this.handleExit(detail);
     });
 
-    this.readline = readline.createInterface({ input: this.proc.stdout });
+    this.readline = readline.createInterface({ input: stdout });
     this.readline.on('line', line => {
       this.handleLine(line);
     });
@@ -303,7 +312,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     }
 
     if (this.proc && !this.proc.killed) {
-      this.proc.stdin.end();
+      this.proc.stdin?.end();
       setTimeout(() => {
         if (this.proc && !this.proc.killed && this.proc.exitCode === null) {
           if (process.platform === 'win32') {
@@ -322,7 +331,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     await this.exitPromise;
   }
 
-  sendMessage(message) {
+  sendMessage(message: any) {
     const line = `${JSON.stringify(message)}\n`;
     const stdin = this.proc?.stdin;
     if (!stdin) {
@@ -382,7 +391,7 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
     await this.exitPromise;
   }
 
-  sendMessage(message) {
+  sendMessage(message: any) {
     const line = `${JSON.stringify(message)}\n`;
     const socket = this.socket;
     if (!socket) {

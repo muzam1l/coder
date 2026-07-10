@@ -83,10 +83,10 @@ export function parseArgs(argv: string[], config: ParseArgsConfig = {}): ParsedA
   return { options, positionals };
 }
 
-export function splitRawArgumentString(raw) {
-  const tokens = [];
+export function splitRawArgumentString(raw: string): string[] {
+  const tokens: string[] = [];
   let current = "";
-  let quote = null;
+  let quote: string | null = null;
   let escaping = false;
 
   for (const character of raw) {

@@ -1,1153 +1,158 @@
 #!/usr/bin/env node
 /**
- * Coder runtime CLI. Dispatches coding tasks to the configured agent chain
- * (codex first by default, claude as fallback) and manages job lifecycle:
- * status, result, steer, stop, approvals.
- *
- * Exit codes:
- *   0  success
- *   1  the agent ran but the turn failed (do not fall back; report it)
- *   3  the agent failed to start (auth/quota/missing binary) — fall back to
- *      the next agent in the chain
+ * Coder runtime CLI entry. Task operations live under the `coder task <sub>`
+ * namespace (with top-level shortcut aliases like `coder run`/`tasks`/`status`);
+ * setup/config/upgrade are standalone. Routes to handlers in ./cmd, wiring in
+ * help, the version flag, and the passive update notice.
  */
-import fs from 'node:fs';
-import path from 'node:path';
 import process from 'node:process';
-import { spawn, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 
-import { parseArgs } from './lib/args.js';
+import { maybeNotifyUpdate, refreshUpdateCache } from './lib/update-check.js';
+import { CLI_PATH, readVersion } from './lib/runtime.js';
+import { fail } from './lib/ui.js';
 import {
-  appendJobLog,
-  findJob,
-  generateJobId,
-  listJobs,
-  readJob,
-  readJobLog,
-  resolveJobDir,
-  resolveWorkspaceRoot,
-  writeJob,
-} from './lib/state.js';
-import {
-  getCodexAuthStatus,
-  getCodexAvailability,
-  interruptTurn,
-  runTurn,
-} from './lib/codex-core.js';
-import { getClaudeAvailability, runClaudeTurn } from './lib/claude-core.js';
-import { answerApproval, createApprovalHandler, listPendingApprovals } from './lib/approvals.js';
-import {
-  clearUpdateCache,
-  compareVersions,
-  detectPackageManager,
-  maybeNotifyUpdate,
-  refreshUpdateCache,
-} from './lib/update-check.js';
-import {
-  CLAUDE_EFFORTS,
-  CLAUDE_MODELS,
-  CLAUDE_SANDBOX_UNAVAILABLE_PATTERN,
-  CODEX_EFFORTS,
-  CODEX_MODELS,
-  DEFAULT_CONFIG,
-  PERMISSION_MODES,
-  loadConfig,
-  resolveCodexModel,
-  resolveUserConfigFile,
-  validateConfig,
-  writeUserConfig,
-} from './lib/config.js';
-
-const CLI_PATH = fileURLToPath(import.meta.url);
-const STARTUP_ERROR_PATTERN =
-  /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|not available|ENOENT/i;
-
-function fail(message, code = 1) {
-  process.stderr.write(`${message}\n`);
-  process.exit(code);
-}
-
-function printJson(value) {
-  process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
-}
-
-function requireJob(cwd, reference) {
-  const job = findJob(cwd, reference);
-  if (!job) {
-    fail(reference ? `No job found for "${reference}".` : 'No jobs found for this workspace.');
-  }
-  return job;
-}
-
-function buildProgressLogger(cwd, jobId, { echo }) {
-  return update => {
-    const entry = typeof update === 'string' ? { message: update } : update;
-    appendJobLog(cwd, jobId, entry);
-    if (echo && entry.message) {
-      process.stderr.write(`[coder] ${entry.message}\n`);
-    }
-  };
-}
-
-function resolveTaskOptions(options, config) {
-  // A bare model alias implies its engine: opus/sonnet/fable -> claude,
-  // spark/luna/terra/sol -> codex (the alias maps are disjoint, so it is
-  // unambiguous).
-  // Explicit --agent always wins; unknown/raw slugs keep the chain default.
-  let agent = options.agent;
-  if (!agent && options.model) {
-    if (options.model in CLAUDE_MODELS) {
-      agent = 'claude';
-    } else if (options.model in CODEX_MODELS) {
-      agent = 'codex';
-    }
-  }
-  agent = agent ?? config.chain[0] ?? 'codex';
-  if (agent !== 'codex' && agent !== 'claude') {
-    const hint =
-      agent in CODEX_MODELS || agent in CLAUDE_MODELS
-        ? ` "${agent}" is a model; use --model ${agent}.`
-        : '';
-    fail(`Invalid --agent "${agent}". Use codex or claude.${hint}`);
-  }
-  const agentDefaults = config.agents[agent] ?? {};
-  const model = options.model ?? agentDefaults.model ?? null;
-  const effort = options.effort ?? agentDefaults.effort ?? null;
-  const permissions = options.permissions ?? agentDefaults.permissions ?? 'auto';
-
-  if (!(permissions in PERMISSION_MODES)) {
-    fail(
-      `Invalid --permissions "${permissions}". Use one of: ${Object.keys(PERMISSION_MODES).join(', ')}`,
-    );
-  }
-  if (agent === 'codex' && effort && !CODEX_EFFORTS.has(effort)) {
-    fail(`Invalid codex --effort "${effort}". Use one of: ${[...CODEX_EFFORTS].join(', ')}`);
-  }
-  if (agent === 'claude' && effort && !CLAUDE_EFFORTS.has(effort)) {
-    fail(`Invalid claude --effort "${effort}". Use one of: ${[...CLAUDE_EFFORTS].join(', ')}`);
-  }
-
-  return { agent, model, effort, permissions };
-}
-
-function claudeDispatchPayload(config, task, reason, permissions = null) {
-  const claude = config.agents.claude ?? {};
-  return {
-    agent: 'claude',
-    action: 'spawn-claude-subagent',
-    // "configured": claude is the selected agent (chain order or --agent).
-    // "codex-failed": codex was selected but could not start.
-    reason,
-    model: claude.model ?? 'opus',
-    permissions: permissions ?? claude.permissions ?? 'auto',
-    note: 'Spawn a general-purpose subagent with this model and forward the task verbatim.',
-    task,
-  };
-}
-
-async function executeCodexTurn(cwd, job, { echo }) {
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  const jobDir = resolveJobDir(cwd, job.id);
-  const config = loadConfig(cwd);
-  const onProgress = buildProgressLogger(cwd, job.id, { echo });
-
-  const mode = PERMISSION_MODES[job.permissions] ?? PERMISSION_MODES.auto;
-  const onApprovalRequest =
-    mode.approvalPolicy === 'never'
-      ? undefined
-      : createApprovalHandler({
-          workspaceRoot,
-          jobDir,
-          mode: mode.approvalMode,
-          escalationTimeoutMs: config.approvals.escalationTimeoutMs,
-          allowedNetworkHosts: config.approvals.allowedNetworkHosts,
-          onEvent: event => {
-            appendJobLog(cwd, job.id, event);
-            if (echo && event.message) {
-              process.stderr.write(`[coder] ${event.message}\n`);
-            }
-          },
-        });
-
-  const result = await runTurn(cwd, {
-    prompt: job.prompt,
-    model: resolveCodexModel(job.model),
-    effort: job.effort,
-    sandbox: mode.sandbox,
-    approvalPolicy: mode.approvalPolicy,
-    onApprovalRequest,
-    resumeThreadId: job.resumeThreadId ?? null,
-    onProgress: update => {
-      onProgress(update);
-      const threadId = typeof update === 'object' ? update.threadId : null;
-      const turnId = typeof update === 'object' ? update.turnId : null;
-      if (threadId || turnId) {
-        writeJob(cwd, job.id, {
-          status: 'running',
-          ...(threadId ? { threadId } : {}),
-          ...(turnId ? { turnId } : {}),
-        });
-      }
-    },
-  });
-
-  const status = result.status === 0 ? 'completed' : 'failed';
-  writeJob(cwd, job.id, {
-    status,
-    threadId: result.threadId,
-    turnId: result.turnId,
-    completedAt: new Date().toISOString(),
-  });
-  fs.writeFileSync(
-    path.join(jobDir, 'result.json'),
-    `${JSON.stringify(result, null, 2)}\n`,
-    'utf8',
-  );
-  return result;
-}
-
-async function executeClaudeTurn(cwd, job, { echo }) {
-  const jobDir = resolveJobDir(cwd, job.id);
-  const onProgress = buildProgressLogger(cwd, job.id, { echo });
-
-  const result = await runClaudeTurn(cwd, {
-    prompt: job.prompt,
-    model: job.model,
-    effort: job.effort,
-    permissions: job.permissions,
-    resumeSessionId: job.resumeThreadId ?? null,
-    onProgress: update => {
-      onProgress(update);
-      if (update.threadId) {
-        writeJob(cwd, job.id, { status: 'running', threadId: update.threadId });
-      }
-    },
-  });
-
-  writeJob(cwd, job.id, {
-    status: result.status === 0 ? 'completed' : 'failed',
-    threadId: result.threadId,
-    completedAt: new Date().toISOString(),
-  });
-  fs.writeFileSync(
-    path.join(jobDir, 'result.json'),
-    `${JSON.stringify(result, null, 2)}\n`,
-    'utf8',
-  );
-  return result;
-}
-
-function executeTurnFor(job) {
-  return job.agent === 'claude' ? executeClaudeTurn : executeCodexTurn;
-}
-
-async function commandTask(argv) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['agent', 'model', 'effort', 'permissions', 'resume', 'cwd', 'host'],
-    booleanOptions: ['background', 'wait', 'json'],
-  });
-  // Background is the default; --wait runs in the foreground and blocks.
-  const background = options.wait ? false : true;
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const prompt = positionals.join(' ').trim();
-  if (!prompt) {
-    fail('Usage: coder task [options] "<task text>"');
-  }
-
-  const config = loadConfig(cwd);
-  const resolved = resolveTaskOptions(options, config);
-  // Host contract: "claude" hosts (Claude Code) spawn Claude subagents
-  // themselves on exit 3; any other host (codex plugin, plain shell) has no
-  // subagent facility, so the runtime executes claude via its own CLI.
-  // Default host: inside a Claude Code shell (CLAUDECODE=1) the harness
-  // interprets exit-3 payloads and spawns the subagent itself; anywhere else
-  // (codex, plain terminal, CI) nobody is listening, so the runtime executes
-  // the claude engine directly.
-  const host = options.host ?? (process.env.CLAUDECODE ? 'claude' : 'codex');
-  if (host !== 'claude' && host !== 'codex') {
-    fail(`Invalid --host "${host}". Use claude or codex.`);
-  }
-
-  if (resolved.agent === 'claude' && host === 'claude') {
-    printJson(claudeDispatchPayload(config, prompt, 'configured', resolved.permissions));
-    process.exit(0);
-  }
-
-  // An agent could not start (missing, auth, quota): hand off to the next
-  // agent in the configured chain. A Claude host takes over via the exit-3
-  // payload when the next engine is claude; otherwise the runtime executes
-  // the next engine itself with the same task.
-  const agentFailed = async (agent, detail) => {
-    const next = config.chain[config.chain.indexOf(agent) + 1];
-    if (!next) {
-      fail(`${agent} failed to start: ${detail}`);
-    }
-    if (next === 'claude' && host === 'claude') {
-      printJson({
-        error: `${agent} failed to start: ${detail}`,
-        fallback: claudeDispatchPayload(config, prompt, 'codex-failed', resolved.permissions),
-      });
-      process.exit(3);
-    }
-    process.stderr.write(
-      `[coder] ${agent} failed to start (${detail}); falling back to ${next}.\n`,
-    );
-    await commandTask([
-      prompt,
-      '--agent',
-      next,
-      '--host',
-      host,
-      '--cwd',
-      cwd,
-      ...(options.wait ? ['--wait'] : []),
-      ...(options.json ? ['--json'] : []),
-      ...(options.permissions ? ['--permissions', options.permissions] : []),
-    ]);
-    process.exit(0);
-  };
-
-  // read-only leans on the OS sandbox; if it cannot start, the mode itself is
-  // unavailable here. This is NOT a chain fallback (the next engine would just
-  // write to the repo, defeating read-only): report the constraint to the
-  // orchestrator so it can re-dispatch with a writable mode or fix the host.
-  const readOnlyUnavailable = detail => {
-    const hint =
-      'read-only unavailable on this host: the OS sandbox failed to start ' +
-      '(Linux/WSL2 needs bubblewrap + socat). Re-dispatch with --permissions auto ' +
-      '(or workspace-write) if writes are acceptable, or install the sandbox deps.';
-    if (options.json) {
-      printJson({ error: hint, code: 'read-only-unavailable', detail });
-    } else {
-      process.stderr.write(`[coder] ${hint}\n`);
-    }
-    process.exit(1);
-  };
-  const isSandboxFailure = detail =>
-    resolved.permissions === 'read-only' && CLAUDE_SANDBOX_UNAVAILABLE_PATTERN.test(detail ?? '');
-
-  // Startup gate: cheap checks before creating a job, so failures classify
-  // cleanly as "fall back to the next agent".
-  {
-    const availability =
-      resolved.agent === 'codex' ? getCodexAvailability(cwd) : getClaudeAvailability();
-    if (!availability.available) {
-      await agentFailed(resolved.agent, availability.detail);
-    }
-  }
-
-  let resumeThreadId = null;
-  if (options.resume) {
-    const referenced = findJob(cwd, options.resume);
-    resumeThreadId = referenced?.threadId ?? options.resume;
-  }
-
-  const jobId = generateJobId();
-  const job = writeJob(cwd, jobId, {
-    status: 'queued',
-    kind: 'task',
-    agent: resolved.agent,
-    host,
-    prompt,
-    model: resolved.model,
-    effort: resolved.effort,
-    permissions: resolved.permissions,
-    resumeThreadId,
-    cwd,
-    background,
-  });
-
-  if (background) {
-    const jobDir = resolveJobDir(cwd, jobId);
-    const logFd = fs.openSync(path.join(jobDir, 'worker.log'), 'a');
-    const child = spawn(process.execPath, [CLI_PATH, '_worker', jobId, '--cwd', cwd], {
-      cwd,
-      detached: true,
-      stdio: ['ignore', logFd, logFd],
-    });
-    child.unref();
-    fs.closeSync(logFd);
-    writeJob(cwd, jobId, { pid: child.pid ?? null });
-
-    // Startup check: wait until the worker reports a live thread or fails.
-    // Usage-limit errors land moments AFTER the thread is ready, so once the
-    // thread appears keep watching briefly before declaring startup passed.
-    const deadline = Date.now() + 15_000;
-    let current = job;
-    let graceDeadline = null;
-    while (Date.now() < (graceDeadline ?? deadline)) {
-      current = readJob(cwd, jobId) ?? current;
-      if (current.status === 'failed' || current.status === 'completed') {
-        break;
-      }
-      if (current.threadId && !graceDeadline) {
-        graceDeadline = Date.now() + 5_000;
-      }
-      await new Promise(resolve => setTimeout(resolve, 300));
-    }
-
-    if (current.status === 'failed') {
-      // Turn errors (sandbox init, usage/auth) land in result.json, not the
-      // progress log, so prefer it and fall back to the log tail.
-      const resultFile = path.join(resolveJobDir(cwd, jobId), 'result.json');
-      const resultError = fs.existsSync(resultFile)
-        ? (JSON.parse(fs.readFileSync(resultFile, 'utf8')).error?.message ?? '')
-        : '';
-      const logTail = readJobLog(cwd, jobId, 5)
-        .map(entry => entry.message ?? '')
-        .join('\n');
-      const detail = resultError || logTail;
-      if (isSandboxFailure(detail)) {
-        readOnlyUnavailable(detail);
-      }
-      if (STARTUP_ERROR_PATTERN.test(detail)) {
-        await agentFailed(resolved.agent, detail);
-      }
-      printJson({ jobId, status: 'failed', detail });
-      process.exit(1);
-    }
-
-    printJson({
-      jobId,
-      status: current.status,
-      threadId: current.threadId ?? null,
-      startupCheck: current.threadId ? 'passed' : 'pending',
-      commands: {
-        status: `coder status ${jobId}`,
-        result: `coder result ${jobId}`,
-        steer: `coder steer ${jobId} "<follow-up>"`,
-        stop: `coder stop ${jobId}`,
-      },
-    });
-    return;
-  }
-
-  writeJob(cwd, jobId, { status: 'running', pid: process.pid });
-  try {
-    const current = readJob(cwd, jobId);
-    const result = await executeTurnFor(current)(cwd, current, { echo: !options.json });
-    // Usage/auth/quota errors arrive as turn-level error notifications, not
-    // thrown startup errors — classify them as "fall back" too. A read-only
-    // sandbox failure is checked first: it is a policy constraint, not a
-    // fall-back trigger.
-    const turnError = result.error?.message ?? '';
-    if (result.status !== 0 && isSandboxFailure(turnError)) {
-      readOnlyUnavailable(turnError);
-    }
-    if (result.status !== 0 && STARTUP_ERROR_PATTERN.test(turnError)) {
-      await agentFailed(resolved.agent, turnError);
-    }
-    if (options.json) {
-      printJson({
-        jobId,
-        status: result.status === 0 ? 'completed' : 'failed',
-        threadId: result.threadId,
-        finalMessage: result.finalMessage,
-      });
-    } else {
-      process.stdout.write(`${result.finalMessage || '(no final message)'}\n`);
-      process.stderr.write(
-        `[coder] job=${jobId} thread=${result.threadId} status=${result.status === 0 ? 'completed' : 'failed'}\n`,
-      );
-    }
-    process.exit(result.status === 0 ? 0 : 1);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    writeJob(cwd, jobId, { status: 'failed', error: message });
-    appendJobLog(cwd, jobId, { kind: 'error', message });
-    if (isSandboxFailure(message)) {
-      readOnlyUnavailable(message);
-    }
-    if (STARTUP_ERROR_PATTERN.test(message)) {
-      await agentFailed(resolved.agent, message);
-    }
-    fail(`${resolved.agent} run failed: ${message}`);
-  }
-}
-
-async function commandWorker(argv) {
-  const { options, positionals } = parseArgs(argv, { valueOptions: ['cwd'] });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const jobId = positionals[0];
-  const job = readJob(cwd, jobId);
-  if (!job) {
-    fail(`Worker: job ${jobId} not found.`);
-  }
-
-  writeJob(cwd, jobId, { status: 'running', pid: process.pid });
-  try {
-    await executeTurnFor(job)(cwd, job, { echo: false });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    writeJob(cwd, jobId, { status: 'failed', error: message });
-    appendJobLog(cwd, jobId, { kind: 'error', message });
-    process.exit(1);
-  }
-}
-
-async function commandStatus(argv) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['json'],
-  });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const job = requireJob(cwd, positionals[0]);
-  const pending = listPendingApprovals(resolveJobDir(cwd, job.id)).filter(
-    approval => !approval.response,
-  );
-  const log = readJobLog(cwd, job.id, 6);
-  printJson({
-    jobId: job.id,
-    status: job.status,
-    agent: job.agent,
-    threadId: job.threadId ?? null,
-    turnId: job.turnId ?? null,
-    createdAt: job.createdAt,
-    updatedAt: job.updatedAt,
-    pendingApprovals: pending.map(approval => ({ id: approval.id, summary: approval.summary })),
-    recentProgress: log.map(entry => entry.message ?? entry.kind).filter(Boolean),
-  });
-}
-
-async function commandResult(argv) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['json'],
-  });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const job = requireJob(cwd, positionals[0]);
-  const resultFile = path.join(resolveJobDir(cwd, job.id), 'result.json');
-  if (!fs.existsSync(resultFile)) {
-    fail(`Job ${job.id} is ${job.status}; no result yet. Check: coder status ${job.id}`);
-  }
-  const result = JSON.parse(fs.readFileSync(resultFile, 'utf8'));
-  if (options.json) {
-    printJson(result);
-    return;
-  }
-  process.stdout.write(`${result.finalMessage || '(no final message)'}\n`);
-  if (result.touchedFiles?.length) {
-    process.stderr.write(`[coder] touched files: ${result.touchedFiles.join(', ')}\n`);
-  }
-}
-
-async function commandSteer(argv) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd', 'model', 'effort', 'permissions'],
-    booleanOptions: ['background', 'wait'],
-  });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const [reference, ...promptParts] = positionals;
-  const prompt = promptParts.join(' ').trim();
-  if (!reference || !prompt) {
-    fail('Usage: coder steer <job-id> "<follow-up instructions>" [--wait]');
-  }
-  const job = requireJob(cwd, reference);
-  if (!job.threadId) {
-    fail(`Job ${job.id} has no thread to steer yet (status: ${job.status}).`);
-  }
-  if (job.status === 'running') {
-    fail(
-      `Job ${job.id} is still running. Stop it first (coder stop ${job.id}) or wait, then steer.`,
-    );
-  }
-
-  const forwarded = [
-    prompt,
-    '--resume',
-    job.id,
-    '--cwd',
-    cwd,
-    ...(job.agent ? ['--agent', job.agent] : []),
-    ...(job.host && job.host !== 'claude' ? ['--host', job.host] : []),
-    ...(options.model
-      ? ['--model', options.model]
-      : ['--model', job.model].filter(() => job.model)),
-    ...(options.effort ? ['--effort', options.effort] : job.effort ? ['--effort', job.effort] : []),
-    ...(options.permissions
-      ? ['--permissions', options.permissions]
-      : job.permissions
-        ? ['--permissions', job.permissions]
-        : []),
-    ...(options.wait ? ['--wait'] : []),
-  ];
-  await commandTask(forwarded);
-}
-
-async function commandStop(argv) {
-  const { options, positionals } = parseArgs(argv, { valueOptions: ['cwd'] });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const job = requireJob(cwd, positionals[0]);
-
-  // Claude jobs have no app-server turn to interrupt; killing the worker
-  // takes the claude child down with it (SIGTERM handler in claude-core).
-  const interrupt =
-    job.agent === 'claude'
-      ? { detail: 'claude worker terminated' }
-      : await interruptTurn(cwd, { threadId: job.threadId, turnId: job.turnId });
-  if (job.pid && job.status === 'running') {
-    try {
-      process.kill(job.pid, 'SIGTERM');
-    } catch {
-      // Worker already exited.
-    }
-  }
-  writeJob(cwd, job.id, { status: 'cancelled', completedAt: new Date().toISOString() });
-  printJson({ jobId: job.id, status: 'cancelled', interrupt: interrupt.detail });
-}
-
-async function commandJobs(argv) {
-  const { options } = parseArgs(argv, { valueOptions: ['cwd'] });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  printJson(
-    listJobs(cwd).map(job => ({
-      jobId: job.id,
-      status: job.status,
-      agent: job.agent,
-      threadId: job.threadId ?? null,
-      prompt: String(job.prompt ?? '').slice(0, 80),
-      updatedAt: job.updatedAt,
-    })),
-  );
-}
-
-async function commandApprovals(argv) {
-  const { options, positionals } = parseArgs(argv, { valueOptions: ['cwd'] });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const job = requireJob(cwd, positionals[0]);
-  printJson(
-    listPendingApprovals(resolveJobDir(cwd, job.id)).map(approval => ({
-      id: approval.id,
-      summary: approval.summary,
-      createdAt: approval.createdAt,
-      answered: approval.response?.decision ?? null,
-    })),
-  );
-}
-
-async function commandApprove(argv) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['deny'],
-  });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const [reference, approvalId] = positionals;
-  if (!reference || !approvalId) {
-    fail('Usage: coder approve <job-id> <approval-id> [--deny]');
-  }
-  const job = requireJob(cwd, reference);
-  answerApproval(resolveJobDir(cwd, job.id), approvalId, options.deny ? 'decline' : 'accept');
-  printJson({ jobId: job.id, approvalId, decision: options.deny ? 'decline' : 'accept' });
-}
-
-// coder config                      -> print effective config
-// coder config get <key>            -> print one value (dotted path)
-// coder config set <key> <value>    -> write to ~/.coder/config.json
-// coder config unset <key>          -> remove an override
-// --workspace targets <repo>/coder.config.json instead of the user file.
-async function commandConfig(argv) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['workspace'],
-  });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-  const [action = 'list', key, ...valueParts] = positionals;
-  const targetFile = options.workspace
-    ? path.join(resolveWorkspaceRoot(cwd), 'coder.config.json')
-    : resolveUserConfigFile();
-
-  const getPath = (object, dotted) =>
-    dotted.split('.').reduce((node, part) => (node == null ? undefined : node[part]), object);
-
-  if (action === 'list') {
-    printJson(loadConfig(cwd));
-    return;
-  }
-  if (action === 'get') {
-    if (!key) {
-      fail('Usage: coder config get <key>  (e.g. chain, agents.codex.model)');
-    }
-    const value = getPath(loadConfig(cwd), key);
-    printJson(value === undefined ? null : value);
-    return;
-  }
-  if (action !== 'set' && action !== 'unset') {
-    fail('Usage: coder config [get|set|unset] <key> [value] [--workspace]');
-  }
-  if (!key || (action === 'set' && valueParts.length === 0)) {
-    fail(`Usage: coder config ${action} <key>${action === 'set' ? ' <value>' : ''}`);
-  }
-
-  const raw = valueParts.join(' ');
-  let value;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    // Not JSON: comma lists become arrays ("codex,claude"), rest stay strings.
-    value = raw.includes(',')
-      ? raw
-          .split(',')
-          .map(part => part.trim())
-          .filter(Boolean)
-      : raw;
-  }
-
-  const current = fs.existsSync(targetFile) ? JSON.parse(fs.readFileSync(targetFile, 'utf8')) : {};
-  const parts = key.split('.');
-  let node = current;
-  for (const part of parts.slice(0, -1)) {
-    if (typeof node[part] !== 'object' || node[part] === null) {
-      node[part] = {};
-    }
-    node = node[part];
-  }
-  if (action === 'set') {
-    node[parts.at(-1)] = value;
-  } else {
-    delete node[parts.at(-1)];
-  }
-  const errors = validateConfig(current);
-  if (errors.length) {
-    fail(`Refusing to write invalid config:\n  ${errors.join('\n  ')}`);
-  }
-  fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-  fs.writeFileSync(targetFile, `${JSON.stringify(current, null, 2)}\n`, 'utf8');
-  printJson({
-    file: targetFile,
-    key,
-    ...(action === 'set' ? { value } : { unset: true }),
-    effective: getPath(loadConfig(cwd), key) ?? null,
-  });
-}
-
-// The two marketplace manifests live at the package root (= the public repo
-// root muzam1l/coder), so the marketplace dir a host installs from is the
-// package root itself.
-function resolveMarketplaceDir() {
-  return fileURLToPath(new URL('..', import.meta.url));
-}
-
-// Register the packaged marketplace with codex and install the coder plugin
-// from it, exactly what a user would type by hand. Re-adding refreshes both the
-// marketplace snapshot and the cached plugin copy (codex caches installs per
-// version). "." is added from inside the dir because codex parses "@" in a path
-// argument (node_modules/@wular/...) as a git owner/repo@ref source.
-function installCodexPlugin(marketplaceDir) {
-  spawnSync('codex', ['plugin', 'remove', 'coder@coder-plugins'], { encoding: 'utf8' });
-  spawnSync('codex', ['plugin', 'marketplace', 'remove', 'coder-plugins'], { encoding: 'utf8' });
-  const addMarketplace = spawnSync('codex', ['plugin', 'marketplace', 'add', '.'], {
-    cwd: marketplaceDir,
-    encoding: 'utf8',
-  });
-  const addPlugin = spawnSync('codex', ['plugin', 'add', 'coder@coder-plugins'], {
-    encoding: 'utf8',
-  });
-  const installed = addMarketplace.status === 0 && addPlugin.status === 0;
-  return {
-    marketplace: marketplaceDir,
-    installed,
-    note: installed
-      ? 'Plugin installed; restart any running codex session to load it.'
-      : `Automatic install failed (${(addPlugin.stderr || addMarketplace.stderr || 'codex not found').trim()}); run: codex plugin marketplace add "${marketplaceDir}" && codex plugin add coder@coder-plugins`,
-  };
-}
-
-// Same through the claude CLI's plugin commands.
-function installClaudePlugin(marketplaceDir) {
-  spawnSync('claude', ['plugin', 'marketplace', 'remove', 'coder-plugins'], { encoding: 'utf8' });
-  const addMarketplace = spawnSync('claude', ['plugin', 'marketplace', 'add', marketplaceDir], {
-    encoding: 'utf8',
-  });
-  const install = spawnSync('claude', ['plugin', 'install', 'coder@coder-plugins'], {
-    encoding: 'utf8',
-  });
-  const installed = addMarketplace.status === 0 && install.status === 0;
-  return {
-    marketplace: marketplaceDir,
-    installed,
-    note: installed
-      ? 'Plugin installed; restart any running Claude Code session to load it.'
-      : `Automatic install failed (${(install.stderr || addMarketplace.stderr || 'claude not found').trim()}); run: claude plugin marketplace add "${marketplaceDir}" && claude plugin install coder@coder-plugins`,
-  };
-}
-
-// GPT-5.6 codex models are gated server-side on the codex CLI version: older
-// codex returns "requires a newer version of Codex". The default codex model is
-// a 5.6 tier, so setup keeps codex current. Bump when a newer model raises the
-// floor. (compareVersions ignores prerelease tags, so an alpha reads as >= this.)
-const MIN_CODEX_VERSION = '0.144.0';
-
-function parseCodexVersion(detail) {
-  const match = /(\d+\.\d+\.\d+)/.exec(String(detail ?? ''));
-  return match ? match[1] : null;
-}
-
-// Auto-update codex in place when it is too old for the configured GPT-5.6
-// model. Prefer codex's own updater: it detects how codex was installed (npm,
-// brew, native) and does the right thing - including refetching the binary a
-// bun global install leaves missing. Fall back to npm when `codex update` is
-// absent (older codex predating the subcommand) or fails. Returns a result to
-// surface, or null when codex is absent or already new enough.
-function ensureCodexUpToDate(availability) {
-  if (!availability.available) {
-    return null;
-  }
-  const version = parseCodexVersion(availability.detail);
-  if (!version || compareVersions(version, MIN_CODEX_VERSION) >= 0) {
-    return null;
-  }
-  let result = spawnSync('codex', ['update'], { encoding: 'utf8' });
-  if (result.status !== 0) {
-    result = spawnSync('npm', ['install', '-g', '@openai/codex@latest'], { encoding: 'utf8' });
-  }
-  return result.status === 0
-    ? { updated: true, from: version }
-    : {
-        updated: false,
-        from: version,
-        note: `codex ${version} is too old for the default GPT-5.6 model (needs >= ${MIN_CODEX_VERSION}); auto-update failed: ${(result.stderr || 'codex/npm not found').trim()}. Run: codex update`,
-      };
-}
-
-async function commandSetup(argv) {
-  const { options } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['codex', 'claude', 'json'],
-  });
-  const cwd = options.cwd ? path.resolve(options.cwd) : process.cwd();
-
-  let availability = getCodexAvailability(cwd);
-  const codexUpdate = ensureCodexUpToDate(availability);
-  if (codexUpdate?.updated) {
-    // Re-read so the rest of setup (auth, chain seeding, output) reflects the
-    // freshly-installed codex rather than the stale version we just replaced.
-    availability = getCodexAvailability(cwd);
-  }
-  const auth = availability.available
-    ? await getCodexAuthStatus(cwd)
-    : { loggedIn: false, detail: availability.detail };
-  const claude = getClaudeAvailability();
-
-  const configFile = resolveUserConfigFile();
-  if (!fs.existsSync(configFile)) {
-    // Seed the chain from what's installed. Codex is the recommended primary,
-    // but when it's absent Claude leads so tasks work without installing Codex.
-    // Neither installed => codex-first, so setup nudges the recommended install
-    // (the Claude opus-subagent fallback still runs meanwhile under a claude host).
-    const chain = availability.available
-      ? ['codex', 'claude']
-      : claude.available
-        ? ['claude', 'codex']
-        : ['codex', 'claude'];
-    writeUserConfig({ ...DEFAULT_CONFIG, chain });
-  }
-
-  const marketplaceDir = resolveMarketplaceDir();
-  const codexPlugin = options.codex ? installCodexPlugin(marketplaceDir) : null;
-  const claudePlugin = options.claude ? installClaudePlugin(marketplaceDir) : null;
-
-  const config = loadConfig(cwd);
-  const ready = availability.available && auth.loggedIn;
-
-  if (options.json) {
-    printJson({
-      codex: {
-        available: availability.available,
-        detail: availability.detail,
-        auth: auth.detail,
-        loggedIn: auth.loggedIn,
-      },
-      ...(codexUpdate ? { codexUpdate } : {}),
-      claude: { available: claude.available, detail: claude.detail },
-      configFile,
-      runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
-      ...(codexPlugin ? { codexPlugin } : {}),
-      ...(claudePlugin ? { claudePlugin } : {}),
-      config,
-      ready,
-    });
-    return;
-  }
-
-  const tty = process.stdout.isTTY && !process.env.NO_COLOR;
-  const paint = (code, text) => (tty ? `\x1b[${code}m${text}\x1b[0m` : text);
-  const good = text => `  ${paint('32', '✔')} ${text}`;
-  const bad = text => `  ${paint('31', '✘')} ${text}`;
-  const head = text => paint('1', text);
-  const gray = text => paint('38;5;245', text);
-
-  const lines = [head('Coder setup'), ''];
-
-  const codexLine = availability.available
-    ? auth.loggedIn
-      ? good(`codex   ${gray(`${availability.detail}; ${auth.detail}`)}`)
-      : bad(`codex   not logged in ${gray(`(${auth.detail})`)} - run: codex login`)
-    : bad(`codex   not installed - run: npm install -g @openai/codex`);
-  const claudeLine = claude.available
-    ? good(`claude  ${gray(claude.detail)}`)
-    : bad(`claude  not installed - run: npm install -g @anthropic-ai/claude-code`);
-  lines.push(head('Available Engines'), codexLine, claudeLine);
-  if (codexUpdate?.updated) {
-    lines.push(good(`codex   ${gray(`updated ${codexUpdate.from} -> ${availability.detail} (GPT-5.6 support)`)}`));
-  } else if (codexUpdate) {
-    lines.push(bad(`codex   ${codexUpdate.note}`));
-  }
-  lines.push('');
-
-  const agentSummary = agent => {
-    const entry = config.agents?.[agent] ?? {};
-    return [entry.model, entry.effort, entry.permissions].filter(Boolean).join('/');
-  };
-  lines.push(
-    head('Config'),
-    `  chain: ${(config.chain ?? []).join(' -> ')}   codex: ${agentSummary('codex')}   claude: ${agentSummary('claude')}`,
-    `  ${gray(configFile)} ${gray('(coder config set <key> <value> to change)')}`,
-    '',
-  );
-
-  const pluginSummaries: [string, { installed: boolean; note: string } | null][] = [
-    ['codex plugin ', codexPlugin],
-    ['claude plugin', claudePlugin],
-  ];
-  for (const [label, plugin] of pluginSummaries) {
-    if (plugin) {
-      lines.push(
-        plugin.installed ? good(`${label} ${gray(plugin.note)}`) : bad(`${label} ${plugin.note}`),
-        '',
-      );
-    }
-  }
-
-  lines.push(
-    ready
-      ? good(`ready - try: coder task --wait "explain this repo's layout"`)
-      : bad(
-          `not ready - fix the engine issues above (tasks fall back to the claude engine meanwhile)`,
-        ),
-  );
-  process.stdout.write(`${lines.join('\n')}\n`);
-}
-
-async function commandUpgrade(argv) {
-  const { options } = parseArgs(argv, {
-    valueOptions: ['pm'],
-    booleanOptions: ['cli-only', 'plugins-only', 'codex', 'claude'],
-  });
-  const doCli = !options['plugins-only'];
-  const doPlugins = !options['cli-only'];
-
-  const tty = process.stdout.isTTY && !process.env.NO_COLOR;
-  const paint = (code, text) => (tty ? `\x1b[${code}m${text}\x1b[0m` : text);
-  const head = text => paint('1', text);
-  const gray = text => paint('38;5;245', text);
-  const good = text => `  ${paint('32', '✔')} ${text}`;
-  const bad = text => `  ${paint('31', '✘')} ${text}`;
-  // "0.1.7 -> 0.1.8" when the version moved, else "0.1.8 (unchanged)".
-  const transition = (before, after) =>
-    after && before && after !== before
-      ? `${before} ${gray('->')} ${head(after)}`
-      : `${after ?? before ?? '?'} ${gray('(unchanged)')}`;
-
-  // Read versions off disk BEFORE updating; npm/pnpm/etc. replace the package
-  // (CLI bundle + bundled plugin manifests) in place, so re-reading the same
-  // paths afterward reports the new versions even though this process is still
-  // running the old code.
-  const marketplaceDir = resolveMarketplaceDir();
-  const codexManifest = path.join(marketplaceDir, 'plugins/codex/.codex-plugin/plugin.json');
-  const claudeManifest = path.join(marketplaceDir, 'plugins/claude/.claude-plugin/plugin.json');
-  const before = {
-    cli: readVersion(),
-    codex: readManifestVersion(codexManifest),
-    claude: readManifestVersion(claudeManifest),
-  };
-
-  // 1. Update the CLI through whichever package manager installed it, so the
-  //    command works regardless of install source (npm/pnpm/yarn/bun).
-  if (doCli) {
-    const detected = detectPackageManager(CLI_PATH);
-    const [pmBin, ...pmArgs] =
-      options.pm === 'npm'
-        ? ['npm', 'install', '-g', '@wular/coder@latest']
-        : options.pm === 'pnpm'
-          ? ['pnpm', 'add', '-g', '@wular/coder@latest']
-          : options.pm === 'yarn'
-            ? ['yarn', 'global', 'add', '@wular/coder@latest']
-            : options.pm === 'bun'
-              ? ['bun', 'add', '-g', '@wular/coder@latest']
-              : detected.command;
-    const pm = options.pm ?? detected.pm;
-    process.stdout.write(`${head('Updating coder CLI')} ${gray(`via ${pm}...`)}\n`);
-    // Capture output (instead of inherit) so the package manager's own noise
-    // ("changed 2 packages", funding notices) does not drown the summary; show
-    // it only if the update fails.
-    const result = spawnSync(pmBin, pmArgs, { encoding: 'utf8' });
-    if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-      fail(
-        `${pm} not found on PATH. Re-run with --pm <npm|pnpm|yarn|bun>, or update manually: ${pmBin} ${pmArgs.join(' ')}`,
-      );
-    }
-    if (result.status !== 0) {
-      const detail = (result.stderr || result.stdout || '').trim();
-      fail(
-        `CLI update failed (${pm}).${detail ? `\n${detail}` : ''}\nRun manually: ${pmBin} ${pmArgs.join(' ')}`,
-      );
-    }
-    // The on-disk package (and its bundled plugins) is now the new version.
-    // Drop the stale notice cache; the next run re-checks fresh.
-    clearUpdateCache();
-    const afterCli = readVersion();
-    process.stdout.write(
-      afterCli !== before.cli
-        ? `${good(`coder CLI  ${transition(before.cli, afterCli)}`)}\n`
-        : `${good(`coder CLI  ${before.cli} ${gray('(already latest)')}`)}\n`,
-    );
-  }
-
-  // 2. Refresh the host plugins from the freshly installed package. Re-adding
-  //    the local marketplace picks up the new plugin files on disk (both hosts
-  //    cache their installed copy). Default to whichever host CLIs are present;
-  //    --codex/--claude narrow it.
-  if (doPlugins) {
-    const explicit = options.codex || options.claude;
-    const wantCodex = explicit ? options.codex : getCodexAvailability(process.cwd()).available;
-    const wantClaude = explicit ? options.claude : getClaudeAvailability().available;
-
-    if (!wantCodex && !wantClaude) {
-      process.stdout.write(`${gray('No host CLI (codex/claude) found to refresh plugins for.')}\n`);
-    }
-    const refreshers: [
-      string,
-      string,
-      string,
-      (() => { installed: boolean; note: string }) | null,
-    ][] = [
-      [
-        'codex plugin ',
-        before.codex,
-        codexManifest,
-        wantCodex ? () => installCodexPlugin(marketplaceDir) : null,
-      ],
-      [
-        'claude plugin',
-        before.claude,
-        claudeManifest,
-        wantClaude ? () => installClaudePlugin(marketplaceDir) : null,
-      ],
-    ];
-    for (const [label, beforeVer, manifest, run] of refreshers) {
-      if (!run) continue;
-      const plugin = run();
-      const afterVer = readManifestVersion(manifest);
-      process.stdout.write(
-        `${
-          plugin.installed
-            ? good(`${label} ${transition(beforeVer, afterVer)} ${gray(`- ${plugin.note}`)}`)
-            : bad(`${label} ${plugin.note}`)
-        }\n`,
-      );
-    }
-  }
-}
-
-const COMMANDS = {
-  task: commandTask,
-  _worker: commandWorker,
-  _refreshUpdate: async () => refreshUpdateCache(readVersion()),
-  upgrade: commandUpgrade,
-  update: commandUpgrade,
-  status: commandStatus,
+  COMMAND_HELP,
+  HELP_ALIASES,
+  renderCommandHelp,
+  renderTaskGroupHelp,
+  renderTopHelp,
+  wantsHelp,
+} from './lib/help.js';
+import { commandTask, commandWorker } from './cmd/task.js';
+import { commandResult } from './cmd/result.js';
+import { commandStream } from './cmd/stream.js';
+import { commandSteer } from './cmd/steer.js';
+import { commandStop } from './cmd/stop.js';
+import { commandJobs } from './cmd/jobs.js';
+import { commandArchive } from './cmd/archive.js';
+import { commandDelete } from './cmd/delete.js';
+import { commandApprovals, commandApprove } from './cmd/approvals.js';
+import { commandConfig } from './cmd/config.js';
+import { commandSetup } from './cmd/setup.js';
+import { commandUpgrade } from './cmd/upgrade.js';
+import type { CommandHandler } from './lib/types.js';
+
+// Subcommands of `coder task <sub> ...`.
+const TASK_SUBCOMMANDS: Record<string, CommandHandler> = {
+  run: commandTask,
+  list: commandJobs,
+  stream: commandStream,
   result: commandResult,
   steer: commandSteer,
   stop: commandStop,
-  jobs: commandJobs,
+  archive: commandArchive,
+  delete: commandDelete,
   approvals: commandApprovals,
   approve: commandApprove,
-  config: commandConfig,
-  setup: commandSetup,
 };
 
-function readVersion() {
-  try {
-    const pkg = JSON.parse(
-      fs.readFileSync(fileURLToPath(new URL('../package.json', import.meta.url)), 'utf8'),
-    );
-    return pkg.version ?? 'unknown';
-  } catch {
-    return 'unknown';
+// `coder task <sub> ...` dispatcher. Creating a task requires the explicit
+// `run` subcommand (or the `coder run` shortcut), so a first arg that is not a
+// known subcommand is an error rather than silently starting a task.
+async function commandTaskGroup(argv: string[]): Promise<void> {
+  const [sub, ...rest] = argv;
+  if (sub === undefined || sub === 'help' || sub === '-h' || sub === '--help') {
+    process.stdout.write(renderTaskGroupHelp());
+    return;
   }
+  const handler = TASK_SUBCOMMANDS[sub];
+  if (!handler) {
+    process.stdout.write(renderTaskGroupHelp());
+    fail(`Unknown task subcommand "${sub}".`, { hint: 'Run a task: coder run "<text>"' });
+  }
+  if (wantsHelp(rest)) {
+    process.stdout.write(renderCommandHelp(`task ${sub}`) ?? renderTaskGroupHelp());
+    return;
+  }
+  await handler(rest);
 }
 
-// Read a plugin manifest's version off disk (fresh each call, so it reflects a
-// just-completed package update). Null when the file is missing/unreadable.
-function readManifestVersion(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, 'utf8')).version ?? null;
-  } catch {
-    return null;
-  }
-}
+const COMMANDS: Record<string, CommandHandler> = {
+  task: commandTaskGroup,
+  // Top-level shortcut aliases for common task subcommands.
+  run: commandTask,
+  list: commandJobs,
+  stream: commandStream,
+  result: commandResult,
+  // Back-compat flat aliases (still work; canonical form is `coder task <sub>`).
+  steer: commandSteer,
+  stop: commandStop,
+  archive: commandArchive,
+  delete: commandDelete,
+  approvals: commandApprovals,
+  approve: commandApprove,
+  watch: commandStream,
+  // Standalone commands.
+  config: commandConfig,
+  'host-setup': commandSetup,
+  setup: commandSetup, // back-compat alias for host-setup
+  upgrade: commandUpgrade,
+  update: commandUpgrade,
+  // Internal.
+  _worker: commandWorker,
+  _refreshUpdate: async () => refreshUpdateCache(readVersion()),
+};
 
 async function main() {
   const [subcommand, ...argv] = process.argv.slice(2);
+
   if (subcommand === '--version' || subcommand === '-v') {
     process.stdout.write(`${readVersion()}\n`);
     return;
   }
+
+  // Top-level help: `coder`, `coder help [topic]`, `coder --help`, `coder -h`.
+  if (
+    subcommand === undefined ||
+    subcommand === 'help' ||
+    subcommand === '--help' ||
+    subcommand === '-h'
+  ) {
+    // `coder help task` -> task-namespace overview; `coder help <cmd>` -> its page.
+    if (argv[0] === 'task' && argv[1] === undefined) {
+      process.stdout.write(renderTaskGroupHelp());
+      return;
+    }
+    const id = argv
+      .map(token => (token === 'task' && argv[1] ? `task ${argv[1]}` : HELP_ALIASES[token] ?? token))
+      .find(token => COMMAND_HELP[token]);
+    process.stdout.write((id && renderCommandHelp(id)) || renderTopHelp());
+    return;
+  }
+
   // Passive, non-blocking update notice. Skip internal/refresh commands so the
   // detached refresher never re-triggers itself.
   if (subcommand !== '_worker' && subcommand !== '_refreshUpdate') {
     maybeNotifyUpdate(readVersion(), CLI_PATH);
   }
+
   const handler = COMMANDS[subcommand];
   if (!handler) {
-    const tty = process.stderr.isTTY && !process.env.NO_COLOR;
-    const bold = text => (tty ? `\x1b[1m${text}\x1b[0m` : text);
-    const cyan = text => (tty ? `\x1b[36m${text}\x1b[0m` : text);
-    // 256-color mid gray: legible on dark and light themes, unlike faint (2m).
-    const dim = text => (tty ? `\x1b[38;5;245m${text}\x1b[0m` : text);
-    const row = (left, right) => `  ${cyan(left.padEnd(34))}${dim(right)}`;
-    fail(
-      [
-        `${bold('Coder')}`,
-        '',
-        bold('Usage:'),
-        '  coder <command> [flags]',
-        '',
-        bold('Commands:'),
-        row('task "<text>" [--wait]', 'run a coding task (background; --wait blocks)'),
-        row('status [job]', 'job status, progress, pending approvals'),
-        row('result [job]', 'final message of a finished job'),
-        row('steer <job> "<follow-up>"', "continue a job's thread with new instructions"),
-        row('stop <job>', 'interrupt a running job'),
-        row('jobs', 'list jobs for this workspace'),
-        row('approvals <job>', 'list escalated approvals'),
-        row('approve <job> <id> [--deny]', 'answer an escalated permission'),
-        row(
-          'config [get|set|unset] <key> [value]',
-          'read or write config (e.g. set chain claude,codex)',
-        ),
-        row('setup [--claude|--codex]', 'check engines, write config, install the host plugin'),
-        row(
-          'upgrade [--cli-only|--plugins-only]',
-          'update the coder CLI and host plugins to latest (alias: update)',
-        ),
-        row('--version, -v', 'print the coder version'),
-        '',
-        bold('Task flags:') + dim(' (task and steer)'),
-        row('--agent <codex|claude>', 'engine (default: first in configured chain)'),
-        row(
-          '--model <alias|slug>',
-          'spark, luna, terra, sol (codex) | opus, sonnet, fable (claude); alias picks engine',
-        ),
-        row('--effort <low|medium|high>', 'reasoning effort'),
-        row('--permissions <mode>', 'read-only | workspace-write | auto (default: auto)'),
-        row('--resume <job>', "continue that job's thread instead of starting fresh"),
-        '',
-        row('--cwd <dir>', 'workspace directory, any command (default: current)'),
-      ].join('\n'),
-    );
+    process.stdout.write(renderTopHelp());
+    fail(`Unknown command "${subcommand}".`, { hint: 'See all commands: coder --help' });
   }
-  await handler(argv);
+
+  // The task group owns its own help routing (group and per-subcommand).
+  if (subcommand !== 'task' && wantsHelp(argv)) {
+    const id = HELP_ALIASES[subcommand] ?? subcommand;
+    process.stdout.write(renderCommandHelp(id) ?? renderTopHelp());
+    return;
+  }
+
+  try {
+    await handler(argv);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // parseArgs throws "Unknown option ..." / "Missing value ..." — steer the
+    // user to that command's help rather than a bare stack trace.
+    if (/^(Unknown option|Missing value)/.test(message)) {
+      const id = HELP_ALIASES[subcommand] ?? subcommand;
+      if (COMMAND_HELP[id]) {
+        fail(message, { hint: `Help: coder ${subcommand} --help` });
+      }
+    }
+    throw error;
+  }
 }
 
 main().catch(error => {

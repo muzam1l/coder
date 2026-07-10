@@ -13,17 +13,25 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 
 - One coder per focused goal. When the work splits into independent parts, decompose it and dispatch each part as its own background `coder task` - fan out a wide web of coders running in parallel, not one giant dispatch. Give each coder a self-contained goal with all context - overview, file paths, constraints (read-only, git rules). Run independent tasks concurrently; use `steer` to continue a single coder's thread.
 - Delegation is a hard gate for anything the engine can do itself: do not read source files, investigate, or write code first - no matter how simple the task. Fold into the task text whatever only you have - conversation context, results from tools the engine lacks. The coder worker runs with plugins disabled (no skills, MCP, or connectors), so include any context only a plugin or MCP tool of yours produced.
-- Compose one self-contained task text (goal, relevant paths, constraints) and run it as a **background Bash call** so you are notified on completion instead of blocking or polling:
+- Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it. It backgrounds by default: the runtime does a startup check and prints a task id (or errors / hands off, see exit codes):
 
   ```bash
-  coder task --wait "<task text>"   # Bash run_in_background: true
+  coder task run "<task text>"
   ```
 
-- The harness re-invokes you when the command exits. Exit 0: usually relay the final message, BUT if stdout is a `spawn-claude-subagent` payload (Claude is the configured engine), this is a clean delegation - spawn the subagent as below, do not treat it as a result. Exit 1: the engine ran but the turn failed - report it, do not retry or fall back yourself. Exit 3: Codex failed and handed off to Claude (see below).
+  Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final answer (keeps your context clean). Run it as a **background Bash call** so it does not block you and you are re-invoked on completion:
+
+  ```bash
+  coder task result <task-id> --wait   # Bash run_in_background: true
+  ```
+
+  Only use `--wait` when you can run it in a background shell like that; without one, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`.
+
+- `coder task run` exits after its startup check. Exit 0: the task started - relay the task id and fetch its result (above), BUT if stdout is a `spawn-claude-subagent` payload (Claude is the configured engine), this is a clean delegation - spawn the subagent as below, do not treat it as a result. Exit 1: it failed to start - report it, do not retry or fall back yourself. Exit 3: Codex failed to start and handed off to Claude (see below).
 - Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
   - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.
 - Permissions default to auto mode (workspace-write + policy-answered escalations). Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
-- For long jobs the user may want to manage by id, drop `--wait`: the runtime detaches a worker, does its own startup check, and prints a job id plus status/result/steer commands. Relay that and do not poll.
+- A background dispatch prints a task id plus its result/steer/stop commands. Relay them and fetch the result (above) rather than polling.
 
 ## Claude engine (spawn-claude-subagent payload)
 
@@ -36,12 +44,12 @@ Spawn one `general-purpose` subagent via the Agent tool, passing the payload's `
 
 Relay its output when it completes.
 
-## Controlling jobs
+## Controlling tasks
 
-- Continue prior work ("keep going", "apply the top fix"): `coder steer <job-id> "<follow-up>"`.
-- Inspect: `coder status <job-id>` / `result <job-id>` / `jobs`.
-- Interrupt: `coder stop <job-id>`.
-- If status shows `pendingApprovals`, surface them to the user; apply their decision with `coder approve <job-id> <approval-id> [--deny]`.
+- Continue prior work ("keep going", "apply the top fix"): `coder task steer <task-id> "<follow-up>"`.
+- Inspect: `coder task result <task-id>` (status + answer; add `--wait` to block until done) and `coder task list`. (`coder task stream <task-id>` streams the live progress log - to watch/debug in special cases, generally not for you to consume.)
+- Interrupt: `coder task stop <task-id>`.
+- If status shows `pendingApprovals`, surface them to the user; apply their decision with `coder task approve <task-id> <approval-id> [--deny]`.
 
 ## Hard rules
 

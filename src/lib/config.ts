@@ -6,8 +6,15 @@ import fs from 'node:fs';
 import { z } from 'zod';
 import path from 'node:path';
 import { resolveCoderHome, resolveWorkspaceRoot } from './state.js';
+import type { Agent, CoderConfig, Effort, Permission } from './types.js';
 
-export const DEFAULT_CONFIG = {
+export interface PermissionMode {
+  sandbox: 'read-only' | 'workspace-write';
+  approvalPolicy: 'never' | 'on-request';
+  approvalMode: 'auto' | null;
+}
+
+export const DEFAULT_CONFIG: CoderConfig = {
   // Agents are tried in order; the next one is the fallback when the previous
   // fails to start (missing binary, auth, quota, rate limit).
   chain: ['codex', 'claude'],
@@ -30,21 +37,21 @@ export const DEFAULT_CONFIG = {
 };
 
 // Model aliases per agent. Values map alias -> concrete identifier.
-export const CODEX_MODELS = {
+export const CODEX_MODELS: Record<string, string> = {
   spark: 'gpt-5.3-codex-spark',
   luna: 'gpt-5.6-luna',
   terra: 'gpt-5.6-terra',
   sol: 'gpt-5.6-sol',
 };
-export const CODEX_EFFORTS = new Set(['low', 'medium', 'high']);
+export const CODEX_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
 
 // Native claude CLI aliases; passed through as-is.
-export const CLAUDE_MODELS = {
+export const CLAUDE_MODELS: Record<string, string> = {
   sonnet: 'sonnet',
   opus: 'opus',
   fable: 'fable',
 };
-export const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high']);
+export const CLAUDE_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
 
 /**
  * The one permission surface, mapped per engine.
@@ -54,7 +61,7 @@ export const CLAUDE_EFFORTS = new Set(['low', 'medium', 'high']);
  * - workspace-write: sandbox workspace-write, approvals never (edits stay in the project; escalations refused)
  * - auto:            sandbox workspace-write, approvals on-request answered by the policy engine
  */
-export const PERMISSION_MODES = {
+export const PERMISSION_MODES: Record<Permission, PermissionMode> = {
   'read-only': { sandbox: 'read-only', approvalPolicy: 'never', approvalMode: null },
   'workspace-write': { sandbox: 'workspace-write', approvalPolicy: 'never', approvalMode: null },
   auto: { sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalMode: 'auto' },
@@ -70,7 +77,7 @@ export const PERMISSION_MODES = {
  * - workspace-write: edits auto-accepted, everything else denied
  * - auto:            claude's own safe/unsafe judgment; unresolved asks denied
  */
-export const CLAUDE_PERMISSION_FLAGS = {
+export const CLAUDE_PERMISSION_FLAGS: Record<Permission, string[]> = {
   'read-only': [
     '--permission-mode',
     'dontAsk',
@@ -100,7 +107,7 @@ export const CLAUDE_SANDBOX_UNAVAILABLE_PATTERN =
  * cannot start. Returns a JSON string for `claude --settings`, or null for
  * modes that need no sandbox.
  */
-export function claudeSandboxSettings(permissions, cwd) {
+export function claudeSandboxSettings(permissions: Permission, cwd: string): string | null {
   if (permissions !== 'read-only') {
     return null;
   }
@@ -123,7 +130,7 @@ const agentEntrySchema = z
   .strictObject({
     model: z.string().min(1),
     effort: effortSchema,
-    permissions: z.enum(Object.keys(PERMISSION_MODES)),
+    permissions: z.enum(['read-only', 'workspace-write', 'auto']),
   })
   .partial();
 const configSchema = z
@@ -140,7 +147,7 @@ const configSchema = z
   .partial();
 
 /** Returns human-readable errors; empty array means valid. */
-export function validateConfig(candidate) {
+export function validateConfig(candidate: unknown): string[] {
   const result = configSchema.safeParse(candidate);
   if (result.success) {
     return [];
@@ -151,45 +158,47 @@ export function validateConfig(candidate) {
   });
 }
 
-function readJsonIfExists(filePath) {
+function readJsonIfExists(filePath: string): unknown {
   if (!fs.existsSync(filePath)) {
     return null;
   }
   try {
     return JSON.parse(fs.readFileSync(filePath, 'utf8'));
   } catch (error) {
-    throw new Error(`Invalid JSON in ${filePath}: ${error.message}`);
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Invalid JSON in ${filePath}: ${message}`);
   }
 }
 
-function deepMerge(base, override) {
+function deepMerge<T>(base: T, override: unknown): T {
   if (!override || typeof override !== 'object' || Array.isArray(override)) {
-    return override ?? base;
+    return (override ?? base) as T;
   }
-  const result = { ...base };
+  const result: Record<string, unknown> = { ...(base as Record<string, unknown>) };
+  const baseRecord = base as Record<string, unknown>;
   for (const [key, value] of Object.entries(override)) {
     if (
       value &&
       typeof value === 'object' &&
       !Array.isArray(value) &&
-      base?.[key] &&
-      typeof base[key] === 'object'
+      baseRecord?.[key] &&
+      typeof baseRecord[key] === 'object'
     ) {
-      result[key] = deepMerge(base[key], value);
+      result[key] = deepMerge(baseRecord[key], value);
     } else {
       result[key] = value;
     }
   }
-  return result;
+  return result as T;
 }
 
-export function resolveUserConfigFile() {
+export function resolveUserConfigFile(): string {
   return path.join(resolveCoderHome(), 'config.json');
 }
 
-export function loadConfig(cwd) {
+export function loadConfig(cwd: string): CoderConfig {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
-  let config = DEFAULT_CONFIG;
+  let config: CoderConfig = DEFAULT_CONFIG;
   for (const filePath of [resolveUserConfigFile(), path.join(workspaceRoot, 'coder.config.json')]) {
     const override = readJsonIfExists(filePath);
     if (!override) {
@@ -204,7 +213,7 @@ export function loadConfig(cwd) {
   return config;
 }
 
-export function resolveCodexModel(alias) {
+export function resolveCodexModel(alias?: string | null): string | null {
   if (!alias) {
     return null;
   }
@@ -215,7 +224,10 @@ export function resolveCodexModel(alias) {
  * Parse a "<agent>:<model?>:<effort?>"-style spec, e.g. "codex", "codex:spark",
  * "codex:sol:high", "claude:opus:high", "terra:high" (agent inferred).
  */
-export function parseAgentSpec(spec, config) {
+export function parseAgentSpec(
+  spec: string | null | undefined,
+  config: CoderConfig,
+): { agent: Agent; model: string | null; effort: Effort | null } | null {
   if (!spec) {
     return null;
   }
@@ -223,11 +235,12 @@ export function parseAgentSpec(spec, config) {
     .split(':')
     .map(part => part.trim())
     .filter(Boolean);
-  let agent = null;
-  let model = null;
-  let effort = null;
+  let agent: Agent | null = null;
+  let model: string | null = null;
+  let effort: Effort | null = null;
 
-  const isEffort = value => CODEX_EFFORTS.has(value) || CLAUDE_EFFORTS.has(value);
+  const isEffort = (value: string): value is Effort =>
+    CODEX_EFFORTS.has(value) || CLAUDE_EFFORTS.has(value);
 
   for (const part of parts) {
     if (part === 'codex' || part === 'claude') {
@@ -255,7 +268,7 @@ export function parseAgentSpec(spec, config) {
   };
 }
 
-export function writeUserConfig(config) {
+export function writeUserConfig(config: CoderConfig): string {
   const filePath = resolveUserConfigFile();
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');

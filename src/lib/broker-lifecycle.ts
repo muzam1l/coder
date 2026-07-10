@@ -7,19 +7,37 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createBrokerEndpoint, parseBrokerEndpoint } from "./broker-endpoint.js";
 import { resolveStateDir } from "./state.js";
+import { readVersion } from "./runtime.js";
 
 const BROKER_STATE_FILE = "broker.json";
+
+/** A persisted broker session record (broker.json). */
+export interface BrokerSession {
+  endpoint: string;
+  pidFile: string;
+  logFile: string;
+  sessionDir: string;
+  pid: number | null;
+  // The CLI version and broker script that spawned this broker. A different
+  // build (e.g. a globally-installed coder vs. this one) speaks a possibly
+  // incompatible protocol, so its broker must never be reused — otherwise
+  // thread creation wedges. See ensureBrokerSession.
+  version?: string;
+  scriptPath?: string;
+}
+
+type KillProcess = (pid: number) => void;
 
 export function createBrokerSessionDir(prefix = "coder-") {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-function connectToEndpoint(endpoint) {
+function connectToEndpoint(endpoint: string) {
   const target = parseBrokerEndpoint(endpoint);
   return net.createConnection({ path: target.path });
 }
 
-export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
+export async function waitForBrokerEndpoint(endpoint: string, timeoutMs = 2000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const ready = await new Promise<boolean>((resolve) => {
@@ -38,7 +56,7 @@ export async function waitForBrokerEndpoint(endpoint, timeoutMs = 2000) {
   return false;
 }
 
-export async function sendBrokerShutdown(endpoint) {
+export async function sendBrokerShutdown(endpoint: string) {
   await new Promise<void>((resolve) => {
     const socket = connectToEndpoint(endpoint);
     socket.setEncoding("utf8");
@@ -54,7 +72,16 @@ export async function sendBrokerShutdown(endpoint) {
   });
 }
 
-export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile, env = process.env }) {
+export interface SpawnBrokerProcessOptions {
+  scriptPath: string;
+  cwd: string;
+  endpoint: string;
+  pidFile: string;
+  logFile: string;
+  env?: NodeJS.ProcessEnv;
+}
+
+export function spawnBrokerProcess({ scriptPath, cwd, endpoint, pidFile, logFile, env = process.env }: SpawnBrokerProcessOptions) {
   const logFd = fs.openSync(logFile, "a");
   const child = spawn(process.execPath, [scriptPath, "serve", "--endpoint", endpoint, "--cwd", cwd, "--pid-file", pidFile], {
     cwd,
@@ -80,37 +107,37 @@ function resolveBrokerScript(): string {
   throw new Error("Coder broker script not found next to the runtime. Rebuild with `bun run build`.");
 }
 
-function resolveBrokerStateFile(cwd) {
+function resolveBrokerStateFile(cwd: string) {
   return path.join(resolveStateDir(cwd), BROKER_STATE_FILE);
 }
 
-export function loadBrokerSession(cwd) {
+export function loadBrokerSession(cwd: string): BrokerSession | null {
   const stateFile = resolveBrokerStateFile(cwd);
   if (!fs.existsSync(stateFile)) {
     return null;
   }
 
   try {
-    return JSON.parse(fs.readFileSync(stateFile, "utf8"));
+    return JSON.parse(fs.readFileSync(stateFile, "utf8")) as BrokerSession;
   } catch {
     return null;
   }
 }
 
-export function saveBrokerSession(cwd, session) {
+export function saveBrokerSession(cwd: string, session: BrokerSession) {
   const stateDir = resolveStateDir(cwd);
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(resolveBrokerStateFile(cwd), `${JSON.stringify(session, null, 2)}\n`, "utf8");
 }
 
-export function clearBrokerSession(cwd) {
+export function clearBrokerSession(cwd: string) {
   const stateFile = resolveBrokerStateFile(cwd);
   if (fs.existsSync(stateFile)) {
     fs.unlinkSync(stateFile);
   }
 }
 
-async function isBrokerEndpointReady(endpoint) {
+async function isBrokerEndpointReady(endpoint: string | null | undefined) {
   if (!endpoint) {
     return false;
   }
@@ -121,9 +148,29 @@ async function isBrokerEndpointReady(endpoint) {
   }
 }
 
-export async function ensureBrokerSession(cwd, options: any = {}) {
+export interface EnsureBrokerSessionOptions {
+  env?: NodeJS.ProcessEnv;
+  killProcess?: KillProcess | null;
+  createBrokerEndpoint?: (sessionDir: string, platform?: NodeJS.Platform) => string;
+  platform?: NodeJS.Platform;
+  scriptPath?: string;
+  timeoutMs?: number;
+}
+
+export async function ensureBrokerSession(
+  cwd: string,
+  options: EnsureBrokerSessionOptions = {}
+): Promise<BrokerSession | null> {
+  const scriptPath = options.scriptPath ?? resolveBrokerScript();
+  const version = readVersion();
+
   const existing = loadBrokerSession(cwd);
-  if (existing && (await isBrokerEndpointReady(existing.endpoint))) {
+  // Only reuse a broker this exact build spawned. A session left by a different
+  // coder (version or script path) may speak an incompatible protocol; reusing
+  // it hangs on thread creation, so tear it down and spawn our own instead.
+  const ownsExisting =
+    existing?.version === version && existing?.scriptPath === scriptPath;
+  if (existing && ownsExisting && (await isBrokerEndpointReady(existing.endpoint))) {
     return existing;
   }
 
@@ -144,7 +191,6 @@ export async function ensureBrokerSession(cwd, options: any = {}) {
   const endpoint = endpointFactory(sessionDir, options.platform);
   const pidFile = path.join(sessionDir, "broker.pid");
   const logFile = path.join(sessionDir, "broker.log");
-  const scriptPath = options.scriptPath ?? resolveBrokerScript();
 
   const child = spawnBrokerProcess({
     scriptPath,
@@ -168,21 +214,39 @@ export async function ensureBrokerSession(cwd, options: any = {}) {
     return null;
   }
 
-  const session = {
+  const session: BrokerSession = {
     endpoint,
     pidFile,
     logFile,
     sessionDir,
-    pid: child.pid ?? null
+    pid: child.pid ?? null,
+    version,
+    scriptPath
   };
   saveBrokerSession(cwd, session);
   return session;
 }
 
-export function teardownBrokerSession({ endpoint = null, pidFile, logFile, sessionDir = null, pid = null, killProcess = null }) {
+export interface TeardownBrokerSessionOptions {
+  endpoint?: string | null;
+  pidFile?: string | null;
+  logFile?: string | null;
+  sessionDir?: string | null;
+  pid?: number | null;
+  killProcess?: KillProcess | null;
+}
+
+export function teardownBrokerSession({
+  endpoint = null,
+  pidFile,
+  logFile,
+  sessionDir = null,
+  pid = null,
+  killProcess = null
+}: TeardownBrokerSessionOptions) {
   if (Number.isFinite(pid) && killProcess) {
     try {
-      killProcess(pid);
+      killProcess(pid as number);
     } catch {
       // Ignore missing or already-exited broker processes.
     }

@@ -19,12 +19,25 @@ const PKG = "@wular/coder";
 const REGISTRY = `https://registry.npmjs.org/${PKG}/latest`;
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-function cacheFile() {
+/** Persisted update-check cache written to CODER_HOME/update-check.json. */
+interface UpdateCache {
+  checkedAt?: number;
+  latest?: string | null;
+  current?: string;
+}
+
+/** The package manager that owns this install and the upgrade command for it. */
+interface PackageManagerInfo {
+  pm: string;
+  command: string[];
+}
+
+function cacheFile(): string {
   return path.join(resolveCoderHome(), "update-check.json");
 }
 
 /** Numeric x.y.z compare; prerelease tags are ignored (our versions are plain). */
-export function compareVersions(a, b) {
+export function compareVersions(a: string, b: string): number {
   const pa = String(a).split(".").map(n => parseInt(n, 10) || 0);
   const pb = String(b).split(".").map(n => parseInt(n, 10) || 0);
   for (let i = 0; i < 3; i += 1) {
@@ -34,15 +47,15 @@ export function compareVersions(a, b) {
   return 0;
 }
 
-function readCache() {
+function readCache(): UpdateCache | null {
   try {
-    return JSON.parse(fs.readFileSync(cacheFile(), "utf8"));
+    return JSON.parse(fs.readFileSync(cacheFile(), "utf8")) as UpdateCache;
   } catch {
     return null;
   }
 }
 
-function writeCache(data) {
+function writeCache(data: UpdateCache) {
   try {
     fs.mkdirSync(resolveCoderHome(), { recursive: true });
     fs.writeFileSync(cacheFile(), JSON.stringify(data));
@@ -64,14 +77,14 @@ export function clearUpdateCache() {
  * a detached background refresh when the cache is stale. Non-blocking; never
  * throws. Suppressed by CODER_NO_UPDATE_CHECK or CI.
  */
-export function maybeNotifyUpdate(currentVersion, cliPath) {
+export function maybeNotifyUpdate(currentVersion: string, cliPath: string) {
   if (process.env.CODER_NO_UPDATE_CHECK || process.env.CI) return;
 
   const cache = readCache();
   if (cache?.latest && compareVersions(cache.latest, currentVersion) > 0) {
     const tty = process.stderr.isTTY && !process.env.NO_COLOR;
-    const dim = t => (tty ? `\x1b[38;5;245m${t}\x1b[0m` : t);
-    const bold = t => (tty ? `\x1b[1m${t}\x1b[0m` : t);
+    const dim = (t: string) => (tty ? `\x1b[38;5;245m${t}\x1b[0m` : t);
+    const bold = (t: string) => (tty ? `\x1b[1m${t}\x1b[0m` : t);
     process.stderr.write(
       dim(`coder ${currentVersion} -> `) +
         bold(cache.latest) +
@@ -99,9 +112,9 @@ export function maybeNotifyUpdate(currentVersion, cliPath) {
  * instead of spawning a refresher every run) while preserving the last-known
  * latest.
  */
-export async function refreshUpdateCache(currentVersion) {
+export async function refreshUpdateCache(currentVersion: string) {
   const prev = readCache();
-  let latest = prev?.latest ?? null;
+  let latest: string | null = prev?.latest ?? null;
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 3000);
@@ -125,7 +138,7 @@ export async function refreshUpdateCache(currentVersion) {
  * running file, so `coder upgrade` uses the same manager that installed it
  * (npm/pnpm/yarn/bun) instead of assuming npm. Falls back to npm.
  */
-export function detectPackageManager(cliPath) {
+export function detectPackageManager(cliPath: string): PackageManagerInfo {
   let real = cliPath;
   try {
     real = fs.realpathSync(cliPath);
