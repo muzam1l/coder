@@ -90,7 +90,8 @@ function buildProgressLogger(cwd, jobId, { echo }) {
 
 function resolveTaskOptions(options, config) {
   // A bare model alias implies its engine: opus/sonnet/fable -> claude,
-  // spark/5.5 -> codex (the alias maps are disjoint, so it is unambiguous).
+  // spark/luna/terra/sol -> codex (the alias maps are disjoint, so it is
+  // unambiguous).
   // Explicit --agent always wins; unknown/raw slugs keep the chain default.
   let agent = options.agent;
   if (!agent && options.model) {
@@ -1084,7 +1085,7 @@ async function main() {
         row('--agent <codex|claude>', 'engine (default: first in configured chain)'),
         row(
           '--model <alias|slug>',
-          'spark, 5.5 (codex) | opus, sonnet, fable (claude); alias picks engine',
+          'spark, luna, terra, sol (codex) | opus, sonnet, fable (claude); alias picks engine',
         ),
         row('--effort <low|medium|high>', 'reasoning effort'),
         row('--permissions <mode>', 'read-only | workspace-write | auto (default: auto)'),

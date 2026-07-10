@@ -20,13 +20,15 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
   ```
 
 - The harness re-invokes you when the command exits. Exit 0: usually relay the final message, BUT if stdout is a `spawn-claude-subagent` payload (Claude is the configured engine), this is a clean delegation - spawn the subagent as below, do not treat it as a result. Exit 1: the engine ran but the turn failed - report it, do not retry or fall back yourself. Exit 3: Codex failed and handed off to Claude (see below).
-- Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `5.5`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
+- Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
+  - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.
 - Permissions default to auto mode (workspace-write + policy-answered escalations). Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
 - For long jobs the user may want to manage by id, drop `--wait`: the runtime detaches a worker, does its own startup check, and prints a job id plus status/result/steer commands. Relay that and do not poll.
 
 ## Claude engine (spawn-claude-subagent payload)
 
 The runtime prints a `spawn-claude-subagent` payload instead of running Codex when Claude should handle the task. Its `reason` field says why, and the exit code follows from it:
+
 - `configured` (Claude is the selected engine): a planned delegation, so the runtime **exits 0** - present it as delegation, not an error.
 - `codex-failed` (Codex missing, auth, quota, rate limit): the runtime **exits 3** and wraps the payload under a `fallback` key alongside an `error` string - mention the failure to the user, including any limit-reset time, then spawn the subagent.
 

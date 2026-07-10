@@ -87,8 +87,8 @@ Machine defaults live in `~/.coder/config.json`; drop a `coder.config.json` in a
 {
   "chain": ["codex", "claude"],
   "agents": {
-    "codex": { "model": "gpt-5.5", "effort": "medium", "permissions": "auto" },
-    "claude": { "model": "opus", "permissions": "auto" }
+    "codex": { "model": "terra", "effort": "high", "permissions": "auto" },
+    "claude": { "model": "opus", "effort": "medium", "permissions": "auto" }
   }
 }
 ```
@@ -112,7 +112,7 @@ Common flags:
 | ------------------ | ------------------------------------------------------------------------- | ----------------- |
 | `--wait`         | run in the foreground and print the answer                                | background        |
 | `--agent`        | `codex`, `claude`                                                     | first in`chain` |
-| `--model`        | `5.5`, `spark`, `opus`, `sonnet`, `fable` or any raw model slug | from config       |
+| `--model`        | `spark`, `luna`, `terra`, `sol`, `opus`, `sonnet`, `fable` or any raw model slug | from config       |
 | `--effort`       | `low`, `medium`, `high`                                             | from config       |
 | `--permissions`  | `read-only`, `workspace-write`, `auto`                              | `auto`          |
 | `--resume <job>` | continue that job's thread instead of starting fresh                      | fresh run         |

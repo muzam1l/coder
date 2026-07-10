@@ -13,8 +13,8 @@ export const DEFAULT_CONFIG = {
   chain: ['codex', 'claude'],
   agents: {
     codex: {
-      model: 'gpt-5.5',
-      effort: 'medium',
+      model: 'gpt-5.6-terra',
+      effort: 'high',
       permissions: 'auto',
     },
     claude: {
@@ -32,7 +32,9 @@ export const DEFAULT_CONFIG = {
 // Model aliases per agent. Values map alias -> concrete identifier.
 export const CODEX_MODELS = {
   spark: 'gpt-5.3-codex-spark',
-  '5.5': 'gpt-5.5',
+  luna: 'gpt-5.6-luna',
+  terra: 'gpt-5.6-terra',
+  sol: 'gpt-5.6-sol',
 };
 export const CODEX_EFFORTS = new Set(['low', 'medium', 'high']);
 
@@ -69,7 +71,14 @@ export const PERMISSION_MODES = {
  * - auto:            claude's own safe/unsafe judgment; unresolved asks denied
  */
 export const CLAUDE_PERMISSION_FLAGS = {
-  'read-only': ['--permission-mode', 'dontAsk', '--disallowedTools', 'Edit', 'Write', 'NotebookEdit'],
+  'read-only': [
+    '--permission-mode',
+    'dontAsk',
+    '--disallowedTools',
+    'Edit',
+    'Write',
+    'NotebookEdit',
+  ],
   'workspace-write': ['--permission-mode', 'acceptEdits'],
   auto: ['--permission-mode', 'auto'],
 };
@@ -204,7 +213,7 @@ export function resolveCodexModel(alias) {
 
 /**
  * Parse a "<agent>:<model?>:<effort?>"-style spec, e.g. "codex", "codex:spark",
- * "codex:gpt-5.5:high", "claude:opus:high", "5.5:high" (agent inferred).
+ * "codex:sol:high", "claude:opus:high", "terra:high" (agent inferred).
  */
 export function parseAgentSpec(spec, config) {
   if (!spec) {

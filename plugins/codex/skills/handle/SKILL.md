@@ -28,7 +28,8 @@ If `coder` is not on PATH, install it yourself without asking: `npm install -g @
   coder task --host codex --agent claude --wait "<same task text, verbatim>"
   ```
 
-- Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `5.5`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
+- Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
+  - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.
 - Permissions default to auto mode. Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
 - For long jobs the user may want to manage by id, drop `--wait`: the runtime detaches a worker and prints a job id plus status/result/steer commands. Relay that.
 
