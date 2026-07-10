@@ -17,8 +17,12 @@ Plugs into Claude Code or Codex to enable the harness with Coder instances.
 - **Unified permissions.** One permission model across agents, with three modes: **Read-only**, **Workspace-write**, and **Auto**. Auto is the default: safe commands run, dangerous ones are blocked, and anything in between is brought to you for a yes/no.
 - **Tasks you can steer.** Every dispatch is a task. Check on it, read its result, give it follow-up instructions, or stop it, all by id, while it keeps working in the background.
 - **Graceful fallback.** If Codex can't start (auth, usage limits, not installed), the task flows to a Claude subagent with the same instructions. You configure the chain and the default model and effort for each agent.
+- **Any model, anywhere.** Codex can point at local models (Ollama, LM Studio, and other OpenAI-compatible endpoints) and third-party providers, so Coder can run your tasks on those too - not just the hosted defaults. That opens up the whole scope of engines you can delegate to.
 
 ## Get started
+
+Coder runs your tasks on an **engine CLI** - it needs at least one of the [codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`, then `codex login`) or the [Claude Code CLI](https://github.com/anthropics/claude-code) (`npm install -g @anthropic-ai/claude-code`, then `claude auth login`) installed and logged in. `coder host-setup` reports which are ready; if none is, install one of them to run tasks.
+
 
 ### Claude Code
 

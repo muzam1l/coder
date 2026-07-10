@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 
 import { parseArgs } from '../lib/args.js';
 import { getCodexAuthStatus, getCodexAvailability } from '../lib/codex-core.js';
-import { getClaudeAvailability } from '../lib/claude-core.js';
+import { getClaudeAuthStatus, getClaudeAvailability } from '../lib/claude-core.js';
 import { DEFAULT_CONFIG, loadConfig, resolveUserConfigFile, writeUserConfig } from '../lib/config.js';
 import { resolveMarketplaceDir } from '../lib/runtime.js';
 import {
@@ -34,6 +34,9 @@ export async function commandSetup(argv: string[]) {
     ? await getCodexAuthStatus(cwd)
     : { loggedIn: false, detail: availability.detail };
   const claude = getClaudeAvailability();
+  const claudeAuth = claude.available
+    ? getClaudeAuthStatus()
+    : { loggedIn: false, detail: claude.detail };
 
   const configFile = resolveUserConfigFile();
   if (!fs.existsSync(configFile)) {
@@ -54,7 +57,9 @@ export async function commandSetup(argv: string[]) {
   const claudePlugin = options.claude ? installClaudePlugin(marketplaceDir) : null;
 
   const config = loadConfig(cwd);
-  const ready = availability.available && auth.loggedIn;
+  // Ready as long as one engine is usable: installed AND logged in (codex or claude).
+  const ready =
+    (availability.available && auth.loggedIn) || (claude.available && claudeAuth.loggedIn);
 
   if (options.json) {
     printJson({
@@ -65,7 +70,12 @@ export async function commandSetup(argv: string[]) {
         loggedIn: auth.loggedIn,
       },
       ...(codexUpdate ? { codexUpdate } : {}),
-      claude: { available: claude.available, detail: claude.detail },
+      claude: {
+        available: claude.available,
+        detail: claude.detail,
+        auth: claudeAuth.detail,
+        loggedIn: claudeAuth.loggedIn,
+      },
       configFile,
       runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
       ...(codexPlugin ? { codexPlugin } : {}),
@@ -89,10 +99,12 @@ export async function commandSetup(argv: string[]) {
     ? auth.loggedIn
       ? good(`codex   ${gray(`${availability.detail}; ${auth.detail}`)}`)
       : bad(`codex   not logged in ${gray(`(${auth.detail})`)} - run: codex login`)
-    : bad(`codex   not installed - run: npm install -g @openai/codex`);
+    : bad(`codex   CLI not installed - run: npm install -g @openai/codex`);
   const claudeLine = claude.available
-    ? good(`claude  ${gray(claude.detail)}`)
-    : bad(`claude  not installed - run: npm install -g @anthropic-ai/claude-code`);
+    ? claudeAuth.loggedIn
+      ? good(`claude  ${gray(`${claude.detail}; ${claudeAuth.detail}`)}`)
+      : bad(`claude  not logged in - run: claude auth login`)
+    : bad(`claude  CLI not installed - run: npm install -g @anthropic-ai/claude-code`);
   lines.push(head('Available Engines'), codexLine, claudeLine);
   if (codexUpdate?.updated) {
     lines.push(
@@ -129,9 +141,9 @@ export async function commandSetup(argv: string[]) {
 
   lines.push(
     ready
-      ? good(`ready - try: coder task --wait "explain this repo's layout"`)
+      ? good(`ready - try: coder run --wait "explain this repo's layout"`)
       : bad(
-          `not ready - fix the engine issues above (tasks fall back to the claude engine meanwhile)`,
+          `not ready - install an engine CLI to run tasks: codex (npm install -g @openai/codex, then codex login) or claude (npm install -g @anthropic-ai/claude-code, then claude auth login)`,
         ),
   );
   process.stdout.write(`${lines.join('\n')}\n`);

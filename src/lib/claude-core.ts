@@ -8,7 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { CLAUDE_PERMISSION_FLAGS, claudeSandboxSettings } from "./config.js";
-import type { Availability, Effort, Permission, TurnResult } from "./types.js";
+import type { AuthStatus, Availability, Effort, Permission, TurnResult } from "./types.js";
 
 // Flatten a tool_result block's content (string, or array of text parts) to
 // raw text for progress output.
@@ -28,6 +28,28 @@ export function getClaudeAvailability(): Availability {
     return { available: false, detail: "claude CLI not found on PATH (npm install -g @anthropic-ai/claude-code)" };
   }
   return { available: true, detail: String(probe.stdout || "").trim() };
+}
+
+// Whether the claude CLI is logged in, via `claude auth status --json`.
+export function getClaudeAuthStatus(): AuthStatus {
+  const probe = spawnSync("claude", ["auth", "status", "--json"], { encoding: "utf8" });
+  if (probe.error || probe.status !== 0) {
+    return { loggedIn: false, detail: "not logged in" };
+  }
+  try {
+    const data = JSON.parse(String(probe.stdout || "")) as {
+      loggedIn?: boolean;
+      email?: string;
+      subscriptionType?: string;
+    };
+    if (!data.loggedIn) {
+      return { loggedIn: false, detail: "not logged in" };
+    }
+    const detail = [data.email, data.subscriptionType].filter(Boolean).join(", ") || "logged in";
+    return { loggedIn: true, detail };
+  } catch {
+    return { loggedIn: false, detail: "unknown" };
+  }
 }
 
 export interface ClaudeTurnOptions {
