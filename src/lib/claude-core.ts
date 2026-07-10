@@ -7,7 +7,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
-import { CLAUDE_PERMISSION_FLAGS, claudeSandboxSettings } from "../config.js";
+import { CLAUDE_PERMISSION_FLAGS, claudeSandboxSettings } from "./config.js";
 
 // Flatten a tool_result block's content (string, or array of text parts) to
 // raw text for progress output.

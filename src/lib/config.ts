@@ -5,7 +5,7 @@
 import fs from 'node:fs';
 import { z } from 'zod';
 import path from 'node:path';
-import { resolveCoderHome, resolveWorkspaceRoot } from './lib/state.js';
+import { resolveCoderHome, resolveWorkspaceRoot } from './state.js';
 
 export const DEFAULT_CONFIG = {
   // Agents are tried in order; the next one is the fallback when the previous

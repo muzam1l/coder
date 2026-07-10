@@ -56,7 +56,7 @@ import {
   resolveUserConfigFile,
   validateConfig,
   writeUserConfig,
-} from './config.js';
+} from './lib/config.js';
 
 const CLI_PATH = fileURLToPath(import.meta.url);
 const STARTUP_ERROR_PATTERN =
