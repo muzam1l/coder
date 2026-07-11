@@ -34,7 +34,6 @@ export async function commandSteer(argv: string[]) {
     '--cwd',
     cwd,
     ...(job.agent ? ['--agent', job.agent] : []),
-    ...(job.host && job.host !== 'claude' ? ['--host', job.host] : []),
     ...(options.model ? ['--model', options.model] : ['--model', job.model].filter(() => job.model)),
     ...(options.effort ? ['--effort', options.effort] : job.effort ? ['--effort', job.effort] : []),
     ...(options.permissions

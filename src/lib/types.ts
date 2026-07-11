@@ -7,7 +7,6 @@
 export type Agent = 'codex' | 'claude';
 export type Permission = 'read-only' | 'workspace-write' | 'auto';
 export type Effort = 'low' | 'medium' | 'high';
-export type Host = 'codex' | 'claude' | 'cursor';
 export type JobKind = 'task';
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -39,7 +38,6 @@ export interface Job {
   kind?: JobKind;
   name?: string | null;
   agent?: Agent;
-  host?: Host;
   prompt?: string;
   model?: string | null;
   effort?: Effort | null;

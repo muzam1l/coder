@@ -14,18 +14,18 @@ When you run setup, also check codex is new enough for the default GPT-5.6 model
 ## Dispatching a task
 
 - Run every `coder` command with escalated permissions (outside your sandbox), justification: Coder is a supervisor - it spawns engines, keeps state in `~/.coder`, and enforces its own sandbox and approval policy on the task. Never retry a sandbox-blocked `coder` call sandboxed again or with HOME/state env workarounds.
-- One coder per focused goal. When the work splits into independent parts, decompose it and dispatch each part as its own `coder task run --host codex` call - fan out a wide web of coders, not one giant dispatch. Give each coder a self-contained goal with all context - overview, file paths, constraints (read-only, git rules); use `steer` to continue a single coder's thread.
+- One coder per focused goal. When the work splits into independent parts, decompose it and dispatch each part as its own `coder task run` call - fan out a wide web of coders, not one giant dispatch. Give each coder a self-contained goal with all context - overview, file paths, constraints (read-only, git rules); use `steer` to continue a single coder's thread.
 - Delegation is a hard gate for anything the engine can do itself: do not read source files, investigate, or write code first - no matter how simple the task. Fold into the task text whatever only you have - conversation context, results from tools the engine lacks. The coder worker runs with plugins disabled (no skills, MCP, or connectors), so include any context only a plugin or MCP tool of yours produced.
 - Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it. It backgrounds by default: the runtime does a startup check and prints a task id (or errors / hands off, see exit codes):
 
   ```bash
-  coder task run --host codex "<task text>"
+  coder task run "<task text>"
   ```
 
   Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final result (keeps your context clean). Only use `--wait` when you can run it in a **background shell** (so it does not block you); if you can't use that, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`. A `--wait` exits **4** when the task is waiting on a permission approval: relay it to the user, apply their decision with `coder approve <task-id> <approval-id> [--deny]`, then re-fetch with `coder task result <task-id> --wait` (unanswered approvals auto-deny after 120s and the task moves on).
 
-- Always pass `--host codex` to identify yourself.
 - `coder task run` exits after its startup check. Exit 0: the task started - fetch its result (above). Exit 1: it failed to start / the turn failed - report it, do not retry.
+- Exit 3: no engine in the chain could start; stdout carries a JSON payload (`fallback.action: "run-native-subagent"`). Mention the failure to the user (including any limit-reset time), then run the task with your own subagent facility: spawn one subagent whose prompt is the payload's `task` verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If the payload's `permissions` is not `auto`, append it: `read-only` means investigate and report without modifying anything; `workspace-write` means never touch anything outside the workspace. Relay its output when it completes.
 - When the first engine can't start (auth, quota, rate limit), the runtime automatically falls back to the next engine in the chain, runs the same task on it via CLI, and still exits 0 - so just fetch the result. If the failure mentions a usage-limit reset time, relay that to the user.
 
 - Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).

@@ -19,13 +19,13 @@ When you run setup, also check codex is new enough for the default GPT-5.6 model
 - Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it. It backgrounds by default: the runtime does a startup check and prints a task id (or errors, see exit codes):
 
   ```bash
-  coder task run --host cursor "<task text>"
+  coder task run "<task text>"
   ```
 
   Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final result (keeps your context clean). Run it in a **background terminal** so it does not block you; if you can't, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`. A `--wait` exits **4** when the task is waiting on a permission approval: relay it to the user, apply their decision with `coder task approve <task-id> <approval-id> [--deny]`, then re-fetch with `coder task result <task-id> --wait` (unanswered approvals auto-deny after 120s and the task moves on).
 
-- Always pass `--host cursor` to identify yourself.
 - `coder task run` exits after its startup check. Exit 0: the task started - fetch its result (above). Exit 1: it failed to start / the turn failed - report it, do not retry.
+- Exit 3: no engine in the chain could start; stdout carries a JSON payload (`fallback.action: "run-native-subagent"`). Mention the failure to the user (including any limit-reset time), then run the task with your own subagent facility: spawn one subagent whose prompt is the payload's `task` verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If the payload's `permissions` is not `auto`, append it: `read-only` means investigate and report without modifying anything; `workspace-write` means never touch anything outside the workspace. Relay its output when it completes.
 - Codex startup failures (auth, quota, rate limit) fall back to the next engine in the chain automatically - the runtime reruns the same task on the claude engine via its CLI and still exits 0, so just fetch the result. If it mentions a usage-limit reset time, relay that to the user.
 - Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
   - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.

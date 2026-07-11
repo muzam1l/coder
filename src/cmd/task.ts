@@ -6,8 +6,9 @@
  * Exit codes (whole CLI):
  *   0    success
  *   1    the agent ran but the turn failed (do not fall back; report it)
- *   3    the agent failed to start (auth/quota/missing binary) — fall back to
- *        the next agent in the chain
+ *   3    no engine in the chain could start — stdout carries a
+ *        run-native-subagent payload: the host should run the task with its
+ *        own native subagent facility (uniform across hosts)
  *   4    a --wait stopped because the task is waiting on an approval — answer it
  *        with `coder approve`, then re-wait (see EXIT_APPROVAL_NEEDED)
  *   130  interrupted (SIGINT) — the task keeps running detached
@@ -52,7 +53,6 @@ import type {
   Agent,
   CoderConfig,
   Job,
-  Permission,
   ProgressUpdate,
   ResolvedTaskOptions,
   TurnResult,
@@ -124,26 +124,6 @@ function buildProgressLogger(cwd: string, jobId: string, { echo }: { echo: boole
     if (echo && entry.message) {
       process.stderr.write(`[coder] ${entry.message}\n`);
     }
-  };
-}
-
-function claudeDispatchPayload(
-  config: CoderConfig,
-  task: string,
-  reason: string,
-  permissions: Permission | null = null,
-) {
-  const claude = config.agents.claude ?? {};
-  return {
-    agent: 'claude',
-    action: 'spawn-claude-subagent',
-    // "configured": claude is the selected agent (chain order or --agent).
-    // "codex-failed": codex was selected but could not start.
-    reason,
-    model: claude.model ?? 'opus',
-    permissions: permissions ?? claude.permissions ?? 'auto',
-    note: 'Spawn a general-purpose subagent with this model and forward the task verbatim.',
-    task,
   };
 }
 
@@ -261,38 +241,26 @@ export async function commandTask(argv: string[]): Promise<void> {
 
   const config = loadConfig(cwd);
   const resolved = resolveTaskOptions(options, config);
-  // Host contract: only a "claude" host (Claude Code) can spawn Claude subagents
-  // itself, so the runtime hands it a spawn-claude-subagent payload; every other
-  // host (codex plugin, cursor plugin, plain shell) has no subagent facility, so
-  // the runtime executes the claude engine via its own CLI. codex and cursor are
-  // identical here - the value just lets a task self-identify its host.
-  // Default host: inside a Claude Code shell (CLAUDECODE=1) the harness
-  // interprets exit-3 payloads and spawns the subagent itself; anywhere else
-  // (codex, cursor, plain terminal, CI) nobody is listening, so the runtime
-  // executes the claude engine directly.
-  const host = options.host ?? (process.env.CLAUDECODE ? 'claude' : 'codex');
-  if (host !== 'claude' && host !== 'codex' && host !== 'cursor') {
-    fail(`Invalid --host "${host}". Use claude, codex, or cursor.`);
-  }
-
-  if (resolved.agent === 'claude' && host === 'claude') {
-    printJson(claudeDispatchPayload(config, prompt, 'configured', resolved.permissions));
-    process.exit(0);
-  }
+  // Note: --host is still accepted (older plugin skills pass it) but ignored —
+  // every engine, claude included, now runs via the runtime's own CLI path.
 
   // An agent could not start (missing, auth, quota): hand off to the next
-  // agent in the configured chain. A Claude host takes over via the exit-3
-  // payload when the next engine is claude; otherwise the runtime executes
-  // the next engine itself with the same task.
+  // agent in the configured chain, executed by the runtime with the same task.
+  // When the chain is exhausted, emit a run-native-subagent payload (exit 3):
+  // the host — Claude Code, Codex, Cursor alike — runs the task with its own
+  // native subagent facility as the last resort.
   const agentFailed = async (agent: Agent, detail: string) => {
     const next = config.chain[config.chain.indexOf(agent) + 1];
     if (!next) {
-      fail(`${agent} failed to start: ${detail}`);
-    }
-    if (next === 'claude' && host === 'claude') {
       printJson({
         error: `${agent} failed to start: ${detail}`,
-        fallback: claudeDispatchPayload(config, prompt, 'codex-failed', resolved.permissions),
+        fallback: {
+          action: 'run-native-subagent',
+          reason: 'no-engine-available',
+          permissions: resolved.permissions,
+          note: 'Every coder engine failed to start. Spawn your own native subagent and forward the task verbatim; tell it to never run git write operations (commit, checkout, stash, reset, push, ...) and to honor the permissions.',
+          task: prompt,
+        },
       });
       process.exit(3);
     }
@@ -301,8 +269,6 @@ export async function commandTask(argv: string[]): Promise<void> {
       prompt,
       '--agent',
       next,
-      '--host',
-      host,
       '--cwd',
       cwd,
       ...(options.wait ? ['--wait'] : []),
@@ -353,7 +319,6 @@ export async function commandTask(argv: string[]): Promise<void> {
     kind: 'task',
     name: options.name ?? null,
     agent: resolved.agent,
-    host,
     prompt,
     model: resolved.model,
     effort: resolved.effort,

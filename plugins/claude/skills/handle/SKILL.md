@@ -16,7 +16,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 - Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it. It backgrounds by default: the runtime does a startup check and prints a task id (or errors / hands off, see exit codes):
 
   ```bash
-  coder task run --host claude "<task text>"
+  coder task run "<task text>"
   ```
 
   Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final answer (keeps your context clean). Run it as a **background Bash call** so it does not block you and you are re-invoked on completion:
@@ -29,23 +29,15 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 
 - A `--wait` (on `run` or `result`) exits **4** when the task is waiting on a permission approval: relay the approval to the user, apply their decision with `coder approve <task-id> <approval-id> [--deny]`, then re-fetch with `coder task result <task-id> --wait`. (Unanswered approvals auto-deny after 120s and the task moves on.)
 
-- Always pass `--host claude` to identify yourself.
-- `coder task run` exits after its startup check. Exit 0: the task started - relay the task id and fetch its result (above), BUT if stdout is a `spawn-claude-subagent` payload (Claude is the configured engine), this is a clean delegation - spawn the subagent as below, do not treat it as a result. Exit 1: it failed to start - report it, do not retry or fall back yourself. Exit 3: Codex failed to start and handed off to Claude (see below).
+- `coder task run` exits after its startup check. Exit 0: the task started - relay the task id and fetch its result (above). Exit 1: it failed to start - report it, do not retry or fall back yourself. Exit 3: no engine in the chain could start and stdout carries a `run-native-subagent` payload - see below. (The runtime runs every engine itself, claude included, and falls back through its configured chain on startup failures - never fall back by implementing the task yourself.)
 - Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
   - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.
 - Permissions default to auto mode (workspace-write + policy-answered escalations). Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
 - A background dispatch prints a task id plus its result/steer/stop commands. Relay them and fetch the result (above) rather than polling.
 
-## Claude engine (spawn-claude-subagent payload)
+## Last resort: run-native-subagent payload (exit 3)
 
-The runtime prints a `spawn-claude-subagent` payload instead of running Codex when Claude should handle the task. Its `reason` field says why, and the exit code follows from it:
-
-- `configured` (Claude is the selected engine): a planned delegation, so the runtime **exits 0** - present it as delegation, not an error.
-- `codex-failed` (Codex missing, auth, quota, rate limit): the runtime **exits 3** and wraps the payload under a `fallback` key alongside an `error` string - mention the failure to the user, including any limit-reset time, then spawn the subagent.
-
-Spawn one `general-purpose` subagent via the Agent tool, passing the payload's `model` as the Agent tool's model parameter. Its prompt is the original task text verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." Append the same for the payload's `permissions` if not the default `auto`: `read-only` means investigate and report without modifying anything; `workspace-write` means never touch anything outside the workspace.
-
-Relay its output when it completes.
+When no coder engine can start (missing binaries, auth, quota across the whole chain), the runtime exits 3 with a JSON payload (`fallback.action: "run-native-subagent"`). Mention the failure to the user (including any limit-reset time), then run the task with your own subagent facility: spawn one `general-purpose` subagent via the Agent tool whose prompt is the payload's `task` verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If the payload's `permissions` is not `auto`, append it: `read-only` means investigate and report without modifying anything; `workspace-write` means never touch anything outside the workspace. Relay its output when it completes.
 
 ## Controlling tasks
 
@@ -56,6 +48,6 @@ Relay its output when it completes.
 
 ## Hard rules
 
-- Forward task text verbatim in `steer` and fallback prompts - never rewrite or summarize what the user asked for.
-- Tell every coder to never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.) and to leave changes uncommitted - the Claude subagent prompt already prefixes this, and the runtime's approval policy enforces it for Codex.
+- Forward task text verbatim in `steer` follow-ups - never rewrite or summarize what the user asked for.
+- Tell every coder to never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.) and to leave changes uncommitted.
 - Pass the user's constraints (read-only, scoped paths) into each coder's task text, and honor them over your own preferences.
