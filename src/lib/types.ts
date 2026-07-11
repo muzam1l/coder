@@ -54,6 +54,9 @@ export interface Job {
   error?: string;
   archived?: boolean;
   archivedAt?: string;
+  // Dev hook (--simulate-approval): the worker raises one real pending approval
+  // before running, to exercise the escalate -> --wait exit 4 -> approve loop.
+  simulateApproval?: boolean;
 }
 
 export const TERMINAL_STATUSES: readonly JobStatus[] = ['completed', 'failed', 'cancelled'];

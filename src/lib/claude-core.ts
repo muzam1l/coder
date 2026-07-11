@@ -83,6 +83,14 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
   }
   const permissions = options.permissions ?? "auto";
   args.push(...(CLAUDE_PERMISSION_FLAGS[permissions] ?? CLAUDE_PERMISSION_FLAGS.auto));
+  // TODO(approval parity): in auto mode, claude's own judgment denies ambiguous
+  // escapes with no way to escalate — unlike codex, which routes escapes to the
+  // main thread. Wire claude's `--permission-prompt-tool` to a small coder MCP
+  // (a hidden `coder _permission-mcp` subcommand) whose handler calls escalate()
+  // so a would-be-denied command instead becomes a pending approval surfaced by
+  // `--wait` (exit 4) and answerable with `coder approve` — reusing the existing
+  // pending-approval flow. Direct `claude -p` path only (the Claude Code host
+  // subagent already routes permissions to the user).
   // Read-only is enforced by claude's OS sandbox, scoped to deny writes to this
   // workspace; passed as a settings JSON string so it needs no on-disk config.
   const sandboxSettings = claudeSandboxSettings(permissions, cwd);

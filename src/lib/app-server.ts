@@ -251,14 +251,21 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
   }
 
   async initialize() {
-    // Disable plugins in the worker session.
-    this.proc = spawn('codex', ['app-server', '--disable', 'plugins'], {
-      cwd: this.cwd,
-      env: this.options.env ?? process.env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      shell: process.platform === 'win32' ? process.env.SHELL || true : false,
-      windowsHide: true,
-    });
+    // Disable plugins in the worker session, and force the workspace-write
+    // sandbox to deny network — so network access escalates through coder's
+    // approval policy instead of silently succeeding (the sandbox is coder's
+    // real containment boundary now that the command allowlist is gone).
+    this.proc = spawn(
+      'codex',
+      ['-c', 'sandbox_workspace_write.network_access=false', 'app-server', '--disable', 'plugins'],
+      {
+        cwd: this.cwd,
+        env: this.options.env ?? process.env,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        shell: process.platform === 'win32' ? process.env.SHELL || true : false,
+        windowsHide: true,
+      },
+    );
 
     const stdout = this.proc.stdout;
     const stderr = this.proc.stderr;

@@ -64,6 +64,25 @@ export function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
+// Milliseconds since an ISO timestamp (0 if unparseable).
+export function ageMs(iso?: string): number {
+  const t = Date.parse(iso ?? '');
+  return Number.isFinite(t) ? Math.max(0, Date.now() - t) : 0;
+}
+
+// Compact human duration: 45s, 12m, 2h3m.
+export function formatAge(ms: number): string {
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m`;
+  return `${Math.floor(m / 60)}h${m % 60}m`;
+}
+
+// A running/queued task idle this long with no pending approval is flagged as
+// possibly stalled (advisory — codex can genuinely run a long command silently).
+export const STALL_MS = 5 * 60_000;
+
 // Color a task status: green for live/succeeded, red for failed/cancelled,
 // dim for queued. Pads to `width` first so ANSI codes don't break alignment.
 export function paintStatus(status: string, width = 0): string {
@@ -75,6 +94,37 @@ export function paintStatus(status: string, width = 0): string {
     return outStyle.red(text);
   }
   return outStyle.dim(text);
+}
+
+// Exit code for "a --wait stopped because the task is waiting on an approval."
+// Coder-specific (4), deliberately not 2 — 2 is the conventional CLI usage-error
+// code. See the exit-code contract in cmd/task.ts.
+export const EXIT_APPROVAL_NEEDED = 4;
+
+// Surface a pending approval hit during a --wait, then exit — so a background/
+// host caller is re-invoked to answer it (`coder approve`) and re-wait, instead
+// of blocking silently until the worker's 120s auto-decline.
+export function surfaceApproval(
+  taskId: string,
+  approval: { id: string; summary: string },
+  json = false,
+): never {
+  if (json) {
+    printJson({ taskId, status: 'awaiting-approval', approval });
+  } else {
+    process.stdout.write(`Approval needed for task ${taskId}: ${approval.summary}\n`);
+    process.stderr.write(
+      `\n${formatHints(
+        [
+          `Approve: coder approve ${taskId} ${approval.id}`,
+          `Deny: coder approve ${taskId} ${approval.id} --deny`,
+          `Then: coder task result ${taskId} --wait`,
+        ],
+        errStyle,
+      )}\n`,
+    );
+  }
+  process.exit(EXIT_APPROVAL_NEEDED);
 }
 
 // Reject positional arguments a command doesn't accept. `help` is the canonical

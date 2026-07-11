@@ -92,8 +92,12 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['task stream [task-id]', 'watch a task live (progress log)'],
     usage: 'coder task stream [task-id]',
     summary:
-      "Watch a running task's progress log live (for you/debugging), then print its\nfinal answer. Blocks until it finishes; exits 0 on success, 1 otherwise. For the\nanswer alone, prefer `coder result`. Shortcuts: `coder stream`, `coder watch`.",
-    flags: [['--json', 'emit each log entry as a JSON line, then the result'], CWD_FLAG],
+      "Watch a running task's progress log live (for you/debugging), then print its\nfinal answer. Starts from the current point; --tail <n> replays the last n lines\nfirst (--tail all for the whole transcript). Blocks until it finishes; exits 0 on\nsuccess, 1 otherwise. For the answer alone, prefer `coder result`.",
+    flags: [
+      ['--tail <n|all>', 'replay the last n log lines first (default: 0)'],
+      ['--json', 'emit each log entry as a JSON line, then the result'],
+      CWD_FLAG,
+    ],
     examples: [['coder stream', 'follow the most recent task to completion']],
     seeAlso: 'task result · task run',
   },

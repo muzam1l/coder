@@ -26,6 +26,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
   ```
 
   Only use `--wait` when you can run it in a background shell like that; without one, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`.
+- A `--wait` (on `run` or `result`) exits **4** when the task is waiting on a permission approval: relay the approval to the user, apply their decision with `coder approve <task-id> <approval-id> [--deny]`, then re-fetch with `coder task result <task-id> --wait`. (Unanswered approvals auto-deny after 120s and the task moves on.)
 
 - `coder task run` exits after its startup check. Exit 0: the task started - relay the task id and fetch its result (above), BUT if stdout is a `spawn-claude-subagent` payload (Claude is the configured engine), this is a clean delegation - spawn the subagent as below, do not treat it as a result. Exit 1: it failed to start - report it, do not retry or fall back yourself. Exit 3: Codex failed to start and handed off to Claude (see below).
 - Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).

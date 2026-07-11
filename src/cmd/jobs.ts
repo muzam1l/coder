@@ -2,7 +2,17 @@ import process from 'node:process';
 
 import { parseArgs } from '../lib/args.js';
 import { listJobs } from '../lib/state.js';
-import { formatHints, outStyle, paintStatus, printJson, rejectExtraArgs, resolveCwd } from '../lib/ui.js';
+import {
+  STALL_MS,
+  ageMs,
+  formatAge,
+  formatHints,
+  outStyle,
+  paintStatus,
+  printJson,
+  rejectExtraArgs,
+  resolveCwd,
+} from '../lib/ui.js';
 import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Job } from '../lib/types.js';
 
 // coder list                   -> active tasks (queued/running), non-archived
@@ -42,6 +52,7 @@ export async function commandJobs(argv: string[]) {
     prompt: String(job.prompt ?? '').slice(0, 80),
     updatedAt: job.updatedAt,
     archived: job.archived ?? false,
+    idleMs: ACTIVE_STATUSES.includes(job.status) ? ageMs(job.updatedAt) : null,
   }));
 
   if (options.json) {
@@ -76,8 +87,13 @@ export async function commandJobs(argv: string[]) {
     const mark = t.archived ? ` ${s.dim('(archived)')}` : '';
     // Named tasks show their name; unnamed ones fall back to the prompt.
     const label = t.name ? t.name : s.dim(t.prompt);
+    // For a running task, show how long since its last update (slow vs hung).
+    const idle =
+      t.idleMs !== null && t.idleMs >= 60_000
+        ? ` ${(t.idleMs > STALL_MS ? s.red : s.dim)(`· idle ${formatAge(t.idleMs)}`)}`
+        : '';
     process.stdout.write(
-      `${s.cyan(t.taskId.padEnd(24))} ${paintStatus(t.status, 10)} ${s.dim((t.agent ?? '-').padEnd(7))} ${label}${mark}\n`,
+      `${s.cyan(t.taskId.padEnd(24))} ${paintStatus(t.status, 10)} ${s.dim((t.agent ?? '-').padEnd(7))} ${label}${idle}${mark}\n`,
     );
   }
 

@@ -135,48 +135,6 @@ const HARD_DENY_PATTERNS = [
 ];
 
 // First-token allowlist for commands that are safe to run un-sandboxed.
-const SAFE_BINARIES = new Set([
-  "ls",
-  "cat",
-  "head",
-  "tail",
-  "wc",
-  "grep",
-  "rg",
-  "ugrep",
-  "find",
-  "fd",
-  "diff",
-  "file",
-  "stat",
-  "du",
-  "df",
-  "which",
-  "whoami",
-  "pwd",
-  "echo",
-  "printf",
-  "env",
-  "date",
-  "uname",
-  "sw_vers",
-  "jq",
-  "sort",
-  "uniq",
-  "tr",
-  "cut",
-  "basename",
-  "dirname",
-  "realpath",
-  "readlink",
-  "xxd",
-  "shasum",
-  "sha256sum",
-  "md5",
-  "tree",
-  "ps"
-]);
-
 const GIT_READ_SUBCOMMANDS = new Set([
   "status",
   "log",
@@ -192,29 +150,6 @@ const GIT_READ_SUBCOMMANDS = new Set([
   "grep",
   "branch", // bare `git branch` lists; write forms are caught by flag check below
   "stash" // bare `git stash list` only; other forms caught below
-]);
-
-// Runner binaries where the subcommand decides safety.
-const RUNNER_SAFE_SUBCOMMANDS = new Map([
-  ["npm", new Set(["test", "run", "exec", "ls", "view", "why", "outdated", "ping"])],
-  ["pnpm", new Set(["test", "run", "exec", "ls", "why", "outdated"])],
-  ["yarn", new Set(["test", "run", "why", "info"])],
-  ["bun", new Set(["test", "run", "x", "pm"])],
-  ["npx", null],
-  ["bunx", null],
-  ["node", null],
-  ["python", null],
-  ["python3", null],
-  ["tsc", null],
-  ["eslint", null],
-  ["prettier", null],
-  ["vitest", null],
-  ["jest", null],
-  ["pytest", null],
-  ["cargo", new Set(["build", "test", "check", "clippy", "fmt", "run", "bench", "doc", "tree", "metadata"])],
-  ["go", new Set(["build", "test", "vet", "run", "fmt", "list", "env", "version"])],
-  ["make", null],
-  ["turbo", null]
 ]);
 
 function firstShellCommand(command: string): string {
@@ -306,23 +241,12 @@ export function decideCommand(rawCommand: unknown, context: DecideContext = {}):
     return { decision: "escalate", reason: `network access to ${networkHost}` };
   }
 
-  if (SAFE_BINARIES.has(binary)) {
-    return { decision: "accept", reason: `${binary} is on the safe-binaries list` };
-  }
-
-  const runnerSubcommands = RUNNER_SAFE_SUBCOMMANDS.get(binary);
-  if (runnerSubcommands !== undefined) {
-    if (runnerSubcommands === null) {
-      return { decision: "accept", reason: `${binary} is a trusted runner` };
-    }
-    const sub = tokens.find((token, index) => index > 0 && !token.startsWith("-"));
-    if (sub && runnerSubcommands.has(sub)) {
-      return { decision: "accept", reason: `${binary} ${sub} is a trusted runner command` };
-    }
-    return { decision: "escalate", reason: `${binary} ${sub ?? ""} is not on the trusted subcommand list` };
-  }
-
-  return { decision: "escalate", reason: `unknown binary: ${binary}` };
+  // No command allowlist: the OS sandbox is the boundary. Any command that
+  // reached this handler is trying to escape the sandbox, so it is a real
+  // decision — escalate to the caller (the orchestrating main thread), which
+  // approves it itself or delegates to a human, rather than rubber-stamping it
+  // by name.
+  return { decision: "escalate", reason: `command needs approval: ${binary || "(unknown)"}` };
 }
 
 /**
@@ -420,6 +344,22 @@ async function escalate(
   }
   onEvent?.({ kind: "approval-timeout", approvalId: id, message: `Approval ${id} timed out; declining.` });
   return "decline";
+}
+
+/**
+ * Dev/test hook (--simulate-approval): raise one real pending approval and block
+ * on it, so the escalate -> --wait exit 4 -> `coder approve` loop can be
+ * exercised without relying on the engine to request an escalation.
+ */
+export function probeApproval(
+  jobDir: string,
+  opts: { timeoutMs?: number; onEvent?: ApprovalEventHandler | null } = {}
+): Promise<"accept" | "decline"> {
+  return escalate(
+    jobDir,
+    { method: "simulate", summary: "simulated approval probe (--simulate-approval)" },
+    { timeoutMs: opts.timeoutMs ?? 120_000, onEvent: opts.onEvent ?? null }
+  );
 }
 
 /**

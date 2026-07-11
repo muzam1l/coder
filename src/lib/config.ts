@@ -10,7 +10,7 @@ import type { Agent, CoderConfig, Effort, Permission } from './types.js';
 
 export interface PermissionMode {
   sandbox: 'read-only' | 'workspace-write';
-  approvalPolicy: 'never' | 'on-request';
+  approvalPolicy: 'never' | 'on-request' | 'on-failure' | 'untrusted';
   approvalMode: 'auto' | null;
 }
 
@@ -56,14 +56,28 @@ export const CLAUDE_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'hi
 /**
  * The one permission surface, mapped per engine.
  *
- * Codex (OS-enforced sandbox + approval policy):
- * - read-only:       sandbox read-only,       approvals never (look, don't touch)
- * - workspace-write: sandbox workspace-write, approvals never (edits stay in the project; escalations refused)
- * - auto:            sandbox workspace-write, approvals on-request answered by the policy engine
+ * Codex (OS-enforced sandbox + approval policy; network is denied in the
+ * workspace-write sandbox, so it is escalated/refused rather than silent):
+ * - read-only:       sandbox read-only,       approvals never (read-only; no writes, no network)
+ * - workspace-write: sandbox workspace-write, approvals never (edits stay in the project;
+ *                    sandbox escapes — out-of-workspace writes, network — are refused, not asked)
+ * - auto:            sandbox workspace-write, approvals on-request; there is no command
+ *                    allowlist, so every sandbox escape escalates to the caller (the
+ *                    orchestrating main thread, which approves it or delegates to a human).
+ *                    Hard-deny patterns and git writes are still declined outright.
  */
 export const PERMISSION_MODES: Record<Permission, PermissionMode> = {
   'read-only': { sandbox: 'read-only', approvalPolicy: 'never', approvalMode: null },
   'workspace-write': { sandbox: 'workspace-write', approvalPolicy: 'never', approvalMode: null },
+  // on-request: codex decides when to ask. The app-server's only plain-string
+  // policies are untrusted / on-request / never (no "on-failure"; "granular"
+  // needs a struct we don't model). With network + out-of-workspace writes now
+  // blocked by the sandbox, escapes that codex doesn't ask about simply FAIL
+  // (the agent adapts) rather than succeed silently; the ones codex does ask
+  // about escalate through decideCommand to the main thread.
+  // TODO(escape escalation): to make *every* sandbox escape escalate (not just
+  // fail), either model the `granular` struct variant, or accept `untrusted`'s
+  // friction, or drive approvals ourselves.
   auto: { sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalMode: 'auto' },
 };
 

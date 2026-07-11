@@ -9,10 +9,12 @@ import { outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '..
 // Follow a job's progress log live, then print its final answer. Useful for a
 // background task: `coder task stream <job>` attaches after the fact and blocks until
 // the job reaches a terminal state, exiting 0 on success and 1 otherwise.
+// By default it starts from the current point (no history replay); --tail <n>
+// replays the last n log lines first, --tail all replays everything.
 // --json emits each new log entry as a JSON line, then the full result object.
 export async function commandStream(argv: string[]) {
   const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
+    valueOptions: ['cwd', 'tail'],
     booleanOptions: ['json'],
   });
   rejectExtraArgs(positionals, 1, 'task stream');
@@ -21,7 +23,18 @@ export async function commandStream(argv: string[]) {
   const terminal = new Set(['completed', 'failed', 'cancelled']);
   const ALL = Number.MAX_SAFE_INTEGER;
 
-  let printed = 0;
+  // How many prior log lines to replay before following. Default 0 (current
+  // point); `--tail all` (or a huge number) replays the whole transcript.
+  const tailOpt = options.tail;
+  const tail =
+    tailOpt === undefined
+      ? 0
+      : tailOpt === 'all'
+        ? ALL
+        : Math.max(0, Number.parseInt(String(tailOpt), 10) || 0);
+
+  // Skip everything older than the last `tail` entries.
+  let printed = Math.max(0, readJobLog(cwd, job.id, ALL).length - tail);
   const flush = () => {
     const entries = readJobLog(cwd, job.id, ALL);
     for (const entry of entries.slice(printed)) {
@@ -38,6 +51,11 @@ export async function commandStream(argv: string[]) {
   };
 
   let current = job;
+  if (!options.json) {
+    process.stdout.write(
+      `${outStyle.dim(`[coder] task ${job.id} ${current.status} — streaming (Ctrl-C to stop)`)}\n`,
+    );
+  }
   flush();
   while (!terminal.has(current.status)) {
     await new Promise(resolve => setTimeout(resolve, 400));

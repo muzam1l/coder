@@ -22,7 +22,7 @@ When you run setup, also check codex is new enough for the default GPT-5.6 model
   coder task run --host codex "<task text>"
   ```
 
-  Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final result (keeps your context clean). Only use `--wait` when you can run it in a **background shell** (so it does not block you); if you can't use that, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`.
+  Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final result (keeps your context clean). Only use `--wait` when you can run it in a **background shell** (so it does not block you); if you can't use that, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`. A `--wait` exits **4** when the task is waiting on a permission approval: relay it to the user, apply their decision with `coder approve <task-id> <approval-id> [--deny]`, then re-fetch with `coder task result <task-id> --wait` (unanswered approvals auto-deny after 120s and the task moves on).
 
 - Always pass `--host codex` to identify yourself.
 - `coder task run` exits after its startup check. Exit 0: the task started - fetch its result (above). Exit 1: it failed to start / the turn failed - report it, do not retry.
