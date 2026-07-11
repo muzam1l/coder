@@ -98,14 +98,19 @@ export function formatTokens(tokens: TokenUsage, model?: string | null): string 
 }
 
 // A running/queued task idle this long with no pending approval is flagged as
-// possibly stalled (advisory — codex can genuinely run a long command silently).
-export const STALL_MS = 5 * 60_000;
+// possibly stalled (advisory — a silent hang; streamed output counts as
+// activity via the heartbeat).
+export const STALL_MS = 10 * 60_000;
 
-// Color a task status: green for live/succeeded, red for failed/cancelled,
-// dim for queued. Pads to `width` first so ANSI codes don't break alignment.
+// Below this, a running task's idle age isn't worth showing at all.
+export const IDLE_SHOW_MS = 2 * 60_000;
+
+// Color a task status: green for live, red for failed/cancelled, dim for the
+// rest (queued, completed). Pads to `width` first so ANSI codes don't break
+// alignment.
 export function paintStatus(status: string, width = 0): string {
   const text = status.padEnd(width);
-  if (status === 'running' || status === 'completed') {
+  if (status === 'running') {
     return outStyle.green(text);
   }
   if (status === 'failed' || status === 'cancelled') {

@@ -28,6 +28,7 @@ import {
   readJobLog,
   resolveJobDir,
   resolveWorkspaceRoot,
+  touchActivity,
   writeJob,
   type JobLogEntry,
 } from '../lib/state.js';
@@ -104,6 +105,18 @@ function resolveTaskOptions(
   return { agent, model, effort, permissions };
 }
 
+// Throttled sign-of-life marker: engines fire this on every server event
+// (including unlogged output deltas); a 10s floor keeps the file writes cheap.
+function buildHeartbeat(cwd: string, jobId: string) {
+  let last = 0;
+  return () => {
+    if (Date.now() - last >= 10_000) {
+      last = Date.now();
+      touchActivity(cwd, jobId);
+    }
+  };
+}
+
 function buildProgressLogger(cwd: string, jobId: string, { echo }: { echo: boolean }) {
   return (update: ProgressUpdate) => {
     const entry = typeof update === 'string' ? { message: update } : update;
@@ -169,6 +182,7 @@ async function executeCodexTurn(
     sandbox: mode.sandbox,
     approvalPolicy: mode.approvalPolicy,
     onApprovalRequest,
+    onHeartbeat: buildHeartbeat(cwd, job.id),
     resumeThreadId: job.resumeThreadId ?? null,
     onProgress: (update: ProgressUpdate) => {
       onProgress(update);
@@ -209,6 +223,7 @@ async function executeClaudeTurn(
     effort: job.effort,
     permissions: job.permissions,
     resumeSessionId: job.resumeThreadId ?? null,
+    onHeartbeat: buildHeartbeat(cwd, job.id),
     onProgress: update => {
       onProgress(update);
       if (update.threadId) {

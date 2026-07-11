@@ -88,10 +88,12 @@ interface TurnCaptureState {
   tokenUsageByThread: Map<string, TokenUsage>;
   itemIndex: Map<string, TurnItem>;
   onProgress: ProgressReporter | null;
+  onHeartbeat: (() => void) | null;
 }
 
 interface CaptureTurnOptions {
   onProgress?: ProgressReporter | null;
+  onHeartbeat?: (() => void) | null;
   onApprovalRequest?: ApprovalRequestHandler;
 }
 
@@ -105,6 +107,7 @@ export interface RunTurnOptions {
   onApprovalRequest?: ApprovalRequestHandler;
   resumeThreadId?: string | null;
   onProgress?: ProgressReporter;
+  onHeartbeat?: () => void;
   ephemeral?: boolean;
   outputSchema?: unknown;
 }
@@ -312,7 +315,8 @@ function createTurnCaptureState(threadId: string, options: CaptureTurnOptions = 
     // itemId -> item, populated on item/started so approval callbacks can look
     // up the pending command/file change they refer to.
     itemIndex: new Map(),
-    onProgress: options.onProgress ?? null
+    onProgress: options.onProgress ?? null,
+    onHeartbeat: options.onHeartbeat ?? null
   };
 }
 
@@ -418,6 +422,9 @@ function recordItem(state: TurnCaptureState, item: TurnItem, lifecycle: Lifecycl
 }
 
 function applyTurnNotification(state: TurnCaptureState, message: AppServerMessage) {
+  // Any notification for this turn is a sign of life — including ones the
+  // switch below ignores, like command output deltas during a long command.
+  state.onHeartbeat?.();
   switch (message.method) {
     case "thread/started":
       state.threadIds.add(message.params.thread.id);
@@ -709,7 +716,11 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
           effort: options.effort ?? null,
           outputSchema: options.outputSchema ?? null
         }),
-      { onProgress: options.onProgress, onApprovalRequest: options.onApprovalRequest }
+      {
+        onProgress: options.onProgress,
+        onHeartbeat: options.onHeartbeat,
+        onApprovalRequest: options.onApprovalRequest
+      }
     );
 
     return {

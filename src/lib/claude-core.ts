@@ -72,6 +72,7 @@ export interface ClaudeTurnOptions {
   permissions?: Permission | null;
   resumeSessionId?: string | null;
   onProgress?: (update: { message: string; threadId?: string }) => void;
+  onHeartbeat?: () => void;
 }
 
 export interface ClaudeTurnResult extends TurnResult {
@@ -124,6 +125,7 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
       if (!event || typeof event !== "object") {
         return;
       }
+      options.onHeartbeat?.();
       if (event.type === "system" && event.subtype === "init" && event.session_id) {
         streamSessionId = event.session_id;
       } else if (event.type === "assistant") {

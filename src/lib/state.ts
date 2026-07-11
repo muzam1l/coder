@@ -13,19 +13,36 @@ export function resolveCoderHome(): string {
   return path.resolve(process.env[CODER_HOME_ENV] || path.join(os.homedir(), ".coder"));
 }
 
+// Memoized per cwd: this shells out to git, and path helpers call it once per
+// job (a `coder list` over N jobs would otherwise spawn N git processes).
+const workspaceRootCache = new Map<string, string>();
+
 export function resolveWorkspaceRoot(cwd: string): string {
+  const cached = workspaceRootCache.get(cwd);
+  if (cached !== undefined) {
+    return cached;
+  }
+  let root: string;
   try {
-    return execFileSync("git", ["rev-parse", "--show-toplevel"], {
+    root = execFileSync("git", ["rev-parse", "--show-toplevel"], {
       cwd,
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"]
     }).trim();
   } catch {
-    return cwd;
+    root = cwd;
   }
+  workspaceRootCache.set(cwd, root);
+  return root;
 }
 
+const stateDirCache = new Map<string, string>();
+
 export function resolveStateDir(cwd: string): string {
+  const cached = stateDirCache.get(cwd);
+  if (cached !== undefined) {
+    return cached;
+  }
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   let canonicalRoot = workspaceRoot;
   try {
@@ -36,7 +53,9 @@ export function resolveStateDir(cwd: string): string {
   const slugSource = path.basename(workspaceRoot) || "workspace";
   const slug = slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
   const hash = createHash("sha256").update(canonicalRoot).digest("hex").slice(0, 12);
-  return path.join(resolveCoderHome(), "state", `${slug}-${hash}`);
+  const stateDir = path.join(resolveCoderHome(), "state", `${slug}-${hash}`);
+  stateDirCache.set(cwd, stateDir);
+  return stateDir;
 }
 
 export function resolveJobsDir(cwd: string): string {
@@ -189,6 +208,34 @@ export function findJob(cwd: string, reference?: string): Job | null {
     throw new Error(`Job reference "${reference}" is ambiguous. Use a longer id.`);
   }
   return null;
+}
+
+// Cheap activity heartbeat: engines touch this file (throttled) on any server
+// event — including ones we don't log, like command output deltas — so idle
+// means "time since the agent emitted anything", not "since we logged".
+export function touchActivity(cwd: string, jobId: string): void {
+  const jobDir = resolveJobDir(cwd, jobId);
+  try {
+    fs.mkdirSync(jobDir, { recursive: true });
+    fs.writeFileSync(path.join(jobDir, "heartbeat"), "", "utf8");
+  } catch {
+    // Best-effort: a missed heartbeat only overstates idle time.
+  }
+}
+
+// Most recent sign of life for a job: the latest of its job.json update, its
+// last log append, and its heartbeat. Uses file mtimes so it stays O(1) per job.
+export function lastActivityAt(cwd: string, job: Job): string | undefined {
+  const jobDir = resolveJobDir(cwd, job.id);
+  let best = Date.parse(job.updatedAt ?? "") || 0;
+  for (const file of ["log.jsonl", "heartbeat"]) {
+    try {
+      best = Math.max(best, fs.statSync(path.join(jobDir, file)).mtimeMs);
+    } catch {
+      // File not created yet.
+    }
+  }
+  return best ? new Date(best).toISOString() : undefined;
 }
 
 export interface JobLogEntry {

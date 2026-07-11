@@ -3,7 +3,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { parseArgs } from '../lib/args.js';
-import { readJobLog, resolveJobDir } from '../lib/state.js';
+import { lastActivityAt, readJobLog, resolveJobDir } from '../lib/state.js';
 import { waitForTaskAttention } from '../lib/wait.js';
 import { listPendingApprovals } from '../lib/approvals.js';
 import {
@@ -51,8 +51,10 @@ export async function commandResult(argv: string[]) {
   const running = ACTIVE_STATUSES.includes(job.status);
   // Last progress event, and how long ago — the signal for slow-vs-hung.
   const lastLog = running ? readJobLog(cwd, job.id, 1)[0] : undefined;
-  const lastActivityAt = lastLog?.at ?? job.updatedAt;
-  const idle = ageMs(lastActivityAt);
+  // Latest sign of life (log, heartbeat, or job update) — heartbeats cover
+  // activity we don't log, like output streaming from a long shell command.
+  const lastActivity = running ? lastActivityAt(cwd, job) : job.updatedAt;
+  const idle = ageMs(lastActivity);
   // Stalled only matters when it isn't legitimately waiting on the user.
   const stalled = running && pending.length === 0 && idle > STALL_MS;
   const exit = () => {
@@ -67,7 +69,7 @@ export async function commandResult(argv: string[]) {
       name: job.name ?? null,
       status: job.status,
       agent: job.agent,
-      ...(running ? { idleMs: idle, lastActivityAt: lastActivityAt ?? null, stalled } : {}),
+      ...(running ? { idleMs: idle, lastActivityAt: lastActivity ?? null, stalled } : {}),
       pendingApprovals: pending.map(a => ({ id: a.id, summary: a.summary })),
       result,
     });
@@ -112,7 +114,10 @@ export async function commandResult(argv: string[]) {
   // While it's still running, point at --wait to block for the answer (and to
   // the transcript if it looks stalled).
   if (running && !options.wait) {
-    const hints = [`Wait for it: coder task result ${job.id} --wait`];
+    const hints = [
+      `Wait for it: coder task result ${job.id} --wait`,
+      `Follow live: coder task stream ${job.id}`,
+    ];
     if (stalled) hints.push(`Check the transcript: coder task stream ${job.id} --tail all`);
     lines.push('', formatHints(hints, s));
   }
