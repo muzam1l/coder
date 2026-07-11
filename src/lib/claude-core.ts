@@ -8,7 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { CLAUDE_PERMISSION_FLAGS, claudeSandboxSettings } from "./config.js";
-import type { AuthStatus, Availability, Effort, Permission, TurnResult } from "./types.js";
+import type { AuthStatus, Availability, Effort, Permission, TokenUsage, TurnResult } from "./types.js";
 
 // Flatten a tool_result block's content (string, or array of text parts) to
 // raw text for progress output.
@@ -20,6 +20,19 @@ function toolResultText(content: any): string {
     return content.map((part) => (typeof part?.text === "string" ? part.text : "")).join("");
   }
   return content == null ? "" : JSON.stringify(content);
+}
+
+// Normalize the result event's usage block ({input_tokens,
+// cache_creation_input_tokens, cache_read_input_tokens, output_tokens}).
+function normalizeClaudeUsage(usage: any): TokenUsage | null {
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+  const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const input = num(usage.input_tokens);
+  const cachedInput = num(usage.cache_read_input_tokens) + num(usage.cache_creation_input_tokens);
+  const output = num(usage.output_tokens);
+  return { input, cachedInput, output, total: input + cachedInput + output };
 }
 
 export function getClaudeAvailability(): Availability {
@@ -191,6 +204,12 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
         threadId: resultEvent?.session_id ?? streamSessionId,
         turnId: null,
         finalMessage,
+        tokens: normalizeClaudeUsage(resultEvent?.usage),
+        // modelUsage is keyed by the actual model id(s) that served the turn.
+        model:
+          (resultEvent?.modelUsage && Object.keys(resultEvent.modelUsage).join('+')) ||
+          options.model ||
+          null,
         error: failed
           ? { message: finalMessage || stderr.trim() || `claude exited ${code}` }
           : null

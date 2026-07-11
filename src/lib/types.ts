@@ -81,6 +81,14 @@ export type ProgressUpdate =
       [key: string]: unknown;
     };
 
+/** Normalized token usage for one turn, summed across the engine's threads. */
+export interface TokenUsage {
+  input: number;
+  cachedInput: number;
+  output: number;
+  total: number;
+}
+
 /** The outcome of running one engine turn. status 0 == success. */
 export interface TurnResult {
   status: number;
@@ -88,6 +96,9 @@ export interface TurnResult {
   turnId?: string | null;
   finalMessage?: string;
   touchedFiles?: string[];
+  tokens?: TokenUsage | null;
+  /** The model that ran the turn (tokens are only comparable per model). */
+  model?: string | null;
   error?: { message?: string } | null;
   [key: string]: unknown;
 }

@@ -45,7 +45,7 @@ import {
   loadConfig,
   resolveCodexModel,
 } from '../lib/config.js';
-import { fail, outStyle, printJson, resolveCwd, surfaceApproval } from '../lib/ui.js';
+import { fail, formatTokens, outStyle, printJson, resolveCwd, surfaceApproval } from '../lib/ui.js';
 import { CLI_PATH } from '../lib/runtime.js';
 import type {
   Agent,
@@ -463,10 +463,21 @@ export async function commandTask(argv: string[]): Promise<void> {
       await agentFailed(resolved.agent, turnError);
     }
     if (options.json) {
-      printJson({ taskId: jobId, status: final.status, finalMessage: result?.finalMessage });
+      printJson({
+        taskId: jobId,
+        status: final.status,
+        finalMessage: result?.finalMessage,
+        tokens: result?.tokens ?? null,
+        model: result?.model ?? final.model ?? null,
+      });
     } else {
       process.stdout.write(`${result?.finalMessage || '(no final message)'}\n`);
-      process.stderr.write(`${outStyle.dim(`[coder] task=${jobId} status=${final.status}`)}\n`);
+      const tokensNote = result?.tokens
+        ? ` tokens=${formatTokens(result.tokens, result.model ?? final.model)}`
+        : '';
+      process.stderr.write(
+        `${outStyle.dim(`[coder] task=${jobId} status=${final.status}${tokensNote}`)}\n`,
+      );
     }
     process.exit(final.status === 'completed' ? 0 : 1);
   }

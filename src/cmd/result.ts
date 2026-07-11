@@ -11,6 +11,7 @@ import {
   ageMs,
   formatAge,
   formatHints,
+  formatTokens,
   outStyle,
   paintStatus,
   printJson,
@@ -79,6 +80,9 @@ export async function commandResult(argv: string[]) {
     ...(job.name ? [`${s.dim('name')}     ${job.name}`] : []),
     `${s.dim('status')}   ${paintStatus(job.status)}`,
     `${s.dim('agent')}    ${job.agent ?? '-'}`,
+    ...(result?.tokens
+      ? [`${s.dim('tokens')}   ${formatTokens(result.tokens, result.model ?? job.model)}`]
+      : []),
   ];
   if (pending.length) {
     lines.push('', s.dim('pending approvals:'));

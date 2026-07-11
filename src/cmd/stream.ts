@@ -4,7 +4,7 @@ import process from 'node:process';
 
 import { parseArgs } from '../lib/args.js';
 import { readJob, readJobLog, reconcileJob, resolveJobDir } from '../lib/state.js';
-import { outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
+import { formatTokens, outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
 
 // Follow a job's progress log live, then print its final answer. Useful for a
 // background task: `coder task stream <job>` attaches after the fact and blocks until
@@ -75,7 +75,12 @@ export async function commandStream(argv: string[]) {
     process.stdout.write(
       `\n${result?.finalMessage || (done ? '(no final message)' : `(task ${current.status})`)}\n`,
     );
-    process.stderr.write(`${outStyle.dim(`[coder] task=${job.id} status=${current.status}`)}\n`);
+    const tokensNote = result?.tokens
+      ? ` tokens=${formatTokens(result.tokens, result.model ?? current.model)}`
+      : '';
+    process.stderr.write(
+      `${outStyle.dim(`[coder] task=${job.id} status=${current.status}${tokensNote}`)}\n`,
+    );
   }
   process.exit(current.status === 'completed' ? 0 : 1);
 }

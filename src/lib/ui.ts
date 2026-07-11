@@ -6,7 +6,7 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { findJob } from './state.js';
-import type { Job, Style } from './types.js';
+import type { Job, Style, TokenUsage } from './types.js';
 
 /** Parsed CLI options. Values are untyped: flags carry strings or booleans. */
 export type Options = Record<string, any>;
@@ -77,6 +77,24 @@ export function formatAge(ms: number): string {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m`;
   return `${Math.floor(m / 60)}h${m % 60}m`;
+}
+
+// Compact token count: 950, 12.3k, 1.2M.
+export function formatTokenCount(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+// One-line token summary: "48.2k (in 45.1k · cached 38.0k · out 3.1k) on spark".
+// Always names the model — token counts are only comparable per model.
+export function formatTokens(tokens: TokenUsage, model?: string | null): string {
+  const parts = [
+    `in ${formatTokenCount(tokens.input)}`,
+    ...(tokens.cachedInput ? [`cached ${formatTokenCount(tokens.cachedInput)}`] : []),
+    `out ${formatTokenCount(tokens.output)}`,
+  ];
+  return `${formatTokenCount(tokens.total)} (${parts.join(' · ')}) on ${model || 'default model'}`;
 }
 
 // A running/queued task idle this long with no pending approval is flagged as

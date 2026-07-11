@@ -10,7 +10,7 @@ import { spawnSync } from "node:child_process";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.js";
 import type { ProtocolError } from "./app-server.js";
 import { binaryAvailable } from "./process.js";
-import type { Availability, AuthStatus, Effort, ProgressUpdate, TurnResult } from "./types.js";
+import type { Availability, AuthStatus, Effort, ProgressUpdate, TokenUsage, TurnResult } from "./types.js";
 
 const SERVICE_NAME = "coder_runtime";
 const TASK_THREAD_PREFIX = "Coder Task";
@@ -84,6 +84,8 @@ interface TurnCaptureState {
   error: { message?: string } | null;
   fileChanges: TurnItem[];
   commandExecutions: TurnItem[];
+  // threadId -> latest cumulative token usage reported for that thread.
+  tokenUsageByThread: Map<string, TokenUsage>;
   itemIndex: Map<string, TurnItem>;
   onProgress: ProgressReporter | null;
 }
@@ -155,6 +157,34 @@ function collectTouchedFiles(fileChanges: TurnItem[]): string[] {
     }
   }
   return [...paths];
+}
+
+// Normalize an app-server TokenUsage ({inputTokens, cachedInputTokens,
+// outputTokens, reasoningOutputTokens, totalTokens}) to the shared shape.
+function normalizeTokenUsage(usage: any): TokenUsage | null {
+  if (!usage || typeof usage !== "object") {
+    return null;
+  }
+  const num = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+  const input = num(usage.inputTokens);
+  const cachedInput = num(usage.cachedInputTokens);
+  const output = num(usage.outputTokens);
+  return { input, cachedInput, output, total: num(usage.totalTokens) || input + cachedInput + output };
+}
+
+// Sum the per-thread cumulative usage into one turn total.
+function collectTokenUsage(state: TurnCaptureState): TokenUsage | null {
+  if (state.tokenUsageByThread.size === 0) {
+    return null;
+  }
+  const sum: TokenUsage = { input: 0, cachedInput: 0, output: 0, total: 0 };
+  for (const usage of state.tokenUsageByThread.values()) {
+    sum.input += usage.input;
+    sum.cachedInput += usage.cachedInput;
+    sum.output += usage.output;
+    sum.total += usage.total;
+  }
+  return sum;
 }
 
 function normalizeReasoningText(text: unknown) {
@@ -278,6 +308,7 @@ function createTurnCaptureState(threadId: string, options: CaptureTurnOptions = 
     error: null,
     fileChanges: [],
     commandExecutions: [],
+    tokenUsageByThread: new Map(),
     // itemId -> item, populated on item/started so approval callbacks can look
     // up the pending command/file change they refer to.
     itemIndex: new Map(),
@@ -416,6 +447,16 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
         emitProgress(state.onProgress, update?.message, update?.phase ?? null);
       }
       break;
+    case "thread/tokenUsage/updated": {
+      // Cumulative per-thread usage; keep the latest snapshot per thread and
+      // sum across threads (subagents included) when the turn completes.
+      const usage = normalizeTokenUsage(message.params?.tokenUsage?.total ?? message.params?.tokenUsage);
+      const usageThreadId = extractThreadId(message);
+      if (usage && usageThreadId) {
+        state.tokenUsageByThread.set(usageThreadId, usage);
+      }
+      break;
+    }
     case "error":
       state.error = message.params.error;
       emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
@@ -682,6 +723,8 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
       stderr: cleanCodexStderr(client.stderr),
       fileChanges: turnState.fileChanges,
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
+      tokens: collectTokenUsage(turnState),
+      model: options.model ?? null,
       commandExecutions: turnState.commandExecutions
     };
   });

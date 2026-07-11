@@ -1,6 +1,6 @@
 {
   "name": "coder",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "interface": {
     "displayName": "Coder (plugin)"
   },
