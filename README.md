@@ -21,54 +21,56 @@ Plugs into Claude Code or Codex to enable the harness with Coder instances.
 
 ## Get started
 
-Coder runs your tasks on an **engine CLI** - it needs at least one of the [codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`, then `codex login`) or the [Claude Code CLI](https://github.com/anthropics/claude-code) (`npm install -g @anthropic-ai/claude-code`, then `claude auth login`) installed and logged in. `coder host-setup` reports which are ready; if none is, install one of them to run tasks.
+**1. Install a host plugin.**
 
-Follow the install host specific guides below, then you can ask like:
+Pick the host you use (or both):
 
-> Use Coder to explain the directory structure of the workspace.
-
-You can also add this to AGENTS.md/CLAUDE.md.
-
-> Always use Coder for all implementation and system exploring tasks.
-
-The work happens in the engine, and your session gets the result. Codex is the primary engine when available, with a Claude subagent as fallback.
-
-_Coder recommends claude cli host (fable preferably) with codex engine. Best for performance and cost distribution_.
-
-### Claude Code
+<table>
+<tr><th>Claude Code</th><th>Codex</th></tr>
+<tr valign="top">
+<td>
 
 ```
 /plugin marketplace add muzam1l/coder
-
 /plugin install coder@coder-plugins
-
 /reload-plugins
-
 /coder:setup
 ```
 
-Or from the shell:
-
-```
-npm install -g @wular/coder
-coder host-setup --claude
-```
-
-### Codex
+</td>
+<td>
 
 ```
 codex plugin marketplace add muzam1l/coder
 codex plugin add coder@coder-plugins
 ```
 
-Or from the npm directly:
+</td>
+</tr>
+</table>
 
-```
+Or do it from the shell instead of slash commands - this installs the same plugin:
+
+```bash
 npm install -g @wular/coder
-coder host-setup --codex
+coder host-setup --claude   # or --codex
 ```
 
-Note: Codex 'Approve for me' just disables invoking CLI agents, so just use 'Ask for approval'/'Full Access' when using Codex/ChatGPT app as host.
+**2. Install at least one engine CLI**, logged in: [codex](https://github.com/openai/codex) (`npm install -g @openai/codex && codex login`) or [Claude Code](https://github.com/anthropics/claude-code) (`npm install -g @anthropic-ai/claude-code && claude auth login`). Run `coder host-setup` any time to check which engines are ready.
+
+**3. Ask your host to use it:**
+
+> Use Coder to explain the directory structure of the workspace.
+
+Or make it the default in AGENTS.md/CLAUDE.md:
+
+> Always use Coder for all implementation and system exploring tasks.
+
+The work happens in the engine, and your session gets the result. Codex is the primary engine when available, with a Claude subagent as fallback.
+
+_Recommended setup: Claude Code as host (fable model preferably), Codex as engine - best for performance and cost distribution._
+
+Note: with Codex as host, use "Ask for approval"/"Full Access", not "Approve for me" - the latter disables invoking CLI agents.
 
 ## Staying up to date
 
