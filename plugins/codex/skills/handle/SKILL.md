@@ -7,7 +7,7 @@ description: Use Coder for any coding, implementation, or investigation task - f
 
 You dispatch coding tasks through the `coder` runtime instead of implementing them yourself. By default the runtime picks the engine from its configured chain; `--agent`/`--model`/`--effort` override it. You never spawn agents yourself in this host.
 
-If `coder` is not on PATH, install it yourself without asking: `npm install -g @wular/coder`, then `coder host-setup --codex`. Only if that fails, show the user the error and those two commands. On first setup, mention the chain is Codex-first with Claude on fallback. The Claude fallback engine needs the claude CLI; if it is not installed, ask the user before installing it (on yes: `npm install -g @anthropic-ai/claude-code`, then have them run `claude` once to log in). If the user prefers Claude engines first, run `coder config set chain claude,codex`.
+If `coder` is not on PATH, install it yourself without asking: `npm install -g @wular/coder`, then `coder host-setup --codex`. Only if that fails, show the user the error and those two commands. The configured chain (`coder config`) decides which engine runs first and which is the fallback; set it with `coder config set chain <first>,<second>`. Each engine needs its own CLI; the claude engine needs the claude CLI installed - if it is not, ask the user before installing it (on yes: `npm install -g @anthropic-ai/claude-code`, then have them run `claude` once to log in).
 
 When you run setup, also check codex is new enough for the default GPT-5.6 model, which needs codex `>= 0.144` (`codex --version`). If it is older, update it automatically without asking with `codex update` (codex's own updater; fall back to `npm install -g @openai/codex@latest` if it fails), then tell the user to restart their codex session so the update takes effect.
 
@@ -26,11 +26,7 @@ When you run setup, also check codex is new enough for the default GPT-5.6 model
 
 - Always pass `--host codex` to identify yourself.
 - `coder task run` exits after its startup check. Exit 0: the task started - fetch its result (above). Exit 1: it failed to start / the turn failed - report it, do not retry.
-- Exit 3: Codex could not start (auth, quota, rate limit - mention this to the user, including any limit-reset time). Rerun once with the Claude engine and fetch its result:
-
-  ```bash
-  coder task run --host codex --agent claude "<same task text, verbatim>"
-  ```
+- When the first engine can't start (auth, quota, rate limit), the runtime automatically falls back to the next engine in the chain, runs the same task on it via CLI, and still exits 0 - so just fetch the result. If the failure mentions a usage-limit reset time, relay that to the user.
 
 - Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
   - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.
@@ -47,5 +43,5 @@ When you run setup, also check codex is new enough for the default GPT-5.6 model
 ## Hard rules
 
 - Forward task text verbatim in `steer` and retries - never rewrite or summarize what the user asked for.
-- NEVER run git write operations yourself (commit, checkout, stash, reset, rebase, merge, push, etc.); the runtime's permission model constrains the engines.
-- Honor any constraints in the user's request (read-only, scoped paths) over your own preferences.
+- Tell every coder, in its task text, to never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.) and to leave changes uncommitted. The runtime's permission model also enforces this on the engines.
+- Pass the user's constraints (read-only, scoped paths) into each coder's task text, and honor them over your own preferences.

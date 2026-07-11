@@ -3,6 +3,9 @@
  * and `coder upgrade`.
  */
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { compareVersions } from './update-check.js';
 import type { Availability } from './types.js';
@@ -62,6 +65,39 @@ export function installClaudePlugin(marketplaceDir: string): PluginResult {
       ? 'Plugin installed; restart any running Claude Code session to load it.'
       : `Automatic install failed (${(install.stderr || addMarketplace.stderr || 'claude not found').trim()}); run: claude plugin marketplace add "${marketplaceDir}" && claude plugin install coder@coder-plugins`,
   };
+}
+
+// Cursor has no plugin-install CLI, but it does auto-discover local plugins from
+// ~/.cursor/plugins/local/<name>/ (a plugin is a dir with .cursor-plugin/plugin.json
+// bundling skills/rules/mcp). So "installing" is copying the packaged coder plugin
+// there - the same artifact you'd publish to the Cursor marketplace, minus the web
+// submission. No engine host, no subagent (a Cursor agent can't spawn one); the
+// bundled handle skill just drives the coder CLI. The install dir must match the
+// manifest `name` ("coder").
+export function installCursorPlugin(marketplaceDir: string): PluginResult {
+  const source = path.join(marketplaceDir, 'plugins', 'cursor');
+  const localRoot = path.join(os.homedir(), '.cursor', 'plugins', 'local');
+  const target = path.join(localRoot, 'coder');
+  try {
+    if (!fs.existsSync(path.join(source, '.cursor-plugin', 'plugin.json'))) {
+      throw new Error(`packaged plugin not found at ${source}`);
+    }
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(localRoot, { recursive: true });
+    fs.cpSync(source, target, { recursive: true });
+    return {
+      marketplace: localRoot,
+      installed: true,
+      note: `Plugin installed to ${target}; reload the Cursor window (or restart Cursor) to load it.`,
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      marketplace: localRoot,
+      installed: false,
+      note: `Automatic install failed (${detail}); copy the plugin by hand: cp -r "${source}" "${target}"`,
+    };
+  }
 }
 
 // GPT-5.6 codex models are gated server-side on the codex CLI version: older

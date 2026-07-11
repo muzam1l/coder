@@ -7,7 +7,7 @@
     {
       "name": "coder",
       "source": "./plugins/claude",
-      "description": "Delegate coding tasks to a Coder subagent. Codex first, Claude fallback; your main context stays clean."
+      "description": "Delegate coding tasks to a Coder subagent. Your main context stays clean."
     }
   ]
 }

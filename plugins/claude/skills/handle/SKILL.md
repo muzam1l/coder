@@ -16,7 +16,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 - Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it. It backgrounds by default: the runtime does a startup check and prints a task id (or errors / hands off, see exit codes):
 
   ```bash
-  coder task run "<task text>"
+  coder task run --host claude "<task text>"
   ```
 
   Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final answer (keeps your context clean). Run it as a **background Bash call** so it does not block you and you are re-invoked on completion:
@@ -26,8 +26,10 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
   ```
 
   Only use `--wait` when you can run it in a background shell like that; without one, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`.
+
 - A `--wait` (on `run` or `result`) exits **4** when the task is waiting on a permission approval: relay the approval to the user, apply their decision with `coder approve <task-id> <approval-id> [--deny]`, then re-fetch with `coder task result <task-id> --wait`. (Unanswered approvals auto-deny after 120s and the task moves on.)
 
+- Always pass `--host claude` to identify yourself.
 - `coder task run` exits after its startup check. Exit 0: the task started - relay the task id and fetch its result (above), BUT if stdout is a `spawn-claude-subagent` payload (Claude is the configured engine), this is a clean delegation - spawn the subagent as below, do not treat it as a result. Exit 1: it failed to start - report it, do not retry or fall back yourself. Exit 3: Codex failed to start and handed off to Claude (see below).
 - Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
   - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.
@@ -55,5 +57,5 @@ Relay its output when it completes.
 ## Hard rules
 
 - Forward task text verbatim in `steer` and fallback prompts - never rewrite or summarize what the user asked for.
-- NEVER run git write operations yourself (commit, checkout, stash, reset, rebase, merge, push, etc.); the runtime's approval policy enforces this for Codex.
-- Honor any constraints in the user's request (read-only, scoped paths) over your own preferences.
+- Tell every coder to never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.) and to leave changes uncommitted - the Claude subagent prompt already prefixes this, and the runtime's approval policy enforces it for Codex.
+- Pass the user's constraints (read-only, scoped paths) into each coder's task text, and honor them over your own preferences.

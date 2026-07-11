@@ -246,16 +246,18 @@ export async function commandTask(argv: string[]): Promise<void> {
 
   const config = loadConfig(cwd);
   const resolved = resolveTaskOptions(options, config);
-  // Host contract: "claude" hosts (Claude Code) spawn Claude subagents
-  // themselves on exit 3; any other host (codex plugin, plain shell) has no
-  // subagent facility, so the runtime executes claude via its own CLI.
+  // Host contract: only a "claude" host (Claude Code) can spawn Claude subagents
+  // itself, so the runtime hands it a spawn-claude-subagent payload; every other
+  // host (codex plugin, cursor plugin, plain shell) has no subagent facility, so
+  // the runtime executes the claude engine via its own CLI. codex and cursor are
+  // identical here - the value just lets a task self-identify its host.
   // Default host: inside a Claude Code shell (CLAUDECODE=1) the harness
   // interprets exit-3 payloads and spawns the subagent itself; anywhere else
-  // (codex, plain terminal, CI) nobody is listening, so the runtime executes
-  // the claude engine directly.
+  // (codex, cursor, plain terminal, CI) nobody is listening, so the runtime
+  // executes the claude engine directly.
   const host = options.host ?? (process.env.CLAUDECODE ? 'claude' : 'codex');
-  if (host !== 'claude' && host !== 'codex') {
-    fail(`Invalid --host "${host}". Use claude or codex.`);
+  if (host !== 'claude' && host !== 'codex' && host !== 'cursor') {
+    fail(`Invalid --host "${host}". Use claude, codex, or cursor.`);
   }
 
   if (resolved.agent === 'claude' && host === 'claude') {

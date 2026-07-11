@@ -11,6 +11,7 @@ import {
   ensureCodexUpToDate,
   installClaudePlugin,
   installCodexPlugin,
+  installCursorPlugin,
   type PluginResult,
 } from '../lib/plugins.js';
 import { printJson, resolveCwd } from '../lib/ui.js';
@@ -19,7 +20,7 @@ import type { Agent } from '../lib/types.js';
 export async function commandSetup(argv: string[]) {
   const { options } = parseArgs(argv, {
     valueOptions: ['cwd'],
-    booleanOptions: ['codex', 'claude', 'json'],
+    booleanOptions: ['codex', 'claude', 'cursor', 'json'],
   });
   const cwd = resolveCwd(options);
 
@@ -55,6 +56,7 @@ export async function commandSetup(argv: string[]) {
   const marketplaceDir = resolveMarketplaceDir();
   const codexPlugin = options.codex ? installCodexPlugin(marketplaceDir) : null;
   const claudePlugin = options.claude ? installClaudePlugin(marketplaceDir) : null;
+  const cursorPlugin = options.cursor ? installCursorPlugin(marketplaceDir) : null;
 
   const config = loadConfig(cwd);
   // Ready as long as one engine is usable: installed AND logged in (codex or claude).
@@ -80,6 +82,7 @@ export async function commandSetup(argv: string[]) {
       runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
       ...(codexPlugin ? { codexPlugin } : {}),
       ...(claudePlugin ? { claudePlugin } : {}),
+      ...(cursorPlugin ? { cursorPlugin } : {}),
       config,
       ready,
     });
@@ -129,6 +132,7 @@ export async function commandSetup(argv: string[]) {
   const pluginSummaries: [string, PluginResult | null][] = [
     ['codex plugin ', codexPlugin],
     ['claude plugin', claudePlugin],
+    ['cursor plugin', cursorPlugin],
   ];
   for (const [label, plugin] of pluginSummaries) {
     if (plugin) {
