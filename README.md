@@ -27,11 +27,13 @@ Follow the install host specific guides below, then you can ask like:
 
 > Use Coder to explain the directory structure of the workspace.
 
-You can also add this to CLAUDE.md.
+You can also add this to AGENTS.md/CLAUDE.md.
 
 > Always use Coder for all implementation and system exploring tasks.
 
 The work happens in the engine, and your session gets the result. Codex is the primary engine when available, with a Claude subagent as fallback.
+
+_Coder recommends claude cli host (fable preferably) with codex engine. Best for performance and cost distribution_.
 
 ### Claude Code
 
