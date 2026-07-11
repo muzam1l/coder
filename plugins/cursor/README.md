@@ -33,6 +33,12 @@ You can also add this to CLAUDE.md.
 
 The work happens in the engine, and your session gets the result. Codex is the primary engine when available, with a Claude subagent as fallback.
 
+### Cursor
+
+```
+/add-plugin Coder
+```
+
 ### Claude Code
 
 ```

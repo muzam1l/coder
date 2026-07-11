@@ -173,16 +173,15 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
   },
   'host-setup': {
     list: [
-      'host-setup [--claude|--codex|--cursor]',
+      'host-setup [--claude|--codex]',
       'set up the host: check engines, write config, install plugin',
     ],
-    usage: 'coder host-setup [--claude] [--codex] [--cursor] [--json]',
+    usage: 'coder host-setup [--claude] [--codex] [--json]',
     summary:
-      'Set up coder in your host (Claude Code, Codex, or Cursor): check engine\navailability and auth, seed the config, and optionally install the host plugin\nfor Claude Code (--claude), Codex (--codex), or Cursor (--cursor). (Formerly\n`setup`, still accepted as an alias.)',
+      'Set up coder in your host (Claude Code or Codex): check engine availability and\nauth, seed the config, and optionally install the host plugin for Claude Code\n(--claude) or Codex (--codex). (Formerly `setup`, still accepted as an alias.)',
     flags: [
       ['--claude', 'install the Claude Code plugin'],
       ['--codex', 'install the Codex plugin'],
-      ['--cursor', 'install the Cursor plugin (to ~/.cursor/plugins/local)'],
       ['--json', 'machine-readable output'],
     ],
   },

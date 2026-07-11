@@ -4,11 +4,13 @@
  *   - package.json                              (npm)
  *   - plugins/claude/.claude-plugin/plugin.json (Claude Code plugin)
  *   - plugins/codex/.codex-plugin/plugin.json   (Codex plugin)
+ *   - plugins/cursor/.cursor-plugin/plugin.json (Cursor plugin)
+ *   - .cursor-plugin/marketplace.json           (Cursor marketplace, metadata.version)
  *
  * They must move together: the host plugins cache installs per version, so a
  * plugin whose version does not change keeps serving a stale copy even after
- * the files on disk change. Keeping all three equal means one publish reliably
- * reaches CLI users and both host plugins.
+ * the files on disk change. Keeping them equal means one publish reliably
+ * reaches CLI users and every host plugin.
  *
  * Usage: node scripts/bump.mjs <major|minor|patch>   (default: patch)
  */
@@ -17,10 +19,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
+// Manifests with a top-level `version` field.
 const MANIFESTS = [
   "package.json",
   "plugins/claude/.claude-plugin/plugin.json",
   "plugins/codex/.codex-plugin/plugin.json",
+  "plugins/cursor/.cursor-plugin/plugin.json",
 ];
 
 const level = (process.argv[2] ?? "patch").toLowerCase();
@@ -55,5 +59,14 @@ for (const relative of MANIFESTS) {
   fs.writeFileSync(file, `${JSON.stringify(json, null, 2)}\n`);
   console.log(`  ${relative}  ${current} -> ${next}`);
 }
+
+// The Cursor marketplace manifest carries its version under metadata, not at the
+// top level, so it needs a separate touch to stay in lockstep.
+const marketplaceRel = ".cursor-plugin/marketplace.json";
+const marketplaceFile = path.join(root, marketplaceRel);
+const marketplace = JSON.parse(fs.readFileSync(marketplaceFile, "utf8"));
+marketplace.metadata = { ...marketplace.metadata, version: next };
+fs.writeFileSync(marketplaceFile, `${JSON.stringify(marketplace, null, 2)}\n`);
+console.log(`  ${marketplaceRel}  ${current} -> ${next}`);
 
 console.log(`\nBumped coder ${current} -> ${next} (${level}). Rebuild + republish to ship it.`);

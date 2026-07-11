@@ -1,8 +1,23 @@
 {
   "name": "coder",
-  "version": "0.1.19",
+  "displayName": "Coder",
+  "version": "0.1.21",
   "description": "Delegate coding tasks to a Coder subagent. Your main context stays clean.",
   "author": {
     "name": "muzam1l"
-  }
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/muzam1l/coder",
+  "repository": "https://github.com/muzam1l/coder",
+  "keywords": [
+    "cursor",
+    "coder",
+    "codex",
+    "claude",
+    "agent",
+    "subagent",
+    "delegation",
+    "orchestration"
+  ],
+  "logo": "assets/logo.png"
 }

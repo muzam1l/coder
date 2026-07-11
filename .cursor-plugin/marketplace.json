@@ -1,0 +1,17 @@
+{
+  "name": "coder-plugins",
+  "owner": {
+    "name": "muzam1l"
+  },
+  "metadata": {
+    "description": "Coder: delegate coding tasks to a supervised subagent, keeping your main context clean.",
+    "version": "0.1.21"
+  },
+  "plugins": [
+    {
+      "name": "coder",
+      "source": "./plugins/cursor",
+      "description": "Delegate coding tasks to a Coder subagent. Your main context stays clean."
+    }
+  ]
+}

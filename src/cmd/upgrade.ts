@@ -1,5 +1,3 @@
-import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
@@ -9,18 +7,13 @@ import { getCodexAvailability } from '../lib/codex-core.js';
 import { getClaudeAvailability } from '../lib/claude-core.js';
 import { clearUpdateCache, detectPackageManager } from '../lib/update-check.js';
 import { CLI_PATH, readManifestVersion, readVersion, resolveMarketplaceDir } from '../lib/runtime.js';
-import {
-  installClaudePlugin,
-  installCodexPlugin,
-  installCursorPlugin,
-  type PluginResult,
-} from '../lib/plugins.js';
+import { installClaudePlugin, installCodexPlugin, type PluginResult } from '../lib/plugins.js';
 import { fail } from '../lib/ui.js';
 
 export async function commandUpgrade(argv: string[]) {
   const { options } = parseArgs(argv, {
     valueOptions: ['pm'],
-    booleanOptions: ['cli-only', 'plugins-only', 'codex', 'claude', 'cursor'],
+    booleanOptions: ['cli-only', 'plugins-only', 'codex', 'claude'],
   });
   const doCli = !options['plugins-only'];
   const doPlugins = !options['cli-only'];
@@ -44,12 +37,10 @@ export async function commandUpgrade(argv: string[]) {
   const marketplaceDir = resolveMarketplaceDir();
   const codexManifest = path.join(marketplaceDir, 'plugins/codex/.codex-plugin/plugin.json');
   const claudeManifest = path.join(marketplaceDir, 'plugins/claude/.claude-plugin/plugin.json');
-  const cursorManifest = path.join(marketplaceDir, 'plugins/cursor/.cursor-plugin/plugin.json');
   const before = {
     cli: readVersion(),
     codex: readManifestVersion(codexManifest),
     claude: readManifestVersion(claudeManifest),
-    cursor: readManifestVersion(cursorManifest),
   };
 
   // 1. Update the CLI through whichever package manager installed it, so the
@@ -99,20 +90,12 @@ export async function commandUpgrade(argv: string[]) {
   //    cache their installed copy). Default to whichever host CLIs are present;
   //    --codex/--claude narrow it.
   if (doPlugins) {
-    const explicit = options.codex || options.claude || options.cursor;
+    const explicit = options.codex || options.claude;
     const wantCodex = explicit ? options.codex : getCodexAvailability(process.cwd()).available;
     const wantClaude = explicit ? options.claude : getClaudeAvailability().available;
-    // Cursor has no CLI to probe; treat a prior install
-    // (~/.cursor/plugins/local/coder) as the signal to refresh it, or --cursor.
-    const cursorInstalled = fs.existsSync(
-      path.join(os.homedir(), '.cursor', 'plugins', 'local', 'coder'),
-    );
-    const wantCursor = explicit ? options.cursor : cursorInstalled;
 
-    if (!wantCodex && !wantClaude && !wantCursor) {
-      process.stdout.write(
-        `${gray('No host (codex/claude CLI or Cursor skill) found to refresh plugins for.')}\n`,
-      );
+    if (!wantCodex && !wantClaude) {
+      process.stdout.write(`${gray('No host CLI (codex/claude) found to refresh plugins for.')}\n`);
     }
     const refreshers: [string, string | null, string, (() => PluginResult) | null][] = [
       [
@@ -126,12 +109,6 @@ export async function commandUpgrade(argv: string[]) {
         before.claude,
         claudeManifest,
         wantClaude ? () => installClaudePlugin(marketplaceDir) : null,
-      ],
-      [
-        'cursor plugin',
-        before.cursor,
-        cursorManifest,
-        wantCursor ? () => installCursorPlugin(marketplaceDir) : null,
       ],
     ];
     for (const [label, beforeVer, manifest, run] of refreshers) {

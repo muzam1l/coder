@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "bin": {
@@ -10,6 +10,7 @@
     "build": "bun build src/cli.ts src/lib/broker.ts --outdir dist --root src --target node --format esm --minify",
     "dev": "bun run build --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "validate-plugin:cursor": "node scripts/validate-template.mjs",
     "version-bump:patch": "node scripts/bump.mjs patch",
     "version-bump:minor": "node scripts/bump.mjs minor",
     "version-bump:major": "node scripts/bump.mjs major",
