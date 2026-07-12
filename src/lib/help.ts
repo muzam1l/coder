@@ -70,13 +70,13 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['task list [--all|--stopped|--archived]', 'list tasks (running by default)'],
     usage: 'coder task list [--all] [--stopped] [--archived]',
     summary:
-      'List tasks for this workspace, most recent first. Shows running tasks by\ndefault; --all adds finished tasks, --stopped shows only finished ones, and\n--archived opens the archive. Archived tasks stay out of --all. Shortcut: `coder list`.',
+      'List tasks across all workspaces, most recent first. Shows running tasks by\ndefault; --all adds finished tasks, --stopped shows only finished ones, and\n--archived opens the archive. Archived tasks stay out of --all. Shortcut: `coder list`.',
     flags: [
       ['--all', 'show running and finished tasks (archived excluded)'],
       ['--stopped', 'show only finished tasks (completed/failed/cancelled)'],
       ['--archived', 'show only archived tasks'],
+      ['--dir <dir>', 'only tasks launched in that workspace'],
       JSON_FLAG,
-      CWD_FLAG,
     ],
     seeAlso: 'task result · task archive · task delete',
   },

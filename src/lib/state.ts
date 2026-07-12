@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -36,26 +35,33 @@ export function resolveWorkspaceRoot(cwd: string): string {
   return root;
 }
 
-const stateDirCache = new Map<string, string>();
+// Task state is global: a task's cwd is just where the agent works, not a
+// storage key. `cwd` params on the helpers below are kept only so legacy
+// per-workspace dirs (pre-global layouts) remain readable.
+const GLOBAL_STATE_SLUG = "global";
 
-export function resolveStateDir(cwd: string): string {
-  const cached = stateDirCache.get(cwd);
-  if (cached !== undefined) {
-    return cached;
+export function resolveStateDir(_cwd: string): string {
+  return path.join(resolveCoderHome(), "state", GLOBAL_STATE_SLUG);
+}
+
+// Pre-global-state layout: one dir per workspace under state/. Read-only now —
+// jobs found there are listed and updated in place, but new jobs never land there.
+let legacyStateDirsCache: string[] | null = null;
+function legacyStateDirs(): string[] {
+  if (legacyStateDirsCache) {
+    return legacyStateDirsCache;
   }
-  const workspaceRoot = resolveWorkspaceRoot(cwd);
-  let canonicalRoot = workspaceRoot;
+  const root = path.join(resolveCoderHome(), "state");
+  let entries: fs.Dirent[] = [];
   try {
-    canonicalRoot = fs.realpathSync.native(workspaceRoot);
+    entries = fs.readdirSync(root, { withFileTypes: true });
   } catch {
-    canonicalRoot = workspaceRoot;
+    // No state yet.
   }
-  const slugSource = path.basename(workspaceRoot) || "workspace";
-  const slug = slugSource.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "workspace";
-  const hash = createHash("sha256").update(canonicalRoot).digest("hex").slice(0, 12);
-  const stateDir = path.join(resolveCoderHome(), "state", `${slug}-${hash}`);
-  stateDirCache.set(cwd, stateDir);
-  return stateDir;
+  legacyStateDirsCache = entries
+    .filter((entry) => entry.isDirectory() && entry.name !== GLOBAL_STATE_SLUG)
+    .map((entry) => path.join(root, entry.name));
+  return legacyStateDirsCache;
 }
 
 export function resolveJobsDir(cwd: string): string {
@@ -63,7 +69,19 @@ export function resolveJobsDir(cwd: string): string {
 }
 
 export function resolveJobDir(cwd: string, jobId: string): string {
-  return path.join(resolveJobsDir(cwd), jobId);
+  const globalDir = path.join(resolveJobsDir(cwd), jobId);
+  if (fs.existsSync(path.join(globalDir, "job.json"))) {
+    return globalDir;
+  }
+  // Legacy per-workspace job: keep operating on it where it lives, so a worker
+  // started by an older build and this build see the same record.
+  for (const stateDir of legacyStateDirs()) {
+    const candidate = path.join(stateDir, "jobs", jobId);
+    if (fs.existsSync(path.join(candidate, "job.json"))) {
+      return candidate;
+    }
+  }
+  return globalDir;
 }
 
 export function generateJobId(): string {
@@ -179,14 +197,32 @@ export function reconcileJob(cwd: string, job: Job): Job {
 }
 
 export function listJobs(cwd: string): Job[] {
-  const jobsDir = resolveJobsDir(cwd);
-  if (!fs.existsSync(jobsDir)) {
-    return [];
+  // Global store plus legacy per-workspace dirs, deduped by id (global wins).
+  const jobsDirs = [resolveJobsDir(cwd), ...legacyStateDirs().map((dir) => path.join(dir, "jobs"))];
+  const seen = new Set<string>();
+  const jobs: Job[] = [];
+  for (const jobsDir of jobsDirs) {
+    let ids: string[] = [];
+    try {
+      ids = fs.readdirSync(jobsDir);
+    } catch {
+      continue;
+    }
+    for (const id of ids) {
+      if (seen.has(id)) {
+        continue;
+      }
+      const jobFile = path.join(jobsDir, id, "job.json");
+      try {
+        const job = JSON.parse(fs.readFileSync(jobFile, "utf8")) as Job;
+        seen.add(id);
+        jobs.push(job);
+      } catch {
+        // Not a job dir (or unreadable) — skip.
+      }
+    }
   }
-  return fs
-    .readdirSync(jobsDir)
-    .map((id) => readJob(cwd, id))
-    .filter((job): job is Job => job !== null)
+  return jobs
     .map((job) => reconcileJob(cwd, job))
     .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
 }

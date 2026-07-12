@@ -1,7 +1,8 @@
+import path from 'node:path';
 import process from 'node:process';
 
 import { parseArgs } from '../lib/args.js';
-import { lastActivityAt, listJobs } from '../lib/state.js';
+import { lastActivityAt, listJobs, resolveWorkspaceRoot } from '../lib/state.js';
 import {
   IDLE_SHOW_MS,
   STALL_MS,
@@ -22,7 +23,7 @@ import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Job } from '../lib/types.js';
 // coder task list --archived   -> archived tasks only
 export async function commandJobs(argv: string[]) {
   const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
+    valueOptions: ['cwd', 'dir'],
     booleanOptions: ['json', 'all', 'stopped', 'archived'],
   });
   rejectExtraArgs(positionals, 0, 'task list');
@@ -33,6 +34,13 @@ export async function commandJobs(argv: string[]) {
   const isActive = (job: Job) => ACTIVE_STATUSES.includes(job.status);
 
   let jobs = listJobs(cwd);
+  // Tasks are stored globally; an explicit --dir (or legacy --cwd) narrows the
+  // view to tasks launched in that workspace (matched by git root).
+  const dir = options.dir ?? options.cwd;
+  if (dir) {
+    const wanted = resolveWorkspaceRoot(path.resolve(String(dir)));
+    jobs = jobs.filter(job => job.cwd && resolveWorkspaceRoot(job.cwd) === wanted);
+  }
   if (options.archived) {
     jobs = jobs.filter(isArchived);
   } else {
