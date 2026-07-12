@@ -39,6 +39,10 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 
 When no coder engine can start (missing binaries, auth, quota across the whole chain), the runtime exits 3 with a JSON payload (`fallback.action: "run-native-subagent"`). Mention the failure to the user (including any limit-reset time), then run the task with your own subagent facility: spawn one `general-purpose` subagent via the Agent tool whose prompt is the payload's `task` verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If the payload's `permissions` is not `auto`, append it: `read-only` means investigate and report without modifying anything; `workspace-write` means never touch anything outside the workspace. Relay its output when it completes.
 
+## Supervision loop
+
+With coders running in the background, don't fire-and-forget: schedule recurring check-ins (the `/loop` skill or ScheduleWakeup; interval by the work's pace, 10m default). Each tick: `coder task list`, fetch finished results, dispatch newly unblocked coders, steer stuck ones, stop off-track ones, surface pending approvals. Stop the loop when all tasks are done and relayed.
+
 ## Controlling tasks
 
 - Continue prior work ("keep going", "apply the top fix"): `coder task steer <task-id> "<follow-up>"`.

@@ -33,6 +33,10 @@ When you run setup, also check codex is new enough for the default GPT-5.6 model
 - Permissions default to auto mode. Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
 - A background dispatch prints a task id plus its result/steer/stop commands. Relay them and fetch the result (above) rather than polling.
 
+## Supervision loop
+
+With coders running in the background, don't fire-and-forget: run a recurring monitoring loop in this task (interval by the work's pace, 10m default). Each tick: `coder task list`, fetch finished results, dispatch newly unblocked coders, steer stuck ones, stop off-track ones, surface pending approvals. Stop the loop when all tasks are done and relayed.
+
 ## Controlling tasks
 
 - Continue prior work ("keep going", "apply the top fix"): `coder task steer <task-id> "<follow-up>"`.
