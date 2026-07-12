@@ -1,7 +1,7 @@
 {
   "name": "coder",
   "displayName": "Coder",
-  "version": "0.1.25",
+  "version": "0.1.26",
   "description": "Delegate coding tasks to a Coder subagent. Your main context stays clean.",
   "author": {
     "name": "muzam1l"

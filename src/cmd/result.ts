@@ -69,6 +69,7 @@ export async function commandResult(argv: string[]) {
       name: job.name ?? null,
       status: job.status,
       agent: job.agent,
+      model: job.model ?? null,
       ...(running ? { idleMs: idle, lastActivityAt: lastActivity ?? null, stalled } : {}),
       pendingApprovals: pending.map(a => ({ id: a.id, summary: a.summary })),
       result,
@@ -81,7 +82,7 @@ export async function commandResult(argv: string[]) {
     `${s.dim('task')}     ${s.cyan(job.id)}`,
     ...(job.name ? [`${s.dim('name')}     ${job.name}`] : []),
     `${s.dim('status')}   ${paintStatus(job.status)}`,
-    `${s.dim('agent')}    ${job.agent ?? '-'}`,
+    `${s.dim('agent')}    ${(job.agent ?? '-') + (job.model ? `/${job.model}` : '')}`,
     ...(result?.tokens
       ? [`${s.dim('tokens')}   ${formatTokens(result.tokens, result.model ?? job.model)}`]
       : []),
