@@ -2,9 +2,13 @@
  * Host-plugin installation and codex version gating, shared by `coder setup`
  * and `coder upgrade`.
  */
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 import { compareVersions } from './update-check.js';
+import { readVersion } from './runtime.js';
 import type { Availability } from './types.js';
 
 /** Result of a plugin install/refresh attempt. */
@@ -62,6 +66,60 @@ export function installClaudePlugin(marketplaceDir: string): PluginResult {
       ? 'Plugin installed; restart any running Claude Code session to load it.'
       : `Automatic install failed (${(install.stderr || addMarketplace.stderr || 'claude not found').trim()}); run: claude plugin marketplace add "${marketplaceDir}" && claude plugin install coder@coder-plugins`,
   };
+}
+
+/**
+ * Where the Agent Skills standard copy lives - read by every harness that
+ * supports the standard dir (Pi, OpenCode, Cursor, Codex, ...). Pi and
+ * OpenCode have no plugin marketplace, so this is their only install path.
+ * Codex sessions may list this skill ("coder") alongside the plugin one
+ * ("handle") - the names differ on purpose so the two are distinguishable;
+ * the plugin stays the codex install path (version-pinned and refreshed by
+ * `coder upgrade`). The copy is inert until a harness reads it.
+ */
+export function agentsSkillDir(): string {
+  return path.join(os.homedir(), '.agents', 'skills', 'coder');
+}
+
+// Version stamped into the installed copy's frontmatter, so `coder upgrade`
+// can show the transition and future checks can detect a stale copy.
+export function readAgentsSkillVersion(): string | null {
+  try {
+    const content = fs.readFileSync(path.join(agentsSkillDir(), 'SKILL.md'), 'utf8');
+    return /^\s*version:\s*(\S+)/m.exec(content)?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// Install the coder skill into the Agent Skills standard dir. A pure file
+// copy - no host CLI is invoked and no harness needs to be installed yet; the
+// copy is overwritten unconditionally so re-running refreshes it (same spirit
+// as the marketplace re-add for codex/claude).
+export function installAgentsSkill(marketplaceDir: string): PluginResult {
+  const dest = agentsSkillDir();
+  try {
+    const src = path.join(marketplaceDir, 'plugins', 'agents', 'skills', 'coder');
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.mkdirSync(dest, { recursive: true });
+    fs.cpSync(src, dest, { recursive: true });
+    const skillFile = path.join(dest, 'SKILL.md');
+    const stamped = fs
+      .readFileSync(skillFile, 'utf8')
+      .replace('\n---\n', `\nmetadata:\n  version: ${readVersion()}\n---\n`);
+    fs.writeFileSync(skillFile, stamped);
+    return {
+      marketplace: dest,
+      installed: true,
+      note: 'Skill installed to ~/.agents/skills/coder; restart running sessions to load it.',
+    };
+  } catch (error) {
+    return {
+      marketplace: dest,
+      installed: false,
+      note: `Skill install failed: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
 }
 
 /** Outcome of an on-demand codex install; null when codex was already present. */

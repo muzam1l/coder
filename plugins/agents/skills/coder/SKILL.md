@@ -1,17 +1,17 @@
 ---
-name: handle
+name: coder
 description: Use Coder for any coding, implementation, or investigation task - features, fixes, refactors, debugging, tests, code questions. You orchestrate, never implement yourself; dispatch through the `coder` CLI, one coder per focused goal, fanning out many coders in parallel as the work needs.
 ---
 
-# Coder dispatch (codex host)
+# Coder dispatch
 
 You dispatch coding tasks through the `coder` runtime instead of implementing them yourself. By default the runtime picks the engine from its configured chain; flags like `--agent`/`--model`/`--effort` override it.
 
-If `coder` is not on PATH, install it yourself without asking (`npm install -g @wular/coder`). Assume nothing about setup state - the user may or may not have run setup. When a dispatch fails because engines are missing or logged out, run `coder setup-host codex` and follow its output: it checks engines and auth, seeds the config, installs the host plugin, auto-updates codex when too old for the default model, and prints the exact fix for anything not ready (safe to re-run anytime). Ask the user before installing an engine CLI or changing auth; if setup updated codex, tell the user to restart their codex session.
+If `coder` is not on PATH, install it yourself without asking (`npm install -g @wular/coder`). Assume nothing about setup state - the user may or may not have run setup. When a dispatch fails because engines are missing or logged out, run `coder setup-host` and follow its output: it checks engines and auth, seeds the config, refreshes this skill, auto-updates codex when too old for the default model, and prints the exact fix for anything not ready (safe to re-run anytime). Ask the user before installing an engine CLI or changing auth; if setup updated codex, tell the user to restart their codex session.
 
 ## Dispatching a task
 
-- Run every `coder` command with escalated permissions (outside your sandbox), justification: Coder is a supervisor - it spawns engines, keeps state in `~/.coder`, and enforces its own sandbox and approval policy on the task. Never retry a sandbox-blocked `coder` call sandboxed again or with HOME/state env workarounds.
+- If your harness sandboxes terminal commands or asks approval for them, run every `coder` command with escalated/approved permissions, justification: Coder is a supervisor - it spawns engines, keeps state in `~/.coder`, and enforces its own sandbox and approval policy on the task. Never retry a blocked `coder` call inside a stricter sandbox or with HOME/state env workarounds.
 - One coder per focused goal. When the work splits into independent parts, decompose it and dispatch each part as its own `coder task run` call - fan out a wide web of coders running in parallel, not one giant dispatch. Give each coder a self-contained goal with all context - overview, file paths, constraints (read-only, git rules). Run independent tasks concurrently; use `steer` to continue a single coder's thread.
 - Delegation is a hard gate for anything the engine can do itself: do not read source files, investigate, or write code first - no matter how simple the task. Fold into the task text whatever only you have - conversation context, results from tools the engine lacks. The coder worker runs with plugins disabled (no skills, MCP, or connectors), so include any context only a plugin or MCP tool of yours produced.
 - Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it. It backgrounds by default: the runtime does a startup check and prints a task id (or errors / hands off, see exit codes):
@@ -20,7 +20,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
   coder task run "<task text>"
   ```
 
-  Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final result (keeps your context clean). Only use `--wait` when you can run it in a **background shell** (so it does not block you); if you can't use that, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`.
+  Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final result (keeps your context clean). Only use `--wait` when your harness can run it in a **background shell** (so it does not block you); without one, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`.
 
 - A `--wait` (on `run` or `result`) exits **4** when the task is waiting on a permission approval: relay the approval to the user, apply their decision with `coder approve <task-id> <approval-id> [--deny]`, then re-fetch with `coder task result <task-id> --wait`. (Unanswered approvals auto-deny after 120s and the task moves on.)
 
@@ -33,11 +33,11 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 
 ## Last resort: run-native-subagent payload (exit 3)
 
-When no coder engine can start (missing binaries, auth, quota across the whole chain), the runtime exits 3 with a JSON payload (`fallback.action: "run-native-subagent"`). Mention the failure to the user (including any limit-reset time), then run the task with your own subagent facility: spawn one subagent whose prompt is the payload's `task` verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If the payload's `permissions` is not `auto`, append it: `read-only` means investigate and report without modifying anything; `workspace-write` means never touch anything outside the workspace. Relay its output when it completes.
+When no coder engine can start (missing binaries, auth, quota across the whole chain), the runtime exits 3 with a JSON payload (`fallback.action: "run-native-subagent"`). Mention the failure to the user (including any limit-reset time). If your harness has a subagent facility, spawn one subagent whose prompt is the payload's `task` verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If the payload's `permissions` is not `auto`, append it: `read-only` means investigate and report without modifying anything; `workspace-write` means never touch anything outside the workspace. Relay its output when it completes. If your harness has no subagent facility, report the failure and stop - never implement the task yourself.
 
 ## Supervision loop
 
-With coders running in the background, don't fire-and-forget: run a recurring monitoring loop in this task (interval by the work's pace, 10m default). Each tick: `coder task list`, fetch finished results, dispatch newly unblocked coders, steer stuck ones, stop off-track ones, surface pending approvals. Stop the loop when all tasks are done and relayed.
+With coders running in the background, don't fire-and-forget: check in on them recurrently with whatever scheduling facility your harness has (interval by the work's pace, 10m default); without one, check between your other steps. Each tick: `coder task list`, fetch finished results, dispatch newly unblocked coders, steer stuck ones, stop off-track ones, surface pending approvals. Stop when all tasks are done and relayed.
 
 ## Controlling tasks
 

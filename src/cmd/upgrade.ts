@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
@@ -7,7 +8,14 @@ import { getCodexAvailability } from '../lib/codex-core.js';
 import { getClaudeAvailability } from '../lib/claude-core.js';
 import { clearUpdateCache, detectPackageManager } from '../lib/update-check.js';
 import { CLI_PATH, readManifestVersion, readVersion, resolveMarketplaceDir } from '../lib/runtime.js';
-import { installClaudePlugin, installCodexPlugin, type PluginResult } from '../lib/plugins.js';
+import {
+  agentsSkillDir,
+  installAgentsSkill,
+  installClaudePlugin,
+  installCodexPlugin,
+  readAgentsSkillVersion,
+  type PluginResult,
+} from '../lib/plugins.js';
 import { fail } from '../lib/ui.js';
 
 export async function commandUpgrade(argv: string[]) {
@@ -120,6 +128,22 @@ export async function commandUpgrade(argv: string[]) {
           plugin.installed
             ? good(`${label} ${transition(beforeVer, afterVer)} ${gray(`- ${plugin.note}`)}`)
             : bad(`${label} ${plugin.note}`)
+        }\n`,
+      );
+    }
+
+    // Refresh the ~/.agents/skills copy (pi, opencode, other Agent Skills
+    // hosts) only when a previous setup-host installed it - it is a plain
+    // file copy, so "was it installed" is just "does the dir exist".
+    if (fs.existsSync(agentsSkillDir())) {
+      const beforeVer = readAgentsSkillVersion();
+      const plugin = installAgentsSkill(marketplaceDir);
+      const afterVer = readAgentsSkillVersion();
+      process.stdout.write(
+        `${
+          plugin.installed
+            ? good(`agents skill  ${transition(beforeVer, afterVer)} ${gray(`- ${plugin.note}`)}`)
+            : bad(`agents skill  ${plugin.note}`)
         }\n`,
       );
     }

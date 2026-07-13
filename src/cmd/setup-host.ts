@@ -5,10 +5,16 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from '../lib/args.js';
 import { getCodexAuthStatus, getCodexAvailability } from '../lib/codex-core.js';
 import { getClaudeAuthStatus, getClaudeAvailability } from '../lib/claude-core.js';
-import { DEFAULT_CONFIG, loadConfig, resolveUserConfigFile, writeUserConfig } from '../lib/config.js';
+import {
+  DEFAULT_CONFIG,
+  loadConfig,
+  resolveUserConfigFile,
+  writeUserConfig,
+} from '../lib/config.js';
 import { resolveMarketplaceDir } from '../lib/runtime.js';
 import {
   ensureCodexUpToDate,
+  installAgentsSkill,
   installClaudePlugin,
   installCodexPlugin,
   type PluginResult,
@@ -19,16 +25,35 @@ import type { Agent } from '../lib/types.js';
 export async function commandSetupHost(argv: string[]) {
   const { options, positionals } = parseArgs(argv, {
     valueOptions: ['cwd'],
-    booleanOptions: ['codex', 'claude', 'json'],
+    booleanOptions: ['codex', 'claude', 'agents', 'json'],
   });
   const cwd = resolveCwd(options);
   // Hosts are named positionally (`coder setup-host claude`); the old
   // --claude/--codex flags keep working as silent aliases.
+  // Hosts are claude, codex, and agents (the ~/.agents/skills install covering
+  // every host that reads the Agent Skills standard dir).
+  const knownHosts = ['claude', 'codex', 'agents'];
   for (const host of positionals) {
-    if (host !== 'claude' && host !== 'codex') {
-      fail(`Unknown host "${host}". Use claude or codex.`);
+    if (!knownHosts.includes(host)) {
+      fail(`Unknown host "${host}". Use claude, codex, or agents.`, {
+        hint: 'Pi, OpenCode, and other Agent Skills hosts: coder setup-host agents',
+      });
     }
     options[host] = true;
+  }
+
+  const tty = process.stdout.isTTY && !process.env.NO_COLOR;
+  const paint = (code: string, text: string) => (tty ? `\x1b[${code}m${text}\x1b[0m` : text);
+  const good = (text: string) => `  ${paint('32', '✔')} ${text}`;
+  const bad = (text: string) => `  ${paint('31', '✘')} ${text}`;
+  const head = (text: string) => paint('1', text);
+  const gray = (text: string) => paint('38;5;245', text);
+
+  // Print the header before any probing: everything below spawns other CLIs
+  // (codex/claude versions, auth via the codex app-server) and can take
+  // seconds - early output shows the command is alive.
+  if (!options.json) {
+    process.stdout.write(`${head('Coder host setup')}\n\n`);
   }
 
   let availability = getCodexAvailability(cwd);
@@ -64,6 +89,9 @@ export async function commandSetupHost(argv: string[]) {
   const codexPlugin = options.codex ? installCodexPlugin(marketplaceDir) : null;
   const claudePlugin = options.claude ? installClaudePlugin(marketplaceDir) : null;
 
+  // Pi, OpenCode and other Agent Skills hosts read ~/.agents/skills.
+  const agentsPlugin = options.agents ? installAgentsSkill(marketplaceDir) : null;
+
   const config = loadConfig(cwd);
   // Ready as long as one engine is usable: installed AND logged in (codex or claude).
   const ready =
@@ -88,20 +116,14 @@ export async function commandSetupHost(argv: string[]) {
       runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
       ...(codexPlugin ? { codexPlugin } : {}),
       ...(claudePlugin ? { claudePlugin } : {}),
+      ...(agentsPlugin ? { agentsSkill: agentsPlugin } : {}),
       config,
       ready,
     });
     return;
   }
 
-  const tty = process.stdout.isTTY && !process.env.NO_COLOR;
-  const paint = (code: string, text: string) => (tty ? `\x1b[${code}m${text}\x1b[0m` : text);
-  const good = (text: string) => `  ${paint('32', '✔')} ${text}`;
-  const bad = (text: string) => `  ${paint('31', '✘')} ${text}`;
-  const head = (text: string) => paint('1', text);
-  const gray = (text: string) => paint('38;5;245', text);
-
-  const lines = [head('Coder host setup'), ''];
+  const lines: string[] = [];
 
   const codexLine = availability.available
     ? auth.loggedIn
@@ -121,7 +143,9 @@ export async function commandSetupHost(argv: string[]) {
   );
   if (codexUpdate?.updated) {
     lines.push(
-      good(`codex   ${gray(`updated ${codexUpdate.from} -> ${availability.detail} (GPT-5.6 support)`)}`),
+      good(
+        `codex   ${gray(`updated ${codexUpdate.from} -> ${availability.detail} (GPT-5.6 support)`)}`,
+      ),
     );
   } else if (codexUpdate) {
     lines.push(bad(`codex   ${codexUpdate.note}`));
@@ -142,6 +166,7 @@ export async function commandSetupHost(argv: string[]) {
   const pluginSummaries: [string, PluginResult | null][] = [
     ['codex plugin ', codexPlugin],
     ['claude plugin', claudePlugin],
+    ['agents skill ', agentsPlugin],
   ];
   for (const [label, plugin] of pluginSummaries) {
     if (plugin) {

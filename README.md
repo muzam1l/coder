@@ -50,6 +50,8 @@ npm install -g @wular/coder
 coder setup-host claude   # or codex
 ```
 
+Other harnesses - Pi, OpenCode, and anything else that reads the Agent Skills standard dir (`~/.agents/skills`) - use `coder setup-host agents`.
+
 **2. Connect at least one engine.** Either an engine CLI, logged in, to use that subscription:
 
 ```bash

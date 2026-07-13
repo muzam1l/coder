@@ -13,7 +13,10 @@ import type { CommandHelpSpec, HelpRow, Style } from './types.js';
 export const TASK_FLAGS: HelpRow[] = [
   ['--wait', 'run in the foreground and block until the answer is ready'],
   ['--agent <codex|claude>', 'engine to use (default: first in the configured chain)'],
-  ['--model <alias|slug>', 'spark/luna/terra/sol (codex) · opus/sonnet/fable (claude) · a custom model (coder setup-model)'],
+  [
+    '--model <alias|slug>',
+    'spark/luna/terra/sol (codex) · opus/sonnet/fable (claude) · a custom model (coder setup-model)',
+  ],
   ['--effort <low|medium|high>', 'reasoning effort'],
   ['--permissions <mode>', 'read-only · workspace-write · auto (default: auto)'],
   ['--resume <task-id>', "continue that task's thread instead of a fresh run"],
@@ -173,16 +176,17 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
   },
   'setup-host': {
     list: [
-      'setup-host [claude|codex]',
+      'setup-host [claude|codex|agents]',
       'set up the host: check engines, write config, install plugin',
     ],
-    usage: 'coder setup-host [claude] [codex] [--json]',
+    usage: 'coder setup-host [claude] [codex] [agents] [--json]',
     summary:
-      'Set up coder in your host (Claude Code or Codex): check engine availability and\nauth, seed the config, and install the host plugin for the named host(s).\nWith no host, just checks and seeds.',
+      'Set up coder in your host: check engines and auth, seed the config, and\ninstall the host plugin/skill for the named host(s). Claude Code and Codex\nget their marketplace plugin; "agents" installs a skill into\n~/.agents/skills for every host that reads the Agent Skills standard dir\n(Pi, OpenCode, ...). With no host, checks and seeds.',
     flags: [['--json', 'machine-readable output']],
     examples: [
       ['coder setup-host claude', 'install the Claude Code plugin'],
       ['coder setup-host codex', 'install the Codex plugin'],
+      ['coder setup-host agents', 'install the skill into ~/.agents/skills (Pi, OpenCode, ...)'],
     ],
   },
   'setup-model': {
