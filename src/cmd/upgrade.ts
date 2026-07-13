@@ -4,7 +4,6 @@ import process from 'node:process';
 import { spawnSync } from 'node:child_process';
 
 import { parseArgs } from '../lib/args.js';
-import { getCodexAvailability } from '../lib/codex-core.js';
 import { getClaudeAvailability } from '../lib/claude-core.js';
 import { clearUpdateCache, detectPackageManager } from '../lib/update-check.js';
 import { CLI_PATH, readManifestVersion, readVersion, resolveMarketplaceDir } from '../lib/runtime.js';
@@ -12,9 +11,7 @@ import {
   agentsSkillDir,
   installAgentsSkill,
   installClaudePlugin,
-  installCodexPlugin,
   readAgentsSkillVersion,
-  type PluginResult,
 } from '../lib/plugins.js';
 import { fail } from '../lib/ui.js';
 
@@ -43,11 +40,9 @@ export async function commandUpgrade(argv: string[]) {
   // paths afterward reports the new versions even though this process is still
   // running the old code.
   const marketplaceDir = resolveMarketplaceDir();
-  const codexManifest = path.join(marketplaceDir, 'plugins/codex/.codex-plugin/plugin.json');
   const claudeManifest = path.join(marketplaceDir, 'plugins/claude/.claude-plugin/plugin.json');
   const before = {
     cli: readVersion(),
-    codex: readManifestVersion(codexManifest),
     claude: readManifestVersion(claudeManifest),
   };
 
@@ -93,48 +88,28 @@ export async function commandUpgrade(argv: string[]) {
     );
   }
 
-  // 2. Refresh the host plugins from the freshly installed package. Re-adding
-  //    the local marketplace picks up the new plugin files on disk (both hosts
-  //    cache their installed copy). Default to whichever host CLIs are present;
-  //    --codex/--claude narrow it.
+  // 2. Refresh the host installs from the freshly installed package. Claude
+  //    Code gets its marketplace plugin re-added (it caches the installed
+  //    copy); every Agent Skills host (codex included) gets the refreshed
+  //    ~/.agents/skills copy. --codex/--claude narrow it.
   if (doPlugins) {
-    const explicit = options.codex || options.claude;
-    const wantCodex = explicit ? options.codex : getCodexAvailability(process.cwd()).available;
-    const wantClaude = explicit ? options.claude : getClaudeAvailability().available;
+    const wantClaude = options.claude || (!options.codex && getClaudeAvailability().available);
 
-    if (!wantCodex && !wantClaude) {
-      process.stdout.write(`${gray('No host CLI (codex/claude) found to refresh plugins for.')}\n`);
-    }
-    const refreshers: [string, string | null, string, (() => PluginResult) | null][] = [
-      [
-        'codex plugin ',
-        before.codex,
-        codexManifest,
-        wantCodex ? () => installCodexPlugin(marketplaceDir) : null,
-      ],
-      [
-        'claude plugin',
-        before.claude,
-        claudeManifest,
-        wantClaude ? () => installClaudePlugin(marketplaceDir) : null,
-      ],
-    ];
-    for (const [label, beforeVer, manifest, run] of refreshers) {
-      if (!run) continue;
-      const plugin = run();
-      const afterVer = readManifestVersion(manifest);
+    if (wantClaude) {
+      const plugin = installClaudePlugin(marketplaceDir);
+      const afterVer = readManifestVersion(claudeManifest);
       process.stdout.write(
         `${
           plugin.installed
-            ? good(`${label} ${transition(beforeVer, afterVer)} ${gray(`- ${plugin.note}`)}`)
-            : bad(`${label} ${plugin.note}`)
+            ? good(`claude plugin ${transition(before.claude, afterVer)} ${gray(`- ${plugin.note}`)}`)
+            : bad(`claude plugin ${plugin.note}`)
         }\n`,
       );
     }
 
-    // Refresh the ~/.agents/skills copy (pi, opencode, other Agent Skills
-    // hosts) only when a previous setup-host installed it - it is a plain
-    // file copy, so "was it installed" is just "does the dir exist".
+    // Refresh the ~/.agents/skills copy (codex, pi, opencode, other Agent
+    // Skills hosts) only when a previous setup-host installed it - it is a
+    // plain file copy, so "was it installed" is just "does the dir exist".
     if (fs.existsSync(agentsSkillDir())) {
       const beforeVer = readAgentsSkillVersion();
       const plugin = installAgentsSkill(marketplaceDir);

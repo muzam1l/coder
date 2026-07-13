@@ -16,7 +16,6 @@ import {
   ensureCodexUpToDate,
   installAgentsSkill,
   installClaudePlugin,
-  installCodexPlugin,
   type PluginResult,
 } from '../lib/plugins.js';
 import { fail, printJson, resolveCwd } from '../lib/ui.js';
@@ -30,13 +29,14 @@ export async function commandSetupHost(argv: string[]) {
   const cwd = resolveCwd(options);
   // Hosts are named positionally (`coder setup-host claude`); the old
   // --claude/--codex flags keep working as silent aliases.
-  // Hosts are claude, codex, and agents (the ~/.agents/skills install covering
-  // every host that reads the Agent Skills standard dir).
+  // Hosts are claude and agents (the ~/.agents/skills install covering every
+  // host that reads the Agent Skills standard dir - codex included). "codex"
+  // stays accepted as an alias for agents.
   const knownHosts = ['claude', 'codex', 'agents'];
   for (const host of positionals) {
     if (!knownHosts.includes(host)) {
       fail(`Unknown host "${host}". Use claude, codex, or agents.`, {
-        hint: 'Pi, OpenCode, and other Agent Skills hosts: coder setup-host agents',
+        hint: 'Codex, Pi, OpenCode, and other Agent Skills hosts: coder setup-host agents',
       });
     }
     options[host] = true;
@@ -86,11 +86,11 @@ export async function commandSetupHost(argv: string[]) {
   }
 
   const marketplaceDir = resolveMarketplaceDir();
-  const codexPlugin = options.codex ? installCodexPlugin(marketplaceDir) : null;
   const claudePlugin = options.claude ? installClaudePlugin(marketplaceDir) : null;
 
-  // Pi, OpenCode and other Agent Skills hosts read ~/.agents/skills.
-  const agentsPlugin = options.agents ? installAgentsSkill(marketplaceDir) : null;
+  // Codex, Pi, OpenCode and other Agent Skills hosts read ~/.agents/skills.
+  const agentsPlugin =
+    options.agents || options.codex ? installAgentsSkill(marketplaceDir) : null;
 
   const config = loadConfig(cwd);
   // Ready as long as one engine is usable: installed AND logged in (codex or claude).
@@ -114,7 +114,6 @@ export async function commandSetupHost(argv: string[]) {
       },
       configFile,
       runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
-      ...(codexPlugin ? { codexPlugin } : {}),
       ...(claudePlugin ? { claudePlugin } : {}),
       ...(agentsPlugin ? { agentsSkill: agentsPlugin } : {}),
       config,
@@ -164,7 +163,6 @@ export async function commandSetupHost(argv: string[]) {
   );
 
   const pluginSummaries: [string, PluginResult | null][] = [
-    ['codex plugin ', codexPlugin],
     ['claude plugin', claudePlugin],
     ['agents skill ', agentsPlugin],
   ];

@@ -17,12 +17,9 @@
 
 ## Get started
 
-**1. Install a host plugin** (pick your host, or both):
+**1. Install into your host.**
 
-<table>
-<tr><th>Claude Code</th><th>Codex</th></tr>
-<tr valign="top">
-<td>
+**Claude Code** - from inside a session:
 
 ```
 /plugin marketplace add muzam1l/coder
@@ -31,26 +28,19 @@
 /coder:setup
 ```
 
-</td>
-<td>
-
-```
-codex plugin marketplace add muzam1l/coder
-codex plugin add coder@coder-plugins
-```
-
-</td>
-</tr>
-</table>
-
-Or from the shell (installs the same plugin):
+Or from the shell:
 
 ```bash
 npm install -g @wular/coder
-coder setup-host claude   # or codex
+coder setup-host claude
 ```
 
-Other harnesses - Pi, OpenCode, and anything else that reads the Agent Skills standard dir (`~/.agents/skills`) - use `coder setup-host agents`.
+**Others** - Codex, Pi, OpenCode, and anything else that reads the Agent Skills standard dir (`~/.agents/skills`):
+
+```bash
+npm install -g @wular/coder
+coder setup-host agents
+```
 
 **2. Connect at least one engine.** Either an engine CLI, logged in, to use that subscription:
 

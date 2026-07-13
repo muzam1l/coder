@@ -181,12 +181,14 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     ],
     usage: 'coder setup-host [claude] [codex] [agents] [--json]',
     summary:
-      'Set up coder in your host: check engines and auth, seed the config, and\ninstall the host plugin/skill for the named host(s). Claude Code and Codex\nget their marketplace plugin; "agents" installs a skill into\n~/.agents/skills for every host that reads the Agent Skills standard dir\n(Pi, OpenCode, ...). With no host, checks and seeds.',
+      'Set up coder in your host: check engines and auth, seed the config, and\ninstall the host plugin/skill for the named host(s). Claude Code gets its\nmarketplace plugin; "agents" installs a skill into ~/.agents/skills for\nevery host that reads the Agent Skills standard dir (Codex, Pi, OpenCode,\n...). "codex" is an alias for agents. With no host, checks and seeds.',
     flags: [['--json', 'machine-readable output']],
     examples: [
       ['coder setup-host claude', 'install the Claude Code plugin'],
-      ['coder setup-host codex', 'install the Codex plugin'],
-      ['coder setup-host agents', 'install the skill into ~/.agents/skills (Pi, OpenCode, ...)'],
+      [
+        'coder setup-host agents',
+        'install the skill into ~/.agents/skills (Codex, Pi, OpenCode, ...)',
+      ],
     ],
   },
   'setup-model': {
@@ -229,8 +231,8 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     flags: [
       ['--cli-only', 'update just the CLI'],
       ['--plugins-only', 'refresh just the host plugins'],
-      ['--codex', 'limit plugin refresh to Codex'],
-      ['--claude', 'limit plugin refresh to Claude Code'],
+      ['--codex', 'limit the refresh to the Agent Skills copy (Codex, Pi, ...)'],
+      ['--claude', 'limit the refresh to the Claude Code plugin'],
       ['--pm <npm|pnpm|yarn|bun>', 'force a package manager instead of auto-detecting'],
     ],
   },
@@ -319,7 +321,7 @@ export function renderTopHelp(): string {
     'Delegate a coding task to the best available engine and steer it while it runs.',
     '',
     s.bold('Get started:'),
-    `  ${s.cyan('coder setup-host claude')}   ${s.dim('# or codex; installs the host plugin')}`,
+    `  ${s.cyan('coder setup-host claude')}   ${s.dim('# or agents (Codex, Pi, ...); installs the host plugin/skill')}`,
     `  ${s.cyan('coder run "explain this repo\'s layout"')}`,
     '',
     s.bold('Usage:'),

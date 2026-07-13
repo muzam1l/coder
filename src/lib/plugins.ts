@@ -24,32 +24,9 @@ export type CodexUpdateResult =
   | { updated: false; from: string; note: string }
   | null;
 
-// Register the packaged marketplace with codex and install the coder plugin
-// from it, exactly what a user would type by hand. Re-adding refreshes both the
-// marketplace snapshot and the cached plugin copy (codex caches installs per
-// version). "." is added from inside the dir because codex parses "@" in a path
-// argument (node_modules/@wular/...) as a git owner/repo@ref source.
-export function installCodexPlugin(marketplaceDir: string): PluginResult {
-  spawnSync('codex', ['plugin', 'remove', 'coder@coder-plugins'], { encoding: 'utf8' });
-  spawnSync('codex', ['plugin', 'marketplace', 'remove', 'coder-plugins'], { encoding: 'utf8' });
-  const addMarketplace = spawnSync('codex', ['plugin', 'marketplace', 'add', '.'], {
-    cwd: marketplaceDir,
-    encoding: 'utf8',
-  });
-  const addPlugin = spawnSync('codex', ['plugin', 'add', 'coder@coder-plugins'], {
-    encoding: 'utf8',
-  });
-  const installed = addMarketplace.status === 0 && addPlugin.status === 0;
-  return {
-    marketplace: marketplaceDir,
-    installed,
-    note: installed
-      ? 'Plugin installed; restart any running codex session to load it.'
-      : `Automatic install failed (${(addPlugin.stderr || addMarketplace.stderr || 'codex not found').trim()}); run: codex plugin marketplace add "${marketplaceDir}" && codex plugin add coder@coder-plugins`,
-  };
-}
-
-// Same through the claude CLI's plugin commands.
+// Install through the claude CLI's plugin commands, exactly what a user would
+// type by hand. Re-adding refreshes both the marketplace snapshot and the
+// cached plugin copy (claude caches installs per version).
 export function installClaudePlugin(marketplaceDir: string): PluginResult {
   spawnSync('claude', ['plugin', 'marketplace', 'remove', 'coder-plugins'], { encoding: 'utf8' });
   const addMarketplace = spawnSync('claude', ['plugin', 'marketplace', 'add', marketplaceDir], {
@@ -70,12 +47,9 @@ export function installClaudePlugin(marketplaceDir: string): PluginResult {
 
 /**
  * Where the Agent Skills standard copy lives - read by every harness that
- * supports the standard dir (Pi, OpenCode, Cursor, Codex, ...). Pi and
- * OpenCode have no plugin marketplace, so this is their only install path.
- * Codex sessions may list this skill ("coder") alongside the plugin one
- * ("handle") - the names differ on purpose so the two are distinguishable;
- * the plugin stays the codex install path (version-pinned and refreshed by
- * `coder upgrade`). The copy is inert until a harness reads it.
+ * supports the standard dir (Codex, Pi, OpenCode, Cursor, ...). This is the
+ * install path for all of them, codex included. The copy is inert until a
+ * harness reads it.
  */
 export function agentsSkillDir(): string {
   return path.join(os.homedir(), '.agents', 'skills', 'coder');
@@ -136,7 +110,10 @@ export function ensureCodexInstalled(availability: Availability): CodexInstallRe
   }
   const result = spawnSync('npm', ['install', '-g', '@openai/codex@latest'], { encoding: 'utf8' });
   return result.status === 0
-    ? { installed: true, note: 'codex CLI installed (runs your custom models; no login needed for them)' }
+    ? {
+        installed: true,
+        note: 'codex CLI installed (runs your custom models; no login needed for them)',
+      }
     : {
         installed: false,
         note: `custom models run on the codex CLI and it is not installed; auto-install failed: ${(result.stderr || 'npm not found').trim()}. Run: npm install -g @openai/codex`,

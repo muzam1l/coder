@@ -3,7 +3,6 @@
  * Bump the coder version in lockstep across every manifest that carries one:
  *   - package.json                              (npm)
  *   - plugins/claude/.claude-plugin/plugin.json (Claude Code plugin)
- *   - plugins/codex/.codex-plugin/plugin.json   (Codex plugin)
  *   - plugins/cursor/.cursor-plugin/plugin.json (Cursor plugin)
  *   - .cursor-plugin/marketplace.json           (Cursor marketplace, metadata.version)
  *
@@ -23,7 +22,6 @@ const root = path.resolve(fileURLToPath(new URL(".", import.meta.url)), "..");
 const MANIFESTS = [
   "package.json",
   "plugins/claude/.claude-plugin/plugin.json",
-  "plugins/codex/.codex-plugin/plugin.json",
   "plugins/cursor/.cursor-plugin/plugin.json",
 ];
 
