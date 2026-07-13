@@ -13,7 +13,7 @@ import type { CommandHelpSpec, HelpRow, Style } from './types.js';
 export const TASK_FLAGS: HelpRow[] = [
   ['--wait', 'run in the foreground and block until the answer is ready'],
   ['--agent <codex|claude>', 'engine to use (default: first in the configured chain)'],
-  ['--model <alias|slug>', 'spark/luna/terra/sol (codex) · opus/sonnet/fable (claude)'],
+  ['--model <alias|slug>', 'spark/luna/terra/sol (codex) · opus/sonnet/fable (claude) · a custom model (coder setup-model)'],
   ['--effort <low|medium|high>', 'reasoning effort'],
   ['--permissions <mode>', 'read-only · workspace-write · auto (default: auto)'],
   ['--resume <task-id>', "continue that task's thread instead of a fresh run"],
@@ -171,19 +171,48 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
       ['coder config get agents.codex.model', 'read one value'],
     ],
   },
-  'host-setup': {
+  'setup-host': {
     list: [
-      'host-setup [--claude|--codex]',
+      'setup-host [claude|codex]',
       'set up the host: check engines, write config, install plugin',
     ],
-    usage: 'coder host-setup [--claude] [--codex] [--json]',
+    usage: 'coder setup-host [claude] [codex] [--json]',
     summary:
-      'Set up coder in your host (Claude Code or Codex): check engine availability and\nauth, seed the config, and optionally install the host plugin for Claude Code\n(--claude) or Codex (--codex). (Formerly `setup`, still accepted as an alias.)',
-    flags: [
-      ['--claude', 'install the Claude Code plugin'],
-      ['--codex', 'install the Codex plugin'],
-      ['--json', 'machine-readable output'],
+      'Set up coder in your host (Claude Code or Codex): check engine availability and\nauth, seed the config, and install the host plugin for the named host(s).\nWith no host, just checks and seeds.',
+    flags: [['--json', 'machine-readable output']],
+    examples: [
+      ['coder setup-host claude', 'install the Claude Code plugin'],
+      ['coder setup-host codex', 'install the Codex plugin'],
     ],
+  },
+  'setup-model': {
+    list: [
+      'setup-model <name> [flags]',
+      'Connect a local or third-party model (OpenAI-compatible)',
+    ],
+    usage: 'coder setup-model <name> --base-url <url> --model <id> [--env-key VAR]',
+    summary:
+      'Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,\nvLLM, OpenRouter, ...). It runs on the codex engine pointed at your URL and is\nusable anywhere a model is: --model <name>, or as an agent default in config.\nWith no arguments, lists configured models and probes their endpoints.',
+    flags: [
+      ['--base-url <url>', 'OpenAI-compatible API base (e.g. http://localhost:11434/v1)'],
+      ['--model <id>', "the provider's model id (e.g. qwen2.5-coder:32b)"],
+      ['--env-key <VAR>', 'env var holding the API key (omit for keyless local endpoints)'],
+      ['--remove <name>', 'delete a configured model'],
+      ['--workspace', 'write to <repo>/coder.config.json instead of the user file'],
+      JSON_FLAG,
+    ],
+    examples: [
+      [
+        'coder setup-model qwen --base-url http://localhost:11434/v1 --model qwen2.5-coder:32b',
+        'local Ollama model, no key',
+      ],
+      [
+        'coder setup-model kimi --base-url https://openrouter.ai/api/v1 --model moonshotai/kimi-k2 --env-key OPENROUTER_API_KEY',
+        'third-party provider via OpenRouter',
+      ],
+      ['coder run --model qwen "explain this repo"', 'dispatch a task on it'],
+    ],
+    seeAlso: 'setup-host · config',
   },
   upgrade: {
     list: [
@@ -216,7 +245,8 @@ export const HELP_ALIASES: Record<string, string> = {
   delete: 'task delete',
   approvals: 'task approvals',
   approve: 'task approve',
-  setup: 'host-setup',
+  setup: 'setup-host',
+  'host-setup': 'setup-host',
   update: 'upgrade',
 };
 
@@ -285,7 +315,7 @@ export function renderTopHelp(): string {
     'Delegate a coding task to the best available engine and steer it while it runs.',
     '',
     s.bold('Get started:'),
-    `  ${s.cyan('coder host-setup --claude')}   ${s.dim('# or --codex; installs the host plugin')}`,
+    `  ${s.cyan('coder setup-host claude')}   ${s.dim('# or codex; installs the host plugin')}`,
     `  ${s.cyan('coder run "explain this repo\'s layout"')}`,
     '',
     s.bold('Usage:'),
@@ -295,6 +325,7 @@ export function renderTopHelp(): string {
     ...shortcutRows,
     `  ${s.dim(`More task commands (${moreSubs}): `)}${s.cyan('coder task --help')}`,
     row(COMMAND_HELP.config!.list),
+    row(COMMAND_HELP['setup-model']!.list),
     row(COMMAND_HELP.upgrade!.list),
     '',
     s.bold('Global:'),

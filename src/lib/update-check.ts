@@ -8,14 +8,14 @@
  * stale (>24h). The notice is always one cycle behind the registry (like npm's
  * own update-notifier) so the check never blocks the command.
  */
-import fs from "node:fs";
-import path from "node:path";
-import { spawn } from "node:child_process";
-import process from "node:process";
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import process from 'node:process';
 
-import { resolveCoderHome } from "./state.js";
+import { resolveCoderHome } from './state.js';
 
-const PKG = "@wular/coder";
+const PKG = '@wular/coder';
 const REGISTRY = `https://registry.npmjs.org/${PKG}/latest`;
 const MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -33,13 +33,17 @@ interface PackageManagerInfo {
 }
 
 function cacheFile(): string {
-  return path.join(resolveCoderHome(), "update-check.json");
+  return path.join(resolveCoderHome(), 'update-check.json');
 }
 
 /** Numeric x.y.z compare; prerelease tags are ignored (our versions are plain). */
 export function compareVersions(a: string, b: string): number {
-  const pa = String(a).split(".").map(n => parseInt(n, 10) || 0);
-  const pb = String(b).split(".").map(n => parseInt(n, 10) || 0);
+  const pa = String(a)
+    .split('.')
+    .map(n => parseInt(n, 10) || 0);
+  const pb = String(b)
+    .split('.')
+    .map(n => parseInt(n, 10) || 0);
   for (let i = 0; i < 3; i += 1) {
     if ((pa[i] ?? 0) > (pb[i] ?? 0)) return 1;
     if ((pa[i] ?? 0) < (pb[i] ?? 0)) return -1;
@@ -49,7 +53,7 @@ export function compareVersions(a: string, b: string): number {
 
 function readCache(): UpdateCache | null {
   try {
-    return JSON.parse(fs.readFileSync(cacheFile(), "utf8")) as UpdateCache;
+    return JSON.parse(fs.readFileSync(cacheFile(), 'utf8')) as UpdateCache;
   } catch {
     return null;
   }
@@ -88,16 +92,16 @@ export function maybeNotifyUpdate(currentVersion: string, cliPath: string) {
     process.stderr.write(
       dim(`coder ${currentVersion} -> `) +
         bold(cache.latest) +
-        dim(" available. run: coder upgrade\n"),
+        dim(' available. run: coder upgrade\n\n'),
     );
   }
 
   const stale = !cache?.checkedAt || Date.now() - cache.checkedAt > MAX_AGE_MS;
   if (stale) {
     try {
-      const child = spawn(process.execPath, [cliPath, "_refreshUpdate"], {
+      const child = spawn(process.execPath, [cliPath, '_refreshUpdate'], {
         detached: true,
-        stdio: "ignore",
+        stdio: 'ignore',
       });
       child.unref();
     } catch {
@@ -120,7 +124,7 @@ export async function refreshUpdateCache(currentVersion: string) {
     const timer = setTimeout(() => controller.abort(), 3000);
     const res = await fetch(REGISTRY, {
       signal: controller.signal,
-      headers: { accept: "application/json" },
+      headers: { accept: 'application/json' },
     });
     clearTimeout(timer);
     if (res.ok) {
@@ -145,20 +149,20 @@ export function detectPackageManager(cliPath: string): PackageManagerInfo {
   } catch {
     /* keep the un-resolved path */
   }
-  const p = real.replace(/\\/g, "/");
+  const p = real.replace(/\\/g, '/');
 
   if (/\/\.bun\//.test(p)) {
-    return { pm: "bun", command: ["bun", "add", "-g", `${PKG}@latest`] };
+    return { pm: 'bun', command: ['bun', 'add', '-g', `${PKG}@latest`] };
   }
   if (/\/\.pnpm\//.test(p) || /\/pnpm(-global)?\//i.test(p) || /\/Library\/pnpm\//.test(p)) {
-    return { pm: "pnpm", command: ["pnpm", "add", "-g", `${PKG}@latest`] };
+    return { pm: 'pnpm', command: ['pnpm', 'add', '-g', `${PKG}@latest`] };
   }
   if (
     /\/\.config\/yarn\/global\//.test(p) ||
     /\/yarn\/global\//.test(p) ||
     /\/Yarn\/Data\/global\//.test(p)
   ) {
-    return { pm: "yarn", command: ["yarn", "global", "add", `${PKG}@latest`] };
+    return { pm: 'yarn', command: ['yarn', 'global', 'add', `${PKG}@latest`] };
   }
-  return { pm: "npm", command: ["npm", "install", "-g", `${PKG}@latest`] };
+  return { pm: 'npm', command: ['npm', 'install', '-g', `${PKG}@latest`] };
 }

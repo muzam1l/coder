@@ -37,6 +37,8 @@ import { waitForTaskAttention } from '../lib/wait.js';
 import { getCodexAvailability, runTurn } from '../lib/codex-core.js';
 import { getClaudeAvailability, runClaudeTurn } from '../lib/claude-core.js';
 import { createApprovalHandler, probeApproval } from '../lib/approvals.js';
+import { ensureCodexInstalled } from '../lib/plugins.js';
+import { startChatBridge } from '../lib/chat-bridge.js';
 import {
   CLAUDE_EFFORTS,
   CLAUDE_MODELS,
@@ -46,6 +48,7 @@ import {
   PERMISSION_MODES,
   loadConfig,
   resolveCodexModel,
+  resolveCustomModel,
 } from '../lib/config.js';
 import { fail, formatTokens, outStyle, printJson, resolveCwd, surfaceApproval } from '../lib/ui.js';
 import { CLI_PATH } from '../lib/runtime.js';
@@ -73,7 +76,8 @@ function resolveTaskOptions(
   if (!agent && options.model) {
     if (options.model in CLAUDE_MODELS) {
       agent = 'claude';
-    } else if (options.model in CODEX_MODELS) {
+    } else if (options.model in CODEX_MODELS || options.model in (config.models ?? {})) {
+      // Custom (OpenAI-compatible) models run on the codex engine.
       agent = 'codex';
     }
   }
@@ -155,9 +159,21 @@ async function executeCodexTurn(
           },
         });
 
+  // A custom-model alias runs on codex pointed at the user's endpoint; the
+  // provider entry travels as per-thread config overrides. Chat-completions
+  // endpoints (the default) get a per-turn responses->chat bridge in front.
+  const customEntry = job.model ? config.models?.[job.model] : undefined;
+  const bridge =
+    customEntry && (customEntry.wireApi ?? 'chat') === 'chat'
+      ? await startChatBridge(customEntry)
+      : null;
+  const custom = resolveCustomModel(config, job.model, bridge ?? undefined);
+  try {
   const result = await runTurn(cwd, {
     prompt: job.prompt ?? '',
-    model: resolveCodexModel(job.model),
+    model: custom?.model ?? resolveCodexModel(job.model),
+    modelProvider: custom?.modelProvider ?? null,
+    configOverrides: custom?.configOverrides ?? null,
     effort: job.effort,
     sandbox: mode.sandbox,
     approvalPolicy: mode.approvalPolicy,
@@ -187,6 +203,9 @@ async function executeCodexTurn(
   });
   fs.writeFileSync(path.join(jobDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
   return result;
+  } finally {
+    await bridge?.close();
+  }
 }
 
 async function executeClaudeTurn(
@@ -300,8 +319,15 @@ export async function commandTask(argv: string[]): Promise<void> {
   // Startup gate: cheap checks before creating a job, so failures classify
   // cleanly as "fall back to the next agent".
   {
-    const availability =
+    let availability =
       resolved.agent === 'codex' ? getCodexAvailability(cwd) : getClaudeAvailability();
+    // A task on a custom model needs the codex engine but no codex login, so a
+    // missing binary is installed on the spot instead of falling back.
+    if (!availability.available && resolved.model && resolved.model in (config.models ?? {})) {
+      const install = ensureCodexInstalled(availability);
+      process.stderr.write(`[coder] ${install!.note}\n`);
+      availability = getCodexAvailability(cwd);
+    }
     if (!availability.available) {
       await agentFailed(resolved.agent, availability.detail);
     }
@@ -402,8 +428,6 @@ export async function commandTask(argv: string[]): Promise<void> {
   const manageBlock = [
     `  result:  coder task result ${jobId}`,
     `  steer:   coder task steer ${jobId} "<follow-up>"`,
-    `  stop:    coder task stop ${jobId}`,
-    `  watch:   coder task stream ${jobId}`,
   ].join('\n');
 
   if (options.wait) {
@@ -447,11 +471,15 @@ export async function commandTask(argv: string[]): Promise<void> {
         taskId: jobId,
         status: final.status,
         finalMessage: result?.finalMessage,
+        ...(turnError ? { error: turnError } : {}),
         tokens: result?.tokens ?? null,
         model: result?.model ?? final.model ?? null,
       });
     } else {
-      process.stdout.write(`${result?.finalMessage || '(no final message)'}\n`);
+      // Blank lines around the answer so it stands apart from the [coder] chrome.
+      process.stdout.write(
+        `\n${result?.finalMessage || (turnError ? `${outStyle.red('error:')} ${turnError}` : '(no final message)')}\n\n`,
+      );
       const tokensNote = result?.tokens
         ? ` tokens=${formatTokens(result.tokens, result.model ?? final.model)}`
         : '';

@@ -28,7 +28,8 @@ import { commandArchive } from './cmd/archive.js';
 import { commandDelete } from './cmd/delete.js';
 import { commandApprovals, commandApprove } from './cmd/approvals.js';
 import { commandConfig } from './cmd/config.js';
-import { commandSetup } from './cmd/setup.js';
+import { commandSetupHost } from './cmd/setup-host.js';
+import { commandSetupModel } from './cmd/setup-model.js';
 import { commandUpgrade } from './cmd/upgrade.js';
 import type { CommandHandler } from './lib/types.js';
 
@@ -84,8 +85,10 @@ const COMMANDS: Record<string, CommandHandler> = {
   watch: commandStream,
   // Standalone commands.
   config: commandConfig,
-  'host-setup': commandSetup,
-  setup: commandSetup, // back-compat alias for host-setup
+  'setup-host': commandSetupHost,
+  'host-setup': commandSetupHost, // back-compat alias for setup-host
+  setup: commandSetupHost, // back-compat alias for setup-host
+  'setup-model': commandSetupModel,
   upgrade: commandUpgrade,
   update: commandUpgrade,
   // Internal.
@@ -114,7 +117,9 @@ async function main() {
       return;
     }
     const id = argv
-      .map(token => (token === 'task' && argv[1] ? `task ${argv[1]}` : HELP_ALIASES[token] ?? token))
+      .map(token =>
+        token === 'task' && argv[1] ? `task ${argv[1]}` : (HELP_ALIASES[token] ?? token),
+      )
       .find(token => COMMAND_HELP[token]);
     process.stdout.write((id && renderCommandHelp(id)) || renderTopHelp());
     return;

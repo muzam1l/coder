@@ -4,30 +4,21 @@
  * of a job, a config, and a turn result.
  */
 
-export type Agent = 'codex' | 'claude';
-export type Permission = 'read-only' | 'workspace-write' | 'auto';
-export type Effort = 'low' | 'medium' | 'high';
+// Config domain types are inferred from the zod schemas in config.ts.
+import type { Agent, Effort, Permission } from './config.js';
+
+export type {
+  Agent,
+  AgentConfig,
+  ApprovalsConfig,
+  CoderConfig,
+  CustomModelConfig,
+  Effort,
+  Permission,
+} from './config.js';
+
 export type JobKind = 'task';
 export type JobStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
-
-/** Per-agent defaults from config (all optional; merged over DEFAULT_CONFIG). */
-export interface AgentConfig {
-  model?: string;
-  effort?: Effort;
-  permissions?: Permission;
-}
-
-export interface ApprovalsConfig {
-  escalationTimeoutMs: number;
-  allowedNetworkHosts: string[];
-}
-
-/** The merged, effective configuration returned by loadConfig. */
-export interface CoderConfig {
-  chain: Agent[];
-  agents: { codex?: AgentConfig; claude?: AgentConfig };
-  approvals: ApprovalsConfig;
-}
 
 /** A persisted job record (job.json). Most fields accrete over the lifecycle. */
 export interface Job {

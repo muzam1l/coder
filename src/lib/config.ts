@@ -6,7 +6,6 @@ import fs from 'node:fs';
 import { z } from 'zod';
 import path from 'node:path';
 import { resolveCoderHome, resolveWorkspaceRoot } from './state.js';
-import type { Agent, CoderConfig, Effort, Permission } from './types.js';
 
 export interface PermissionMode {
   sandbox: 'read-only' | 'workspace-write';
@@ -30,6 +29,7 @@ export const DEFAULT_CONFIG: CoderConfig = {
       permissions: 'auto',
     },
   },
+  models: {},
   approvals: {
     escalationTimeoutMs: 120_000,
     allowedNetworkHosts: [],
@@ -137,28 +137,54 @@ export function claudeSandboxSettings(permissions: Permission, cwd: string): str
 
 /**
  * Strict schema for a config object (a file's contents or the merged result).
- * Unknown keys and out-of-range values are errors, not warnings.
+ * Unknown keys and out-of-range values are errors, not warnings. These schemas
+ * are the source of truth for the config domain types (types.ts re-exports the
+ * z.infer'd types).
  */
+const agentSchema = z.enum(['codex', 'claude']);
 const effortSchema = z.enum(['low', 'medium', 'high']);
+const permissionSchema = z.enum(['read-only', 'workspace-write', 'auto']);
 const agentEntrySchema = z
   .strictObject({
     model: z.string().min(1),
     effort: effortSchema,
-    permissions: z.enum(['read-only', 'workspace-write', 'auto']),
+    permissions: permissionSchema,
   })
   .partial();
-const configSchema = z
-  .strictObject({
-    chain: z.array(z.enum(['codex', 'claude'])).nonempty(),
-    agents: z.strictObject({ codex: agentEntrySchema, claude: agentEntrySchema }).partial(),
-    approvals: z
-      .strictObject({
-        escalationTimeoutMs: z.number().positive(),
-        allowedNetworkHosts: z.array(z.string()),
-      })
-      .partial(),
-  })
+const customModelSchema = z.strictObject({
+  baseUrl: z.string().url(),
+  model: z.string().min(1),
+  envKey: z.string().min(1).optional(),
+  // 'chat' (the default) is translated for codex through the built-in
+  // responses->chat bridge; 'responses' passes straight through. setup-model
+  // detects this automatically; the field remains as a manual override.
+  wireApi: z.enum(['chat', 'responses']).optional(),
+});
+const approvalsSchema = z.strictObject({
+  escalationTimeoutMs: z.number().positive(),
+  allowedNetworkHosts: z.array(z.string()),
+});
+/** The merged, effective shape (everything present after DEFAULT_CONFIG). */
+const effectiveConfigSchema = z.strictObject({
+  chain: z.array(agentSchema).min(1),
+  agents: z.strictObject({ codex: agentEntrySchema, claude: agentEntrySchema }).partial(),
+  models: z
+    .record(z.string().regex(/^[a-z][a-z0-9-]*$/, 'lowercase kebab-case'), customModelSchema)
+    .optional(),
+  approvals: approvalsSchema,
+});
+/** What a single config file may contain: any strict subset. */
+const configSchema = effectiveConfigSchema
+  .extend({ approvals: approvalsSchema.partial() })
   .partial();
+
+export type Agent = z.infer<typeof agentSchema>;
+export type Effort = z.infer<typeof effortSchema>;
+export type Permission = z.infer<typeof permissionSchema>;
+export type AgentConfig = z.infer<typeof agentEntrySchema>;
+export type CustomModelConfig = z.infer<typeof customModelSchema>;
+export type ApprovalsConfig = z.infer<typeof approvalsSchema>;
+export type CoderConfig = z.infer<typeof effectiveConfigSchema>;
 
 /** Returns human-readable errors; empty array means valid. */
 export function validateConfig(candidate: unknown): string[] {
@@ -225,6 +251,56 @@ export function loadConfig(cwd: string): CoderConfig {
     config = deepMerge(config, override);
   }
   return config;
+}
+
+/**
+ * Users paste full endpoint URLs as often as API bases; accept both by
+ * stripping a trailing route segment (and trailing slashes) off the base URL.
+ */
+export function normalizeBaseUrl(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, '').replace(/\/(chat\/completions|completions|responses)$/, '');
+}
+
+/** Codex-engine overrides for one custom model: model id, provider id, config. */
+export interface CustomModelResolution {
+  model: string;
+  modelProvider: string;
+  configOverrides: Record<string, unknown>;
+}
+
+/**
+ * Resolve a custom (user-configured, OpenAI-compatible) model alias to codex
+ * engine overrides, or null when the alias is not a custom model. The provider
+ * is injected per-thread via app-server config overrides, so the user's
+ * ~/.codex/config.toml is never touched.
+ */
+export function resolveCustomModel(
+  config: CoderConfig,
+  alias?: string | null,
+  // When the entry speaks chat completions, codex talks to the local
+  // responses->chat bridge instead of the endpoint; the bridge injects the API
+  // key itself, so no env_key is configured on the provider.
+  bridge?: { url: string },
+): CustomModelResolution | null {
+  const entry = alias ? config.models?.[alias] : undefined;
+  if (!alias || !entry) {
+    return null;
+  }
+  const providerId = `coder-${alias}`;
+  return {
+    model: entry.model,
+    modelProvider: providerId,
+    configOverrides: {
+      [`model_providers.${providerId}`]: {
+        name: alias,
+        base_url: bridge?.url ?? normalizeBaseUrl(entry.baseUrl),
+        ...(entry.envKey && !bridge ? { env_key: entry.envKey } : {}),
+        // codex itself always speaks the Responses API (>= 0.144 dropped
+        // 'chat'); chat-only endpoints are translated by the bridge.
+        wire_api: 'responses',
+      },
+    },
+  };
 }
 
 export function resolveCodexModel(alias?: string | null): string | null {

@@ -13,15 +13,23 @@ import {
   installCodexPlugin,
   type PluginResult,
 } from '../lib/plugins.js';
-import { printJson, resolveCwd } from '../lib/ui.js';
+import { fail, printJson, resolveCwd } from '../lib/ui.js';
 import type { Agent } from '../lib/types.js';
 
-export async function commandSetup(argv: string[]) {
-  const { options } = parseArgs(argv, {
+export async function commandSetupHost(argv: string[]) {
+  const { options, positionals } = parseArgs(argv, {
     valueOptions: ['cwd'],
     booleanOptions: ['codex', 'claude', 'json'],
   });
   const cwd = resolveCwd(options);
+  // Hosts are named positionally (`coder setup-host claude`); the old
+  // --claude/--codex flags keep working as silent aliases.
+  for (const host of positionals) {
+    if (host !== 'claude' && host !== 'codex') {
+      fail(`Unknown host "${host}". Use claude or codex.`);
+    }
+    options[host] = true;
+  }
 
   let availability = getCodexAvailability(cwd);
   const codexUpdate = ensureCodexUpToDate(availability);
@@ -105,7 +113,12 @@ export async function commandSetup(argv: string[]) {
       ? good(`claude  ${gray(`${claude.detail}; ${claudeAuth.detail}`)}`)
       : bad(`claude  not logged in - run: claude auth login`)
     : bad(`claude  CLI not installed - run: npm install -g @anthropic-ai/claude-code`);
-  lines.push(head('Available Engines'), codexLine, claudeLine);
+  lines.push(
+    head('Available Engines'),
+    codexLine,
+    claudeLine,
+    `  ${gray('custom models (local/provider endpoints): coder setup-model --help')}`,
+  );
   if (codexUpdate?.updated) {
     lines.push(
       good(`codex   ${gray(`updated ${codexUpdate.from} -> ${availability.detail} (GPT-5.6 support)`)}`),

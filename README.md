@@ -2,28 +2,22 @@
 
 # Coder
 
-### Delegate the coding. Keep your context.
+**Delegate coding to subagents of any model from your favorite harness.**
 
 </div>
 
-One runtime that hands your coding tasks to the best engine available and lets you steer, inspect, or stop any task while it works.
-
-Plugs into Claude Code or Codex to enable the harness with Coder instances.
-
 ## Why Coder
 
-- **A clean main thread.** Installed in Claude Code or Codex, dispatch is a single command from your session; the actual coding runs in a Coder subagent. File dumps, test output, and retries stay there; only the outcome returns to your conversation.
-- **Fast dispatch.** Coder keeps a single Codex engine warm in the background and hands tasks to it directly, instead of booting the CLI for every request. A handoff starts in seconds.
-- **Unified permissions.** One permission model across agents, with three modes: **Read-only**, **Workspace-write**, and **Auto**. Auto is the default: safe commands run, dangerous ones are blocked, and anything in between is brought to you for a yes/no.
-- **Tasks you can steer.** Every dispatch is a task. Check on it, read its result, give it follow-up instructions, or stop it, all by id, while it keeps working in the background.
-- **Graceful fallback.** If Codex can't start (auth, usage limits, not installed), the task flows to a Claude subagent with the same instructions. You configure the chain and the default model and effort for each agent.
-- **Any model, anywhere.** Codex can point at local models (Ollama, LM Studio, and other OpenAI-compatible endpoints) and third-party providers, so Coder can run your tasks on those too - not just the hosted defaults. That opens up the whole scope of engines you can delegate to.
+- **Cross-harness.** One runtime, every host. The same subagents and models from Claude Code, Codex and more.
+- **Cross-model.** Codex, Claude, any OpenAI-compatible endpoint, or local models. Pick per task.
+- **Clean context.** Your conversation stays about intent and orchestration; implementation details live in the subagents.
+- **Fast dispatch.** Handoffs are instant, and light enough to spin up a large number of subagents at once.
+- **Steerable tasks.** Full visibility into every task, from live progress to mid-run course corrections.
+- **Unified permissions.** Three modes across all engines: _Read-only_, _Workspace-write_, and _Auto_.
 
 ## Get started
 
-**1. Install a host plugin.**
-
-Pick the host you use (or both):
+**1. Install a host plugin** (pick your host, or both):
 
 <table>
 <tr><th>Claude Code</th><th>Codex</th></tr>
@@ -49,14 +43,22 @@ codex plugin add coder@coder-plugins
 </tr>
 </table>
 
-Or do it from the shell instead of slash commands - this installs the same plugin:
+Or from the shell (installs the same plugin):
 
 ```bash
 npm install -g @wular/coder
-coder host-setup --claude   # or --codex
+coder setup-host claude   # or codex
 ```
 
-**2. Install at least one engine CLI**, logged in: [codex](https://github.com/openai/codex) (`npm install -g @openai/codex && codex login`) or [Claude Code](https://github.com/anthropics/claude-code) (`npm install -g @anthropic-ai/claude-code && claude auth login`). Run `coder host-setup` any time to check which engines are ready.
+**2. Connect at least one engine.** Either an engine CLI, logged in, to use that subscription:
+
+```bash
+npm install -g @openai/codex && codex login
+# and/or
+npm install -g @anthropic-ai/claude-code && claude auth login
+```
+
+Or a local/provider model of your own (see [Bring your own model](docs/custom-models.md)). `coder setup-host` checks what's ready.
 
 **3. Ask your host to use it:**
 
@@ -66,25 +68,11 @@ Or make it the default in AGENTS.md/CLAUDE.md:
 
 > Always use Coder for all implementation and system exploring tasks.
 
-The work happens in the engine, and your session gets the result. Codex is the primary engine when available, with a Claude subagent as fallback.
-
-_Recommended setup: Claude Code as host (fable model preferably), Codex as engine - best for performance and cost distribution._
-
-Note: with Codex as host, use "Ask for approval"/"Full Access", not "Approve for me" - the latter disables invoking CLI agents.
-
-## Staying up to date
-
-```bash
-coder upgrade
-```
-
-It updates the CLI through whichever package manager installed it (npm, pnpm, yarn, or bun, auto-detected) and refreshes the host plugins to match. Narrow it with `--cli-only`, `--plugins-only`, `--codex`, `--claude`, or force a manager with `--pm <npm|pnpm|yarn|bun>`.
-
-Set `CODER_NO_UPDATE_CHECK=1` to silence the update notice.
+Recommended setup: Claude Code as host (fable low/medium) and Codex (terra) as engine - best for performance and cost distribution.
 
 ## Configuration
 
-Machine defaults live in `~/.coder/config.json`; drop a `coder.config.json` in a repo to override per project.
+Machine defaults live in `~/.coder/config.json`; a `coder.config.json` in a repo overrides per project.
 
 ```json
 {
@@ -92,26 +80,35 @@ Machine defaults live in `~/.coder/config.json`; drop a `coder.config.json` in a
   "agents": {
     "codex": { "model": "terra", "effort": "high", "permissions": "auto" },
     "claude": { "model": "opus", "effort": "medium", "permissions": "auto" }
+  },
+  "models": {
+    "qwen": { "baseUrl": "http://localhost:11434/v1", "model": "qwen2.5-coder:32b" }
   }
 }
 ```
 
-## Advanced usage
-
-You rarely need these - the agent drives tasks itself - but you can run them. Task commands live under `coder task <sub>`; the common ones have a top-level shortcut. Full docs: `coder --help`, `coder task <sub> --help`.
+## Staying up to date
 
 ```bash
-coder run "<text>"                # dispatch a task (--wait to block for the answer)
-coder result [task-id]            # status + final answer (--wait blocks until done)
-coder list [--all|--stopped]      # list tasks (running by default)
-coder task steer <id> "<text>"    # continue a task with new instructions
-coder task stop <id>              # interrupt it
-coder task stream [id]            # watch the live progress log (you/debugging)
-coder task archive <id>           # archive a session (--all-stopped for all finished)
-coder task delete <id>            # delete a session (--all-archived for all archived)
-coder task approve <id> <appr>    # answer an escalated permission (--deny)
+coder upgrade
 ```
 
-`run`/`list`/`result`/`stream` are shortcuts for the `task` subcommand. Any `[task-id]` defaults to the most recent task and accepts a unique prefix.
+Updates the CLI through whichever package manager installed it and refreshes the host plugins to match. See `coder upgrade --help` for narrowing flags. Set `CODER_NO_UPDATE_CHECK=1` to silence the update notice.
 
-Run flags (`run`/`steer`): `--wait` (foreground), `--agent codex|claude`, `--model spark|luna|terra|sol|opus|sonnet|fable`, `--effort low|medium|high`, `--permissions read-only|workspace-write|auto`, `--resume <task-id>`, `--json`.
+## Advanced usage
+
+You rarely need these - the host agent drives tasks itself - but everything is scriptable:
+
+```bash
+coder run "<text>"                     # dispatch a task (--wait to block for the answer)
+coder list                             # list running tasks (--all for running & stopped)
+coder result [task-id]                 # status + final answer (--wait blocks until done)
+coder task steer <task-id> "<text>"    # continue a task with new instructions
+coder task stop <task-id>              # interrupt it
+coder task stream [task-id]            # watch the live progress log
+coder task approve <task-id> <appr-id> # answer an escalated permission (--deny)
+```
+
+Any `[task-id]` defaults to the most recent task.
+
+Full docs: `coder --help`.

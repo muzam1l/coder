@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.1.27",
+  "version": "0.2.0",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "bin": {
@@ -23,7 +23,8 @@
     "plugins",
     ".claude-plugin",
     ".agents",
-    "README.md"
+    "README.md",
+    "docs"
   ],
   "publishConfig": {
     "access": "public"

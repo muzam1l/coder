@@ -21,7 +21,7 @@ Plugs into Claude Code or Codex to enable the harness with Coder instances.
 
 ## Get started
 
-Coder runs your tasks on an **engine CLI** - it needs at least one of the [codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`, then `codex login`) or the [Claude Code CLI](https://github.com/anthropics/claude-code) (`npm install -g @anthropic-ai/claude-code`, then `claude auth login`) installed and logged in. `coder host-setup` reports which are ready; if none is, install one of them to run tasks.
+Coder runs your tasks on an **engine CLI** - it needs at least one of the [codex CLI](https://github.com/openai/codex) (`npm install -g @openai/codex`, then `codex login`) or the [Claude Code CLI](https://github.com/anthropics/claude-code) (`npm install -g @anthropic-ai/claude-code`, then `claude auth login`) installed and logged in. `coder setup-host` reports which are ready; if none is, install one of them to run tasks.
 
 Follow the install host specific guides below, then you can ask like:
 
@@ -55,7 +55,7 @@ Or from the shell:
 
 ```
 npm install -g @wular/coder
-coder host-setup --claude
+coder setup-host claude
 ```
 
 ### Codex
@@ -69,7 +69,7 @@ Or from the npm directly:
 
 ```
 npm install -g @wular/coder
-coder host-setup --codex
+coder setup-host codex
 ```
 
 Note: Codex 'Approve for me' just disables invoking CLI agents, so just use 'Ask for approval'/'Full Access' when using Codex/ChatGPT app as host.

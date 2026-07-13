@@ -100,7 +100,11 @@ export async function commandResult(argv: string[]) {
   }
   lines.push('');
   if (result) {
-    lines.push(result.finalMessage || '(no final message)');
+    const errorMessage = result.error?.message ?? job.error;
+    lines.push(
+      result.finalMessage ||
+        (errorMessage ? `${s.red('error:')} ${errorMessage}` : '(no final message)'),
+    );
   } else if (running) {
     lines.push(
       s.dim(

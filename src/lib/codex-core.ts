@@ -101,6 +101,10 @@ interface CaptureTurnOptions {
 export interface RunTurnOptions {
   prompt?: string;
   model?: string | null;
+  /** Codex model provider id (custom OpenAI-compatible endpoints). */
+  modelProvider?: string | null;
+  /** Per-thread codex config overrides (e.g. a model_providers entry). */
+  configOverrides?: Record<string, unknown> | null;
   effort?: Effort | null;
   sandbox?: string;
   approvalPolicy?: string;
@@ -677,6 +681,8 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
         threadId: options.resumeThreadId,
         cwd,
         model: options.model ?? null,
+        modelProvider: options.modelProvider ?? null,
+        config: options.configOverrides ?? null,
         approvalPolicy: options.approvalPolicy ?? "never",
         sandbox: options.sandbox ?? "read-only"
       });
@@ -686,6 +692,8 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
       const response = await client.request("thread/start", {
         cwd,
         model: options.model ?? null,
+        modelProvider: options.modelProvider ?? null,
+        config: options.configOverrides ?? null,
         approvalPolicy: options.approvalPolicy ?? "never",
         sandbox: options.sandbox ?? "read-only",
         serviceName: SERVICE_NAME,

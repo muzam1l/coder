@@ -64,6 +64,27 @@ export function installClaudePlugin(marketplaceDir: string): PluginResult {
   };
 }
 
+/** Outcome of an on-demand codex install; null when codex was already present. */
+export type CodexInstallResult = { installed: boolean; note: string } | null;
+
+// Custom (OpenAI-compatible) models run on the codex engine, but users who set
+// them up may never have installed codex — it needs no login for third-party
+// endpoints, so it is safe to install on their behalf. Only called when a
+// custom model actually needs it; the regular codex-subscription flow still
+// expects the user to install and log in themselves.
+export function ensureCodexInstalled(availability: Availability): CodexInstallResult {
+  if (availability.available) {
+    return null;
+  }
+  const result = spawnSync('npm', ['install', '-g', '@openai/codex@latest'], { encoding: 'utf8' });
+  return result.status === 0
+    ? { installed: true, note: 'codex CLI installed (runs your custom models; no login needed for them)' }
+    : {
+        installed: false,
+        note: `custom models run on the codex CLI and it is not installed; auto-install failed: ${(result.stderr || 'npm not found').trim()}. Run: npm install -g @openai/codex`,
+      };
+}
+
 // GPT-5.6 codex models are gated server-side on the codex CLI version: older
 // codex returns "requires a newer version of Codex". The default codex model is
 // a 5.6 tier, so setup keeps codex current. Bump when a newer model raises the
