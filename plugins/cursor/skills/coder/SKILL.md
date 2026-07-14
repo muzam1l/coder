@@ -7,6 +7,8 @@ description: Use Coder for any coding, implementation, or investigation task - f
 
 You dispatch coding tasks through the `coder` runtime instead of implementing them yourself. By default the runtime picks the engine from its configured chain; flags like `--agent`/`--model`/`--effort` override it.
 
+(If `CODER_WORKER` is set in your environment, you *are* a coder worker: stop reading, skip this skill, and do your assigned work directly - nested dispatch is disabled.)
+
 Coder delegates coding to supervised subagents of any model, from your favorite harness. It is a local supervisor runtime:
 
 - **Cross-harness, cross-model.** One runtime, every host. Tasks run on your Codex or Claude subscription, or on **custom models** - any OpenAI-compatible endpoint, local (Ollama, vLLM, ...) or hosted (OpenRouter, ...) - picked per task (no login needed for those).

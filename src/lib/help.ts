@@ -90,8 +90,13 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['task result [task-id]', 'status + final answer of a task'],
     usage: 'coder task result [task-id]',
     summary:
-      "Show a task's status and its final answer (result pending while it runs), plus\nany pending approvals. --wait blocks until it finishes, then prints. Defaults to\nthe most recent task. Shortcut: `coder result`.",
-    flags: [['--wait', 'block until the task finishes, then print'], JSON_FLAG, CWD_FLAG],
+      "Show a task's status and its final answer (result pending while it runs), plus\nany pending approvals. --wait blocks until it finishes, then prints. --tail <n>\nincludes the last n progress-log steps (--tail all for the whole transcript).\nDefaults to the most recent task. Shortcut: `coder result`.",
+    flags: [
+      ['--wait', 'block until the task finishes, then print'],
+      ['--tail <n|all>', 'include the last n progress-log steps'],
+      JSON_FLAG,
+      CWD_FLAG,
+    ],
     seeAlso: 'task list · task steer · task stream',
   },
   'task stream': {

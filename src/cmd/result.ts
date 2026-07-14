@@ -27,7 +27,7 @@ import { ACTIVE_STATUSES } from '../lib/types.js';
 // then. Defaults to the most recent task.
 export async function commandResult(argv: string[]) {
   const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
+    valueOptions: ['cwd', 'tail'],
     booleanOptions: ['json', 'wait'],
   });
   rejectExtraArgs(positionals, 1, 'task result');
@@ -44,6 +44,15 @@ export async function commandResult(argv: string[]) {
       surfaceApproval(job.id, outcome.approval!, options.json);
     }
   }
+
+  // --tail <n|all>: include the last n progress-log steps (same as stream --tail).
+  const tail =
+    options.tail === undefined
+      ? 0
+      : options.tail === 'all'
+        ? Number.MAX_SAFE_INTEGER
+        : Math.max(0, Number.parseInt(String(options.tail), 10) || 0);
+  const steps = tail > 0 ? readJobLog(cwd, job.id, tail) : [];
 
   const pending = listPendingApprovals(resolveJobDir(cwd, job.id)).filter(a => !a.response);
   const resultFile = path.join(resolveJobDir(cwd, job.id), 'result.json');
@@ -72,6 +81,7 @@ export async function commandResult(argv: string[]) {
       model: job.model ?? null,
       ...(running ? { idleMs: idle, lastActivityAt: lastActivity ?? null, stalled } : {}),
       pendingApprovals: pending.map(a => ({ id: a.id, summary: a.summary })),
+      ...(steps.length ? { steps } : {}),
       result,
     });
     return exit();
@@ -91,6 +101,13 @@ export async function commandResult(argv: string[]) {
     lines.push('', s.dim('pending approvals:'));
     for (const a of pending) {
       lines.push(`  ${s.cyan(a.id)}  ${a.summary}`);
+    }
+  }
+  if (steps.length) {
+    lines.push('', s.dim('steps:'));
+    for (const entry of steps) {
+      const msg = entry.message ?? entry.kind;
+      if (msg) lines.push(`  ${s.dim(msg)}`);
     }
   }
   // For a running task, surface last activity + how long ago (slow vs hung).
@@ -123,7 +140,7 @@ export async function commandResult(argv: string[]) {
       `Wait for it: coder task result ${job.id} --wait`,
       `Follow live: coder task stream ${job.id}`,
     ];
-    if (stalled) hints.push(`Check the transcript: coder task stream ${job.id} --tail all`);
+    if (stalled) hints.push(`Check the transcript: coder task result ${job.id} --tail all`);
     lines.push('', formatHints(hints, s));
   }
   process.stdout.write(`${lines.join('\n')}\n`);

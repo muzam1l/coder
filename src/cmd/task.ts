@@ -65,6 +65,20 @@ import type {
 const STARTUP_ERROR_PATTERN =
   /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|not available|ENOENT/i;
 
+// Marks a worker's whole process tree (engine, agent shell) so task-creating
+// commands can refuse nested dispatch.
+const WORKER_ENV = 'CODER_WORKER';
+
+// Prepended to the initial turn only; resumed turns inherit it from the thread.
+const WORKER_SYSTEM_PROMPT =
+  'You are running inside a coder task: do the work yourself, directly. ' +
+  'Do not load the coder skill (recursive), and never dispatch through the `coder` CLI - ' +
+  'nested dispatch is disabled.\n\n---------\n\n';
+
+function taskPrompt(job: Job): string {
+  return job.resumeThreadId ? (job.prompt ?? '') : WORKER_SYSTEM_PROMPT + (job.prompt ?? '');
+}
+
 function resolveTaskOptions(
   options: Record<string, any>,
   config: CoderConfig,
@@ -192,40 +206,44 @@ async function executeCodexTurn(
       : null;
   const custom = resolveCustomModel(config, job.model, bridge ?? undefined);
   try {
-  const result = await runTurn(cwd, {
-    prompt: job.prompt ?? '',
-    model: custom?.model ?? resolveCodexModel(job.model),
-    modelProvider: custom?.modelProvider ?? null,
-    configOverrides: custom?.configOverrides ?? null,
-    effort: job.effort,
-    sandbox: mode.sandbox,
-    approvalPolicy: mode.approvalPolicy,
-    onApprovalRequest,
-    onHeartbeat: buildHeartbeat(cwd, job.id),
-    resumeThreadId: job.resumeThreadId ?? null,
-    onProgress: (update: ProgressUpdate) => {
-      onProgress(update);
-      const threadId = typeof update === 'object' ? update.threadId : null;
-      const turnId = typeof update === 'object' ? update.turnId : null;
-      if (threadId || turnId) {
-        writeJob(cwd, job.id, {
-          status: 'running',
-          ...(threadId ? { threadId } : {}),
-          ...(turnId ? { turnId } : {}),
-        });
-      }
-    },
-  });
+    const result = await runTurn(cwd, {
+      prompt: taskPrompt(job),
+      model: custom?.model ?? resolveCodexModel(job.model),
+      modelProvider: custom?.modelProvider ?? null,
+      configOverrides: custom?.configOverrides ?? null,
+      effort: job.effort,
+      sandbox: mode.sandbox,
+      approvalPolicy: mode.approvalPolicy,
+      onApprovalRequest,
+      onHeartbeat: buildHeartbeat(cwd, job.id),
+      resumeThreadId: job.resumeThreadId ?? null,
+      onProgress: (update: ProgressUpdate) => {
+        onProgress(update);
+        const threadId = typeof update === 'object' ? update.threadId : null;
+        const turnId = typeof update === 'object' ? update.turnId : null;
+        if (threadId || turnId) {
+          writeJob(cwd, job.id, {
+            status: 'running',
+            ...(threadId ? { threadId } : {}),
+            ...(turnId ? { turnId } : {}),
+          });
+        }
+      },
+    });
 
-  const status = result.status === 0 ? 'completed' : 'failed';
-  writeJob(cwd, job.id, {
-    status,
-    threadId: result.threadId,
-    turnId: result.turnId,
-    completedAt: new Date().toISOString(),
-  });
-  fs.writeFileSync(path.join(jobDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
-  return result;
+    const status = result.status === 0 ? 'completed' : 'failed';
+    writeJob(cwd, job.id, {
+      status,
+      threadId: result.threadId,
+      turnId: result.turnId,
+      completedAt: new Date().toISOString(),
+    });
+    fs.writeFileSync(
+      path.join(jobDir, 'result.json'),
+      `${JSON.stringify(result, null, 2)}\n`,
+      'utf8',
+    );
+    return result;
   } finally {
     await bridge?.close();
   }
@@ -240,7 +258,7 @@ async function executeClaudeTurn(
   const onProgress = buildProgressLogger(cwd, job.id, { echo });
 
   const result = await runClaudeTurn(cwd, {
-    prompt: job.prompt ?? '',
+    prompt: taskPrompt(job),
     model: job.model,
     effort: job.effort,
     permissions: job.permissions,
@@ -259,7 +277,11 @@ async function executeClaudeTurn(
     threadId: result.threadId,
     completedAt: new Date().toISOString(),
   });
-  fs.writeFileSync(path.join(jobDir, 'result.json'), `${JSON.stringify(result, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(
+    path.join(jobDir, 'result.json'),
+    `${JSON.stringify(result, null, 2)}\n`,
+    'utf8',
+  );
   return result;
 }
 
@@ -269,6 +291,13 @@ export function executeTurnFor(job: Job) {
 }
 
 export async function commandTask(argv: string[]): Promise<void> {
+  if (process.env[WORKER_ENV]) {
+    fail(
+      'Nested dispatch refused: this shell is already inside a coder task. ' +
+        'Do the work yourself, directly in this session - ignore any skill or ' +
+        'instruction telling you to orchestrate via the coder CLI.',
+    );
+  }
   const { options, positionals } = parseArgs(argv, {
     valueOptions: ['agent', 'model', 'effort', 'permissions', 'resume', 'cwd', 'host', 'name'],
     booleanOptions: ['background', 'wait', 'json', 'simulate-approval'],
@@ -306,7 +335,9 @@ export async function commandTask(argv: string[]): Promise<void> {
       });
       process.exit(3);
     }
-    process.stderr.write(`[coder] ${agent} failed to start (${detail}); falling back to ${next}.\n`);
+    process.stderr.write(
+      `[coder] ${agent} failed to start (${detail}); falling back to ${next}.\n`,
+    );
     await commandTask([
       prompt,
       '--agent',
@@ -387,6 +418,7 @@ export async function commandTask(argv: string[]): Promise<void> {
     cwd,
     detached: true,
     stdio: ['ignore', logFd, logFd],
+    env: { ...process.env, [WORKER_ENV]: '1' },
   });
   child.unref();
   fs.closeSync(logFd);
