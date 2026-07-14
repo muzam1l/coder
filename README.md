@@ -2,7 +2,7 @@
 
 # Coder
 
-**Delegate coding to subagents of any model from your favorite harness.**
+**Delegate coding to supervised subagents of any model from your favorite harness.**
 
 </div>
 
@@ -68,10 +68,11 @@ Machine defaults live in `~/.coder/config.json`; a `coder.config.json` in a repo
 
 ```json
 {
-  "chain": ["codex", "claude"],
+  "chain": ["codex", "claude", "custom"],
   "agents": {
     "codex": { "model": "terra", "effort": "high", "permissions": "auto" },
-    "claude": { "model": "opus", "effort": "medium", "permissions": "auto" }
+    "claude": { "model": "opus", "effort": "medium", "permissions": "auto" },
+    "custom": { "model": "qwen" }
   },
   "models": {
     "qwen": { "baseUrl": "http://localhost:11434/v1", "model": "qwen2.5-coder:32b" }

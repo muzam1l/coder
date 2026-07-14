@@ -138,7 +138,7 @@ export async function commandSetupHost(argv: string[]) {
     head('Available Engines'),
     codexLine,
     claudeLine,
-    `  ${gray('custom models (local/provider endpoints): coder setup-model --help')}`,
+    `  ${gray('custom models (local/provider endpoints): coder model --help')}`,
   );
   if (codexUpdate?.updated) {
     lines.push(

@@ -17,7 +17,7 @@ export async function commandStop(argv: string[]) {
   // Claude tasks have no app-server turn to interrupt; killing the worker
   // takes the claude child down with it (SIGTERM handler in claude-core).
   const interrupt =
-    job.agent === 'claude'
+    job.engine === 'claude'
       ? { detail: 'claude worker terminated' }
       : await interruptTurn(cwd, { threadId: job.threadId, turnId: job.turnId });
   if (job.pid && job.status === 'running') {

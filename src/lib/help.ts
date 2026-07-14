@@ -12,10 +12,13 @@ import type { CommandHelpSpec, HelpRow, Style } from './types.js';
 // Shared flag descriptions. task run and task steer accept the same run flags.
 export const TASK_FLAGS: HelpRow[] = [
   ['--wait', 'run in the foreground and block until the answer is ready'],
-  ['--agent <codex|claude>', 'engine to use (default: first in the configured chain)'],
+  [
+    '--agent <codex|claude|custom>',
+    'engine to use; custom runs your configured custom models (default: first in the chain)',
+  ],
   [
     '--model <alias|slug>',
-    'spark/luna/terra/sol (codex) · opus/sonnet/fable (claude) · a custom model (coder setup-model)',
+    'spark/luna/terra/sol (codex) · opus/sonnet/fable (claude) · a custom model (coder model list)',
   ],
   ['--effort <low|medium|high>', 'reasoning effort'],
   ['--permissions <mode>', 'read-only · workspace-write · auto (default: auto)'],
@@ -58,7 +61,7 @@ export const TASK_MENU: { sub: string; usage: string; blurb: string; alias?: str
 export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
   'task run': {
     list: ['task run "<text>"', 'run a coding task (background; --wait blocks)'],
-    usage: 'coder task run [flags] "<task text>"',
+    usage: 'coder task run "<task text>"',
     summary:
       'Dispatch a coding task to the configured engine. Backgrounds by default and\nprints a task id; --wait runs in the foreground and prints the answer.\nShortcut: `coder run "<text>"`.',
     flags: [['--name <name>', 'label the task (shown in list/result)'], ...TASK_FLAGS, CWD_FLAG],
@@ -191,34 +194,62 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
       ],
     ],
   },
-  'setup-model': {
-    list: [
-      'setup-model <name> [flags]',
-      'Connect a local or third-party model (OpenAI-compatible)',
-    ],
-    usage: 'coder setup-model <name> --base-url <url> --model <id> [--env-key VAR]',
+  'model list': {
+    list: ['model list', 'list custom models and probe their endpoints'],
+    usage: 'coder model list [--json]',
     summary:
-      'Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,\nvLLM, OpenRouter, ...). It runs on the codex engine pointed at your URL and is\nusable anywhere a model is: --model <name>, or as an agent default in config.\nWith no arguments, lists configured models and probes their endpoints.',
+      'List the configured custom models and probe each endpoint for reachability.\nAlso the default when `coder model` is run bare.',
+    flags: [JSON_FLAG, CWD_FLAG],
+    seeAlso: 'model add · model remove',
+  },
+  'model add': {
+    list: ['model add <name> --base-url <url> --model <id>', 'connect a local or third-party model (OpenAI-compatible)'],
+    usage: 'coder model add <name> --base-url <url> --model <id> [--env-key VAR]',
+    summary:
+      'Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,\nvLLM, OpenRouter, ...). It currently runs on the codex engine pointed at your\nURL and is usable anywhere a model is: --model <name>, --agent custom, or as an\nagent default in config. Alias: `coder model setup`.',
     flags: [
       ['--base-url <url>', 'OpenAI-compatible API base (e.g. http://localhost:11434/v1)'],
       ['--model <id>', "the provider's model id (e.g. qwen2.5-coder:32b)"],
       ['--env-key <VAR>', 'env var holding the API key (omit for keyless local endpoints)'],
-      ['--remove <name>', 'delete a configured model'],
       ['--workspace', 'write to <repo>/coder.config.json instead of the user file'],
       JSON_FLAG,
     ],
     examples: [
       [
-        'coder setup-model qwen --base-url http://localhost:11434/v1 --model qwen2.5-coder:32b',
+        'coder model add qwen --base-url http://localhost:11434/v1 --model qwen2.5-coder:32b',
         'local Ollama model, no key',
       ],
       [
-        'coder setup-model kimi --base-url https://openrouter.ai/api/v1 --model moonshotai/kimi-k2 --env-key OPENROUTER_API_KEY',
+        'coder model add kimi --base-url https://openrouter.ai/api/v1 --model moonshotai/kimi-k2 --env-key OPENROUTER_API_KEY',
         'third-party provider via OpenRouter',
       ],
       ['coder run --model qwen "explain this repo"', 'dispatch a task on it'],
     ],
-    seeAlso: 'setup-host · config',
+    seeAlso: 'model list · model update · setup-host · config',
+  },
+  'model update': {
+    list: ['model update <name> [--base-url|--model|--env-key]', 'change a custom model in place'],
+    usage: 'coder model update <name> [--base-url <url>] [--model <id>] [--env-key VAR]',
+    summary:
+      'Update a configured custom model. Only the flags you pass change; the endpoint\nis re-probed and the wire protocol re-detected.',
+    flags: [
+      ['--base-url <url>', 'new API base'],
+      ['--model <id>', 'new provider model id'],
+      ['--env-key <VAR>', 'new API-key env var'],
+      ['--workspace', 'write to <repo>/coder.config.json instead of the user file'],
+      JSON_FLAG,
+    ],
+    seeAlso: 'model list · model remove',
+  },
+  'model remove': {
+    list: ['model remove <name>', 'delete a custom model'],
+    usage: 'coder model remove <name>',
+    summary: 'Remove a configured custom model.',
+    flags: [
+      ['--workspace', 'target <repo>/coder.config.json instead of the user file'],
+      JSON_FLAG,
+    ],
+    seeAlso: 'model list · model add',
   },
   upgrade: {
     list: [
@@ -255,6 +286,36 @@ export const HELP_ALIASES: Record<string, string> = {
   'host-setup': 'setup-host',
   update: 'upgrade',
 };
+
+// Model subcommands in display order, for the `coder model` overview.
+const MODEL_MENU: { usage: string; blurb: string }[] = [
+  { usage: 'list', blurb: 'list models, probe their endpoints' },
+  {
+    usage: 'add <name> --base-url <url> --model <id> [--env-key VAR]',
+    blurb: 'connect a model (alias: setup)',
+  },
+  { usage: 'update <name> [--base-url|--model|--env-key]', blurb: 'change a model in place' },
+  { usage: 'remove <name>', blurb: 'delete a model' },
+];
+
+// `coder model --help` / `coder help model`: the model-namespace overview.
+export function renderModelGroupHelp(): string {
+  const s = outStyle;
+  const rows = MODEL_MENU.map(m => `  ${s.cyan(m.usage.padEnd(60))}${s.dim(m.blurb)}`);
+  return `${[
+    s.bold('Usage:'),
+    '  coder model <subcommand>',
+    '',
+    'Custom (OpenAI-compatible) models: local (Ollama, LM Studio, vLLM, ...) or',
+    'hosted (OpenRouter, gateways). Together they form the `custom` agent and',
+    'currently run on the codex engine pointed at your URL.',
+    '',
+    s.bold('Subcommands:'),
+    ...rows,
+    '',
+    s.dim("Run 'coder model <subcommand> --help' for details on any subcommand."),
+  ].join('\n')}\n`;
+}
 
 function renderFlags(flags: HelpRow[], style: Style): string[] {
   return flags.map(([flag, desc]) => `  ${style.cyan(flag.padEnd(30))}${style.dim(desc)}`);
@@ -295,7 +356,7 @@ export function renderTaskGroupHelp(): string {
   });
   return `${[
     s.bold('Usage:'),
-    '  coder task <subcommand> [flags]',
+    '  coder task <subcommand>',
     '',
     s.bold('Subcommands:'),
     ...rows,
@@ -325,13 +386,13 @@ export function renderTopHelp(): string {
     `  ${s.cyan('coder run "explain this repo\'s layout"')}`,
     '',
     s.bold('Usage:'),
-    '  coder <command> [flags]',
+    '  coder <command>',
     '',
     s.bold('Commands:'),
     ...shortcutRows,
     `  ${s.dim(`More task commands (${moreSubs}): `)}${s.cyan('coder task --help')}`,
     row(COMMAND_HELP.config!.list),
-    row(COMMAND_HELP['setup-model']!.list),
+    row(['model <list|add|update|remove>', 'manage custom models (OpenAI-compatible)']),
     row(COMMAND_HELP.upgrade!.list),
     '',
     s.bold('Global:'),

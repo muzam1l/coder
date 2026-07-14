@@ -55,6 +55,7 @@ import { CLI_PATH } from '../lib/runtime.js';
 import type {
   Agent,
   CoderConfig,
+  Engine,
   Job,
   ProgressUpdate,
   ResolvedTaskOptions,
@@ -68,45 +69,67 @@ function resolveTaskOptions(
   options: Record<string, any>,
   config: CoderConfig,
 ): ResolvedTaskOptions {
-  // A bare model alias implies its engine: opus/sonnet/fable -> claude,
-  // spark/luna/terra/sol -> codex (the alias maps are disjoint, so it is
-  // unambiguous).
+  // A bare model implies its agent: opus/sonnet/fable -> claude,
+  // spark/luna/terra/sol -> codex, a configured custom-model name -> custom
+  // (the maps are disjoint - `coder model add` reserves the built-in names -
+  // so it is unambiguous).
   // Explicit --agent always wins; unknown/raw slugs keep the chain default.
   let agent = options.agent;
   if (!agent && options.model) {
     if (options.model in CLAUDE_MODELS) {
       agent = 'claude';
-    } else if (options.model in CODEX_MODELS || options.model in (config.models ?? {})) {
-      // Custom (OpenAI-compatible) models run on the codex engine.
+    } else if (options.model in CODEX_MODELS) {
       agent = 'codex';
+    } else if (options.model in (config.models ?? {})) {
+      agent = 'custom';
     }
   }
   agent = agent ?? config.chain[0] ?? 'codex';
-  if (agent !== 'codex' && agent !== 'claude') {
+  if (agent !== 'codex' && agent !== 'claude' && agent !== 'custom') {
     const hint =
-      agent in CODEX_MODELS || agent in CLAUDE_MODELS
+      agent in CODEX_MODELS || agent in CLAUDE_MODELS || agent in (config.models ?? {})
         ? ` "${agent}" is a model; use --model ${agent}.`
         : '';
-    fail(`Invalid --agent "${agent}". Use codex or claude.${hint}`);
+    fail(`Invalid --agent "${agent}". Use codex, claude, or custom.${hint}`);
   }
   const agentDefaults = config.agents[agent as Agent] ?? {};
-  const model = options.model ?? agentDefaults.model ?? null;
+  let model = options.model ?? agentDefaults.model ?? null;
   const effort = options.effort ?? agentDefaults.effort ?? null;
   const permissions = options.permissions ?? agentDefaults.permissions ?? 'auto';
+
+  // The custom agent groups the user's configured (OpenAI-compatible) models;
+  // the codex engine runs them underneath. Unlike codex/claude there is no
+  // raw-slug passthrough: the model must be a config entry, so typos fail
+  // here with the configured names instead of reaching an engine.
+  if (agent === 'custom') {
+    const names = Object.keys(config.models ?? {});
+    if (!model && names.length === 1) {
+      model = names[0]!;
+    }
+    if (!model || !(model in (config.models ?? {}))) {
+      fail(
+        model
+          ? `No custom model named "${model}". Configured: ${names.join(', ') || 'none'}.`
+          : 'No custom model to run: pass --model <name> or set agents.custom.model.',
+        { hint: 'Add one: coder model add <name> --base-url <url> --model <id>' },
+      );
+    }
+  }
+  const engine: Engine = agent === 'claude' ? 'claude' : 'codex';
 
   if (!(permissions in PERMISSION_MODES)) {
     fail(
       `Invalid --permissions "${permissions}". Use one of: ${Object.keys(PERMISSION_MODES).join(', ')}`,
     );
   }
-  if (agent === 'codex' && effort && !CODEX_EFFORTS.has(effort)) {
+  if (engine === 'codex' && effort && !CODEX_EFFORTS.has(effort)) {
     fail(`Invalid codex --effort "${effort}". Use one of: ${[...CODEX_EFFORTS].join(', ')}`);
   }
-  if (agent === 'claude' && effort && !CLAUDE_EFFORTS.has(effort)) {
+  if (engine === 'claude' && effort && !CLAUDE_EFFORTS.has(effort)) {
     fail(`Invalid claude --effort "${effort}". Use one of: ${[...CLAUDE_EFFORTS].join(', ')}`);
   }
 
-  return { agent, model, effort, permissions };
+  return { engine, agent, model, effort, permissions };
 }
 
 // Throttled sign-of-life marker: engines fire this on every server event
@@ -240,9 +263,9 @@ async function executeClaudeTurn(
   return result;
 }
 
-// The turn executor for a job's agent. Exported so the detached worker can run it.
+// The turn executor for a job's engine. Exported so the detached worker can run it.
 export function executeTurnFor(job: Job) {
-  return job.agent === 'claude' ? executeClaudeTurn : executeCodexTurn;
+  return job.engine === 'claude' ? executeClaudeTurn : executeCodexTurn;
 }
 
 export async function commandTask(argv: string[]): Promise<void> {
@@ -320,7 +343,7 @@ export async function commandTask(argv: string[]): Promise<void> {
   // cleanly as "fall back to the next agent".
   {
     let availability =
-      resolved.agent === 'codex' ? getCodexAvailability(cwd) : getClaudeAvailability();
+      resolved.engine === 'codex' ? getCodexAvailability(cwd) : getClaudeAvailability();
     // A task on a custom model needs the codex engine but no codex login, so a
     // missing binary is installed on the spot instead of falling back.
     if (!availability.available && resolved.model && resolved.model in (config.models ?? {})) {
@@ -345,6 +368,7 @@ export async function commandTask(argv: string[]): Promise<void> {
     kind: 'task',
     name: options.name ?? null,
     agent: resolved.agent,
+    engine: resolved.engine,
     prompt,
     model: resolved.model,
     effort: resolved.effort,

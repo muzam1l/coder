@@ -9,7 +9,7 @@ import { archiveCodexSession } from '../lib/codex-sessions.js';
 // Also archive the codex session behind a task, so it moves to codex's archived
 // section instead of lingering in the Codex app. Best-effort, codex tasks only.
 function archiveSessionFor(job: Job) {
-  if (job.agent === 'codex' && job.threadId) {
+  if (job.engine === 'codex' && job.threadId) {
     archiveCodexSession(job.threadId);
   }
 }

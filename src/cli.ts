@@ -14,6 +14,7 @@ import {
   COMMAND_HELP,
   HELP_ALIASES,
   renderCommandHelp,
+  renderModelGroupHelp,
   renderTaskGroupHelp,
   renderTopHelp,
   wantsHelp,
@@ -29,7 +30,7 @@ import { commandDelete } from './cmd/delete.js';
 import { commandApprovals, commandApprove } from './cmd/approvals.js';
 import { commandConfig } from './cmd/config.js';
 import { commandSetupHost } from './cmd/setup-host.js';
-import { commandSetupModel } from './cmd/setup-model.js';
+import { commandModel } from './cmd/model.js';
 import { commandUpgrade } from './cmd/upgrade.js';
 import type { CommandHandler } from './lib/types.js';
 
@@ -86,9 +87,9 @@ const COMMANDS: Record<string, CommandHandler> = {
   // Standalone commands.
   config: commandConfig,
   'setup-host': commandSetupHost,
-  'host-setup': commandSetupHost, // back-compat alias for setup-host
+  'host-setup': commandSetupHost, // alias for setup-host
   setup: commandSetupHost, // back-compat alias for setup-host
-  'setup-model': commandSetupModel,
+  model: commandModel,
   upgrade: commandUpgrade,
   update: commandUpgrade,
   // Internal.
@@ -111,14 +112,20 @@ async function main() {
     subcommand === '--help' ||
     subcommand === '-h'
   ) {
-    // `coder help task` -> task-namespace overview; `coder help <cmd>` -> its page.
+    // `coder help task|model` -> namespace overview; `coder help <cmd>` -> its page.
     if (argv[0] === 'task' && argv[1] === undefined) {
       process.stdout.write(renderTaskGroupHelp());
       return;
     }
+    if (argv[0] === 'model' && argv[1] === undefined) {
+      process.stdout.write(renderModelGroupHelp());
+      return;
+    }
     const id = argv
       .map(token =>
-        token === 'task' && argv[1] ? `task ${argv[1]}` : (HELP_ALIASES[token] ?? token),
+        (token === 'task' || token === 'model') && argv[1]
+          ? `${token} ${argv[1]}`
+          : (HELP_ALIASES[token] ?? token),
       )
       .find(token => COMMAND_HELP[token]);
     process.stdout.write((id && renderCommandHelp(id)) || renderTopHelp());
@@ -138,6 +145,11 @@ async function main() {
   }
 
   // The task group owns its own help routing (group and per-subcommand).
+  if (subcommand === 'model' && wantsHelp(argv)) {
+    const sub = argv.find(token => !token.startsWith('-'));
+    process.stdout.write((sub && renderCommandHelp(`model ${sub}`)) || renderModelGroupHelp());
+    return;
+  }
   if (subcommand !== 'task' && wantsHelp(argv)) {
     const id = HELP_ALIASES[subcommand] ?? subcommand;
     process.stdout.write(renderCommandHelp(id) ?? renderTopHelp());

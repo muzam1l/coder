@@ -5,7 +5,7 @@
  */
 
 // Config domain types are inferred from the zod schemas in config.ts.
-import type { Agent, Effort, Permission } from './config.js';
+import type { Agent, Effort, Engine, Permission } from './config.js';
 
 export type {
   Agent,
@@ -14,6 +14,7 @@ export type {
   CoderConfig,
   CustomModelConfig,
   Effort,
+  Engine,
   Permission,
 } from './config.js';
 
@@ -28,7 +29,10 @@ export interface Job {
   status: JobStatus;
   kind?: JobKind;
   name?: string | null;
+  // The dispatched agent (public-facing: codex, claude, or custom).
   agent?: Agent;
+  // The engine that executed the turn (custom-model jobs record codex).
+  engine?: Engine;
   prompt?: string;
   model?: string | null;
   effort?: Effort | null;
@@ -53,6 +57,9 @@ export const ACTIVE_STATUSES: readonly JobStatus[] = ['queued', 'running'];
 
 /** Task options after resolving CLI flags against config defaults. */
 export interface ResolvedTaskOptions {
+  /** The engine that executes the turn (custom models run on codex). */
+  engine: Engine;
+  /** The dispatched agent, used for chain positioning: codex, claude, or custom. */
   agent: Agent;
   model: string | null;
   effort: Effort | null;

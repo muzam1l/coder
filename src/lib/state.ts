@@ -100,13 +100,22 @@ export function writeJob(cwd: string, jobId: string, patch: Partial<Job>): Job {
   return next;
 }
 
+// Records written before the agent/engine split stored only "agent", which
+// was always the engine (codex|claude); backfill `engine` from it on read.
+function normalizeJob(job: Job): Job {
+  if (!job.engine && (job.agent === 'codex' || job.agent === 'claude')) {
+    job.engine = job.agent;
+  }
+  return job;
+}
+
 export function readJob(cwd: string, jobId: string): Job | null {
   const jobFile = path.join(resolveJobDir(cwd, jobId), "job.json");
   if (!fs.existsSync(jobFile)) {
     return null;
   }
   try {
-    return JSON.parse(fs.readFileSync(jobFile, "utf8")) as Job;
+    return normalizeJob(JSON.parse(fs.readFileSync(jobFile, "utf8")) as Job);
   } catch {
     return null;
   }
@@ -214,7 +223,7 @@ export function listJobs(cwd: string): Job[] {
       }
       const jobFile = path.join(jobsDir, id, "job.json");
       try {
-        const job = JSON.parse(fs.readFileSync(jobFile, "utf8")) as Job;
+        const job = normalizeJob(JSON.parse(fs.readFileSync(jobFile, "utf8")) as Job);
         seen.add(id);
         jobs.push(job);
       } catch {

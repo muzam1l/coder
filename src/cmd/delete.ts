@@ -13,9 +13,9 @@ function deleteSessionFor(job: Job) {
   if (!job.threadId) {
     return;
   }
-  if (job.agent === 'codex') {
+  if (job.engine === 'codex') {
     deleteCodexSession(job.threadId);
-  } else if (job.agent === 'claude') {
+  } else if (job.engine === 'claude') {
     deleteClaudeSession(job.threadId);
   }
 }

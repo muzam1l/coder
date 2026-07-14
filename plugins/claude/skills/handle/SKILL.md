@@ -3,9 +3,13 @@ name: handle
 description: Use Coder for any coding, implementation, or investigation task - features, fixes, refactors, debugging, tests, code questions. You orchestrate, never implement yourself; dispatch through the `coder` CLI, one coder per focused goal, fanning out many coders in parallel as the work needs.
 ---
 
-# Coder dispatch
+# Coder dispatch (Claude host)
 
 You dispatch coding tasks through the `coder` runtime instead of implementing them yourself. By default the runtime picks the engine from its configured chain; flags like `--agent`/`--model`/`--effort` override it.
+
+Coder delegates coding to supervised subagents of any model, from your favorite harness. It is a local supervisor runtime (npm: `@wular/coder`): it spawns engine CLIs (OpenAI Codex, Anthropic Claude) as sandboxed workers, keeps task state in `~/.coder`, enforces its own permission/approval policy, and falls back down the configured chain when an engine can't start. Beyond the built-in models it runs **custom models** - any OpenAI-compatible endpoint, local (Ollama, vLLM, ...) or hosted (OpenRouter, ...) - added with `coder model add` and dispatched with `--model <name>` or `--agent custom` (they currently run on the codex engine; no login needed).
+
+## Setup
 
 If `coder` is not on PATH, install it yourself without asking (`npm install -g @wular/coder`). Assume nothing about setup state - the user may or may not have run setup. When a dispatch fails because engines are missing or logged out, run `coder setup-host claude` and follow its output: it checks engines and auth, seeds the config, installs the host plugin, auto-updates codex when too old for the default model, and prints the exact fix for anything not ready (safe to re-run anytime). Ask the user before installing an engine CLI or changing auth; if setup updated codex, tell the user to restart their codex session. For a guided setup, suggest `/coder:setup`.
 
@@ -31,7 +35,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 
 - `coder task run` exits after its startup check. Exit 0: the task started - relay the task id and fetch its result (above). Exit 1: it failed to start or the turn failed - report it, do not retry or fall back yourself. Exit 3: no engine in the chain could start and stdout carries a `run-native-subagent` payload - see below.
 - When the first engine can't start (auth, quota, rate limit), the runtime automatically falls back to the next engine in the chain, runs the same task on it, and still exits 0 - so just fetch the result. If the failure mentions a usage-limit reset time, relay that to the user.
-- Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`).
+- Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`, `custom`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`; custom models: any name from `coder model add` - list them with `coder model list`).
   - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.
 - Permissions default to auto mode (workspace-write + policy-answered escalations). Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
 - A background dispatch prints a task id plus its result/steer/stop commands. Relay them and fetch the result (above) rather than polling.

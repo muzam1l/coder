@@ -4,14 +4,14 @@
     "name": "muzam1l"
   },
   "metadata": {
-    "description": "Coder: delegate coding tasks to a supervised subagent, keeping your main context clean.",
-    "version": "0.2.2"
+    "description": "Coder: delegate coding tasks to supervised subagents on Codex, Claude, or any OpenAI-compatible model, keeping your main context clean.",
+    "version": "0.2.3"
   },
   "plugins": [
     {
       "name": "coder",
       "source": "./plugins/cursor",
-      "description": "Delegate coding tasks to a Coder subagent. Your main context stays clean."
+      "description": "Delegate coding tasks to supervised Coder subagents running on Codex, Claude, or any OpenAI-compatible model. Your main context stays clean."
     }
   ]
 }

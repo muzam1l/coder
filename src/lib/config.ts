@@ -141,7 +141,11 @@ export function claudeSandboxSettings(permissions: Permission, cwd: string): str
  * are the source of truth for the config domain types (types.ts re-exports the
  * z.infer'd types).
  */
-const agentSchema = z.enum(['codex', 'claude']);
+// Engines are what execute a turn; agents are what you dispatch and chain:
+// the two engines plus "custom", the grouping of the user's configured
+// (OpenAI-compatible) models. Underneath, custom runs on the codex engine.
+const engineSchema = z.enum(['codex', 'claude']);
+const agentSchema = z.enum(['codex', 'claude', 'custom']);
 const effortSchema = z.enum(['low', 'medium', 'high']);
 const permissionSchema = z.enum(['read-only', 'workspace-write', 'auto']);
 const agentEntrySchema = z
@@ -156,7 +160,7 @@ const customModelSchema = z.strictObject({
   model: z.string().min(1),
   envKey: z.string().min(1).optional(),
   // 'chat' (the default) is translated for codex through the built-in
-  // responses->chat bridge; 'responses' passes straight through. setup-model
+  // responses->chat bridge; 'responses' passes straight through. `coder model`
   // detects this automatically; the field remains as a manual override.
   wireApi: z.enum(['chat', 'responses']).optional(),
 });
@@ -167,7 +171,9 @@ const approvalsSchema = z.strictObject({
 /** The merged, effective shape (everything present after DEFAULT_CONFIG). */
 const effectiveConfigSchema = z.strictObject({
   chain: z.array(agentSchema).min(1),
-  agents: z.strictObject({ codex: agentEntrySchema, claude: agentEntrySchema }).partial(),
+  agents: z
+    .strictObject({ codex: agentEntrySchema, claude: agentEntrySchema, custom: agentEntrySchema })
+    .partial(),
   models: z
     .record(z.string().regex(/^[a-z][a-z0-9-]*$/, 'lowercase kebab-case'), customModelSchema)
     .optional(),
@@ -178,6 +184,7 @@ const configSchema = effectiveConfigSchema
   .extend({ approvals: approvalsSchema.partial() })
   .partial();
 
+export type Engine = z.infer<typeof engineSchema>;
 export type Agent = z.infer<typeof agentSchema>;
 export type Effort = z.infer<typeof effortSchema>;
 export type Permission = z.infer<typeof permissionSchema>;

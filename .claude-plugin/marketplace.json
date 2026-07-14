@@ -7,7 +7,7 @@
     {
       "name": "coder",
       "source": "./plugins/claude",
-      "description": "Delegate coding tasks to a Coder subagent. Your main context stays clean."
+      "description": "Delegate coding tasks to supervised Coder subagents running on Codex, Claude, or any OpenAI-compatible model. Your main context stays clean."
     }
   ]
 }
