@@ -7,7 +7,13 @@ description: Use Coder for any coding, implementation, or investigation task - f
 
 You dispatch coding tasks through the `coder` runtime instead of implementing them yourself. By default the runtime picks the engine from its configured chain; flags like `--agent`/`--model`/`--effort` override it.
 
-Coder delegates coding to supervised subagents of any model, from your favorite harness. It is a local supervisor runtime (npm: `@wular/coder`): it spawns engine CLIs (OpenAI Codex, Anthropic Claude) as sandboxed workers, keeps task state in `~/.coder`, enforces its own permission/approval policy, and falls back down the configured chain when an engine can't start. Beyond the built-in models it runs **custom models** - any OpenAI-compatible endpoint, local (Ollama, vLLM, ...) or hosted (OpenRouter, ...) - added with `coder model add` and dispatched with `--model <name>` or `--agent custom` (they currently run on the codex engine; no login needed).
+Coder delegates coding to supervised subagents of any model, from your favorite harness. It is a local supervisor runtime:
+
+- **Cross-harness, cross-model.** One runtime, every host. Tasks run on your Codex or Claude subscription, or on **custom models** - any OpenAI-compatible endpoint, local (Ollama, vLLM, ...) or hosted (OpenRouter, ...) - picked per task (no login needed for those).
+- **Clean context, fast dispatch.** Implementation details live in the subagents, your conversation stays about intent; handoffs are instant and light enough to fan out many subagents at once.
+- **Steerable, supervised tasks.** Full visibility from live progress to mid-run course corrections; each task runs in a sandboxed worker under unified permissions (read-only · workspace-write · auto), falling back down the configured chain when an agent can't start.
+
+Discover the command surface with `coder --help`; every command and subcommand takes `--help` too.
 
 ## Setup
 
@@ -35,7 +41,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 
 - `coder task run` exits after its startup check. Exit 0: the task started - relay the task id and fetch its result (above). Exit 1: it failed to start or the turn failed - report it, do not retry or fall back yourself. Exit 3: no engine in the chain could start and stdout carries a `run-native-subagent` payload - see below.
 - When the first engine can't start (auth, quota, rate limit), the runtime automatically falls back to the next engine in the chain, runs the same task on it, and still exits 0 - so just fetch the result. If the failure mentions a usage-limit reset time, relay that to the user.
-- Engine, model, and effort come from config; add `--agent` / `--model` / `--effort` when the user asks or it is unambiguous from context (agents: `codex`, `claude`, `custom`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`; custom models: any name from `coder model add` - list them with `coder model list`).
+- Model choice: config holds only the defaults (per-agent model/effort; the chain is an availability fallback, not a per-task choice). Matching the dispatch to the task is on you - pick `--agent` / `--model` / `--effort` by the task's weight and the user's ask (light -> cheap/fast model, hard -> stronger model or higher effort), and let the defaults carry the unremarkable middle (agents: `codex`, `claude`, `custom`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`; custom models: any name from `coder model add` - list them with `coder model list`).
   - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.
 - Permissions default to auto mode (workspace-write + policy-answered escalations). Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
 - A background dispatch prints a task id plus its result/steer/stop commands. Relay them and fetch the result (above) rather than polling.

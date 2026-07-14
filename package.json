@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "bin": {
