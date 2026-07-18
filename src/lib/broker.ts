@@ -54,8 +54,14 @@ function send(socket: Socket, message: JsonRpcMessage) {
   socket.write(`${JSON.stringify(message)}\n`);
 }
 
-function isInterruptRequest(message: JsonRpcMessage) {
-  return message?.method === "turn/interrupt";
+// Requests a second client may send while another client owns the active
+// stream: interrupting the turn, or steering a follow-up into it. Both target
+// the app-server that owns the live turn and leave stream ownership untouched,
+// so the broker forwards them straight through instead of returning "busy".
+const PASSTHROUGH_DURING_STREAM = new Set(["turn/interrupt", "turn/steer"]);
+
+function isPassthroughDuringStream(message: JsonRpcMessage) {
+  return typeof message?.method === "string" && PASSTHROUGH_DURING_STREAM.has(message.method);
 }
 
 function writePidFile(pidFile: string | null) {
@@ -226,12 +232,12 @@ async function main() {
           continue;
         }
 
-        const allowInterruptDuringActiveStream =
-          isInterruptRequest(message) && activeStreamSocket && activeStreamSocket !== socket && !activeRequestSocket;
+        const allowPassthroughDuringActiveStream =
+          isPassthroughDuringStream(message) && activeStreamSocket && activeStreamSocket !== socket && !activeRequestSocket;
 
         if (
           ((activeRequestSocket && activeRequestSocket !== socket) || (activeStreamSocket && activeStreamSocket !== socket)) &&
-          !allowInterruptDuringActiveStream
+          !allowPassthroughDuringActiveStream
         ) {
           send(socket, {
             id: message.id,
@@ -240,7 +246,7 @@ async function main() {
           continue;
         }
 
-        if (allowInterruptDuringActiveStream) {
+        if (allowPassthroughDuringActiveStream) {
           try {
             const result = await appClient.request(message.method, message.params ?? {});
             send(socket, { id: message.id, result });

@@ -10,6 +10,7 @@ import { spawnSync } from "node:child_process";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.js";
 import type { ProtocolError } from "./app-server.js";
 import { binaryAvailable } from "./process.js";
+import { isCodexSessionArchived, unarchiveCodexSession } from "./codex-sessions.js";
 import type { Availability, AuthStatus, Effort, ProgressUpdate, TokenUsage, TurnResult } from "./types.js";
 
 const SERVICE_NAME = "coder_runtime";
@@ -659,6 +660,45 @@ export async function interruptTurn(
 }
 
 /**
+ * Inject a follow-up into a thread's live turn ("steering"). The app-server's
+ * `turn/steer` merges the input into the active turn instead of starting a new
+ * one; the worker that owns the turn keeps capturing it and completes when the
+ * (now-extended) turn finishes.
+ *
+ * Reaches the running turn over the shared broker exactly like interruptTurn:
+ * the broker forwards turn/steer from this separate process to the app-server
+ * that owns the active stream. Returns steered:false (with a detail) when there
+ * is no steerable active turn — no live broker, the turn just ended, or a
+ * non-steerable turn kind (review/compact) — so callers can fall back to
+ * queueing the follow-up.
+ */
+export async function steerTurn(
+  cwd: string,
+  { threadId, text }: { threadId?: string | null; text: string }
+): Promise<{ steered: boolean; detail: string }> {
+  if (!threadId) {
+    return { steered: false, detail: "missing threadId" };
+  }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return { steered: false, detail: "empty follow-up" };
+  }
+  let client: AppServerClient | null = null;
+  try {
+    client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
+    await client.request("turn/steer", {
+      threadId,
+      input: [{ type: "text", text: trimmed, text_elements: [] }]
+    });
+    return { steered: true, detail: `Steered follow-up into the active turn on ${threadId}.` };
+  } catch (error) {
+    return { steered: false, detail: error instanceof Error ? error.message : String(error) };
+  } finally {
+    await client?.close().catch(() => {});
+  }
+}
+
+/**
  * Run one Codex turn. Options:
  * - prompt (required), model, effort
  * - sandbox: "read-only" | "workspace-write" | "danger-full-access"
@@ -683,6 +723,11 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
+      // Sessions may have been auto-archived since the task stopped; resume
+      // rejects archived sessions.
+      if (isCodexSessionArchived(options.resumeThreadId)) {
+        await unarchiveCodexSession(options.resumeThreadId);
+      }
       const response = await client.request("thread/resume", {
         threadId: options.resumeThreadId,
         cwd,

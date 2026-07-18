@@ -23,6 +23,7 @@ import { spawn } from 'node:child_process';
 import { parseArgs } from '../lib/args.js';
 import {
   appendJobLog,
+  claimSteers,
   findJob,
   generateJobId,
   readJob,
@@ -296,6 +297,44 @@ async function executeClaudeTurn(
 // The turn executor for a job's engine. Exported so the detached worker can run it.
 export function executeTurnFor(job: Job) {
   return job.engine === 'claude' ? executeClaudeTurn : executeCodexTurn;
+}
+
+// After a turn completes, run any follow-ups that were queued by `coder task
+// steer` while the task was running but could not be injected into the live
+// turn (a codex non-steerable window, or the claude engine). Each runs as a
+// resumed turn on the same thread, in order. A short grace re-check closes the
+// race with a steer that lands as the turn is completing; a failed/cancelled
+// task is left terminal rather than resumed.
+async function drainSteerQueue(cwd: string, jobId: string): Promise<void> {
+  for (let idleChecks = 0; idleChecks < 2; ) {
+    const current = readJob(cwd, jobId);
+    if (!current || current.status === 'failed' || current.status === 'cancelled') {
+      return;
+    }
+    const followUps = claimSteers(cwd, jobId);
+    if (followUps.length === 0) {
+      idleChecks += 1;
+      await new Promise(resolve => setTimeout(resolve, 300));
+      continue;
+    }
+    idleChecks = 0;
+    for (const text of followUps) {
+      const resumeJob = writeJob(cwd, jobId, {
+        status: 'running',
+        prompt: text,
+        resumeThreadId: current.threadId ?? null,
+      });
+      appendJobLog(cwd, jobId, { message: 'Running steered follow-up.' });
+      try {
+        await executeTurnFor(resumeJob)(cwd, resumeJob, { echo: false });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        writeJob(cwd, jobId, { status: 'failed', error: message });
+        appendJobLog(cwd, jobId, { kind: 'error', message });
+        return;
+      }
+    }
+  }
 }
 
 export async function commandTask(argv: string[]): Promise<void> {
@@ -616,6 +655,8 @@ export async function commandWorker(argv: string[]): Promise<void> {
       }
     }
     await executeTurnFor(job)(cwd, job, { echo: false });
+    // Run any follow-ups steered in while this turn was mid-flight.
+    await drainSteerQueue(cwd, jobId);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     writeJob(cwd, jobId, { status: 'failed', error: message });

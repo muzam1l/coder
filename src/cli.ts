@@ -25,7 +25,7 @@ import { commandStream } from './cmd/stream.js';
 import { commandSteer } from './cmd/steer.js';
 import { commandStop } from './cmd/stop.js';
 import { commandJobs } from './cmd/jobs.js';
-import { commandArchive } from './cmd/archive.js';
+import { commandArchive, commandArchiveSweep } from './cmd/archive.js';
 import { commandDelete } from './cmd/delete.js';
 import { commandApprovals, commandApprove } from './cmd/approvals.js';
 import { commandConfig } from './cmd/config.js';
@@ -95,6 +95,7 @@ const COMMANDS: Record<string, CommandHandler> = {
   // Internal.
   _worker: commandWorker,
   _refreshUpdate: async () => refreshUpdateCache(readVersion()),
+  _archiveSweep: commandArchiveSweep,
 };
 
 async function main() {
@@ -134,7 +135,11 @@ async function main() {
 
   // Passive, non-blocking update notice. Skip internal/refresh commands so the
   // detached refresher never re-triggers itself.
-  if (subcommand !== '_worker' && subcommand !== '_refreshUpdate') {
+  if (
+    subcommand !== '_worker' &&
+    subcommand !== '_refreshUpdate' &&
+    subcommand !== '_archiveSweep'
+  ) {
     maybeNotifyUpdate(readVersion(), CLI_PATH);
   }
 

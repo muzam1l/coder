@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { archiveCodexSession } from "./codex-sessions.js";
 import type { Job } from "./types.js";
 import { TERMINAL_STATUSES } from "./types.js";
 
@@ -94,12 +95,23 @@ export function resolveJobDir(cwd: string, jobId: string): string {
   return globalDir;
 }
 
-// Mark a job archived and move its dir into the archive bin. Jobs archived in
-// place by older builds (or in legacy workspace dirs) migrate here lazily.
-export function archiveJob(cwd: string, job: Job): Job {
-  const next = job.archived
+// Flag a job archived without moving its dir; the migration in listJobs/
+// listArchivedJobs tolerates the flag-without-move interim and finishes the move.
+export function markJobArchived(cwd: string, job: Job): Job {
+  return job.archived
     ? job
     : writeJob(cwd, job.id, { archived: true, archivedAt: new Date().toISOString() });
+}
+
+// Archive a job fully: flag the record, move its dir into the archive bin, and
+// archive the codex session behind it (detached, best-effort) so it leaves the
+// Codex app too. Jobs archived in place by older builds (or in legacy workspace
+// dirs) migrate here lazily, which also retries the session propagation.
+export function archiveJob(cwd: string, job: Job): Job {
+  const next = markJobArchived(cwd, job);
+  if (job.engine === "codex" && job.threadId) {
+    archiveCodexSession(job.threadId);
+  }
   const from = resolveJobDir(cwd, job.id);
   const to = path.join(resolveArchiveDir(cwd), job.id);
   if (from !== to) {
@@ -282,13 +294,16 @@ export function listJobs(cwd: string): Job[] {
 
 // Archived jobs. Scans the active bins too so in-place-archived legacy jobs
 // show up (and migrate); those bins stay small once migration has run.
-export function listArchivedJobs(cwd: string): Job[] {
+// migrate: false skips the dir moves — for cheap counts on hot paths (the
+// detached sweep or a later migrating scan finishes the moves).
+export function listArchivedJobs(cwd: string, opts?: { migrate?: boolean }): Job[] {
+  const migrate = opts?.migrate ?? true;
   const seen = new Set<string>();
   const archived = scanJobs([resolveArchiveDir(cwd)], seen);
   const jobsDirs = [resolveJobsDir(cwd), ...legacyStateDirs().map((dir) => path.join(dir, "jobs"))];
   for (const job of scanJobs(jobsDirs, seen)) {
     if (job.archived) {
-      archived.push(archiveJob(cwd, job));
+      archived.push(migrate ? archiveJob(cwd, job) : job);
     }
   }
   return archived.sort(byRecency);
@@ -359,6 +374,57 @@ export async function waitForTerminalJob(cwd: string, job: Job, pollMs = 400): P
     current = reconcileJob(cwd, readJob(cwd, current.id) ?? current);
   }
   return current;
+}
+
+// Follow-ups steered into a still-running task that could not be injected into
+// the live turn (a codex non-steerable window, or the claude engine, which has
+// no live steering) are queued in this file. The worker that owns the task
+// drains it when its turn finishes, running each as a resumed turn.
+const STEER_QUEUE_FILE = "steer-queue.jsonl";
+
+export function enqueueSteer(cwd: string, jobId: string, text: string): void {
+  const jobDir = resolveJobDir(cwd, jobId);
+  fs.mkdirSync(jobDir, { recursive: true });
+  fs.appendFileSync(
+    path.join(jobDir, STEER_QUEUE_FILE),
+    `${JSON.stringify({ at: new Date().toISOString(), text })}\n`,
+    "utf8"
+  );
+}
+
+// Atomically claim every queued follow-up, oldest first. Renames the queue file
+// aside before reading so a steer racing this drain starts a fresh file (its
+// entry is never lost — the next drain picks it up) and the worker is the sole
+// consumer, so a claimed entry is never dispatched twice.
+export function claimSteers(cwd: string, jobId: string): string[] {
+  const jobDir = resolveJobDir(cwd, jobId);
+  const queueFile = path.join(jobDir, STEER_QUEUE_FILE);
+  const claimFile = path.join(jobDir, `steer-claim-${process.pid}-${Date.now()}.tmp`);
+  try {
+    fs.renameSync(queueFile, claimFile);
+  } catch {
+    return []; // nothing queued
+  }
+  try {
+    return fs
+      .readFileSync(claimFile, "utf8")
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return String((JSON.parse(line) as { text?: unknown }).text ?? "");
+        } catch {
+          return "";
+        }
+      })
+      .filter(Boolean);
+  } finally {
+    try {
+      fs.unlinkSync(claimFile);
+    } catch {
+      // Best-effort cleanup of the claimed file.
+    }
+  }
 }
 
 export function appendJobLog(cwd: string, jobId: string, entry: JobLogEntry): void {

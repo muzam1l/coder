@@ -5,7 +5,7 @@
   },
   "metadata": {
     "description": "Coder: delegate coding tasks to supervised subagents on Codex, Claude, or any OpenAI-compatible model, keeping your main context clean.",
-    "version": "0.2.9"
+    "version": "0.2.10"
   },
   "plugins": [
     {

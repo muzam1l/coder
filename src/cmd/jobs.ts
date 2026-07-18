@@ -3,13 +3,13 @@ import process from 'node:process';
 
 import { parseArgs } from '../lib/args.js';
 import {
-  archiveJob,
   lastActivityAt,
   listArchivedJobs,
   listJobs,
+  markJobArchived,
   resolveWorkspaceRoot,
 } from '../lib/state.js';
-import { archiveSessionFor } from './archive.js';
+import { spawnArchiveSweep } from './archive.js';
 import {
   IDLE_SHOW_MS,
   STALL_MS,
@@ -42,16 +42,20 @@ export async function commandJobs(argv: string[]) {
 
   const isStopped = (job: Job) => TERMINAL_STATUSES.includes(job.status);
 
-  // Auto-archive sweep: any task stopped for more than 2 minutes moves to the
-  // archive bin, so the default view only ever scans/shows what just ran.
+  // Auto-archive sweep: any task stopped longer than AUTO_ARCHIVE_MS drops out of
+  // the default view. Flag it archived inline (cheap, keeps the record and count
+  // correct) but defer the slow dir move to a detached sweep so listing many
+  // expired tasks isn't blocked.
+  const toArchive: string[] = [];
   let jobs = listJobs(cwd).filter(job => {
     if (!isStopped(job)) return true;
     const stoppedAt = job.completedAt ?? job.updatedAt ?? job.createdAt;
     if (ageMs(stoppedAt) <= AUTO_ARCHIVE_MS) return true;
-    archiveJob(cwd, job);
-    archiveSessionFor(job);
+    markJobArchived(cwd, job);
+    toArchive.push(job.id);
     return false;
   });
+  spawnArchiveSweep(cwd, toArchive);
   if (options.archived) {
     jobs = listArchivedJobs(cwd);
   } else if (options.running) {
@@ -98,7 +102,7 @@ export async function commandJobs(argv: string[]) {
     // On the default (recent) view, point at the archive if it has tasks.
     const hints: string[] = [];
     if (!options.archived) {
-      const archived = listArchivedJobs(cwd).length;
+      const archived = listArchivedJobs(cwd, { migrate: false }).length;
       if (archived) hints.push(`${archived} archived: coder task list --archived`);
     }
     if (hints.length) {
