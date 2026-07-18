@@ -26,7 +26,7 @@ import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Job } from '../lib/types.js';
 
 // Stopped tasks linger in the recent view briefly, then auto-archive on the
 // next list. After that they are visible only via --archived.
-const AUTO_ARCHIVE_MS = 2 * 60_000;
+const AUTO_ARCHIVE_MS = 5 * 60_000;
 
 // coder list                   -> recent tasks: running + stopped in the last 2 min
 // coder task list --running    -> only the running ones
