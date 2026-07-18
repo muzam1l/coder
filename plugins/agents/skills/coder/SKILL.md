@@ -29,7 +29,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 - Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it. It backgrounds by default: the runtime does a startup check and prints a task id (or errors / hands off, see exit codes):
 
   ```bash
-  coder task run "<task text>"
+  coder task run --system "<standing instructions>" "<task text>"
   ```
 
   Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final result (keeps your context clean). Only use `--wait` when your harness can run it in a **background shell** (so it does not block you); without one, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`.

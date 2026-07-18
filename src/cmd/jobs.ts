@@ -73,6 +73,7 @@ export async function commandJobs(argv: string[]) {
     agent: job.agent ?? null,
     model: job.model ?? null,
     name: job.name ?? null,
+    cwd: job.cwd ?? null,
     prompt: String(job.prompt ?? '').slice(0, 80),
     updatedAt: job.updatedAt,
     archived: job.archived ?? false,
@@ -116,7 +117,7 @@ export async function commandJobs(argv: string[]) {
         ? ` ${(t.idleMs > STALL_MS ? s.red : s.dim)(`· idle ${formatAge(t.idleMs)}`)}`
         : '';
     process.stdout.write(
-      `${s.cyan(t.taskId.padEnd(24))} ${paintStatus(t.status, 10)} ${s.dim(((t.agent ?? '-') + (t.model ? `/${t.model}` : '')).padEnd(14))} ${label}${idle}${mark}\n`,
+      `${s.cyan(t.taskId.padEnd(24))} ${paintStatus(t.status, 10)} ${s.dim(((t.agent ?? '-') + (t.model ? `/${t.model}` : '')).padEnd(14))} ${s.dim((t.cwd ? path.basename(t.cwd) : '-').padEnd(12))} ${label}${idle}${mark}\n`,
     );
   }
 

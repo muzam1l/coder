@@ -70,16 +70,21 @@ const STARTUP_ERROR_PATTERN =
 const WORKER_ENV = 'CODER_WORKER';
 
 // Prepended to the initial turn only; resumed turns inherit it from the thread.
-const WORKER_SYSTEM_PROMPT =
-  'You are running inside a coder task: do the work yourself, directly. ' +
-  'Do not load the coder skill (recursive), and never dispatch through the `coder` CLI - ' +
-  'nested dispatch is disabled.\n\n---------\n\n';
+const WORKER_SYSTEM_PROMPT = `
+You are running inside a coder task: do the work yourself, directly.
+Do not load the coder skill (recursive), and never dispatch through the \`coder\` CLI - nested dispatch is disabled.
+When finished, provide a concise implementation result summary.
+`.trim();
 
 function taskPrompt(job: Job): string {
   if (job.resumeThreadId) return job.prompt ?? '';
-  // --system instructions sit between the worker preamble and the task text.
-  const system = job.system ? `${job.system}\n\n---------\n\n` : '';
-  return WORKER_SYSTEM_PROMPT + system + (job.prompt ?? '');
+  // --system instructions sit below the worker preamble inside the <system> element.
+  const system = job.system ? `\n-------\n${job.system}` : '';
+  return `<system>
+${WORKER_SYSTEM_PROMPT}${system}
+</system>
+
+${job.prompt ?? ''}`;
 }
 
 function resolveTaskOptions(
@@ -302,7 +307,17 @@ export async function commandTask(argv: string[]): Promise<void> {
     );
   }
   const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['agent', 'model', 'effort', 'permissions', 'resume', 'cwd', 'host', 'name', 'system'],
+    valueOptions: [
+      'agent',
+      'model',
+      'effort',
+      'permissions',
+      'resume',
+      'cwd',
+      'host',
+      'name',
+      'system',
+    ],
     booleanOptions: ['background', 'wait', 'json', 'simulate-approval'],
   });
   const cwd = resolveCwd(options);

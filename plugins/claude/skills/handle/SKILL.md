@@ -28,7 +28,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 - Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it. It backgrounds by default: the runtime does a startup check and prints a task id (or errors / hands off, see exit codes):
 
   ```bash
-  coder task run "<task text>"
+  coder task run --system "<standing instructions>" "<task text>"
   ```
 
   Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final result (keeps your context clean). Run it as a **background Bash call** so it does not block you and you are re-invoked on completion:
