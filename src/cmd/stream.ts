@@ -4,13 +4,21 @@ import process from 'node:process';
 
 import { parseArgs } from '../lib/args.js';
 import { readJob, readJobLog, reconcileJob, resolveJobDir } from '../lib/state.js';
-import { formatTokens, outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
+import {
+  formatTokens,
+  outStyle,
+  printJson,
+  promptBlock,
+  rejectExtraArgs,
+  requireJob,
+  resolveCwd,
+} from '../lib/ui.js';
 
 // Follow a job's progress log live, then print its final answer. Useful for a
 // background task: `coder task stream <job>` attaches after the fact and blocks until
 // the job reaches a terminal state, exiting 0 on success and 1 otherwise.
-// By default it starts from the current point (no history replay); --tail <n>
-// replays the last n log lines first, --tail all replays everything.
+// By default it replays the last log line (so the current step is visible);
+// --tail <n> replays the last n log lines first, --tail all replays everything.
 // --json emits each new log entry as a JSON line, then the full result object.
 export async function commandStream(argv: string[]) {
   const { options, positionals } = parseArgs(argv, {
@@ -23,12 +31,12 @@ export async function commandStream(argv: string[]) {
   const terminal = new Set(['completed', 'failed', 'cancelled']);
   const ALL = Number.MAX_SAFE_INTEGER;
 
-  // How many prior log lines to replay before following. Default 0 (current
-  // point); `--tail all` (or a huge number) replays the whole transcript.
+  // How many prior log lines to replay before following. Default 1, so the
+  // step in progress is visible; `--tail all` replays the whole transcript.
   const tailOpt = options.tail;
   const tail =
     tailOpt === undefined
-      ? 0
+      ? 1
       : tailOpt === 'all'
         ? ALL
         : Math.max(0, Number.parseInt(String(tailOpt), 10) || 0);
@@ -55,6 +63,9 @@ export async function commandStream(argv: string[]) {
     process.stdout.write(
       `${outStyle.dim(`[coder] task ${job.id} ${current.status} — streaming (Ctrl-C to stop)`)}\n`,
     );
+    if (job.prompt) {
+      process.stdout.write(`${promptBlock(job.prompt, outStyle).join('\n')}\n`);
+    }
   }
   flush();
   while (!terminal.has(current.status)) {

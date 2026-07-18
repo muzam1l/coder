@@ -1,14 +1,14 @@
 import process from 'node:process';
 
 import { parseArgs } from '../lib/args.js';
-import { listJobs, writeJob } from '../lib/state.js';
+import { archiveJob, listJobs } from '../lib/state.js';
 import { fail, outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
 import { TERMINAL_STATUSES, type Job } from '../lib/types.js';
 import { archiveCodexSession } from '../lib/codex-sessions.js';
 
 // Also archive the codex session behind a task, so it moves to codex's archived
 // section instead of lingering in the Codex app. Best-effort, codex tasks only.
-function archiveSessionFor(job: Job) {
+export function archiveSessionFor(job: Job) {
   if (job.engine === 'codex' && job.threadId) {
     archiveCodexSession(job.threadId);
   }
@@ -23,14 +23,11 @@ export async function commandArchive(argv: string[]) {
   });
   rejectExtraArgs(positionals, 1, 'task archive');
   const cwd = resolveCwd(options);
-  const now = new Date().toISOString();
 
   if (options['all-stopped']) {
-    const targets = listJobs(cwd).filter(
-      job => !job.archived && TERMINAL_STATUSES.includes(job.status),
-    );
+    const targets = listJobs(cwd).filter(job => TERMINAL_STATUSES.includes(job.status));
     for (const job of targets) {
-      writeJob(cwd, job.id, { archived: true, archivedAt: now });
+      archiveJob(cwd, job);
       archiveSessionFor(job);
     }
     const ids = targets.map(job => job.id);
@@ -56,7 +53,7 @@ export async function commandArchive(argv: string[]) {
     });
   }
   const job = requireJob(cwd, reference);
-  writeJob(cwd, job.id, { archived: true, archivedAt: now });
+  archiveJob(cwd, job);
   archiveSessionFor(job);
   if (options.json) {
     printJson({ taskId: job.id, archived: true });

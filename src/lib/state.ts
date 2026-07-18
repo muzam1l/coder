@@ -68,10 +68,20 @@ export function resolveJobsDir(cwd: string): string {
   return path.join(resolveStateDir(cwd), "jobs");
 }
 
+// Archived jobs live in a separate bin, so the default list only ever scans
+// the (tiny) active bin instead of every task ever run.
+export function resolveArchiveDir(cwd: string): string {
+  return path.join(resolveStateDir(cwd), "archive");
+}
+
 export function resolveJobDir(cwd: string, jobId: string): string {
   const globalDir = path.join(resolveJobsDir(cwd), jobId);
   if (fs.existsSync(path.join(globalDir, "job.json"))) {
     return globalDir;
+  }
+  const archivedDir = path.join(resolveArchiveDir(cwd), jobId);
+  if (fs.existsSync(path.join(archivedDir, "job.json"))) {
+    return archivedDir;
   }
   // Legacy per-workspace job: keep operating on it where it lives, so a worker
   // started by an older build and this build see the same record.
@@ -82,6 +92,26 @@ export function resolveJobDir(cwd: string, jobId: string): string {
     }
   }
   return globalDir;
+}
+
+// Mark a job archived and move its dir into the archive bin. Jobs archived in
+// place by older builds (or in legacy workspace dirs) migrate here lazily.
+export function archiveJob(cwd: string, job: Job): Job {
+  const next = job.archived
+    ? job
+    : writeJob(cwd, job.id, { archived: true, archivedAt: new Date().toISOString() });
+  const from = resolveJobDir(cwd, job.id);
+  const to = path.join(resolveArchiveDir(cwd), job.id);
+  if (from !== to) {
+    try {
+      fs.mkdirSync(resolveArchiveDir(cwd), { recursive: true });
+      fs.renameSync(from, to);
+    } catch {
+      // Move failed (conflict, cross-device) — the record is still flagged
+      // archived, so views stay correct; only the scan-cost win is lost.
+    }
+  }
+  return next;
 }
 
 export function generateJobId(): string {
@@ -205,12 +235,9 @@ export function reconcileJob(cwd: string, job: Job): Job {
   return job;
 }
 
-export function listJobs(cwd: string): Job[] {
-  // Global store plus legacy per-workspace dirs, deduped by id (global wins).
-  const jobsDirs = [resolveJobsDir(cwd), ...legacyStateDirs().map((dir) => path.join(dir, "jobs"))];
-  const seen = new Set<string>();
+function scanJobs(dirs: string[], seen: Set<string>): Job[] {
   const jobs: Job[] = [];
-  for (const jobsDir of jobsDirs) {
+  for (const jobsDir of dirs) {
     let ids: string[] = [];
     try {
       ids = fs.readdirSync(jobsDir);
@@ -231,13 +258,46 @@ export function listJobs(cwd: string): Job[] {
       }
     }
   }
-  return jobs
-    .map((job) => reconcileJob(cwd, job))
-    .sort((left, right) => String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")));
+  return jobs;
+}
+
+const byRecency = (left: Job, right: Job) =>
+  String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? ""));
+
+// Active jobs: the global jobs bin plus legacy per-workspace dirs, deduped by
+// id (global wins). Jobs flagged archived but still sitting in an active bin
+// (older builds archived in place) migrate to the archive bin as they're seen.
+export function listJobs(cwd: string): Job[] {
+  const jobsDirs = [resolveJobsDir(cwd), ...legacyStateDirs().map((dir) => path.join(dir, "jobs"))];
+  const jobs: Job[] = [];
+  for (const job of scanJobs(jobsDirs, new Set())) {
+    if (job.archived) {
+      archiveJob(cwd, job);
+    } else {
+      jobs.push(reconcileJob(cwd, job));
+    }
+  }
+  return jobs.sort(byRecency);
+}
+
+// Archived jobs. Scans the active bins too so in-place-archived legacy jobs
+// show up (and migrate); those bins stay small once migration has run.
+export function listArchivedJobs(cwd: string): Job[] {
+  const seen = new Set<string>();
+  const archived = scanJobs([resolveArchiveDir(cwd)], seen);
+  const jobsDirs = [resolveJobsDir(cwd), ...legacyStateDirs().map((dir) => path.join(dir, "jobs"))];
+  for (const job of scanJobs(jobsDirs, seen)) {
+    if (job.archived) {
+      archived.push(archiveJob(cwd, job));
+    }
+  }
+  return archived.sort(byRecency);
 }
 
 export function findJob(cwd: string, reference?: string): Job | null {
-  const jobs = listJobs(cwd);
+  // Search active and archived alike (result/steer/delete accept archived
+  // ids), newest first across both bins.
+  const jobs = [...listJobs(cwd), ...listArchivedJobs(cwd)].sort(byRecency);
   if (!reference) {
     return jobs[0] ?? null;
   }

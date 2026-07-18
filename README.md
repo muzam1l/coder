@@ -94,7 +94,7 @@ You rarely need these - the host agent drives tasks itself - but everything is s
 
 ```bash
 coder run "<text>"                     # dispatch a task (--wait to block for the answer)
-coder list                             # list running tasks (--all for running & stopped)
+coder list                             # list recent tasks (running + just stopped)
 coder result [task-id]                 # status + final answer (--wait blocks until done)
 coder task steer <task-id> "<text>"    # continue a task with new instructions
 coder task stop <task-id>              # interrupt it

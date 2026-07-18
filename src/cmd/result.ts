@@ -18,6 +18,7 @@ import {
   rejectExtraArgs,
   requireJob,
   resolveCwd,
+  promptBlock,
   surfaceApproval,
 } from '../lib/ui.js';
 import { ACTIVE_STATUSES } from '../lib/types.js';
@@ -76,6 +77,8 @@ export async function commandResult(argv: string[]) {
     printJson({
       taskId: job.id,
       name: job.name ?? null,
+      prompt: job.prompt ?? null,
+      system: job.system ?? null,
       status: job.status,
       agent: job.agent,
       model: job.model ?? null,
@@ -97,6 +100,11 @@ export async function commandResult(argv: string[]) {
       ? [`${s.dim('tokens')}   ${formatTokens(result.tokens, result.model ?? job.model)}`]
       : []),
   ];
+  // The prompt gets its own block (not a header field) so longer task text
+  // stays readable.
+  if (job.prompt) {
+    lines.push('', ...promptBlock(job.prompt, s));
+  }
   if (pending.length) {
     lines.push('', s.dim('pending approvals:'));
     for (const a of pending) {

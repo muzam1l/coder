@@ -76,7 +76,10 @@ const WORKER_SYSTEM_PROMPT =
   'nested dispatch is disabled.\n\n---------\n\n';
 
 function taskPrompt(job: Job): string {
-  return job.resumeThreadId ? (job.prompt ?? '') : WORKER_SYSTEM_PROMPT + (job.prompt ?? '');
+  if (job.resumeThreadId) return job.prompt ?? '';
+  // --system instructions sit between the worker preamble and the task text.
+  const system = job.system ? `${job.system}\n\n---------\n\n` : '';
+  return WORKER_SYSTEM_PROMPT + system + (job.prompt ?? '');
 }
 
 function resolveTaskOptions(
@@ -299,7 +302,7 @@ export async function commandTask(argv: string[]): Promise<void> {
     );
   }
   const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['agent', 'model', 'effort', 'permissions', 'resume', 'cwd', 'host', 'name'],
+    valueOptions: ['agent', 'model', 'effort', 'permissions', 'resume', 'cwd', 'host', 'name', 'system'],
     booleanOptions: ['background', 'wait', 'json', 'simulate-approval'],
   });
   const cwd = resolveCwd(options);
@@ -330,6 +333,7 @@ export async function commandTask(argv: string[]): Promise<void> {
           reason: 'no-engine-available',
           permissions: resolved.permissions,
           note: 'Every coder engine failed to start. Spawn your own native subagent and forward the task verbatim; tell it to never run git write operations (commit, checkout, stash, reset, push, ...) and to honor the permissions.',
+          ...(options.system ? { system: options.system } : {}),
           task: prompt,
         },
       });
@@ -347,6 +351,7 @@ export async function commandTask(argv: string[]): Promise<void> {
       ...(options.wait ? ['--wait'] : []),
       ...(options.json ? ['--json'] : []),
       ...(options.permissions ? ['--permissions', options.permissions] : []),
+      ...(options.system ? ['--system', options.system] : []),
     ]);
     process.exit(0);
   };
@@ -398,6 +403,7 @@ export async function commandTask(argv: string[]): Promise<void> {
     status: 'queued',
     kind: 'task',
     name: options.name ?? null,
+    system: options.system ?? null,
     agent: resolved.agent,
     engine: resolved.engine,
     prompt,

@@ -1,7 +1,7 @@
 import process from 'node:process';
 
 import { parseArgs } from '../lib/args.js';
-import { deleteJob, listJobs } from '../lib/state.js';
+import { deleteJob, listArchivedJobs } from '../lib/state.js';
 import { fail, outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
 import type { Job } from '../lib/types.js';
 import { deleteCodexSession } from '../lib/codex-sessions.js';
@@ -31,7 +31,7 @@ export async function commandDelete(argv: string[]) {
   const cwd = resolveCwd(options);
 
   if (options['all-archived']) {
-    const targets = listJobs(cwd).filter(job => job.archived);
+    const targets = listArchivedJobs(cwd);
     const ids = targets
       .filter(job => {
         deleteSessionFor(job);

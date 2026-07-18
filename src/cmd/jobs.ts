@@ -2,7 +2,14 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { parseArgs } from '../lib/args.js';
-import { lastActivityAt, listJobs, resolveWorkspaceRoot } from '../lib/state.js';
+import {
+  archiveJob,
+  lastActivityAt,
+  listArchivedJobs,
+  listJobs,
+  resolveWorkspaceRoot,
+} from '../lib/state.js';
+import { archiveSessionFor } from './archive.js';
 import {
   IDLE_SHOW_MS,
   STALL_MS,
@@ -17,40 +24,47 @@ import {
 } from '../lib/ui.js';
 import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Job } from '../lib/types.js';
 
-// coder list                   -> active tasks (queued/running), non-archived
-// coder task list --stopped    -> finished tasks (completed/failed/cancelled)
-// coder task list --all        -> running + stopped (non-archived)
-// coder task list --archived   -> archived tasks only
+// Stopped tasks linger in the recent view briefly, then auto-archive on the
+// next list. After that they are visible only via --archived.
+const AUTO_ARCHIVE_MS = 2 * 60_000;
+
+// coder list                   -> recent tasks: running + stopped in the last 2 min
+// coder task list --running    -> only the running ones
+// coder task list --stopped    -> only the recently stopped ones
+// coder task list --archived   -> archived tasks (everything older)
 export async function commandJobs(argv: string[]) {
   const { options, positionals } = parseArgs(argv, {
     valueOptions: ['cwd', 'dir'],
-    booleanOptions: ['json', 'all', 'stopped', 'archived'],
+    booleanOptions: ['json', 'running', 'stopped', 'archived'],
   });
   rejectExtraArgs(positionals, 0, 'task list');
   const cwd = resolveCwd(options);
 
-  const isArchived = (job: Job) => job.archived === true;
   const isStopped = (job: Job) => TERMINAL_STATUSES.includes(job.status);
-  const isActive = (job: Job) => ACTIVE_STATUSES.includes(job.status);
 
-  let jobs = listJobs(cwd);
+  // Auto-archive sweep: any task stopped for more than 2 minutes moves to the
+  // archive bin, so the default view only ever scans/shows what just ran.
+  let jobs = listJobs(cwd).filter(job => {
+    if (!isStopped(job)) return true;
+    const stoppedAt = job.completedAt ?? job.updatedAt ?? job.createdAt;
+    if (ageMs(stoppedAt) <= AUTO_ARCHIVE_MS) return true;
+    archiveJob(cwd, job);
+    archiveSessionFor(job);
+    return false;
+  });
+  if (options.archived) {
+    jobs = listArchivedJobs(cwd);
+  } else if (options.running) {
+    jobs = jobs.filter(job => ACTIVE_STATUSES.includes(job.status));
+  } else if (options.stopped) {
+    jobs = jobs.filter(isStopped);
+  }
   // Tasks are stored globally; an explicit --dir (or legacy --cwd) narrows the
   // view to tasks launched in that workspace (matched by git root).
   const dir = options.dir ?? options.cwd;
   if (dir) {
     const wanted = resolveWorkspaceRoot(path.resolve(String(dir)));
     jobs = jobs.filter(job => job.cwd && resolveWorkspaceRoot(job.cwd) === wanted);
-  }
-  if (options.archived) {
-    jobs = jobs.filter(isArchived);
-  } else {
-    // Archived is a separate bin: only the --archived view shows it.
-    jobs = jobs.filter(job => !isArchived(job));
-    if (options.stopped) {
-      jobs = jobs.filter(isStopped);
-    } else if (!options.all) {
-      jobs = jobs.filter(isActive);
-    }
   }
 
   const tasks = jobs.map(job => ({
@@ -74,19 +88,16 @@ export async function commandJobs(argv: string[]) {
   if (!tasks.length) {
     const scope = options.archived
       ? 'archived tasks'
-      : options.stopped
-        ? 'stopped tasks'
-        : options.all
-          ? 'tasks'
-          : 'running tasks';
+      : options.running
+        ? 'running tasks'
+        : options.stopped
+          ? 'recently stopped tasks'
+          : 'recent tasks';
     process.stdout.write(`No ${scope}.\n`);
-    // On the default (running) view, point at other scopes that do have tasks.
+    // On the default (recent) view, point at the archive if it has tasks.
     const hints: string[] = [];
-    if (!options.archived && !options.stopped && !options.all) {
-      const all = listJobs(cwd);
-      const stopped = all.filter(j => !isArchived(j) && isStopped(j)).length;
-      const archived = all.filter(isArchived).length;
-      if (stopped) hints.push(`${stopped} stopped: coder task list --stopped`);
+    if (!options.archived) {
+      const archived = listArchivedJobs(cwd).length;
       if (archived) hints.push(`${archived} archived: coder task list --archived`);
     }
     if (hints.length) {
@@ -110,9 +121,9 @@ export async function commandJobs(argv: string[]) {
   }
 
   const hints = ['Result: coder task result <task-id>'];
-  // The default view only shows active tasks; point at the full list.
-  if (!options.all && !options.stopped && !options.archived) {
-    hints.push('All tasks: coder task list --all');
+  // The default view only shows recent tasks; point at the archive.
+  if (!options.archived) {
+    hints.push('Older tasks: coder task list --archived');
   }
   process.stdout.write(`\n${formatHints(hints, s)}\n`);
 }

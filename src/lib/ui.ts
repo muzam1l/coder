@@ -20,6 +20,7 @@ export function makeStyle(stream: NodeJS.WriteStream): Style {
   const tty = stream.isTTY && !process.env.NO_COLOR;
   const paint = (code: string, text: string) => (tty ? `\x1b[${code}m${text}\x1b[0m` : text);
   return {
+    blue: text => paint('34', text),
     bold: text => paint('1', text),
     cyan: text => paint('36', text),
     dim: text => paint('38;5;245', text),
@@ -97,6 +98,17 @@ export function formatTokens(tokens: TokenUsage, model?: string | null): string 
   return `${formatTokenCount(tokens.total)} (${parts.join(' · ')}) on ${model || 'default model'}`;
 }
 
+// How much of the task prompt the text views show (full prompt is in --json).
+export const PROMPT_PREVIEW_CHARS = 500;
+
+// Dim, indented prompt block for result/stream: 'prompt:' plus the prompt's
+// lines, capped so a huge prompt doesn't drown the output.
+export function promptBlock(prompt: string, style: Style = outStyle): string[] {
+  const capped =
+    prompt.length > PROMPT_PREVIEW_CHARS ? `${prompt.slice(0, PROMPT_PREVIEW_CHARS)}…` : prompt;
+  return [style.dim('prompt:'), ...capped.split('\n').map(line => `  ${style.dim(line)}`)];
+}
+
 // A running/queued task idle this long with no pending approval is flagged as
 // possibly stalled (advisory — a silent hang; streamed output counts as
 // activity via the heartbeat).
@@ -105,9 +117,9 @@ export const STALL_MS = 10 * 60_000;
 // Below this, a running task's idle age isn't worth showing at all.
 export const IDLE_SHOW_MS = 2 * 60_000;
 
-// Color a task status: green for live, red for failed/cancelled, dim for the
-// rest (queued, completed). Pads to `width` first so ANSI codes don't break
-// alignment.
+// Color a task status: green for live, red for failed/cancelled, blue for
+// completed (cyan is taken by task ids), dim for the rest (queued). Pads to
+// `width` first so ANSI codes don't break alignment.
 export function paintStatus(status: string, width = 0): string {
   const text = status.padEnd(width);
   if (status === 'running') {
@@ -115,6 +127,9 @@ export function paintStatus(status: string, width = 0): string {
   }
   if (status === 'failed' || status === 'cancelled') {
     return outStyle.red(text);
+  }
+  if (status === 'completed') {
+    return outStyle.blue(text);
   }
   return outStyle.dim(text);
 }

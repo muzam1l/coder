@@ -34,6 +34,9 @@ export interface Job {
   // The engine that executed the turn (custom-model jobs record codex).
   engine?: Engine;
   prompt?: string;
+  // Harness-supplied standing instructions (--system), kept separate from the
+  // task prompt so previews (list/result/stream) show only the task itself.
+  system?: string | null;
   model?: string | null;
   effort?: Effort | null;
   permissions?: Permission;
@@ -123,6 +126,7 @@ export interface Approval {
 /** ANSI styler returned by makeStyle; each fn wraps text in a color/attr. */
 export type Painter = (text: string) => string;
 export interface Style {
+  blue: Painter;
   bold: Painter;
   cyan: Painter;
   dim: Painter;

@@ -36,7 +36,12 @@ export const TASK_MENU: { sub: string; usage: string; blurb: string; alias?: str
     blurb: 'run a task (background; --wait blocks)',
     alias: 'run',
   },
-  { sub: 'list', usage: 'list', blurb: 'list running tasks (--all for all)', alias: 'list' },
+  {
+    sub: 'list',
+    usage: 'list',
+    blurb: 'list recent tasks (running + just stopped)',
+    alias: 'list',
+  },
   {
     sub: 'result',
     usage: 'result [task-id]',
@@ -64,23 +69,37 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     usage: 'coder task run "<task text>"',
     summary:
       'Dispatch a coding task to the configured engine. Backgrounds by default and\nprints a task id; --wait runs in the foreground and prints the answer.\nShortcut: `coder run "<text>"`.',
-    flags: [['--name <name>', 'label the task (shown in list/result)'], ...TASK_FLAGS, CWD_FLAG],
+    flags: [
+      ['--name <name>', 'label the task (shown in list/result)'],
+      [
+        '--system <text>',
+        'standing instructions prepended to the task (kept out of prompt previews)',
+      ],
+      ...TASK_FLAGS,
+      CWD_FLAG,
+    ],
     examples: [
       ['coder run "add a /health endpoint"', 'dispatch in the background, print a task id'],
       ['coder run --wait "fix the failing test"', 'block until done, print the answer'],
-      ['coder task run --model spark "rename foo to bar"', 'pick an engine via its model alias'],
+      [
+        'coder task run --model spark --system "tests live in test/, don\'t touch anything outside of it" "rename foo to bar"',
+        'pick an engine via its model alias; --system adds standing instructions',
+      ],
     ],
     seeAlso: 'task result · task steer · task stop · task stream',
   },
   'task list': {
-    list: ['task list [--all|--stopped|--archived]', 'list tasks (running by default)'],
-    usage: 'coder task list [--all] [--stopped] [--archived]',
+    list: [
+      'task list [--running|--stopped|--archived]',
+      'list recent tasks (running + just stopped)',
+    ],
+    usage: 'coder task list [--running] [--stopped] [--archived]',
     summary:
-      'List tasks across all workspaces, most recent first. Shows running tasks by\ndefault; --all adds finished tasks, --stopped shows only finished ones, and\n--archived opens the archive. Archived tasks stay out of --all. Shortcut: `coder list`.',
+      'List recent tasks across all workspaces, most recent first: running tasks plus\nones stopped within the last 2 minutes. Older stopped tasks auto-archive and\nmove to --archived. Shortcut: `coder list`.',
     flags: [
-      ['--all', 'show running and finished tasks (archived excluded)'],
-      ['--stopped', 'show only finished tasks (completed/failed/cancelled)'],
-      ['--archived', 'show only archived tasks'],
+      ['--running', 'show only running tasks'],
+      ['--stopped', 'show only recently stopped tasks (not yet archived)'],
+      ['--archived', 'show only archived tasks (auto-archived or via task archive)'],
       ['--dir <dir>', 'only tasks launched in that workspace'],
       JSON_FLAG,
     ],
@@ -103,9 +122,9 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['task stream [task-id]', 'watch a task live (progress log)'],
     usage: 'coder task stream [task-id]',
     summary:
-      "Watch a running task's progress log live (for you/debugging), then print its\nfinal answer. Starts from the current point; --tail <n> replays the last n lines\nfirst (--tail all for the whole transcript). Blocks until it finishes; exits 0 on\nsuccess, 1 otherwise. For the answer alone, prefer `coder result`.",
+      "Watch a running task's progress log live (for you/debugging), then print its\nfinal answer. Replays the last line first so the current step is visible;\n--tail <n> replays the last n lines (--tail all for the whole transcript).\nBlocks until it finishes; exits 0 on success, 1 otherwise. For the answer\nalone, prefer `coder result`.",
     flags: [
-      ['--tail <n|all>', 'replay the last n log lines first (default: 0)'],
+      ['--tail <n|all>', 'replay the last n log lines first (default: 1)'],
       ['--json', 'emit each log entry as a JSON line, then the result'],
       CWD_FLAG,
     ],
@@ -208,7 +227,10 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     seeAlso: 'model add · model remove',
   },
   'model add': {
-    list: ['model add <name> --base-url <url> --model <id>', 'connect a local or third-party model (OpenAI-compatible)'],
+    list: [
+      'model add <name> --base-url <url> --model <id>',
+      'connect a local or third-party model (OpenAI-compatible)',
+    ],
     usage: 'coder model add <name> --base-url <url> --model <id> [--env-key VAR]',
     summary:
       'Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,\nvLLM, OpenRouter, ...). It currently runs on the codex engine pointed at your\nURL and is usable anywhere a model is: --model <name>, --agent custom, or as an\nagent default in config. Alias: `coder model setup`.',
@@ -250,10 +272,7 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['model remove <name>', 'delete a custom model'],
     usage: 'coder model remove <name>',
     summary: 'Remove a configured custom model.',
-    flags: [
-      ['--workspace', 'target <repo>/coder.config.json instead of the user file'],
-      JSON_FLAG,
-    ],
+    flags: [['--workspace', 'target <repo>/coder.config.json instead of the user file'], JSON_FLAG],
     seeAlso: 'model list · model add',
   },
   upgrade: {
