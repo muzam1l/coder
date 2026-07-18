@@ -12,6 +12,8 @@ import {
   rejectExtraArgs,
   requireJob,
   resolveCwd,
+  STEP_PREVIEW_CHARS,
+  trimStep,
 } from '../lib/ui.js';
 
 // Follow a job's progress log live, then print its final answer. Useful for a
@@ -22,7 +24,7 @@ import {
 // --json emits each new log entry as a JSON line, then the full result object.
 export async function commandStream(argv: string[]) {
   const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd', 'tail'],
+    valueOptions: ['cwd', 'tail', 'trim'],
     booleanOptions: ['json'],
   });
   rejectExtraArgs(positionals, 1, 'task stream');
@@ -41,17 +43,28 @@ export async function commandStream(argv: string[]) {
         ? ALL
         : Math.max(0, Number.parseInt(String(tailOpt), 10) || 0);
 
+  // Per-step display cap, applied to text and JSON alike (the job log keeps
+  // full entries). --trim <n> overrides the default; --trim none disables it.
+  const trimOpt = options.trim;
+  const trim =
+    trimOpt === undefined
+      ? STEP_PREVIEW_CHARS
+      : trimOpt === 'none'
+        ? Number.MAX_SAFE_INTEGER
+        : Math.max(1, Number.parseInt(String(trimOpt), 10) || STEP_PREVIEW_CHARS);
+
   // Skip everything older than the last `tail` entries.
   let printed = Math.max(0, readJobLog(cwd, job.id, ALL).length - tail);
   const flush = () => {
     const entries = readJobLog(cwd, job.id, ALL);
     for (const entry of entries.slice(printed)) {
       if (options.json) {
-        process.stdout.write(`${JSON.stringify(entry)}\n`);
+        const out = entry.message ? { ...entry, message: trimStep(entry.message, trim, { plain: true }) } : entry;
+        process.stdout.write(`${JSON.stringify(out)}\n`);
       } else {
         const message = entry.message ?? entry.kind;
         if (message) {
-          process.stdout.write(`${outStyle.dim('[coder]')} ${message}\n`);
+          process.stdout.write(`${outStyle.dim('[coder]')} ${trimStep(message, trim)}\n`);
         }
       }
     }

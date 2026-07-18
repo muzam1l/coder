@@ -251,10 +251,12 @@ function emitProgress(
   onProgress({ message, phase, ...extra });
 }
 
+// Messages are logged raw (full command, full output) like the claude core;
+// the text views trim them for display and --json keeps everything.
 function describeStartedItem(item: TurnItem) {
   switch (item.type) {
     case "commandExecution":
-      return { message: `Running command: ${shorten(item.command, 96)}`, phase: "running" };
+      return { message: `Running command: ${String(item.command ?? "").trim()}`, phase: "running" };
     case "fileChange":
       return { message: `Applying ${item.changes!.length} file change(s).`, phase: "editing" };
     case "mcpToolCall":
@@ -262,7 +264,7 @@ function describeStartedItem(item: TurnItem) {
     case "dynamicToolCall":
       return { message: `Running tool: ${item.tool}.`, phase: "investigating" };
     case "webSearch":
-      return { message: `Searching: ${shorten(item.query, 96)}`, phase: "investigating" };
+      return { message: `Searching: ${String(item.query ?? "").trim()}`, phase: "investigating" };
     default:
       return null;
   }
@@ -270,11 +272,15 @@ function describeStartedItem(item: TurnItem) {
 
 function describeCompletedItem(item: TurnItem) {
   switch (item.type) {
-    case "commandExecution":
+    case "commandExecution": {
+      const output = String(item.aggregatedOutput ?? "").trim();
       return {
-        message: `Command ${item.status === "completed" ? "completed" : item.status}: ${shorten(item.command, 96)} (exit ${item.exitCode ?? "?"})`,
+        message:
+          `Command ${item.status === "completed" ? "completed" : item.status}: ${String(item.command ?? "").trim()} (exit ${item.exitCode ?? "?"})` +
+          (output ? `\n${output}` : ""),
         phase: "running"
       };
+    }
     case "fileChange":
       return { message: `File changes ${item.status}.`, phase: "editing" };
     case "mcpToolCall":

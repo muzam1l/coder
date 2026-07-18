@@ -20,6 +20,7 @@ import {
   resolveCwd,
   promptBlock,
   surfaceApproval,
+  trimStep,
 } from '../lib/ui.js';
 import { ACTIVE_STATUSES } from '../lib/types.js';
 
@@ -115,13 +116,13 @@ export async function commandResult(argv: string[]) {
     lines.push('', s.dim('steps:'));
     for (const entry of steps) {
       const msg = entry.message ?? entry.kind;
-      if (msg) lines.push(`  ${s.dim(msg)}`);
+      if (msg) lines.push(`  ${s.dim(trimStep(msg))}`);
     }
   }
   // For a running task, surface last activity + how long ago (slow vs hung).
   if (running && lastLog) {
     const msg = lastLog.message ?? lastLog.kind ?? '';
-    lines.push(`${s.dim('last')}     ${s.dim(`${msg} (${formatAge(idle)} ago)`)}`);
+    lines.push(`${s.dim('last')}     ${s.dim(`${trimStep(msg)} (${formatAge(idle)} ago)`)}`);
   }
   lines.push('');
   if (result) {

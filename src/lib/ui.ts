@@ -109,6 +109,22 @@ export function promptBlock(prompt: string, style: Style = outStyle): string[] {
   return [style.dim('prompt:'), ...capped.split('\n').map(line => `  ${style.dim(line)}`)];
 }
 
+// How much of a single progress-log step the text views show (full entries are
+// in --json / the job log).
+export const STEP_PREVIEW_CHARS = 128;
+
+// Cap a step message for display, noting how much was cut. Pass `plain: true`
+// for machine-readable contexts (JSON lines) where the marker must stay unstyled.
+export function trimStep(
+  message: string,
+  limit = STEP_PREVIEW_CHARS,
+  { plain = false, style = outStyle }: { plain?: boolean; style?: Style } = {},
+): string {
+  if (message.length <= limit) return message;
+  const marker = `<${message.length - limit} more chars>`;
+  return `${message.slice(0, limit)} ${plain ? marker : style.dim(marker)}`;
+}
+
 // A running/queued task idle this long with no pending approval is flagged as
 // possibly stalled (advisory — a silent hang; streamed output counts as
 // activity via the heartbeat).
