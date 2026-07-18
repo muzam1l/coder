@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, flag, parseArgs } from '../lib/args.js';
 import { getCodexAuthStatus, getCodexAvailability } from '../lib/codex-core.js';
 import { getClaudeAuthStatus, getClaudeAvailability } from '../lib/claude-core.js';
 import {
@@ -22,24 +24,24 @@ import { fail, printJson, resolveCwd } from '../lib/ui.js';
 import type { Agent } from '../lib/types.js';
 
 export async function commandSetupHost(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['codex', 'claude', 'agents', 'json'],
-  });
+  const { options, positionals } = parseArgs(
+    argv,
+    z.object({ ...baseOptions, codex: flag, claude: flag, agents: flag }),
+  );
   const cwd = resolveCwd(options);
   // Hosts are named positionally (`coder setup-host claude`); the old
   // --claude/--codex flags keep working as silent aliases.
   // Hosts are claude and agents (the ~/.agents/skills install covering every
   // host that reads the Agent Skills standard dir - codex included). "codex"
   // stays accepted as an alias for agents.
-  const knownHosts = ['claude', 'codex', 'agents'];
+  const knownHosts = ['claude', 'codex', 'agents'] as const;
   for (const host of positionals) {
-    if (!knownHosts.includes(host)) {
+    if (!knownHosts.includes(host as (typeof knownHosts)[number])) {
       fail(`Unknown host "${host}". Use claude, codex, or agents.`, {
         hint: 'Codex, Pi, OpenCode, and other Agent Skills hosts: coder setup-host agents',
       });
     }
-    options[host] = true;
+    options[host as (typeof knownHosts)[number]] = true;
   }
 
   const tty = process.stdout.isTTY && !process.env.NO_COLOR;

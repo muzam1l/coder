@@ -6,7 +6,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, flag, parseArgs, str } from '../lib/args.js';
 import { getCodexAvailability } from '../lib/codex-core.js';
 import {
   CLAUDE_MODELS,
@@ -121,10 +123,13 @@ async function detectResponsesApi(entry: CustomModelConfig): Promise<boolean> {
 }
 
 // Flags shared by add/update/remove/list.
-const MODEL_FLAG_SPEC = {
-  valueOptions: ['base-url', 'model', 'env-key', 'cwd'],
-  booleanOptions: ['workspace', 'json'],
-};
+const MODEL_FLAG_SPEC = z.object({
+  ...baseOptions,
+  'base-url': str,
+  model: str,
+  'env-key': str,
+  workspace: flag,
+});
 
 function resolveTargetFile(options: Record<string, any>, cwd: string): string {
   return options.workspace

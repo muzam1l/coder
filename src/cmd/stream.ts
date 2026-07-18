@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, parseArgs } from '../lib/args.js';
 import { readJob, readJobLog, reconcileJob, resolveJobDir } from '../lib/state.js';
 import {
   formatTokens,
@@ -23,10 +25,22 @@ import {
 // --tail <n> replays the last n log lines first, --tail all replays everything.
 // --json emits each new log entry as a JSON line, then the full result object.
 export async function commandStream(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd', 'tail', 'trim'],
-    booleanOptions: ['json'],
-  });
+  const { options, positionals } = parseArgs(
+    argv,
+    z.object({
+      ...baseOptions,
+      tail: z.optional(
+        z.union([z.literal('all'), z.coerce.number().check(z.int(), z.nonnegative())], {
+          error: 'expected a number or "all"',
+        }),
+      ),
+      trim: z.optional(
+        z.union([z.literal('none'), z.coerce.number().check(z.int(), z.positive())], {
+          error: 'expected a positive integer or "none"',
+        }),
+      ),
+    }),
+  );
   rejectExtraArgs(positionals, 1, 'task stream');
   const cwd = resolveCwd(options);
   const job = requireJob(cwd, positionals[0]);
@@ -36,22 +50,12 @@ export async function commandStream(argv: string[]) {
   // How many prior log lines to replay before following. Default 1, so the
   // step in progress is visible; `--tail all` replays the whole transcript.
   const tailOpt = options.tail;
-  const tail =
-    tailOpt === undefined
-      ? 1
-      : tailOpt === 'all'
-        ? ALL
-        : Math.max(0, Number.parseInt(String(tailOpt), 10) || 0);
+  const tail = tailOpt === undefined ? 1 : tailOpt === 'all' ? ALL : tailOpt;
 
   // Per-step display cap, applied to text and JSON alike (the job log keeps
   // full entries). --trim <n> overrides the default; --trim none disables it.
   const trimOpt = options.trim;
-  const trim =
-    trimOpt === undefined
-      ? STEP_PREVIEW_CHARS
-      : trimOpt === 'none'
-        ? Number.MAX_SAFE_INTEGER
-        : Math.max(1, Number.parseInt(String(trimOpt), 10) || STEP_PREVIEW_CHARS);
+  const trim = trimOpt === undefined ? STEP_PREVIEW_CHARS : trimOpt === 'none' ? Number.MAX_SAFE_INTEGER : trimOpt;
 
   // Skip everything older than the last `tail` entries.
   let printed = Math.max(0, readJobLog(cwd, job.id, ALL).length - tail);

@@ -3,7 +3,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawnSync } from 'node:child_process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { flag, parseArgs, str } from '../lib/args.js';
 import { getClaudeAvailability } from '../lib/claude-core.js';
 import { clearUpdateCache, detectPackageManager } from '../lib/update-check.js';
 import { CLI_PATH, readManifestVersion, readVersion, resolveMarketplaceDir } from '../lib/runtime.js';
@@ -16,10 +18,10 @@ import {
 import { fail } from '../lib/ui.js';
 
 export async function commandUpgrade(argv: string[]) {
-  const { options } = parseArgs(argv, {
-    valueOptions: ['pm'],
-    booleanOptions: ['cli-only', 'plugins-only', 'codex', 'claude'],
-  });
+  const { options } = parseArgs(
+    argv,
+    z.object({ pm: str, 'cli-only': flag, 'plugins-only': flag, codex: flag, claude: flag }),
+  );
   const doCli = !options['plugins-only'];
   const doPlugins = !options['cli-only'];
 

@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, flag, parseArgs, str } from '../lib/args.js';
 import { enqueueSteer, readJob, resolveJobDir, waitForTerminalJob } from '../lib/state.js';
 import { steerTurn } from '../lib/codex-core.js';
 import { fail, outStyle, printJson, requireJob, resolveCwd } from '../lib/ui.js';
@@ -10,10 +12,10 @@ import { ACTIVE_STATUSES } from '../lib/types.js';
 import { commandTask } from './task.js';
 
 export async function commandSteer(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd', 'model', 'effort', 'permissions'],
-    booleanOptions: ['background', 'wait', 'json'],
-  });
+  const { options, positionals } = parseArgs(
+    argv,
+    z.object({ ...baseOptions, model: str, effort: str, permissions: str, background: flag, wait: flag }),
+  );
   const cwd = resolveCwd(options);
   const [reference, ...promptParts] = positionals;
   const prompt = promptParts.join(' ').trim();
@@ -58,7 +60,7 @@ export async function commandSteer(argv: string[]) {
     '--cwd',
     cwd,
     ...(job.agent ? ['--agent', job.agent] : []),
-    ...(options.model ? ['--model', options.model] : ['--model', job.model].filter(() => job.model)),
+    ...(options.model ? ['--model', options.model] : job.model ? ['--model', job.model] : []),
     ...(options.effort ? ['--effort', options.effort] : job.effort ? ['--effort', job.effort] : []),
     ...(options.permissions
       ? ['--permissions', options.permissions]

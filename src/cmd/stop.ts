@@ -1,15 +1,14 @@
 import process from 'node:process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, parseArgs } from '../lib/args.js';
 import { writeJob } from '../lib/state.js';
 import { interruptTurn } from '../lib/codex-core.js';
 import { outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
 
 export async function commandStop(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['json'],
-  });
+  const { options, positionals } = parseArgs(argv, z.object(baseOptions));
   rejectExtraArgs(positionals, 1, 'task stop');
   const cwd = resolveCwd(options);
   const job = requireJob(cwd, positionals[0]);

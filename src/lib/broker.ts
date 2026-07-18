@@ -13,7 +13,9 @@ import process from "node:process";
 
 import type { Socket } from "node:net";
 
-import { parseArgs } from "./args.js";
+import * as z from "zod/mini";
+
+import { parseArgs, str } from "./args.js";
 import { BROKER_BUSY_RPC_CODE, CodexAppServerClient, ProtocolError } from "./app-server.js";
 import { parseBrokerEndpoint } from "./broker-endpoint.js";
 
@@ -78,13 +80,7 @@ async function main() {
     throw new Error("Usage: node src/lib/broker.mjs serve --endpoint <value> [--cwd <path>] [--pid-file <path>]");
   }
 
-  const { options } = parseArgs(argv, {
-    valueOptions: ["cwd", "pid-file", "endpoint"]
-  });
-
-  if (!options.endpoint) {
-    throw new Error("Missing required --endpoint.");
-  }
+  const { options } = parseArgs(argv, z.object({ cwd: str, "pid-file": str, endpoint: z.string() }));
 
   const cwd = options.cwd ? path.resolve(process.cwd(), options.cwd) : process.cwd();
   const endpoint = String(options.endpoint);

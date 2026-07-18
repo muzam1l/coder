@@ -20,7 +20,9 @@ import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, flag, parseArgs, str } from '../lib/args.js';
 import {
   appendJobLog,
   claimSteers,
@@ -345,20 +347,23 @@ export async function commandTask(argv: string[]): Promise<void> {
         'instruction telling you to orchestrate via the coder CLI.',
     );
   }
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: [
-      'agent',
-      'model',
-      'effort',
-      'permissions',
-      'resume',
-      'cwd',
-      'host',
-      'name',
-      'system',
-    ],
-    booleanOptions: ['background', 'wait', 'json', 'simulate-approval'],
-  });
+  const { options, positionals } = parseArgs(
+    argv,
+    z.object({
+      ...baseOptions,
+      agent: str,
+      model: str,
+      effort: str,
+      permissions: str,
+      resume: str,
+      host: str,
+      name: str,
+      system: str,
+      background: flag,
+      wait: flag,
+      'simulate-approval': flag,
+    }),
+  );
   const cwd = resolveCwd(options);
   const prompt = positionals.join(' ').trim();
   if (!prompt) {
@@ -628,7 +633,7 @@ export async function commandTask(argv: string[]): Promise<void> {
 }
 
 export async function commandWorker(argv: string[]): Promise<void> {
-  const { options, positionals } = parseArgs(argv, { valueOptions: ['cwd'] });
+  const { options, positionals } = parseArgs(argv, z.object({ cwd: str }));
   const cwd = resolveCwd(options);
   const jobId = positionals[0];
   const job = readJob(cwd, jobId);

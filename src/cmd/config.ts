@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, flag, parseArgs } from '../lib/args.js';
 import { resolveWorkspaceRoot } from '../lib/state.js';
 import { loadConfig, resolveUserConfigFile, validateConfig } from '../lib/config.js';
 import { fail, outStyle, printJson, resolveCwd } from '../lib/ui.js';
@@ -14,10 +16,7 @@ import type { AgentConfig } from '../lib/types.js';
 // coder config unset <key>          -> remove an override
 // --workspace targets <repo>/coder.config.json instead of the user file.
 export async function commandConfig(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['workspace', 'json'],
-  });
+  const { options, positionals } = parseArgs(argv, z.object({ ...baseOptions, workspace: flag }));
   const cwd = resolveCwd(options);
   const [action = 'list', key, ...valueParts] = positionals;
   const targetFile = options.workspace

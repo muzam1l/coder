@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
 import process from 'node:process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, flag, parseArgs, str } from '../lib/args.js';
 import { archiveJob, findJob, listJobs } from '../lib/state.js';
 import { CLI_PATH } from '../lib/runtime.js';
 import { fail, outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
@@ -25,7 +27,7 @@ export function spawnArchiveSweep(cwd: string, jobIds: string[]) {
 
 // Hidden-command body invoked detached by spawnArchiveSweep.
 export async function commandArchiveSweep(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, { valueOptions: ['cwd'] });
+  const { options, positionals } = parseArgs(argv, z.object({ cwd: str }));
   const cwd = resolveCwd(options);
   for (const id of positionals) {
     const job = findJob(cwd, id);
@@ -38,10 +40,7 @@ export async function commandArchiveSweep(argv: string[]) {
 // coder task archive <task-id>     -> hide one task from the default list
 // coder task archive --all-stopped -> archive every stopped (finished) task at once
 export async function commandArchive(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['all-stopped', 'json'],
-  });
+  const { options, positionals } = parseArgs(argv, z.object({ ...baseOptions, 'all-stopped': flag }));
   rejectExtraArgs(positionals, 1, 'task archive');
   const cwd = resolveCwd(options);
 

@@ -3,7 +3,7 @@
  * defaults -> ~/.coder/config.json -> <workspace>/coder.config.json -> CLI flags.
  */
 import fs from 'node:fs';
-import { z } from 'zod';
+import * as z from 'zod/mini';
 import path from 'node:path';
 import { resolveCoderHome, resolveWorkspaceRoot } from './state.js';
 
@@ -148,41 +148,39 @@ const engineSchema = z.enum(['codex', 'claude']);
 const agentSchema = z.enum(['codex', 'claude', 'custom']);
 const effortSchema = z.enum(['low', 'medium', 'high']);
 const permissionSchema = z.enum(['read-only', 'workspace-write', 'auto']);
-const agentEntrySchema = z
-  .strictObject({
-    model: z.string().min(1),
+const agentEntrySchema = z.partial(
+  z.strictObject({
+    model: z.string().check(z.minLength(1)),
     effort: effortSchema,
     permissions: permissionSchema,
-  })
-  .partial();
+  }),
+);
 const customModelSchema = z.strictObject({
-  baseUrl: z.string().url(),
-  model: z.string().min(1),
-  envKey: z.string().min(1).optional(),
+  baseUrl: z.url(),
+  model: z.string().check(z.minLength(1)),
+  envKey: z.optional(z.string().check(z.minLength(1))),
   // 'chat' (the default) is translated for codex through the built-in
   // responses->chat bridge; 'responses' passes straight through. `coder model`
   // detects this automatically; the field remains as a manual override.
-  wireApi: z.enum(['chat', 'responses']).optional(),
+  wireApi: z.optional(z.enum(['chat', 'responses'])),
 });
 const approvalsSchema = z.strictObject({
-  escalationTimeoutMs: z.number().positive(),
+  escalationTimeoutMs: z.number().check(z.positive()),
   allowedNetworkHosts: z.array(z.string()),
 });
 /** The merged, effective shape (everything present after DEFAULT_CONFIG). */
 const effectiveConfigSchema = z.strictObject({
-  chain: z.array(agentSchema).min(1),
-  agents: z
-    .strictObject({ codex: agentEntrySchema, claude: agentEntrySchema, custom: agentEntrySchema })
-    .partial(),
-  models: z
-    .record(z.string().regex(/^[a-z][a-z0-9-]*$/, 'lowercase kebab-case'), customModelSchema)
-    .optional(),
+  chain: z.array(agentSchema).check(z.minLength(1)),
+  agents: z.partial(
+    z.strictObject({ codex: agentEntrySchema, claude: agentEntrySchema, custom: agentEntrySchema }),
+  ),
+  models: z.optional(
+    z.record(z.string().check(z.regex(/^[a-z][a-z0-9-]*$/, 'lowercase kebab-case')), customModelSchema),
+  ),
   approvals: approvalsSchema,
 });
 /** What a single config file may contain: any strict subset. */
-const configSchema = effectiveConfigSchema
-  .extend({ approvals: approvalsSchema.partial() })
-  .partial();
+const configSchema = z.partial(z.extend(effectiveConfigSchema, { approvals: z.partial(approvalsSchema) }));
 
 export type Engine = z.infer<typeof engineSchema>;
 export type Agent = z.infer<typeof agentSchema>;

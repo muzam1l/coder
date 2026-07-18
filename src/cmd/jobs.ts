@@ -1,7 +1,9 @@
 import path from 'node:path';
 import process from 'node:process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { flag, parseArgs, str } from '../lib/args.js';
 import {
   lastActivityAt,
   listArchivedJobs,
@@ -33,12 +35,26 @@ const AUTO_ARCHIVE_MS = 5 * 60_000;
 // coder task list --stopped    -> only the recently stopped ones
 // coder task list --archived   -> archived tasks (everything older)
 export async function commandJobs(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd', 'dir'],
-    booleanOptions: ['json', 'running', 'stopped', 'archived'],
-  });
+  const { options, positionals } = parseArgs(
+    argv,
+    z.object({
+      cwd: str,
+      dir: str,
+      limit: z.optional(
+        z.union([z.literal('all'), z.coerce.number().check(z.int(), z.positive())], {
+          error: 'expected a positive integer or "all"',
+        }),
+      ),
+      json: flag,
+      running: flag,
+      stopped: flag,
+      archived: flag,
+    }),
+  );
   rejectExtraArgs(positionals, 0, 'task list');
   const cwd = resolveCwd(options);
+  // --limit all matches the default (everything); accepted so scripts can be explicit.
+  const limit = options.limit === 'all' ? undefined : options.limit;
 
   const isStopped = (job: Job) => TERMINAL_STATUSES.includes(job.status);
 
@@ -69,6 +85,24 @@ export async function commandJobs(argv: string[]) {
   if (dir) {
     const wanted = resolveWorkspaceRoot(path.resolve(String(dir)));
     jobs = jobs.filter(job => job.cwd && resolveWorkspaceRoot(job.cwd) === wanted);
+  }
+
+  // The default (recent) view surfaces what needs attention: failed tasks first,
+  // then running, with completed last — so --limit trims completed tasks first.
+  if (!options.archived && !options.running && !options.stopped) {
+    const rank = (job: Job) =>
+      job.status === 'failed'
+        ? 0
+        : ACTIVE_STATUSES.includes(job.status)
+          ? 1
+          : job.status === 'completed'
+            ? 3
+            : 2;
+    jobs = [...jobs].sort((a, b) => rank(a) - rank(b));
+  }
+  const clipped = limit !== undefined ? Math.max(0, jobs.length - limit) : 0;
+  if (limit !== undefined) {
+    jobs = jobs.slice(0, limit);
   }
 
   const tasks = jobs.map(job => ({
@@ -103,7 +137,7 @@ export async function commandJobs(argv: string[]) {
     const hints: string[] = [];
     if (!options.archived) {
       const archived = listArchivedJobs(cwd, { migrate: false }).length;
-      if (archived) hints.push(`${archived} archived: coder task list --archived`);
+      if (archived) hints.push(`${archived} archived: coder task list --archived [--limit N]`);
     }
     if (hints.length) {
       process.stdout.write(`\n${formatHints(hints, outStyle)}\n`);
@@ -125,10 +159,14 @@ export async function commandJobs(argv: string[]) {
     );
   }
 
+  if (clipped) {
+    process.stdout.write(s.dim(`\n... ${clipped} more not shown (--limit ${limit})\n`));
+  }
+
   const hints = ['Result: coder task result <task-id>'];
   // The default view only shows recent tasks; point at the archive.
   if (!options.archived) {
-    hints.push('Older tasks: coder task list --archived');
+    hints.push('Older tasks: coder task list --archived [--limit N]');
   }
   process.stdout.write(`\n${formatHints(hints, s)}\n`);
 }

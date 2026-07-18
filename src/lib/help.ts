@@ -93,13 +93,14 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
       'task list [--running|--stopped|--archived]',
       'list recent tasks (running + just stopped)',
     ],
-    usage: 'coder task list [--running] [--stopped] [--archived]',
+    usage: 'coder task list [--running] [--stopped] [--archived [--limit N]]',
     summary:
       'List recent tasks across all workspaces, most recent first: running tasks plus\nones stopped within the last 2 minutes. Older stopped tasks auto-archive and\nmove to --archived. Shortcut: `coder list`.',
     flags: [
       ['--running', 'show only running tasks'],
       ['--stopped', 'show only recently stopped tasks (not yet archived)'],
       ['--archived', 'show only archived tasks (auto-archived or via task archive)'],
+      ['--limit <n|all>', 'show at most n tasks (default all)'],
       ['--dir <dir>', 'only tasks launched in that workspace'],
       JSON_FLAG,
     ],
@@ -160,7 +161,7 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['task archive <task-id> | --all-stopped', 'hide a task (or all stopped) from the list'],
     usage: 'coder task archive <task-id> | coder task archive --all-stopped',
     summary:
-      'Archive a task session so it drops out of the default list (see it again with\n`coder task list --archived`). Pass --all-stopped to archive every finished task.',
+      'Archive a task session so it drops out of the default list (see it again with\n`coder task list --archived [--limit N]`). Pass --all-stopped to archive every\nfinished task.',
     flags: [['--all-stopped', 'archive every stopped (finished) task'], JSON_FLAG, CWD_FLAG],
     seeAlso: 'task list · task delete',
   },

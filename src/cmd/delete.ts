@@ -1,6 +1,8 @@
 import process from 'node:process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, flag, parseArgs } from '../lib/args.js';
 import { deleteJob, listArchivedJobs } from '../lib/state.js';
 import { fail, outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
 import type { Job } from '../lib/types.js';
@@ -23,10 +25,7 @@ function deleteSessionFor(job: Job) {
 // coder task delete <task-id>      -> remove one task's session from disk
 // coder task delete --all-archived -> remove every archived task at once
 export async function commandDelete(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd'],
-    booleanOptions: ['all-archived', 'json'],
-  });
+  const { options, positionals } = parseArgs(argv, z.object({ ...baseOptions, 'all-archived': flag }));
   rejectExtraArgs(positionals, 1, 'task delete');
   const cwd = resolveCwd(options);
 

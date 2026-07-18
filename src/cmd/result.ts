@@ -2,7 +2,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
-import { parseArgs } from '../lib/args.js';
+import * as z from 'zod/mini';
+
+import { baseOptions, flag, parseArgs } from '../lib/args.js';
 import { lastActivityAt, readJobLog, resolveJobDir } from '../lib/state.js';
 import { waitForTaskAttention } from '../lib/wait.js';
 import { listPendingApprovals } from '../lib/approvals.js';
@@ -28,10 +30,18 @@ import { ACTIVE_STATUSES } from '../lib/types.js';
 // status (result pending); once finished it shows the answer. --wait blocks until
 // then. Defaults to the most recent task.
 export async function commandResult(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, {
-    valueOptions: ['cwd', 'tail'],
-    booleanOptions: ['json', 'wait'],
-  });
+  const { options, positionals } = parseArgs(
+    argv,
+    z.object({
+      ...baseOptions,
+      tail: z.optional(
+        z.union([z.literal('all'), z.coerce.number().check(z.int(), z.nonnegative())], {
+          error: 'expected a number or "all"',
+        }),
+      ),
+      wait: flag,
+    }),
+  );
   rejectExtraArgs(positionals, 1, 'task result');
   const cwd = resolveCwd(options);
   let job = requireJob(cwd, positionals[0]);
@@ -49,11 +59,7 @@ export async function commandResult(argv: string[]) {
 
   // --tail <n|all>: include the last n progress-log steps (same as stream --tail).
   const tail =
-    options.tail === undefined
-      ? 0
-      : options.tail === 'all'
-        ? Number.MAX_SAFE_INTEGER
-        : Math.max(0, Number.parseInt(String(options.tail), 10) || 0);
+    options.tail === undefined ? 0 : options.tail === 'all' ? Number.MAX_SAFE_INTEGER : options.tail;
   const steps = tail > 0 ? readJobLog(cwd, job.id, tail) : [];
 
   const pending = listPendingApprovals(resolveJobDir(cwd, job.id)).filter(a => !a.response);
