@@ -1,16 +1,19 @@
 /**
- * Responses -> Chat Completions bridge for custom models. Codex (>= 0.144)
- * only speaks the OpenAI Responses API, while most OpenAI-compatible endpoints
- * (Ollama, llama.cpp, vLLM, OpenRouter, ...) only speak chat completions. The
- * bridge is a loopback HTTP server, alive for the duration of one turn: codex
- * POSTs /responses to it, it forwards a translated /chat/completions request
- * to the user's endpoint (injecting the API key from the configured env var)
- * and streams the reply back as Responses SSE events.
+ * Loopback bridge for custom models, alive for the duration of one turn.
+ * Codex (>= 0.144) only speaks the OpenAI Responses API, and resolves a
+ * provider env_key in its own process env — which, under the shared broker,
+ * is frozen from whenever the broker was first spawned. So every custom model
+ * goes through the bridge: it runs in the worker (whose env is the caller's,
+ * doppler and friends included) and injects the API key itself.
+ *
+ * Chat endpoints (Ollama, llama.cpp, vLLM, OpenRouter, ...) get a translated
+ * /chat/completions request with the reply streamed back as Responses SSE
+ * events; native Responses endpoints get a verbatim passthrough.
  */
 import http from 'node:http';
 import process from 'node:process';
 
-import { normalizeBaseUrl } from './config.js';
+import { endpointCandidates } from './config.js';
 import type { CustomModelConfig } from './types.js';
 
 export interface ChatBridge {
@@ -239,9 +242,37 @@ class StreamTranslator {
  * accepts POSTs to any path ending in /responses (providers and codex versions
  * vary the prefix) and rejects everything else.
  */
-export async function startChatBridge(entry: CustomModelConfig): Promise<ChatBridge> {
-  const target = `${normalizeBaseUrl(entry.baseUrl)}/chat/completions`;
+export async function startChatBridge(
+  entry: CustomModelConfig,
+  wireApi: 'chat' | 'responses' = 'chat',
+): Promise<ChatBridge> {
+  // A bare-host baseUrl may serve the API under /v1 (endpointCandidates yields
+  // both); a 404 on one candidate falls through to the next, and the first
+  // candidate that responds with anything else is locked in for the turn.
+  const passthrough = wireApi === 'responses';
+  const targets = endpointCandidates(entry.baseUrl, passthrough ? 'responses' : 'chat/completions');
+  let resolvedTarget: string | null = null;
   const apiKey = entry.envKey ? process.env[entry.envKey] : undefined;
+
+  async function postUpstream(payload: string): Promise<Response> {
+    const candidates = resolvedTarget ? [resolvedTarget] : targets;
+    let last: Response | null = null;
+    for (const url of candidates) {
+      last = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
+        },
+        body: payload,
+      });
+      if (last.status !== 404) {
+        resolvedTarget = url;
+        return last;
+      }
+    }
+    return last!;
+  }
 
   const server = http.createServer((req, res) => {
     if (req.method !== 'POST' || !req.url?.replace(/\/+$/, '').endsWith('/responses')) {
@@ -261,14 +292,23 @@ export async function startChatBridge(entry: CustomModelConfig): Promise<ChatBri
         return;
       }
       try {
-        const upstream = await fetch(target, {
-          method: 'POST',
-          headers: {
-            'content-type': 'application/json',
-            ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-          },
-          body: JSON.stringify(toChatRequest(parsed)),
-        });
+        // Passthrough (native Responses endpoint): forward verbatim, relay the
+        // reply bytes and status as-is — the bridge only adds auth.
+        if (passthrough) {
+          const upstream = await postUpstream(body);
+          res.writeHead(upstream.status, {
+            'content-type': upstream.headers.get('content-type') ?? 'application/json',
+            'cache-control': 'no-store',
+          });
+          if (upstream.body) {
+            for await (const chunk of upstream.body as unknown as AsyncIterable<Uint8Array>) {
+              res.write(chunk);
+            }
+          }
+          res.end();
+          return;
+        }
+        const upstream = await postUpstream(JSON.stringify(toChatRequest(parsed)));
         if (!upstream.ok || !upstream.body) {
           const detail = await upstream.text().catch(() => '');
           res.writeHead(upstream.status, { 'content-type': 'application/json' });

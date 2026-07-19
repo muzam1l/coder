@@ -13,12 +13,14 @@ import { getCodexAvailability } from '../lib/codex-core.js';
 import {
   CLAUDE_MODELS,
   CODEX_MODELS,
+  endpointCandidates,
   loadConfig,
   normalizeBaseUrl,
   resolveUserConfigFile,
   validateConfig,
 } from '../lib/config.js';
 import { ensureCodexInstalled } from '../lib/plugins.js';
+import { detectWireApi } from '../lib/wire.js';
 import { resolveWorkspaceRoot } from '../lib/state.js';
 import { fail, outStyle, printJson, resolveCwd } from '../lib/ui.js';
 import type { CustomModelConfig } from '../lib/types.js';
@@ -44,37 +46,45 @@ interface ProbeResult {
  * model listing is best-effort (some gateways don't implement /models).
  */
 async function probeEndpoint(entry: CustomModelConfig): Promise<ProbeResult> {
-  const url = `${entry.baseUrl.replace(/\/+$/, '')}/models`;
   const key = entry.envKey ? process.env[entry.envKey] : undefined;
-  try {
-    const response = await fetch(url, {
-      headers: key ? { Authorization: `Bearer ${key}` } : {},
-      signal: AbortSignal.timeout(5_000),
-    });
-    if (!response.ok) {
-      // No /models route is fine (not every gateway implements it); any other
-      // failure (401/403/5xx) means the endpoint itself needs attention.
-      return response.status === 404
-        ? { reachable: true, modelListed: null, detail: 'endpoint reachable (no model list to verify against)' }
-        : { reachable: false, modelListed: null, detail: `${url} -> HTTP ${response.status}` };
+  // A bare host may serve the API under /v1; a 404 falls through to the next
+  // candidate, and only an all-candidates 404 counts as "no /models route".
+  const urls = endpointCandidates(entry.baseUrl, 'models');
+  let lastFailure: ProbeResult | null = null;
+  for (const url of urls) {
+    try {
+      const response = await fetch(url, {
+        headers: key ? { Authorization: `Bearer ${key}` } : {},
+        signal: AbortSignal.timeout(5_000),
+      });
+      if (!response.ok) {
+        // No /models route is fine (not every gateway implements it); any other
+        // failure (401/403/5xx) means the endpoint itself needs attention.
+        lastFailure =
+          response.status === 404
+            ? { reachable: true, modelListed: null, detail: 'endpoint reachable (no model list to verify against)' }
+            : { reachable: false, modelListed: null, detail: `${url} -> HTTP ${response.status}` };
+        continue;
+      }
+      const body = (await response.json().catch(() => null)) as { data?: { id?: string }[] } | null;
+      const ids = Array.isArray(body?.data) ? body.data.map(m => m.id) : null;
+      if (!ids) {
+        return { reachable: true, modelListed: null, detail: 'endpoint reachable' };
+      }
+      const listed = ids.includes(entry.model);
+      return {
+        reachable: true,
+        modelListed: listed,
+        detail: listed
+          ? `endpoint reachable; model "${entry.model}" listed`
+          : `endpoint reachable, but "${entry.model}" is not in its model list`,
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastFailure = { reachable: false, modelListed: null, detail: `${url} unreachable (${message})` };
     }
-    const body = (await response.json().catch(() => null)) as { data?: { id?: string }[] } | null;
-    const ids = Array.isArray(body?.data) ? body.data.map(m => m.id) : null;
-    if (!ids) {
-      return { reachable: true, modelListed: null, detail: 'endpoint reachable' };
-    }
-    const listed = ids.includes(entry.model);
-    return {
-      reachable: true,
-      modelListed: listed,
-      detail: listed
-        ? `endpoint reachable; model "${entry.model}" listed`
-        : `endpoint reachable, but "${entry.model}" is not in its model list`,
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { reachable: false, modelListed: null, detail: `${url} unreachable (${message})` };
   }
+  return lastFailure!;
 }
 
 function writeModels(
@@ -97,29 +107,6 @@ function writeModels(
   }
   fs.mkdirSync(path.dirname(targetFile), { recursive: true });
   fs.writeFileSync(targetFile, `${JSON.stringify(current, null, 2)}\n`, 'utf8');
-}
-
-/**
- * Does the endpoint natively speak the Responses API? POST /responses and see
- * whether the route exists (auth/validation errors still prove the route). If
- * it does, codex talks to it directly; otherwise the chat bridge translates.
- */
-async function detectResponsesApi(entry: CustomModelConfig): Promise<boolean> {
-  const key = entry.envKey ? process.env[entry.envKey] : undefined;
-  try {
-    const response = await fetch(`${entry.baseUrl.replace(/\/+$/, '')}/responses`, {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(key ? { Authorization: `Bearer ${key}` } : {}),
-      },
-      body: JSON.stringify({ model: entry.model, input: [], stream: false }),
-      signal: AbortSignal.timeout(5_000),
-    });
-    return response.status !== 404 && response.status !== 405 && response.status !== 501;
-  } catch {
-    return false;
-  }
 }
 
 // Flags shared by add/update/remove/list.
@@ -182,10 +169,16 @@ async function saveModel(
   const s = outStyle;
   // Wire protocol is detected, not asked: native Responses endpoints get
   // codex directly, chat-completions endpoints go through the bridge. The
-  // config field stays editable for gateways that mislead the probe.
-  const nativeResponses = await detectResponsesApi(entry);
-  if (nativeResponses) {
-    entry.wireApi = 'responses';
+  // config field stays editable for gateways that mislead the probe. A
+  // definitive answer is written explicitly (so runtime never re-probes);
+  // codex hits `<baseUrl>/responses` directly, so the stored base must be the
+  // one the route was actually found at (e.g. with /v1 appended). When nothing
+  // answered, the field stays unset and runtime detects on first use.
+  const detected = await detectWireApi(entry);
+  const nativeResponses = detected?.wireApi === 'responses';
+  if (detected) {
+    entry.wireApi = detected.wireApi;
+    entry.baseUrl = detected.baseUrl ?? entry.baseUrl;
   } else {
     delete entry.wireApi;
   }

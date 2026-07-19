@@ -1,7 +1,7 @@
 {
   "name": "coder",
   "displayName": "Coder",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "description": "Delegate coding tasks to supervised Coder subagents running on Codex, Claude, or any OpenAI-compatible model. Your main context stays clean.",
   "author": {
     "name": "muzam1l"

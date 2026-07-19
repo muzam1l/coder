@@ -50,9 +50,11 @@ import {
   CODEX_MODELS,
   PERMISSION_MODES,
   loadConfig,
+  persistModelPatch,
   resolveCodexModel,
   resolveCustomModel,
 } from '../lib/config.js';
+import { detectWireApi } from '../lib/wire.js';
 import { fail, formatTokens, outStyle, printJson, resolveCwd, surfaceApproval } from '../lib/ui.js';
 import { CLI_PATH } from '../lib/runtime.js';
 import type {
@@ -209,12 +211,34 @@ async function executeCodexTurn(
 
   // A custom-model alias runs on codex pointed at the user's endpoint; the
   // provider entry travels as per-thread config overrides. Chat-completions
-  // endpoints (the default) get a per-turn responses->chat bridge in front.
-  const customEntry = job.model ? config.models?.[job.model] : undefined;
-  const bridge =
-    customEntry && (customEntry.wireApi ?? 'chat') === 'chat'
-      ? await startChatBridge(customEntry)
-      : null;
+  // endpoints get a per-turn responses->chat bridge in front.
+  let customEntry = job.model ? config.models?.[job.model] : undefined;
+  // `coder model add` writes wireApi (and the resolved base URL) explicitly; a
+  // missing field means a hand-written entry, so run the same detection here
+  // and save it back so later turns skip the probe. On no answer (endpoint
+  // down), fall back to chat for this turn without persisting.
+  if (customEntry && !customEntry.wireApi && job.model) {
+    const detected = await detectWireApi(customEntry);
+    if (detected) {
+      customEntry = { ...customEntry, ...detected };
+      config.models![job.model] = customEntry;
+      persistModelPatch(cwd, job.model, detected);
+      appendJobLog(cwd, job.id, {
+        kind: 'info',
+        message: `detected wire api for ${job.model}: ${detected.wireApi} @ ${customEntry.baseUrl}`,
+      } as JobLogEntry);
+    }
+  }
+  // Every custom model goes through the loopback bridge: it runs here in the
+  // worker (whose env is the caller's) and injects the API key itself —
+  // codex's own env_key would resolve inside the shared broker, whose env is
+  // frozen from whenever it was first spawned.
+  if (customEntry?.envKey && !process.env[customEntry.envKey]) {
+    throw new Error(`Missing environment variable: \`${customEntry.envKey}\`.`);
+  }
+  const bridge = customEntry
+    ? await startChatBridge(customEntry, customEntry.wireApi ?? 'chat')
+    : null;
   const custom = resolveCustomModel(config, job.model, bridge ?? undefined);
   try {
     const result = await runTurn(cwd, {

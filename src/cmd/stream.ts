@@ -7,6 +7,7 @@ import * as z from 'zod/mini';
 import { baseOptions, parseArgs } from '../lib/args.js';
 import { readJob, readJobLog, reconcileJob, resolveJobDir } from '../lib/state.js';
 import {
+  finalMessageLine,
   formatTokens,
   outStyle,
   printJson,
@@ -100,9 +101,8 @@ export async function commandStream(argv: string[]) {
     printJson({ taskId: job.id, status: current.status, result });
   } else {
     const done = current.status === 'completed';
-    process.stdout.write(
-      `\n${result?.finalMessage || (done ? '(no final message)' : `(task ${current.status})`)}\n`,
-    );
+    const fallback = done ? '(no final message)' : `(task ${current.status})`;
+    process.stdout.write(`\n${finalMessageLine(result, current.error, fallback)}\n`);
     const tokensNote = result?.tokens
       ? ` tokens=${formatTokens(result.tokens, result.model ?? current.model)}`
       : '';

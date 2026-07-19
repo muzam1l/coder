@@ -266,6 +266,62 @@ export function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.replace(/\/+$/, '').replace(/\/(chat\/completions|completions|responses)$/, '');
 }
 
+/**
+ * Persist a patch onto an existing custom-model entry, in whichever config
+ * file defines it (workspace first — it wins the merge). Used to save back a
+ * runtime wire-api detection for hand-written entries so later turns skip the
+ * probe. A no-op when no file defines the entry, or the patch would make the
+ * file invalid.
+ */
+export function persistModelPatch(
+  cwd: string,
+  alias: string,
+  patch: Partial<CustomModelConfig>,
+): boolean {
+  const files = [
+    path.join(resolveWorkspaceRoot(cwd), 'coder.config.json'),
+    resolveUserConfigFile(),
+  ];
+  for (const filePath of files) {
+    let raw: any;
+    try {
+      raw = readJsonIfExists(filePath);
+    } catch {
+      continue;
+    }
+    if (!raw?.models?.[alias]) {
+      continue;
+    }
+    Object.assign(raw.models[alias], patch);
+    if (validateConfig(raw).length) {
+      return false;
+    }
+    fs.writeFileSync(filePath, `${JSON.stringify(raw, null, 2)}\n`, 'utf8');
+    return true;
+  }
+  return false;
+}
+
+/** Did the user paste a full endpoint URL rather than an API base? */
+export function hasExplicitEndpoint(baseUrl: string): boolean {
+  return /\/(chat\/completions|completions|responses)\/*$/.test(baseUrl);
+}
+
+/**
+ * Candidate URLs for an API route, most-likely first. A bare host (e.g.
+ * `https://ai-gateway.vercel.sh`) usually serves the API under /v1, so we try
+ * `<base>/<route>` then `<base>/v1/<route>`. When the user supplied a full
+ * endpoint path, or the base already names a version segment, there is exactly
+ * one candidate — a failure there is theirs to fix, not ours to guess around.
+ */
+export function endpointCandidates(baseUrl: string, route: string): string[] {
+  const base = normalizeBaseUrl(baseUrl);
+  if (hasExplicitEndpoint(baseUrl) || /\/v\d+(alpha|beta)?$/.test(base)) {
+    return [`${base}/${route}`];
+  }
+  return [`${base}/${route}`, `${base}/v1/${route}`];
+}
+
 /** Codex-engine overrides for one custom model: model id, provider id, config. */
 export interface CustomModelResolution {
   model: string;

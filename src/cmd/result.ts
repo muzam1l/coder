@@ -11,6 +11,7 @@ import { listPendingApprovals } from '../lib/approvals.js';
 import {
   STALL_MS,
   ageMs,
+  finalMessageLine,
   formatAge,
   formatHints,
   formatTokens,
@@ -132,11 +133,7 @@ export async function commandResult(argv: string[]) {
   }
   lines.push('');
   if (result) {
-    const errorMessage = result.error?.message ?? job.error;
-    lines.push(
-      result.finalMessage ||
-        (errorMessage ? `${s.red('error:')} ${errorMessage}` : '(no final message)'),
-    );
+    lines.push(finalMessageLine(result, job.error, '(no final message)', s));
   } else if (running) {
     lines.push(
       s.dim(

@@ -99,6 +99,21 @@ export function formatTokens(tokens: TokenUsage, model?: string | null): string 
 }
 
 // How much of the task prompt the text views show (full prompt is in --json).
+/**
+ * The final-answer line for a finished task: the final message when there is
+ * one, else the recorded error (result's, falling back to the job's), else the
+ * caller's placeholder.
+ */
+export function finalMessageLine(
+  result: { finalMessage?: string; error?: { message?: string } } | null | undefined,
+  jobError: string | undefined,
+  fallback: string,
+  style: Style = outStyle,
+): string {
+  const errorMessage = result?.error?.message ?? jobError;
+  return result?.finalMessage || (errorMessage ? `${style.red('error:')} ${errorMessage}` : fallback);
+}
+
 export const PROMPT_PREVIEW_CHARS = 500;
 
 // Dim, indented prompt block for result/stream: 'prompt:' plus the prompt's
