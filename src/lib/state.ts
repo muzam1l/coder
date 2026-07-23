@@ -9,6 +9,20 @@ import { TERMINAL_STATUSES } from "./types.js";
 
 const CODER_HOME_ENV = "CODER_HOME";
 
+// Task/run ids come straight from CLI positionals and SDK args and are joined
+// into state paths — reject anything that could traverse out of the state root.
+const VALID_ID = /^[a-z0-9][a-z0-9_-]*$/i;
+
+export function isValidId(id: string): boolean {
+  return VALID_ID.test(id);
+}
+
+export function assertValidId(id: string, what: string): void {
+  if (!isValidId(id)) {
+    throw new Error(`Invalid ${what} "${id}".`);
+  }
+}
+
 export function resolveCoderHome(): string {
   return path.resolve(process.env[CODER_HOME_ENV] || path.join(os.homedir(), ".coder"));
 }
@@ -69,6 +83,10 @@ export function resolveJobsDir(cwd: string): string {
   return path.join(resolveStateDir(cwd), "jobs");
 }
 
+// Stopped tasks (and flow runs) linger in the recent view this long, then move
+// to the archived view. Shared by `coder list` and `coder flow list`.
+export const AUTO_ARCHIVE_MS = 10 * 60_000;
+
 // Archived jobs live in a separate bin, so the default list only ever scans
 // the (tiny) active bin instead of every task ever run.
 export function resolveArchiveDir(cwd: string): string {
@@ -76,6 +94,7 @@ export function resolveArchiveDir(cwd: string): string {
 }
 
 export function resolveJobDir(cwd: string, jobId: string): string {
+  assertValidId(jobId, "task id");
   const globalDir = path.join(resolveJobsDir(cwd), jobId);
   if (fs.existsSync(path.join(globalDir, "job.json"))) {
     return globalDir;
@@ -128,7 +147,7 @@ export function archiveJob(cwd: string, job: Job): Job {
 
 export function generateJobId(): string {
   const random = Math.random().toString(36).slice(2, 8);
-  return `coder-${Date.now().toString(36)}-${random}`;
+  return `task-${Date.now().toString(36)}-${random}`;
 }
 
 export function writeJob(cwd: string, jobId: string, patch: Partial<Job>): Job {
@@ -152,6 +171,10 @@ function normalizeJob(job: Job): Job {
 }
 
 export function readJob(cwd: string, jobId: string): Job | null {
+  // A lookup by user-supplied reference: a malformed id is just "not found".
+  if (!isValidId(jobId)) {
+    return null;
+  }
   const jobFile = path.join(resolveJobDir(cwd, jobId), "job.json");
   if (!fs.existsSync(jobFile)) {
     return null;
@@ -188,8 +211,23 @@ function isPidAlive(pid?: number | null): boolean {
 
 // Epoch ms when the process holding `pid` started, or null if unknown (process
 // gone, or `ps` unavailable e.g. on Windows). Used to tell our worker apart from
-// an unrelated process that later recycled the same pid.
-function processStartMs(pid: number): number | null {
+// an unrelated process that later recycled the same pid. Briefly memoized: a
+// start time never changes for a live pid, and one `coder list` (or a flow
+// polling its tasks) would otherwise spawn a synchronous `ps` per running job.
+const startMsCache = new Map<number, { at: number; value: number | null }>();
+const START_MS_TTL = 5_000;
+
+export function processStartMs(pid: number): number | null {
+  const cached = startMsCache.get(pid);
+  if (cached && Date.now() - cached.at < START_MS_TTL) {
+    return cached.value;
+  }
+  const value = queryStartMs(pid);
+  startMsCache.set(pid, { at: Date.now(), value });
+  return value;
+}
+
+function queryStartMs(pid: number): number | null {
   try {
     const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",

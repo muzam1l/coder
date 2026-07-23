@@ -21,7 +21,83 @@ import {
   type PluginResult,
 } from '../lib/plugins.js';
 import { fail, printJson, resolveCwd } from '../lib/ui.js';
-import type { Agent } from '../lib/types.js';
+import type { Agent, CoderConfig } from '../lib/types.js';
+
+export interface SetupHostReport {
+  codex: { available: boolean; detail: string; auth: string; loggedIn: boolean };
+  codexUpdate?: ReturnType<typeof ensureCodexUpToDate>;
+  claude: { available: boolean; detail: string; auth: string; loggedIn: boolean };
+  configFile: string;
+  runtime: string;
+  claudePlugin?: PluginResult;
+  agentsSkill?: PluginResult;
+  config: CoderConfig;
+  ready: boolean;
+}
+
+// Print-free core: probe engines, seed the chain, install requested host plugins.
+// It performs the real side effects (installs, chain seeding) - just no output.
+export async function setupHostCore(
+  cwd: string,
+  opts: { claude?: boolean; codex?: boolean; agents?: boolean } = {},
+): Promise<SetupHostReport> {
+  let availability = getCodexAvailability(cwd);
+  const codexUpdate = ensureCodexUpToDate(availability);
+  if (codexUpdate?.updated) {
+    // Re-read so the rest of setup reflects the freshly-installed codex.
+    availability = getCodexAvailability(cwd);
+  }
+  const auth = availability.available
+    ? await getCodexAuthStatus(cwd)
+    : { loggedIn: false, detail: availability.detail };
+  const claude = getClaudeAvailability();
+  const claudeAuth = claude.available
+    ? getClaudeAuthStatus()
+    : { loggedIn: false, detail: claude.detail };
+
+  const configFile = resolveUserConfigFile();
+  if (!fs.existsSync(configFile)) {
+    // Seed the chain from what's installed; codex-first when neither is present.
+    const chain: Agent[] = availability.available
+      ? ['codex', 'claude']
+      : claude.available
+        ? ['claude', 'codex']
+        : ['codex', 'claude'];
+    writeUserConfig({ ...DEFAULT_CONFIG, chain });
+  }
+
+  const marketplaceDir = resolveMarketplaceDir();
+  const claudePlugin = opts.claude ? installClaudePlugin(marketplaceDir) : null;
+  // Codex, Pi, OpenCode and other Agent Skills hosts read ~/.agents/skills.
+  const agentsPlugin = opts.agents || opts.codex ? installAgentsSkill(marketplaceDir) : null;
+
+  const config = loadConfig(cwd);
+  // Ready as long as one engine is usable: installed AND logged in.
+  const ready =
+    (availability.available && auth.loggedIn) || (claude.available && claudeAuth.loggedIn);
+
+  return {
+    codex: {
+      available: availability.available,
+      detail: availability.detail,
+      auth: auth.detail,
+      loggedIn: auth.loggedIn,
+    },
+    ...(codexUpdate ? { codexUpdate } : {}),
+    claude: {
+      available: claude.available,
+      detail: claude.detail,
+      auth: claudeAuth.detail,
+      loggedIn: claudeAuth.loggedIn,
+    },
+    configFile,
+    runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
+    ...(claudePlugin ? { claudePlugin } : {}),
+    ...(agentsPlugin ? { agentsSkill: agentsPlugin } : {}),
+    config,
+    ready,
+  };
+}
 
 export async function commandSetupHost(argv: string[]) {
   const { options, positionals } = parseArgs(
@@ -58,82 +134,29 @@ export async function commandSetupHost(argv: string[]) {
     process.stdout.write(`${head('Coder host setup')}\n\n`);
   }
 
-  let availability = getCodexAvailability(cwd);
-  const codexUpdate = ensureCodexUpToDate(availability);
-  if (codexUpdate?.updated) {
-    // Re-read so the rest of setup (auth, chain seeding, output) reflects the
-    // freshly-installed codex rather than the stale version we just replaced.
-    availability = getCodexAvailability(cwd);
-  }
-  const auth = availability.available
-    ? await getCodexAuthStatus(cwd)
-    : { loggedIn: false, detail: availability.detail };
-  const claude = getClaudeAvailability();
-  const claudeAuth = claude.available
-    ? getClaudeAuthStatus()
-    : { loggedIn: false, detail: claude.detail };
-
-  const configFile = resolveUserConfigFile();
-  if (!fs.existsSync(configFile)) {
-    // Seed the chain from what's installed. Codex is the recommended primary,
-    // but when it's absent Claude leads so tasks work without installing Codex.
-    // Neither installed => codex-first, so setup nudges the recommended install
-    // (the Claude opus-subagent fallback still runs meanwhile under a claude host).
-    const chain: Agent[] = availability.available
-      ? ['codex', 'claude']
-      : claude.available
-        ? ['claude', 'codex']
-        : ['codex', 'claude'];
-    writeUserConfig({ ...DEFAULT_CONFIG, chain });
-  }
-
-  const marketplaceDir = resolveMarketplaceDir();
-  const claudePlugin = options.claude ? installClaudePlugin(marketplaceDir) : null;
-
-  // Codex, Pi, OpenCode and other Agent Skills hosts read ~/.agents/skills.
-  const agentsPlugin =
-    options.agents || options.codex ? installAgentsSkill(marketplaceDir) : null;
-
-  const config = loadConfig(cwd);
-  // Ready as long as one engine is usable: installed AND logged in (codex or claude).
-  const ready =
-    (availability.available && auth.loggedIn) || (claude.available && claudeAuth.loggedIn);
+  const report = await setupHostCore(cwd, {
+    claude: options.claude,
+    codex: options.codex,
+    agents: options.agents,
+  });
 
   if (options.json) {
-    printJson({
-      codex: {
-        available: availability.available,
-        detail: availability.detail,
-        auth: auth.detail,
-        loggedIn: auth.loggedIn,
-      },
-      ...(codexUpdate ? { codexUpdate } : {}),
-      claude: {
-        available: claude.available,
-        detail: claude.detail,
-        auth: claudeAuth.detail,
-        loggedIn: claudeAuth.loggedIn,
-      },
-      configFile,
-      runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
-      ...(claudePlugin ? { claudePlugin } : {}),
-      ...(agentsPlugin ? { agentsSkill: agentsPlugin } : {}),
-      config,
-      ready,
-    });
+    printJson(report);
     return;
   }
 
+  const { codex, claude, codexUpdate, config, configFile, claudePlugin, agentsSkill, ready } =
+    report;
   const lines: string[] = [];
 
-  const codexLine = availability.available
-    ? auth.loggedIn
-      ? good(`codex   ${gray(`${availability.detail}; ${auth.detail}`)}`)
-      : bad(`codex   not logged in ${gray(`(${auth.detail})`)} - run: codex login`)
+  const codexLine = codex.available
+    ? codex.loggedIn
+      ? good(`codex   ${gray(`${codex.detail}; ${codex.auth}`)}`)
+      : bad(`codex   not logged in ${gray(`(${codex.auth})`)} - run: codex login`)
     : bad(`codex   CLI not installed - run: npm install -g @openai/codex`);
   const claudeLine = claude.available
-    ? claudeAuth.loggedIn
-      ? good(`claude  ${gray(`${claude.detail}; ${claudeAuth.detail}`)}`)
+    ? claude.loggedIn
+      ? good(`claude  ${gray(`${claude.detail}; ${claude.auth}`)}`)
       : bad(`claude  not logged in - run: claude auth login`)
     : bad(`claude  CLI not installed - run: npm install -g @anthropic-ai/claude-code`);
   lines.push(
@@ -144,9 +167,7 @@ export async function commandSetupHost(argv: string[]) {
   );
   if (codexUpdate?.updated) {
     lines.push(
-      good(
-        `codex   ${gray(`updated ${codexUpdate.from} -> ${availability.detail} (GPT-5.6 support)`)}`,
-      ),
+      good(`codex   ${gray(`updated ${codexUpdate.from} -> ${codex.detail} (GPT-5.6 support)`)}`),
     );
   } else if (codexUpdate) {
     lines.push(bad(`codex   ${codexUpdate.note}`));
@@ -165,8 +186,8 @@ export async function commandSetupHost(argv: string[]) {
   );
 
   const pluginSummaries: [string, PluginResult | null][] = [
-    ['claude plugin', claudePlugin],
-    ['agents skill ', agentsPlugin],
+    ['claude plugin', claudePlugin ?? null],
+    ['agents skill ', agentsSkill ?? null],
   ];
   for (const [label, plugin] of pluginSummaries) {
     if (plugin) {

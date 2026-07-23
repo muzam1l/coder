@@ -23,7 +23,8 @@ export function makeStyle(stream: NodeJS.WriteStream): Style {
     blue: text => paint('34', text),
     bold: text => paint('1', text),
     cyan: text => paint('36', text),
-    dim: text => paint('38;5;245', text),
+    dim: text => paint('38;5;246', text),
+    light: text => paint('38;5;249', text),
     green: text => paint('32', text),
     red: text => paint('31', text),
   };
@@ -54,7 +55,7 @@ export function fail(message: string, opts: FailOptions = {}): never {
   const code = typeof opts === 'number' ? opts : (opts.code ?? 1);
   const hint = typeof opts === 'object' ? opts.hint : null;
   const hints = hint == null ? [] : Array.isArray(hint) ? hint : [hint];
-  process.stderr.write(`${message}\n`);
+  process.stderr.write(`${errStyle.red(message)}\n`);
   if (hints.length) {
     process.stderr.write(`\n${formatHints(hints, errStyle)}\n`);
   }
@@ -63,6 +64,20 @@ export function fail(message: string, opts: FailOptions = {}): never {
 
 export function printJson(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+}
+
+// Human-view JSON: keys light, primitive values blue, structure plain. Display
+// only — machine output always goes through printJson unstyled.
+export function formatJson(value: unknown, style: Style = outStyle): string {
+  const raw = JSON.stringify(value, null, 2) ?? 'null';
+  return raw
+    .split('\n')
+    .map(line =>
+      line
+        .replace(/"((?:[^"\\]|\\.)*)":/g, (_m, key: string) => `${style.light(`"${key}"`)}:`)
+        .replace(/: (-?\d[\d.eE+-]*|true|false|null)(,?)$/, (_m, v: string, comma: string) => `: ${style.blue(v)}${comma}`),
+    )
+    .join('\n');
 }
 
 // Milliseconds since an ISO timestamp (0 if unparseable).
@@ -111,22 +126,61 @@ export function finalMessageLine(
   style: Style = outStyle,
 ): string {
   const errorMessage = result?.error?.message ?? jobError;
-  return result?.finalMessage || (errorMessage ? `${style.red('error:')} ${errorMessage}` : fallback);
+  return (
+    result?.finalMessage || (errorMessage ? `${style.red('error:')} ${errorMessage}` : fallback)
+  );
 }
 
-export const PROMPT_PREVIEW_CHARS = 500;
+// A long prompt keeps its opening and its closing (where the actual ask
+// usually lives) and drops the middle.
+const PROMPT_HEAD_CHARS = 500;
+const PROMPT_TAIL_CHARS = 500;
+export const PROMPT_PREVIEW_CHARS = PROMPT_HEAD_CHARS + PROMPT_TAIL_CHARS;
 
 // Dim, indented prompt block for result/stream: 'prompt:' plus the prompt's
-// lines, capped so a huge prompt doesn't drown the output.
+// lines, capped so a huge prompt doesn't drown the output. Over the cap, the
+// middle is elided so both the opening and the final instructions stay visible.
 export function promptBlock(prompt: string, style: Style = outStyle): string[] {
-  const capped =
-    prompt.length > PROMPT_PREVIEW_CHARS ? `${prompt.slice(0, PROMPT_PREVIEW_CHARS)}…` : prompt;
-  return [style.dim('prompt:'), ...capped.split('\n').map(line => `  ${style.dim(line)}`)];
+  const indent = (text: string) => text.split('\n').map(line => `  ${style.dim(line)}`);
+  if (prompt.length <= PROMPT_PREVIEW_CHARS) {
+    return [style.dim('prompt:'), ...indent(prompt)];
+  }
+  // The elision marker is a shade brighter than the prompt text, so it can't
+  // be mistaken for prompt content.
+  return [
+    style.dim('prompt:'),
+    ...indent(prompt.slice(0, PROMPT_HEAD_CHARS).trimEnd()),
+    style.light(`  … <${prompt.length - PROMPT_PREVIEW_CHARS} chars trimmed> …`),
+    ...indent(prompt.slice(-PROMPT_TAIL_CHARS).trimStart()),
+  ];
+}
+
+// "agent/model/effort" for the header agent line, dropping unset parts
+// (e.g. "claude/opus/medium", "codex", "claude/opus").
+export function formatAgentSpec(job: {
+  agent?: string | null;
+  model?: string | null;
+  effort?: string | null;
+}): string {
+  return [job.agent ?? '-', job.model, job.model ? job.effort : null].filter(Boolean).join('/');
+}
+
+// Header lines for the task's dispatch options (permissions, cwd) — shown by
+// result/stream alongside agent/model so a glance answers "how was this
+// dispatched". Only options actually set are listed.
+export function jobOptionLines(
+  job: { permissions?: string | null; cwd?: string },
+  style: Style = outStyle,
+): string[] {
+  const opts: Array<[string, string]> = [];
+  if (job.permissions) opts.push(['perms', job.permissions]);
+  if (job.cwd) opts.push(['cwd', job.cwd]);
+  return opts.map(([k, v]) => `${style.dim(k.padEnd(8))} ${v}`);
 }
 
 // How much of a single progress-log step the text views show (full entries are
 // in --json / the job log).
-export const STEP_PREVIEW_CHARS = 128;
+export const STEP_PREVIEW_CHARS = 300;
 
 // Cap a step message for display, noting how much was cut. Pass `plain: true`
 // for machine-readable contexts (JSON lines) where the marker must stay unstyled.
@@ -147,6 +201,12 @@ export const STALL_MS = 10 * 60_000;
 
 // Below this, a running task's idle age isn't worth showing at all.
 export const IDLE_SHOW_MS = 2 * 60_000;
+
+// Fixed-width table cell: pad short values, clip long ones with an ellipsis so
+// an oversized value can't shift the columns after it.
+export function clipPad(text: string, width: number): string {
+  return text.length > width ? `${text.slice(0, width - 1)}…` : text.padEnd(width);
+}
 
 // Color a task status: green for live, red for failed/cancelled, blue for
 // completed (cyan is taken by task ids), dim for the rest (queued). Pads to

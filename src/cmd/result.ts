@@ -1,10 +1,9 @@
-import fs from 'node:fs';
-import path from 'node:path';
 import process from 'node:process';
 
 import * as z from 'zod/mini';
 
-import { baseOptions, flag, parseArgs } from '../lib/args.js';
+import { baseOptions, flag, parseArgs, tailOption } from '../lib/args.js';
+import { readTask } from '../lib/dispatch.js';
 import { lastActivityAt, readJobLog, resolveJobDir } from '../lib/state.js';
 import { waitForTaskAttention } from '../lib/wait.js';
 import { listPendingApprovals } from '../lib/approvals.js';
@@ -21,6 +20,8 @@ import {
   rejectExtraArgs,
   requireJob,
   resolveCwd,
+  formatAgentSpec,
+  jobOptionLines,
   promptBlock,
   surfaceApproval,
   trimStep,
@@ -35,11 +36,7 @@ export async function commandResult(argv: string[]) {
     argv,
     z.object({
       ...baseOptions,
-      tail: z.optional(
-        z.union([z.literal('all'), z.coerce.number().check(z.int(), z.nonnegative())], {
-          error: 'expected a number or "all"',
-        }),
-      ),
+      tail: tailOption,
       wait: flag,
     }),
   );
@@ -58,14 +55,11 @@ export async function commandResult(argv: string[]) {
     }
   }
 
-  // --tail <n|all>: include the last n progress-log steps (same as stream --tail).
-  const tail =
-    options.tail === undefined ? 0 : options.tail === 'all' ? Number.MAX_SAFE_INTEGER : options.tail;
-  const steps = tail > 0 ? readJobLog(cwd, job.id, tail) : [];
+  // --tail <n|all>: include the last n progress-log steps (same as stream
+  // --tail). readTask fills `steps`, so CLI --tail and SDK tail are one path.
+  const { steps, result } = readTask(cwd, job.id, { tail: options.tail });
 
   const pending = listPendingApprovals(resolveJobDir(cwd, job.id)).filter(a => !a.response);
-  const resultFile = path.join(resolveJobDir(cwd, job.id), 'result.json');
-  const result = fs.existsSync(resultFile) ? JSON.parse(fs.readFileSync(resultFile, 'utf8')) : null;
   const running = ACTIVE_STATUSES.includes(job.status);
   // Last progress event, and how long ago — the signal for slow-vs-hung.
   const lastLog = running ? readJobLog(cwd, job.id, 1)[0] : undefined;
@@ -90,6 +84,9 @@ export async function commandResult(argv: string[]) {
       status: job.status,
       agent: job.agent,
       model: job.model ?? null,
+      effort: job.effort ?? null,
+      permissions: job.permissions ?? null,
+      cwd: job.cwd ?? null,
       ...(running ? { idleMs: idle, lastActivityAt: lastActivity ?? null, stalled } : {}),
       pendingApprovals: pending.map(a => ({ id: a.id, summary: a.summary })),
       ...(steps.length ? { steps } : {}),
@@ -103,7 +100,8 @@ export async function commandResult(argv: string[]) {
     `${s.dim('task')}     ${s.cyan(job.id)}`,
     ...(job.name ? [`${s.dim('name')}     ${job.name}`] : []),
     `${s.dim('status')}   ${paintStatus(job.status)}`,
-    `${s.dim('agent')}    ${(job.agent ?? '-') + (job.model ? `/${job.model}` : '')}`,
+    `${s.dim('agent')}    ${formatAgentSpec(job)}`,
+    ...jobOptionLines(job, s),
     ...(result?.tokens
       ? [`${s.dim('tokens')}   ${formatTokens(result.tokens, result.model ?? job.model)}`]
       : []),
@@ -133,7 +131,7 @@ export async function commandResult(argv: string[]) {
   }
   lines.push('');
   if (result) {
-    lines.push(finalMessageLine(result, job.error, '(no final message)', s));
+    lines.push(finalMessageLine({ ...result, error: result.error ?? undefined }, job.error, '(no final message)', s));
   } else if (running) {
     lines.push(
       s.dim(

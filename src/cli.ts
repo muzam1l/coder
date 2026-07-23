@@ -14,11 +14,13 @@ import {
   COMMAND_HELP,
   HELP_ALIASES,
   renderCommandHelp,
+  renderFlowGroupHelp,
   renderModelGroupHelp,
   renderTaskGroupHelp,
   renderTopHelp,
   wantsHelp,
 } from './lib/help.js';
+import { commandFlow } from './cmd/flow.js';
 import { commandTask, commandWorker } from './cmd/task.js';
 import { commandResult } from './cmd/result.js';
 import { commandStream } from './cmd/stream.js';
@@ -31,6 +33,7 @@ import { commandApprovals, commandApprove } from './cmd/approvals.js';
 import { commandConfig } from './cmd/config.js';
 import { commandSetupHost } from './cmd/setup-host.js';
 import { commandModel } from './cmd/model.js';
+import { commandDocs } from './cmd/docs.js';
 import { commandUpgrade } from './cmd/upgrade.js';
 import type { CommandHandler } from './lib/types.js';
 
@@ -71,6 +74,7 @@ async function commandTaskGroup(argv: string[]): Promise<void> {
 
 const COMMANDS: Record<string, CommandHandler> = {
   task: commandTaskGroup,
+  flow: commandFlow,
   // Top-level shortcut aliases for common task subcommands.
   run: commandTask,
   list: commandJobs,
@@ -90,6 +94,7 @@ const COMMANDS: Record<string, CommandHandler> = {
   'host-setup': commandSetupHost, // alias for setup-host
   setup: commandSetupHost, // back-compat alias for setup-host
   model: commandModel,
+  docs: commandDocs,
   upgrade: commandUpgrade,
   update: commandUpgrade,
   // Internal.
@@ -122,9 +127,13 @@ async function main() {
       process.stdout.write(renderModelGroupHelp());
       return;
     }
+    if (argv[0] === 'flow' && argv[1] === undefined) {
+      process.stdout.write(renderFlowGroupHelp());
+      return;
+    }
     const id = argv
       .map(token =>
-        (token === 'task' || token === 'model') && argv[1]
+        (token === 'task' || token === 'model' || token === 'flow') && argv[1]
           ? `${token} ${argv[1]}`
           : (HELP_ALIASES[token] ?? token),
       )
@@ -146,6 +155,7 @@ async function main() {
   const handler = COMMANDS[subcommand];
   if (!handler) {
     process.stdout.write(renderTopHelp());
+    process.stdout.write('\n');
     fail(`Unknown command "${subcommand}".`, { hint: 'See all commands: coder --help' });
   }
 
@@ -155,7 +165,7 @@ async function main() {
     process.stdout.write((sub && renderCommandHelp(`model ${sub}`)) || renderModelGroupHelp());
     return;
   }
-  if (subcommand !== 'task' && wantsHelp(argv)) {
+  if (subcommand !== 'task' && subcommand !== 'flow' && wantsHelp(argv)) {
     const id = HELP_ALIASES[subcommand] ?? subcommand;
     process.stdout.write(renderCommandHelp(id) ?? renderTopHelp());
     return;
