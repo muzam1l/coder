@@ -332,10 +332,16 @@ async function returnsPart(returns: unknown): Promise<unknown> {
 
 // With a `returns` schema, `data` is guaranteed (validation failure throws
 // instead of resolving) — the overload spares callers a needless `?.`/`!`.
+/**
+ * Dispatch one coder task and await its result. With a `returns` schema the
+ * reply is validated and `data` is guaranteed (validation failure throws).
+ * Inside a flow run, results are journaled and replayed on resume.
+ */
 export async function task<T>(
   prompt: string,
   opts: FlowTaskOptions<T> & { returns: FlowSchema<T> },
 ): Promise<FlowTaskResult<T> & { data: T }>;
+/** Dispatch one coder task and await its result. Mirrors `coder run`. */
 export async function task(
   prompt: string,
   opts?: FlowTaskOptions,
@@ -422,6 +428,10 @@ async function executeGate(cmd: string, cwd: string): Promise<GateResult> {
   });
 }
 
+/**
+ * Run a shell command as a checkpoint. Never throws — inspect `ok`/`code`;
+ * output is captured (capped) and journaled for resume.
+ */
 export async function gate(cmd: string, opts: { cwd?: string } = {}): Promise<GateResult> {
   const ctx = ctxALS.getStore();
   const cwd = opts.cwd ? path.resolve(opts.cwd) : ctx?.cwd ?? process.cwd();
@@ -453,6 +463,11 @@ type Stage = (prev: any, item: any, index: number) => unknown;
 type S<P, T, R> = (prev: P, item: T, index: number) => R | Promise<R>;
 
 // Overloads chain each stage's result into the next; a thrown stage yields null.
+/**
+ * Run each item through the stages independently, with no barrier between
+ * stages. Each stage receives `(prev, item, index)`; a thrown stage drops
+ * that item to `null` and skips its remaining stages.
+ */
 export async function pipeline<T, A>(items: T[], s1: S<T, T, A>): Promise<(A | null)[]>;
 export async function pipeline<T, A, B>(items: T[], s1: S<T, T, A>, s2: S<A, T, B>): Promise<(B | null)[]>;
 export async function pipeline<T, A, B, C>(
@@ -489,6 +504,7 @@ export async function pipeline<T>(items: T[], ...stages: Stage[]): Promise<any[]
 // log()
 // ---------------------------------------------------------------------------
 
+/** Emit a progress line: appended to the run's flow.log and streamed to watchers. */
 export function log(msg: string): void {
   const ctx = ctxALS.getStore();
   if (ctx) {
@@ -647,6 +663,10 @@ async function loadAndRun(filePath: string, rawArgs: unknown): Promise<unknown> 
 // flow() — inline sub-flow
 // ---------------------------------------------------------------------------
 
+/**
+ * Run another flow inline as a sub-step and return its result. Nesting is one
+ * level deep — a sub-flow cannot call `flow()` itself.
+ */
 export async function flow(name: string, args?: unknown): Promise<unknown> {
   const ctx = ctxALS.getStore();
   const cwd = ctx?.cwd ?? process.cwd();
