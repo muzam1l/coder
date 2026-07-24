@@ -4,6 +4,12 @@ Orchestrate many coder tasks with a plain TypeScript file. A flow is code, not c
 
 Like tasks, flows are normally authored by your host agent: you describe the wave, the harness writes the flow file into `.coder/flows/`, and you review or edit it before it runs. The file is the contract; everything below is what goes in it.
 
+Watch a run live - progress and overview of its tasks as the wave goes:
+
+```sh
+coder flow stream [run-id]
+```
+
 ## A first flow
 
 ```ts

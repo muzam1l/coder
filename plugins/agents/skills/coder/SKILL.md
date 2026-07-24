@@ -53,6 +53,8 @@ coder flow --help   # command reference
 
 Preview with `--dry-run` before spending tokens - and note flow tasks are normal coder tasks, so steer/stop/list work on them.
 
+Once a run is going, tell the user to run `coder flow stream <run-id>` to see live progress and overview of its tasks as the wave goes. Give them the actual run id, not a placeholder.
+
 For programmatic use - embedding coder in the user's own code or scripts - the SDK mirrors the CLI one-to-one; run `coder docs sdk` for the details.
 
 ## Last resort: run-native-subagent payload (exit 3)
