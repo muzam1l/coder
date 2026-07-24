@@ -1,47 +1,60 @@
 ---
 name: coder
-description: Use Coder for any coding, implementation, or investigation task - features, fixes, refactors, debugging, tests, code questions. You orchestrate, never implement yourself; dispatch through the `coder` CLI, one coder per focused goal, fanning out many coders in parallel as the work needs.
+description: Use Coder to dispatch any coding, implementation, or investigation task - features, fixes, refactors, debugging, tests, code questions - one coder per focused goal, fanned out in parallel. Also covers Coder flows - TypeScript workflows running many tasks as one resumable wave.
 ---
 
 # Coder dispatch (Cursor host)
 
-You dispatch coding tasks through the `coder` runtime instead of implementing them yourself. By default the runtime picks the engine from its configured chain; flags like `--agent`/`--model`/`--effort` override it.
+(If `CODER_WORKER` is set in your environment, you _are_ a coder worker: stop reading, skip this skill, and do your assigned work directly - nested dispatch is disabled.)
 
-(If `CODER_WORKER` is set in your environment, you *are* a coder worker: stop reading, skip this skill, and do your assigned work directly - nested dispatch is disabled.)
+You dispatch coding tasks through the `coder` runtime instead of implementing them yourself.
 
-Coder delegates coding to supervised subagents of any model, from your favorite harness. It is a local supervisor runtime:
+## Overview
 
-- **Cross-harness, cross-model.** One runtime, every host. Tasks run on your Codex or Claude subscription, or on **custom models** - any OpenAI-compatible endpoint, local (Ollama, vLLM, ...) or hosted (OpenRouter, ...) - picked per task (no login needed for those).
-- **Clean context, fast dispatch.** Implementation details live in the subagents, your conversation stays about intent; handoffs are instant and light enough to fan out many subagents at once.
-- **Steerable, supervised tasks.** Full visibility from live progress to mid-run course corrections; each task runs in a sandboxed worker under unified permissions (read-only · workspace-write · auto), falling back down the configured chain when an agent can't start.
+Coder delegates coding to supervised subagents of any model - Codex, Claude, or any OpenAI-compatible/local endpoint - from one runtime on every host. Implementation details live in the subagents, so your context stays clean and handoffs are instant; every task runs sandboxed under unified permissions (read-only · workspace-write · auto), steerable mid-run, falling back down the configured chain when an engine can't start.
 
-Discover the command surface with `coder --help`; every command and subcommand takes `--help` too.
+`coder --help` is the cmd reference: every command and subcommand takes `--help` - reach for it instead of guessing flags.
+Deeper guides ship with the CLI: `coder docs` lists them, `coder docs <topic>` prints one.
 
 ## Setup
 
-If `coder` is not on PATH, install it yourself without asking (`npm install -g @wular/coder`). Assume nothing about setup state - the user may or may not have run setup. When a dispatch fails because engines are missing or logged out, run `coder setup-host` and follow its output: it checks engines and auth, seeds the config, auto-updates codex when too old for the default model, and prints the exact fix for anything not ready (safe to re-run anytime; no host plugin to install - Cursor gets this skill from its marketplace). Ask the user before installing an engine CLI or changing auth; if setup updated codex, tell the user to restart their codex session.
+If `coder` is not on PATH, install it yourself without asking (`npm install -g @wular/coder`). When a dispatch fails because engines are missing or logged out, run `coder setup-host` and follow its output - it checks engines and auth, fixes what it can, and prints the exact fix for the rest (safe to re-run anytime). Ask the user before installing an engine CLI or changing auth; if it updated codex, tell the user to restart their codex session.
 
 ## Dispatching a task
 
-- `coder` commands are safe to run in the terminal - the runtime is a supervisor: it spawns engines, keeps state in `~/.coder`, and enforces its own OS sandbox and approval policy on the task. If Cursor asks before running terminal commands, approve the `coder` calls (or allowlist the `coder` command).
+- `coder` commands are safe to run in the terminal - the runtime is a supervisor and enforces its own OS sandbox and approval policy on the task. If Cursor asks before running terminal commands, approve the `coder` calls (or allowlist the `coder` command).
 - One coder per focused goal. When the work splits into independent parts, decompose it and dispatch each part as its own `coder task run` call - fan out a wide web of coders running in parallel, not one giant dispatch. Give each coder a self-contained goal with all context - overview, file paths, constraints (read-only, git rules). Run independent tasks concurrently; use `steer` to continue a single coder's thread.
 - Delegation is a hard gate for anything the engine can do itself: do not read source files, investigate, or write code first - no matter how simple the task. Fold into the task text whatever only you have - conversation context, results from tools the engine lacks. The coder worker runs with plugins disabled (no rules, skills, MCP, or connectors), so include any context only a rule or MCP tool of yours produced.
-- Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it. It backgrounds by default: the runtime does a startup check and prints a task id (or errors / hands off, see exit codes):
+- Compose one self-contained task text (goal, relevant paths, constraints) and dispatch it - it backgrounds by default and prints a task id:
 
   ```bash
   coder task run --system "<standing instructions>" "<task text>"
   ```
 
-  Fetch the answer with `coder task result <task-id> --wait` - it blocks until the task finishes, then prints only the final result (keeps your context clean). Only use `--wait` when you can run it in a **background terminal** (so it does not block you); if you can't, poll `coder task result <task-id>` (no `--wait`) until it is done. Or skip the two steps and block on the run itself with `--wait` on `coder task run`.
+  Fetch the answer with `coder task result <task-id> --wait` - blocks until done, prints only the final result. Run it in a background shell so it does not block you; without one, poll without `--wait`, or put `--wait` on the run itself.
 
 - A `--wait` (on `run` or `result`) exits **4** when the task is waiting on a permission approval: relay the approval to the user, apply their decision with `coder approve <task-id> <approval-id> [--deny]`, then re-fetch with `coder task result <task-id> --wait`. (Unanswered approvals auto-deny after 120s and the task moves on.)
 
 - `coder task run` exits after its startup check. Exit 0: the task started - relay the task id and fetch its result (above). Exit 1: it failed to start or the turn failed - report it, do not retry or fall back yourself. Exit 3: no engine in the chain could start and stdout carries a `run-native-subagent` payload - see below.
 - When the first engine can't start (auth, quota, rate limit), the runtime automatically falls back to the next engine in the chain, runs the same task on it, and still exits 0 - so just fetch the result. If the failure mentions a usage-limit reset time, relay that to the user.
-- Model choice: config holds only the defaults (per-agent model/effort; the chain is an availability fallback, not a per-task choice). Matching the dispatch to the task is on you - pick `--agent` / `--model` / `--effort` by the task's weight and the user's ask (light -> cheap/fast model, hard -> stronger model or higher effort), and let the defaults carry the unremarkable middle (agents: `codex`, `claude`, `custom`; codex models: `spark`, `luna`, `terra`, `sol`; claude models: `opus`, `sonnet`, `fable`; efforts: `low|medium|high`; custom models: any name from `coder model add` - list them with `coder model list`).
-  - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - very fast and very cheap. It runs on a separate quota, so reach for it when the others hit a usage limit; it may still run once they are exhausted.
+- Model choice: config holds the defaults; matching the dispatch to the task is on you - pick `--agent` / `--model` / `--effort` by the task's weight and the user's ask (light -> cheap/fast model, hard -> stronger model or higher effort). `coder task run --help` lists agents, models, and efforts; `coder model list` shows custom models.
+  - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - and it runs on a separate quota, so reach for it when the others hit a usage limit.
 - Permissions default to auto mode (workspace-write + policy-answered escalations). Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
-- A background dispatch prints a task id plus its result/steer/stop commands. Relay them and fetch the result (above) rather than polling.
+
+## Flows (multi-task workflows)
+
+When the user asks for a workflow - a repeatable multi-task wave with verification gates and crash/resume - author a Coder flow instead of hand-fanning tasks: a TypeScript file the runtime executes, written to `.coder/flows/<name>.ts` for the user to review. Before writing or editing one, always read the full reference first:
+
+```bash
+coder docs flows    # authoring conventions, primitives, resume rules
+coder flow --help   # command reference
+```
+
+Preview with `--dry-run` before spending tokens - and note flow tasks are normal coder tasks, so steer/stop/list work on them.
+
+Once a run is going, tell the user to run `coder flow stream <run-id>` to see live progress and overview of its tasks as the wave goes. Give them the actual run id, not a placeholder.
+
+For programmatic use - embedding coder in the user's own code or scripts - the SDK mirrors the CLI one-to-one; run `coder docs sdk` for the details.
 
 ## Last resort: run-native-subagent payload (exit 3)
 

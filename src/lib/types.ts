@@ -10,11 +10,13 @@ import type { Agent, Effort, Engine, Permission } from './config.js';
 export type {
   Agent,
   AgentConfig,
+  AliasModelConfig,
   ApprovalsConfig,
   CoderConfig,
   CustomModelConfig,
   Effort,
   Engine,
+  ModelEntry,
   Permission,
 } from './config.js';
 
@@ -53,6 +55,9 @@ export interface Job {
   // Dev hook (--simulate-approval): the worker raises one real pending approval
   // before running, to exercise the escalate -> --wait exit 4 -> approve loop.
   simulateApproval?: boolean;
+  // Set when this task was dispatched by a flow run; groups it under the run in
+  // `coder list`.
+  flowRunId?: string;
 }
 
 export const TERMINAL_STATUSES: readonly JobStatus[] = ['completed', 'failed', 'cancelled'];
@@ -130,6 +135,8 @@ export interface Style {
   bold: Painter;
   cyan: Painter;
   dim: Painter;
+  /** A brighter second shade of dim. */
+  light: Painter;
   green: Painter;
   red: Painter;
 }
