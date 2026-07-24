@@ -65,6 +65,7 @@ const WORKER_SYSTEM_PROMPT = `
 You are running inside a coder task: do the work yourself, directly.
 Do not load the coder skill (recursive), and never dispatch through the \`coder\` CLI - nested dispatch is disabled.
 When finished, provide a concise implementation result summary.
+Your turn is one-shot: background processes will not re-invoke you after it ends, so verify synchronously before finishing.
 `.trim();
 
 function taskPrompt(job: Job): string {

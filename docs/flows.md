@@ -217,6 +217,8 @@ Runs show up in `coder list` alongside tasks, with the run's tasks grouped under
 
 `coder flow run` prints the run id and orchestrates in the background. `--wait` follows the run in the foreground, rendering progress live as tasks start and finish; Ctrl-C detaches and the run keeps going, just like a task. `coder flow stop` is the only way to end a run: it stops the orchestrator and the tasks it still has running (pass `--keep-tasks` to let those finish), leaving the journal ready for `resume`. A finished run's result (the flow's default export) is shown by `coder flow result`.
 
+On a TTY, `--wait` and `flow stream` render a live view (spinner, in-place task rows); when piped, output degrades to plain append-only lines. Styling honors the standard `NO_COLOR` and `FORCE_COLOR` env vars.
+
 `--dry-run` executes the script with dispatch stubbed out: it prints every resolved prompt and gate command with placeholder results, so you can review exactly what would be sent before spending tokens.
 
 ## SDK

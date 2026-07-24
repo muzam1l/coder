@@ -11,6 +11,7 @@ import { flag, limitOption, parseArgs, str, tailOption } from '../lib/args.js';
 import { CoderError } from '../lib/dispatch.js';
 import { CLI_PATH } from '../lib/runtime.js';
 import {
+  LiveRegion,
   ageMs,
   clipPad,
   fail,
@@ -19,11 +20,15 @@ import {
   formatJson,
   formatTokenCount,
   formatTokens,
+  muteKeys,
   outStyle,
   paintStatus,
   printJson,
   rejectExtraArgs,
   resolveCwd,
+  termCols,
+  termRows,
+  type LiveStream,
 } from '../lib/ui.js';
 import { renderCommandHelp, renderFlowGroupHelp, wantsHelp } from '../lib/help.js';
 import { discoverFlows, resolveFlow } from '../flow/discover.js';
@@ -47,6 +52,7 @@ import {
   streamFlowCore,
 } from '../flow/runtime.js';
 import { readJournal } from '../flow/journal.js';
+import { readJobLog } from '../lib/state.js';
 import { TERMINAL_STATUSES } from '../lib/types.js';
 import type { CommandHandler } from '../lib/types.js';
 import type { FlowHooks, RunOptions, RunSummary } from '../flow/runtime.js';
@@ -161,12 +167,30 @@ const SPINNER_FRAMES = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷'];
 
 // Status symbol: ✔ done, ✘ failed/cancelled, ● running, ○ queued/other.
 // Bold so terminals draw the heavier stroke.
-function stepSymbol(status: string): string {
+//
+// Off a TTY the reader is a log scraper or an agent, so `plain` swaps every
+// glyph for a bracketed word — `[done]`, `[failed]`, `[running]` — padded to
+// one column: the same row, greppable and free of box/braille characters.
+function stepSymbol(status: string, plain = false): string {
   const s = outStyle;
+  if (plain) return clipPad(`[${statusWord(status)}]`, 10);
   if (status === 'completed') return s.bold(s.green('✔'));
-  if (status === 'failed' || status === 'cancelled' || status === 'stopped') return s.bold(s.red('✘'));
+  if (status === 'failed' || status === 'cancelled' || status === 'stopped')
+    return s.bold(s.red('✘'));
   if (status === 'running') return s.bold(s.cyan('●'));
   return s.dim('○');
+}
+
+// Plain-mode opener: a step's `[start]` line, paired with the `[done]` /
+// `[failed]` line the same step writes when it ends.
+function startTag(): string {
+  return clipPad('[start]', 10);
+}
+
+function statusWord(status: string): string {
+  if (status === 'completed') return 'done';
+  if (status === 'cancelled') return 'failed';
+  return status;
 }
 
 // Display name: the task's name as given, else the prompt's opening flattened
@@ -183,10 +207,14 @@ function taskLine(
   taskId: string,
   tokens?: { total: number } | null,
   agent?: string,
+  highlight?: boolean,
 ): string {
   const s = outStyle;
+  // Highlight is applied after clipPad: styling inside the pad would count
+  // ANSI codes as width and break column alignment.
+  const nameCell = clipPad(name ?? taskId, 32);
   return [
-    `${symbol} ${clipPad(name ?? taskId, 24)}`,
+    `${symbol} ${highlight ? s.bold(nameCell) : nameCell}`,
     s.dim(clipPad(taskId, 24)),
     s.light(clipPad(agent ?? '', 20)),
     tokens ? s.light(`${formatTokenCount(tokens.total)} tok`) : '',
@@ -212,10 +240,20 @@ function readEvents(runId: string): FlowEvent[] {
     });
 }
 
-// `✔ gate bun tsc` / `✘ gate bun tsc · exit 3`.
-function gateLine(e: { cmd: string; ok: boolean; code: number }): string {
+// `✔ gate bun tsc` / `✘ gate bun tsc · exit 3` (plain: `[done]  gate bun tsc`).
+function gateLine(e: { cmd: string; ok: boolean; code: number }, plain = false): string {
   const s = outStyle;
-  return `${e.ok ? s.bold(s.green('✔')) : s.bold(s.red('✘'))} ${s.dim('gate')} ${s.light(e.cmd)}${e.ok ? '' : s.dim(` · exit ${e.code}`)}`;
+  const symbol = stepSymbol(e.ok ? 'completed' : 'failed', plain);
+  return `${symbol} ${s.dim('gate')} ${s.light(e.cmd)}${e.ok ? '' : s.dim(` · exit ${e.code}`)}`;
+}
+
+// A gate still running: same row shape, live symbol, and (once it has run long
+// enough to be worth saying) how long it has been going — a harness gate can
+// hold the flow for ten minutes and the row is the only sign of life.
+function gateRunningLine(cmd: string, symbol: string, elapsedMs?: number): string {
+  const s = outStyle;
+  const age = elapsedMs !== undefined && elapsedMs >= 1000 ? s.dim(` · ${formatAge(elapsedMs)}`) : '';
+  return `${symbol} ${s.dim('gate')} ${s.light(cmd)}${age}`;
 }
 
 // Stateful step renderer shared by the dry-run hooks and the follower. Tracks
@@ -244,15 +282,30 @@ interface PendingLine {
   log?: boolean;
 }
 
-function paintPending(p: PendingLine, last: boolean): string {
+// Plain rows carry no rails: depth is two spaces per level and a log line gets
+// the word in the status column, so every row still starts with what it is.
+function paintPlain(p: PendingLine): string {
+  return `${'  '.repeat(p.depth)}${p.log ? `${clipPad('[log]', 10)} ` : ''}${p.body}`;
+}
+
+function paintPending(p: PendingLine, last: boolean, plain = false): string {
+  if (plain) return paintPlain(p);
   return `${p.log ? logRail(p.depth) : stepRail(p.depth, last)} ${p.body}`;
+}
+
+// Breathing room above a running task row in the live block: a rail-only line
+// whose lone │ sits in the step's tooth column, so the leg reads connected
+// across the gap. Committed scrollback rows stay dense.
+function spacerRail(depth: number): string {
+  return outStyle.dim(`${'│    '.repeat(Math.max(0, depth))}│`);
 }
 
 // Static replay with the whole row list in hand: rails are exact — a level's
 // vertical stops once it has no further rows (no trailing leg below a
 // last-child sub-flow), and each group's last row closes with └─.
-function paintRows(rows: PendingLine[]): string[] {
+function paintRows(rows: PendingLine[], plain = false): string[] {
   const s = outStyle;
+  if (plain) return rows.map(paintPlain);
   // continues(i, level): another row lands at exactly `level` after i, before
   // the tree pops above it — deeper rows (descendants) don't extend the leg.
   const continues = (i: number, level: number): boolean => {
@@ -273,14 +326,29 @@ function paintRows(rows: PendingLine[]): string[] {
   });
 }
 
-class FlowStepRenderer {
+export class FlowStepRenderer {
   private names = new Map<string, { name: string; agent?: string; depth?: number }>();
   private active = new Map<string, { name: string; agent?: string; depth?: number }>();
+  // Gates in flight, by gate id — rendered in the active block beside tasks.
+  private activeGates = new Map<string, { cmd: string; depth: number; startedAt: number }>();
   private pending: PendingLine | undefined;
-  private painted = 0;
+  // Latest progress-log message per running task, shown as one dim railed
+  // line under its row (never wrapped — a second row buys little and costs
+  // half the viewport when tasks run wide).
+  private previews = new Map<string, string>();
   private frame = 0;
+  // Whether anything has been committed yet — the first row gets no spacer.
+  private hasCommitted = false;
   private timer: NodeJS.Timeout | undefined;
-  private readonly tty = Boolean(process.stdout.isTTY);
+  private readonly tty: boolean;
+  // Owns all cursor codes: erase/repaint geometry, resize quiescing, clipping.
+  private readonly region: LiveRegion;
+
+  // `stream` is injectable for the FakeTerm emulation tests only.
+  constructor(private readonly stream: LiveStream = process.stdout) {
+    this.tty = Boolean(stream.isTTY);
+    this.region = new LiveRegion(stream);
+  }
 
   emit(e: FlowEvent): void {
     const s = outStyle;
@@ -288,11 +356,12 @@ class FlowStepRenderer {
       case 'task-start': {
         const entry = { name: taskLabel(e.name, e.prompt), agent: e.agent, depth: e.depth ?? 0 };
         this.names.set(e.taskId, entry);
+        // Off a TTY there is no live block to hold a row in, so the stream is
+        // an event feed instead — `[start]` now, `[done]`/`[failed]` when it
+        // ends, the same shape `coder stream` uses for a task's steps. (The
+        // one-row-per-step view is `flow result`, which is a state snapshot.)
         if (!this.tty) {
-          this.final(
-            entry.depth,
-            taskLine(stepSymbol('running'), entry.name, e.taskId, null, entry.agent),
-          );
+          this.final(entry.depth, taskLine(startTag(), entry.name, e.taskId, null, entry.agent));
           return;
         }
         this.active.set(e.taskId, entry);
@@ -302,19 +371,42 @@ class FlowStepRenderer {
       }
       case 'task-end': {
         this.active.delete(e.taskId);
-        if (!this.active.size) this.spin(false);
+        this.previews.delete(e.taskId);
+        this.idle();
         const known = this.names.get(e.taskId);
         this.final(
           known?.depth ?? 0,
-          taskLine(stepSymbol(e.status), known?.name ?? null, e.taskId, e.tokens, known?.agent),
+          taskLine(
+            stepSymbol(e.status, !this.tty),
+            known?.name ?? null,
+            e.taskId,
+            e.tokens,
+            known?.agent,
+          ),
         );
         return;
       }
+      case 'gate-start': {
+        const entry = { cmd: e.cmd, depth: e.depth ?? 0, startedAt: Date.now() };
+        if (!this.tty) {
+          this.final(entry.depth, gateRunningLine(entry.cmd, startTag()));
+          return;
+        }
+        this.activeGates.set(e.gateId, entry);
+        this.spin(true);
+        this.repaint();
+        return;
+      }
       case 'gate':
-        this.final(e.depth ?? 0, gateLine(e));
+        if (e.gateId) this.activeGates.delete(e.gateId);
+        this.idle();
+        this.final(e.depth ?? 0, gateLine(e, !this.tty));
         return;
       case 'log':
-        this.final(e.depth ?? 0, e.message, true);
+        // One railed row per line: a multi-line message would otherwise paint
+        // rail-less inner lines and break the repaint row accounting. Light,
+        // so commentary reads secondary to the step rows.
+        for (const l of e.message.split('\n')) this.final(e.depth ?? 0, s.light(l), true);
         return;
       case 'flow-start':
         this.final(e.depth - 1, s.bold(`flow ${e.name}`));
@@ -327,56 +419,99 @@ class FlowStepRenderer {
   /** Stream over: flush the held line (closing its leg if nested), stop the spinner. */
   done(): void {
     this.spin(false);
-    if (this.tty) this.clear();
     this.flush(0);
     if (this.tty) this.repaint();
+    this.region.done();
   }
 
   // Commit the held line now that the next line's depth is known.
   private flush(nextDepth: number): void {
     if (!this.pending) return;
-    process.stdout.write(`${paintPending(this.pending, nextDepth < this.pending.depth)}\n`);
+    this.region.commit(
+      `${paintPending(this.pending, nextDepth < this.pending.depth, !this.tty)}\n`,
+    );
+    this.hasCommitted = true;
     this.pending = undefined;
   }
 
   // Hold a finished line (rail undecided until the next one), committing the
   // previous hold above the active block.
   private final(depth: number, body: string, log = false): void {
+    // Plain rows have no rail to decide, so nothing is held back: a follower
+    // tailing the feed must see `[start]` when it happens, not whenever the
+    // next event lands (a ten-minute gate would sit unflushed for ten minutes).
     if (!this.tty) {
-      this.flush(depth);
-      this.pending = { depth, body, log };
+      this.region.commit(`${paintPlain({ depth, body, log })}\n`);
+      this.hasCommitted = true;
       return;
     }
-    this.clear();
     this.flush(depth);
     this.pending = { depth, body, log };
-    this.repaint();
-  }
-
-  private clear(): void {
-    if (this.painted) process.stdout.write(`\x1b[${this.painted}A\x1b[0J`);
-    this.painted = 0;
+    if (this.tty) this.repaint();
   }
 
   private repaint(): void {
-    this.clear();
-    let painted = 0;
+    // Two candidate blocks, degrading as the viewport shrinks: task rows with
+    // previews, then task rows alone, then the newest task rows behind a dim
+    // "+N more running" header. Task rows always outrank previews — a preview
+    // without its task row is noise.
+    const withPreviews: string[] = [];
+    const bare: string[] = [];
     // The held line joins the active block (provisional ├─) so the display
     // never lags an event behind.
     if (this.pending) {
-      process.stdout.write(`${paintPending(this.pending, false)}\n`);
-      painted++;
+      const held = paintPending(this.pending, false);
+      withPreviews.push(held);
+      bare.push(held);
     }
     // Animate ● as a braille spinner while the timer runs; static ● otherwise.
     const symbol = this.timer
       ? outStyle.bold(outStyle.cyan(SPINNER_FRAMES[this.frame % SPINNER_FRAMES.length]!))
       : stepSymbol('running');
     for (const [taskId, entry] of this.active) {
-      process.stdout.write(
-        `${stepRail(entry.depth ?? 0)} ${taskLine(symbol, entry.name, taskId, null, entry.agent)}\n`,
-      );
+      const row = `${stepRail(entry.depth ?? 0)} ${taskLine(symbol, entry.name, taskId, null, entry.agent, true)}`;
+      if (withPreviews.length || this.hasCommitted) withPreviews.push(spacerRail(entry.depth ?? 0));
+      withPreviews.push(row);
+      bare.push(row);
+      const preview = this.previews.get(taskId);
+      if (preview) withPreviews.push(`${logRail(entry.depth ?? 0)} ${outStyle.dim(preview)}`);
     }
-    this.painted = painted + this.active.size;
+    // Gates last: a gate is usually a barrier, so it reads as the thing the
+    // flow is currently blocked on, under whatever tasks are still running.
+    for (const gate of this.activeGates.values()) {
+      const row = `${stepRail(gate.depth)} ${gateRunningLine(gate.cmd, symbol, Date.now() - gate.startedAt)}`;
+      if (withPreviews.length || this.hasCommitted) withPreviews.push(spacerRail(gate.depth));
+      withPreviews.push(row);
+      bare.push(row);
+    }
+    const budget = (termRows(this.stream) ?? Infinity) - 1;
+    let lines = withPreviews.length <= budget ? withPreviews : bare;
+    if (lines.length > budget) {
+      const keep = Math.max(0, budget - 1);
+      lines = [outStyle.dim(`… +${lines.length - keep} more running`), ...lines.slice(-keep)];
+    }
+    this.region.set(lines);
+  }
+
+  // Latest progress-log line per running task: one railed row, clipped to the
+  // terminal so the preview itself can never wrap.
+  private refreshPreviews(): void {
+    for (const taskId of this.active.keys()) {
+      try {
+        const last = readJobLog(process.cwd(), taskId, 1)[0];
+        const msg = last?.message?.replace(/\s+/g, ' ').trim();
+        if (!msg) continue;
+        const width = (termCols(this.stream) ?? 120) - 8;
+        this.previews.set(taskId, msg.length > width ? `${msg.slice(0, width - 1)}…` : msg);
+      } catch {
+        // Best-effort preview.
+      }
+    }
+  }
+
+  // Stop the spinner once nothing is in flight — tasks AND gates.
+  private idle(): void {
+    if (!this.active.size && !this.activeGates.size) this.spin(false);
   }
 
   private spin(on: boolean): void {
@@ -384,6 +519,8 @@ class FlowStepRenderer {
       // unref: the spinner must never keep the process alive on its own.
       this.timer = setInterval(() => {
         this.frame++;
+        // Preview refresh hits the job log on disk — throttle to ~every 480ms.
+        if (this.frame % 4 === 0) this.refreshPreviews();
         this.repaint();
       }, 120).unref();
     } else if (!on && this.timer) {
@@ -402,6 +539,7 @@ function foregroundHooks(options: { json?: boolean }): FlowHooks {
   return {
     onTaskStart: info => line({ kind: 'task-start', ...info }),
     onTaskEnd: info => line({ kind: 'task-end', ...info }),
+    onGateStart: info => line({ kind: 'gate-start', ...info }),
     onGate: info => line({ kind: 'gate', ...info }),
     onLog: (message, depth) => line({ kind: 'log', message, depth }),
     onFlowStart: info => line({ kind: 'flow-start', ...info }),
@@ -425,6 +563,7 @@ function fileHooks(runId: string): FlowHooks {
     onStart: h => installStop(h),
     onTaskStart: info => append({ kind: 'task-start', ...info }),
     onTaskEnd: info => append({ kind: 'task-end', ...info }),
+    onGateStart: info => append({ kind: 'gate-start', ...info }),
     onGate: info => append({ kind: 'gate', ...info }),
     onLog: (message, depth) => append({ kind: 'log', message, depth }),
     onFlowStart: info => append({ kind: 'flow-start', ...info }),
@@ -500,13 +639,21 @@ async function followRun(
   // No waiting banner for a run that already ended: just replay + summary.
   if (!options.json && (readFlowRecord(runId)?.status ?? 'running') === 'running') {
     process.stderr.write(
-      `${outStyle.dim('[flow]')} run ${outStyle.cyan(runId)} started (running); waiting for it to finish — Ctrl-C to detach (it keeps running).\n`,
+      `${outStyle.dim('[flow]')} run ${outStyle.cyan(runId)} started (running); waiting for it to finish — Ctrl-C to detach (it keeps running).\n\n`,
     );
   }
+  // Swallow keystroke echo while the live block is up — a stray Enter would
+  // shift the cursor and strand a copy of the block on every repaint.
+  const restoreKeys = options.json ? () => {} : muteKeys();
   const onSigint = () => {
+    restoreKeys();
     if (!streamJson) {
+      process.stderr.write(`\n${outStyle.dim('[flow] detached — run still going.')}\n`);
       process.stderr.write(
-        `\n${outStyle.dim(`[flow] detached — run still going: coder flow result ${runId}`)}\n`,
+        `\n${formatHints(
+          [`Result: coder flow result ${runId}`, `Stop it: coder flow stop ${runId}`],
+          outStyle,
+        )}\n`,
       );
     }
     process.exit(130);
@@ -522,6 +669,7 @@ async function followRun(
     }
   }
   renderer.done();
+  restoreKeys();
   process.off('SIGINT', onSigint);
 
   const record = readFlowRecord(runId);
@@ -559,9 +707,11 @@ async function followRun(
     }
     process.exit(1);
   }
-  fail(`[flow] run ${runId} failed: ${record.error ?? 'unknown error'}`, {
-    hint: `Resume: coder flow resume ${runId}`,
-  });
+  // Match `flow result`'s failure block: blank line, red `error:` prefix,
+  // plain message — not one all-red wall glued to the tree.
+  process.stdout.write(`\n${outStyle.red('error:')} ${record.error ?? 'unknown error'}\n`);
+  process.stdout.write(`\n${formatHints([`Resume: coder flow resume ${runId}`], outStyle)}\n`);
+  process.exit(1);
 }
 
 // Flags shared by flow run and flow resume (resume accepts the same flags).
@@ -604,8 +754,10 @@ function printRunSummary(summary: RunSummary, json?: boolean): void {
     printJson(summary);
     return;
   }
+  const plain = !process.stdout.isTTY;
+  const rail = plain ? '' : `${outStyle.dim('└─')} `;
   process.stdout.write(
-    `${outStyle.dim('└─')} ${stepSymbol('completed')} run ${outStyle.cyan(summary.runId)} completed ${outStyle.dim(`(${summary.taskCount} tasks)`)}\n`,
+    `${rail}${stepSymbol('completed', plain)} run ${outStyle.cyan(summary.runId)} completed ${outStyle.dim(`(${summary.taskCount} tasks)`)}\n`,
   );
   process.stdout.write(`\n${formatJson(summary.result)}\n`);
   printLedger(summary.tokens);
@@ -763,6 +915,9 @@ function renderResult(record: FlowRecord, json: boolean, tail: number | 'all' = 
     return;
   }
   const s = outStyle;
+  // Same plain-vs-glyph split the follower makes: a piped `flow result` is
+  // being read by a log scraper or an agent.
+  const plain = !process.stdout.isTTY;
   process.stdout.write(
     `${s.bold('Flow')} ${s.cyan(record.name)} ${s.dim(`(${record.runId})`)} — ${s.bold(paintStatus(record.status))}\n`,
   );
@@ -783,6 +938,7 @@ function renderResult(record: FlowRecord, json: boolean, tail: number | 'all' = 
     const events = readEvents(record.runId);
     const names = new Map<string, { name: string; agent?: string; depth?: number }>();
     const started = new Map<string, { name: string; agent?: string; depth?: number }>();
+    const startedGates = new Map<string, { cmd: string; depth: number }>();
     const rows: PendingLine[] = [];
     for (const e of events) {
       if (e.kind === 'task-start') {
@@ -794,12 +950,22 @@ function renderResult(record: FlowRecord, json: boolean, tail: number | 'all' = 
         const known = names.get(e.taskId);
         rows.push({
           depth: known?.depth ?? 0,
-          body: taskLine(stepSymbol(e.status), known?.name ?? null, e.taskId, e.tokens, known?.agent),
+          body: taskLine(
+            stepSymbol(e.status, plain),
+            known?.name ?? null,
+            e.taskId,
+            e.tokens,
+            known?.agent,
+          ),
         });
+      } else if (e.kind === 'gate-start') {
+        startedGates.set(e.gateId, { cmd: e.cmd, depth: e.depth ?? 0 });
       } else if (e.kind === 'gate') {
-        rows.push({ depth: e.depth ?? 0, body: gateLine(e) });
+        if (e.gateId) startedGates.delete(e.gateId);
+        rows.push({ depth: e.depth ?? 0, body: gateLine(e, plain) });
       } else if (e.kind === 'log') {
-        rows.push({ depth: e.depth ?? 0, body: e.message, log: true });
+        for (const l of e.message.split('\n'))
+          rows.push({ depth: e.depth ?? 0, body: s.light(l), log: true });
       } else if (e.kind === 'flow-start') {
         rows.push({ depth: e.depth - 1, body: s.bold(`flow ${e.name}`) });
       }
@@ -807,7 +973,18 @@ function renderResult(record: FlowRecord, json: boolean, tail: number | 'all' = 
     for (const [taskId, entry] of started) {
       rows.push({
         depth: entry.depth ?? 0,
-        body: taskLine(stepSymbol('running'), entry.name, taskId, null, entry.agent),
+        // Static view has no spinner — say it in words (plain rows already
+        // carry `running` in the status column).
+        body: taskLine(stepSymbol('running', plain), entry.name, taskId, null, entry.agent) +
+          (plain ? '' : ` ${s.light('running')}`),
+      });
+    }
+    for (const gate of startedGates.values()) {
+      rows.push({
+        depth: gate.depth,
+        body:
+          gateRunningLine(gate.cmd, stepSymbol('running', plain)) +
+          (plain ? '' : ` ${s.light('running')}`),
       });
     }
     if (!rows.length) {
@@ -815,11 +992,11 @@ function renderResult(record: FlowRecord, json: boolean, tail: number | 'all' = 
       for (const step of tail === 'all' ? allSteps : flowSteps(record.runId, tail)) {
         rows.push({
           depth: 0,
-          body: taskLine(stepSymbol(step.status), step.name, step.taskId ?? '-', step.tokens),
+          body: taskLine(stepSymbol(step.status, plain), step.name, step.taskId ?? '-', step.tokens),
         });
       }
     }
-    const lines = paintRows(rows);
+    const lines = paintRows(rows, plain);
     const shown = tail === 'all' ? lines : lines.slice(-tail);
     if (shown.length) {
       process.stdout.write(`\n${shown.join('\n')}\n`);

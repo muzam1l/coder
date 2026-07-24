@@ -232,6 +232,9 @@ function queryStartMs(pid: number): number | null {
     const out = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
+      // Pin ps to the JS runtime's timezone: lstart has no zone marker, and
+      // env TZ can differ from the runtime's (e.g. bun test forces UTC).
+      env: { ...process.env, TZ: Intl.DateTimeFormat().resolvedOptions().timeZone },
     }).trim();
     const parsed = out ? Date.parse(out) : NaN;
     return Number.isFinite(parsed) ? parsed : null;

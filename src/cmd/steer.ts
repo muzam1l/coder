@@ -61,9 +61,12 @@ export async function steerTaskCore(
   if (running) {
     return running;
   }
+  // Resume in the job's own cwd, not the steer invoker's: the claude session
+  // transcript lives under the project dir the task originally ran in, and
+  // `claude --resume` only finds sessions for the current project.
   const dispatch = await dispatchTask({
     prompt: text,
-    cwd,
+    cwd: job.cwd ?? cwd,
     resume: job.id,
     agent: job.agent,
     model: opts.model ?? job.model ?? undefined,
@@ -107,8 +110,9 @@ export async function commandSteer(argv: string[]) {
     prompt,
     '--resume',
     job.id,
+    // The job's own cwd, not the invoker's (see steerTaskCore).
     '--cwd',
-    cwd,
+    job.cwd ?? cwd,
     ...(job.agent ? ['--agent', job.agent] : []),
     ...(options.model ? ['--model', options.model] : job.model ? ['--model', job.model] : []),
     ...(options.effort ? ['--effort', options.effort] : job.effort ? ['--effort', job.effort] : []),

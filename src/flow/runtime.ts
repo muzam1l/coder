@@ -8,7 +8,7 @@ import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { CoderError, dispatchTask, waitTask } from '../lib/dispatch.js';
+import { CoderError, dispatchTask, turnFallbackAgent, waitTask } from '../lib/dispatch.js';
 import { AUTO_ARCHIVE_MS, assertValidId, isValidId, listJobs, processStartMs, readJob, resolveCoderHome } from '../lib/state.js';
 import { createJsonlTail } from '../lib/fsx.js';
 import { spawnArchiveSweep } from '../cmd/archive.js';
@@ -45,8 +45,10 @@ export interface FlowHooks {
   }) => void;
   /** A task reached a terminal state. */
   onTaskEnd?: (info: { taskId: string; status: string; tokens: TokenUsage | null }) => void;
-  /** A gate command finished. */
-  onGate?: (info: { cmd: string; ok: boolean; code: number; depth?: number }) => void;
+  /** A gate command was spawned (real runs only, never dry-run or replay). */
+  onGateStart?: (info: { gateId: string; cmd: string; depth?: number }) => void;
+  /** A gate command finished; `gateId` pairs it with its onGateStart. */
+  onGate?: (info: { gateId?: string; cmd: string; ok: boolean; code: number; depth?: number }) => void;
   /** The flow called log(). */
   onLog?: (msg: string, depth?: number) => void;
   /** A sub-flow started (depth is the sub-flow's own nesting level). */
@@ -238,34 +240,55 @@ async function runOneTask(
   resume?: string,
 ): Promise<{ taskId: string; status: string; output: string; tokens: TokenUsage | null; model: string | null }> {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : ctx?.cwd ?? process.cwd();
-  const dispatch = await dispatchTask({
-    prompt,
-    ...dispatchOptsFrom(opts, cwd, ctx),
-    resume: resume ?? opts.resume,
-  });
-  ctx?.running.add(dispatch.taskId);
-  // Resolved engine spec ("claude/opus/medium") from the job record — the
-  // dispatch may have picked the agent via the chain, not the flow author.
-  const job = readJob(cwd, dispatch.taskId);
-  const agent = job ? formatAgentSpec(job) : undefined;
-  ctx?.hooks.onTaskStart?.({
-    taskId: dispatch.taskId,
-    name: opts.name,
-    prompt,
-    agent,
-    depth: currentDepth(),
-  });
-  try {
-    const waited = await waitTask(cwd, dispatch.taskId);
+  // Chain agent override for mid-turn fallback attempts; mirrors dispatch's
+  // own startup fallback (next agent runs on its config defaults).
+  let chainAgent: string | undefined;
+  for (;;) {
+    const base = dispatchOptsFrom(opts, cwd, ctx);
+    const dispatch = await dispatchTask({
+      prompt,
+      ...base,
+      ...(chainAgent
+        ? { agent: chainAgent, model: undefined, effort: undefined, resume: undefined }
+        : { resume: resume ?? opts.resume }),
+      // Surface the gate's silent chain walk — without this the user stares at
+      // nothing for the failed engine's whole startup window.
+      onFallback: f =>
+        log(`${f.agent} failed to start — falling back to ${f.next} (${f.detail.replace(/\s+/g, ' ').slice(0, 140)})`),
+    });
+    ctx?.running.add(dispatch.taskId);
+    // Resolved engine spec ("claude/opus/medium") from the job record — the
+    // dispatch may have picked the agent via the chain, not the flow author.
+    const job = readJob(cwd, dispatch.taskId);
+    const agent = job ? formatAgentSpec(job) : undefined;
+    ctx?.hooks.onTaskStart?.({
+      taskId: dispatch.taskId,
+      name: opts.name,
+      prompt,
+      agent,
+      depth: currentDepth(),
+    });
+    let waited;
+    try {
+      waited = await waitTask(cwd, dispatch.taskId);
+    } finally {
+      ctx?.running.delete(dispatch.taskId);
+    }
+
+    const next = turnFallbackAgent(cwd, waited);
+    if (next) {
+      ctx?.hooks.onTaskEnd?.({ taskId: dispatch.taskId, status: 'failed', tokens: null });
+      chainAgent = next;
+      continue;
+    }
+
     return {
       taskId: dispatch.taskId,
       status: waited.status,
-      output: waited.result?.finalMessage ?? '',
+      output: waited.result?.finalMessage || waited.result?.error?.message || '',
       tokens: waited.result?.tokens ?? null,
       model: waited.result?.model ?? waited.job.model ?? null,
     };
-  } finally {
-    ctx?.running.delete(dispatch.taskId);
   }
 }
 
@@ -410,9 +433,26 @@ export async function task<T = unknown>(
 // command (a full build log) can't balloon the journal or the process heap.
 const GATE_OUTPUT_CAP = 256 * 1024;
 
+// Per-process counter behind gate ids (the start/end pairing key).
+let gateSeq = 0;
+
+// Like `bun run`, put every ancestor node_modules/.bin on PATH so gates can
+// call locally installed binaries (`tsc`, `eslint`) without a runner prefix.
+function gateEnv(cwd: string): NodeJS.ProcessEnv {
+  const bins: string[] = [];
+  for (let dir = cwd; ; ) {
+    bins.push(path.join(dir, 'node_modules', '.bin'));
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  const sep = process.platform === 'win32' ? ';' : ':';
+  return { ...process.env, PATH: [...bins, process.env.PATH ?? ''].join(sep) };
+}
+
 async function executeGate(cmd: string, cwd: string): Promise<GateResult> {
   return new Promise(resolve => {
-    const child = spawn(cmd, { shell: true, cwd });
+    const child = spawn(cmd, { shell: true, cwd, env: gateEnv(cwd) });
     let out = '';
     const take = (d: Buffer | string) => {
       if (out.length >= GATE_OUTPUT_CAP) return;
@@ -449,8 +489,15 @@ export async function gate(cmd: string, opts: { cwd?: string } = {}): Promise<Ga
     return res;
   }
   const startedAt = new Date().toISOString();
+  // A gate can run for minutes (a test harness, a cold tsc); announce the spawn
+  // so the renderer can hold a live row instead of painting nothing until it
+  // returns. Pid-prefixed so ids stay unique when a resume appends to the same
+  // events.jsonl.
+  const gateId = `gate-${process.pid}-${(gateSeq += 1)}`;
+  const depth = currentDepth();
+  ctx.hooks.onGateStart?.({ gateId, cmd, depth });
   const res = await executeGate(cmd, cwd);
-  ctx.hooks.onGate?.({ cmd, ok: res.ok, code: res.code, depth: currentDepth() });
+  ctx.hooks.onGate?.({ gateId, cmd, ok: res.ok, code: res.code, depth });
   ctx.journal.record({ kind: 'gate', fingerprint: fp, result: res, startedAt, endedAt: new Date().toISOString() });
   return res;
 }
@@ -621,20 +668,32 @@ async function importFlow(filePath: string): Promise<any> {
   } catch {
     // Best-effort sweep.
   }
-  const tmp = path.join(
-    dir,
-    `.__coderflow_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}${ext}`,
-  );
-  fs.writeFileSync(tmp, rewritten, 'utf8');
+  const id = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+  const tmp = path.join(dir, `.__coderflow_${id}${ext}`);
+  // Flow scripts top-level-await, so the import() promise only resolves when
+  // the whole flow finishes — waiting for it would keep the temp file around
+  // for the entire run. Instead a sentinel call injected as the module's first
+  // statement fires when body evaluation starts (source read and parsed —
+  // unlinking is safe from then on). Same line as the original first line, so
+  // stack-trace line numbers stay true.
+  const key = `__coderflow_loaded_${id}`;
+  const loaded = new Promise<void>(resolve => {
+    (globalThis as any)[key] = resolve;
+  });
+  fs.writeFileSync(tmp, `globalThis[${JSON.stringify(key)}]?.();${rewritten}`, 'utf8');
+  const imported = importResolved(tmp, ext, filePath);
   try {
-    return await importResolved(tmp, ext, filePath);
+    // A parse/startup error settles `imported` without the sentinel firing.
+    await Promise.race([loaded, imported.then(() => undefined, () => undefined)]);
   } finally {
+    delete (globalThis as any)[key];
     try {
       fs.unlinkSync(tmp);
     } catch {
       // Best-effort cleanup.
     }
   }
+  return await imported;
 }
 
 async function loadAndRun(filePath: string, rawArgs: unknown): Promise<unknown> {
@@ -776,7 +835,7 @@ export function deleteRun(runId: string): boolean {
   return true;
 }
 
-export function readFlowRecord(runId: string): FlowRecord | null {
+function readRawRecord(runId: string): FlowRecord | null {
   // A lookup by user-supplied reference: a malformed id is just "not found".
   if (!isValidId(runId)) return null;
   const file = path.join(runDirFor(runId), 'flow.json');
@@ -786,6 +845,21 @@ export function readFlowRecord(runId: string): FlowRecord | null {
   } catch {
     return null;
   }
+}
+
+// Self-heal a zombie run on read — mirrors reconcileJob for tasks. Pidless
+// records are left alone: no pid means the run is still booting
+// (streamFlowCore's boot-pid bridge covers that window).
+export function reconcileRun(record: FlowRecord): FlowRecord {
+  if (record.status !== 'running' || !record.pid) return record;
+  if (orchestratorAlive(record)) return record;
+  markRunFailed(record.runId, 'orchestrator died');
+  return readRawRecord(record.runId) ?? record;
+}
+
+export function readFlowRecord(runId: string): FlowRecord | null {
+  const record = readRawRecord(runId);
+  return record ? reconcileRun(record) : null;
 }
 
 function writeFlowRecord(runDir: string, record: FlowRecord): void {
@@ -802,7 +876,7 @@ function scanRuns(dir: string): FlowRecord[] {
   const runs: FlowRecord[] = [];
   for (const id of ids) {
     try {
-      runs.push(JSON.parse(fs.readFileSync(path.join(dir, id, 'flow.json'), 'utf8')) as FlowRecord);
+      runs.push(reconcileRun(JSON.parse(fs.readFileSync(path.join(dir, id, 'flow.json'), 'utf8')) as FlowRecord));
     } catch {
       // Not a run dir (or unreadable) — skip.
     }
@@ -994,7 +1068,7 @@ function endRecord(runDir: string, record: FlowRecord, patch: Partial<FlowRecord
 
 /** Stamp a still-running record failed — a detached orchestrator that crashed before drive(). */
 export function markRunFailed(runId: string, error: string): void {
-  const record = readFlowRecord(runId);
+  const record = readRawRecord(runId);
   if (!record || record.status !== 'running') return;
   endRecord(runDirFor(runId), record, { status: 'failed', error });
 }

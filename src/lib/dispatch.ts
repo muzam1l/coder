@@ -353,22 +353,28 @@ async function attemptOnce(
   writeJob(cwd, jobId, { pid: child.pid ?? null });
 
   // Startup check: wait until the worker reports a live thread, then until its
-  // next event lands (first real output, or a failure) — not a fixed timer.
+  // next substantive event lands (first real output, or a failure) — not a
+  // fixed timer. Lifecycle entries (phase 'starting': thread ready, turn
+  // started) don't count as settling: an engine can greet and then die (codex
+  // rejects a over-limit turn ~2.5s in), and that must fail over inside the
+  // gate, not surface mid-turn.
   const ALL = Number.MAX_SAFE_INTEGER;
+  const substantive = () =>
+    readJobLog(cwd, jobId, ALL).filter(e => (e as { phase?: string }).phase !== 'starting').length;
   const deadline = Date.now() + 15_000;
   let current = job;
-  let threadLogLen: number | null = null;
+  let baseline: number | null = null;
   let settleDeadline: number | null = null;
   while (Date.now() < (settleDeadline ?? deadline)) {
     current = readJob(cwd, jobId) ?? current;
     if (current.status === 'failed' || current.status === 'completed') {
       break;
     }
-    if (current.threadId && threadLogLen === null) {
-      threadLogLen = readJobLog(cwd, jobId, ALL).length;
-      settleDeadline = Date.now() + 2_000;
+    if (current.threadId && baseline === null) {
+      baseline = substantive();
+      settleDeadline = Date.now() + 5_000;
     }
-    if (threadLogLen !== null && readJobLog(cwd, jobId, ALL).length > threadLogLen) {
+    if (baseline !== null && substantive() > baseline) {
       current = readJob(cwd, jobId) ?? current;
       break;
     }
@@ -495,6 +501,27 @@ export interface TaskResult {
   /** The last `tail` progress-log entries; [] at the default tail of 0. */
   steps: JobLogEntry[];
   job: Job;
+}
+
+/**
+ * Chain agent to retry on after a mid-turn failure, or undefined. Startup
+ * fallback (dispatchTask) can't cover an engine that dies moments after the
+ * gate (usage limit, auth): dispatch has already returned. A waiting caller
+ * may walk the chain instead of surfacing the failure — but only when the
+ * error matches the startup pattern AND the turn provably did nothing, so a
+ * retry can't double-apply work.
+ */
+export function turnFallbackAgent(cwd: string, waited: TaskResult): Agent | undefined {
+  if (waited.status !== 'failed') return undefined;
+  const r = waited.result;
+  if (!r || !STARTUP_ERROR_PATTERN.test(r.error?.message ?? '')) return undefined;
+  const sideEffectFree =
+    !r.touchedFiles?.length &&
+    !(r as any).fileChanges?.length &&
+    !(r as any).commandExecutions?.length;
+  if (!sideEffectFree) return undefined;
+  const chain = loadConfig(cwd).chain;
+  return chain[chain.indexOf(waited.job.agent as Agent) + 1];
 }
 
 function readResultJson(cwd: string, taskId: string): TurnResult | null {

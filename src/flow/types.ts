@@ -44,7 +44,8 @@ export type FlowRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'sto
 export type FlowEvent =
   | { kind: 'task-start'; taskId: string; name?: string; prompt: string; agent?: string; depth?: number }
   | { kind: 'task-end'; taskId: string; status: string; tokens: TokenUsage | null }
-  | { kind: 'gate'; cmd: string; ok: boolean; code: number; depth?: number }
+  | { kind: 'gate-start'; gateId: string; cmd: string; depth?: number }
+  | { kind: 'gate'; gateId?: string; cmd: string; ok: boolean; code: number; depth?: number }
   | { kind: 'log'; message: string; depth?: number }
   | { kind: 'flow-start'; name: string; depth: number }
   | { kind: 'replay'; count: number };

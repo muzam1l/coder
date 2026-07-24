@@ -20,7 +20,7 @@ import {
   installClaudePlugin,
   type PluginResult,
 } from '../lib/plugins.js';
-import { fail, printJson, resolveCwd } from '../lib/ui.js';
+import { bad, fail, good, outStyle, printJson, resolveCwd } from '../lib/ui.js';
 import type { Agent, CoderConfig } from '../lib/types.js';
 
 export interface SetupHostReport {
@@ -120,12 +120,8 @@ export async function commandSetupHost(argv: string[]) {
     options[host as (typeof knownHosts)[number]] = true;
   }
 
-  const tty = process.stdout.isTTY && !process.env.NO_COLOR;
-  const paint = (code: string, text: string) => (tty ? `\x1b[${code}m${text}\x1b[0m` : text);
-  const good = (text: string) => `  ${paint('32', '✔')} ${text}`;
-  const bad = (text: string) => `  ${paint('31', '✘')} ${text}`;
-  const head = (text: string) => paint('1', text);
-  const gray = (text: string) => paint('38;5;245', text);
+  const head = outStyle.bold;
+  const gray = outStyle.dim;
 
   // Print the header before any probing: everything below spawns other CLIs
   // (codex/claude versions, auth via the codex app-server) and can take

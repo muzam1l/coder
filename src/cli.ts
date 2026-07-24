@@ -7,6 +7,13 @@
  */
 import process from 'node:process';
 
+// A downstream pipe closing early (`coder ... | head`) is a normal way to stop
+// reading — exit quietly instead of crashing with an EPIPE stack trace.
+process.stdout.on('error', err => {
+  if ((err as NodeJS.ErrnoException).code === 'EPIPE') process.exit(0);
+  throw err;
+});
+
 import { maybeNotifyUpdate, refreshUpdateCache } from './lib/update-check.js';
 import { CLI_PATH, readVersion } from './lib/runtime.js';
 import { fail } from './lib/ui.js';

@@ -25,9 +25,7 @@
     "validate-plugin:cursor": "node scripts/validate-template.mjs",
     "version-bump:patch": "node scripts/bump.mjs patch",
     "version-bump:minor": "node scripts/bump.mjs minor",
-    "version-bump:major": "node scripts/bump.mjs major",
-    "prepublishOnly": "bun run build && bun run typecheck",
-    "npm-publish": "npm publish --access public --tag latest --registry=https://registry.npmjs.org --//registry.npmjs.org/:_authToken=\"$NPM_TOKEN\""
+    "version-bump:major": "node scripts/bump.mjs major"
   },
   "files": [
     "bin",

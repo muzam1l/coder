@@ -15,7 +15,7 @@ import {
   installClaudePlugin,
   readAgentsSkillVersion,
 } from '../lib/plugins.js';
-import { fail } from '../lib/ui.js';
+import { bad, fail, good, outStyle } from '../lib/ui.js';
 
 export interface UpgradeReport {
   cli?: { pm: string; from: string | null; to: string | null; changed: boolean };
@@ -121,12 +121,8 @@ export async function commandUpgrade(argv: string[]) {
     z.object({ pm: str, 'cli-only': flag, 'plugins-only': flag, codex: flag, claude: flag }),
   );
 
-  const tty = process.stdout.isTTY && !process.env.NO_COLOR;
-  const paint = (code: string, text: string) => (tty ? `\x1b[${code}m${text}\x1b[0m` : text);
-  const head = (text: string) => paint('1', text);
-  const gray = (text: string) => paint('38;5;245', text);
-  const good = (text: string) => `  ${paint('32', '✔')} ${text}`;
-  const bad = (text: string) => `  ${paint('31', '✘')} ${text}`;
+  const head = outStyle.bold;
+  const gray = outStyle.dim;
   // "0.1.7 -> 0.1.8" when the version moved, else "0.1.8 (unchanged)".
   const transition = (before: string | null, after: string | null) =>
     after && before && after !== before
