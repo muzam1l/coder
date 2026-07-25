@@ -1,4 +1,4 @@
-// Exercises every flow feature with cheap spark tasks; preview with --dry-run.
+// Exercises every flow feature with cheap tasks; preview with --dry-run.
 import { z } from 'zod';
 import { task, gate, pipeline, flow, log, args } from '@wular/coder/flow';
 

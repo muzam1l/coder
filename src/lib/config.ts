@@ -38,7 +38,7 @@ export const DEFAULT_CONFIG: CoderConfig = {
 
 // Model aliases per agent. Values map alias -> concrete identifier.
 export const CODEX_MODELS: Record<string, string> = {
-  spark: 'gpt-5.3-codex-spark',
+  mini: 'gpt-5.4-mini',
   luna: 'gpt-5.6-luna',
   terra: 'gpt-5.6-terra',
   sol: 'gpt-5.6-sol',
@@ -47,6 +47,7 @@ export const CODEX_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'hig
 
 // Native claude CLI aliases; passed through as-is.
 export const CLAUDE_MODELS: Record<string, string> = {
+  haiku: 'haiku',
   sonnet: 'sonnet',
   opus: 'opus',
   fable: 'fable',
@@ -448,7 +449,7 @@ export function assertModelEnabled(config: CoderConfig, name?: string | null): v
 }
 
 /**
- * Parse a "<agent>:<model?>:<effort?>"-style spec, e.g. "codex", "codex:spark",
+ * Parse a "<agent>:<model?>:<effort?>"-style spec, e.g. "codex", "codex:mini",
  * "codex:sol:high", "claude:opus:high", "terra:high" (agent inferred).
  *
  * A user alias entry (config.models with `provider`) named by the model part

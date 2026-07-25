@@ -39,7 +39,6 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 - `coder task run` exits after its startup check. Exit 0: the task started - relay the task id and fetch its result (above). Exit 1: it failed to start or the turn failed - report it, do not retry or fall back yourself. Exit 3: no engine in the chain could start and stdout carries a `run-native-subagent` payload - see below.
 - When the first engine can't start (auth, quota, rate limit), the runtime automatically falls back to the next engine in the chain, runs the same task on it, and still exits 0 - so just fetch the result. If the failure mentions a usage-limit reset time, relay that to the user.
 - Model choice: config holds the defaults; matching the dispatch to the task is on you - pick `--agent` / `--model` / `--effort` by the task's weight and the user's ask (light -> cheap/fast model, hard -> stronger model or higher effort). `coder task run --help` lists agents, models, and efforts; `coder model list` shows custom models.
-  - `spark` is only for the very lightest tasks (formatting, renames, quick lookups) - and it runs on a separate quota, so reach for it when the others hit a usage limit.
 - Permissions default to auto mode (workspace-write + policy-answered escalations). Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
 
 ## Flows (multi-task workflows)
