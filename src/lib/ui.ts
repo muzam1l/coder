@@ -109,7 +109,7 @@ export function formatTokenCount(n: number): string {
   return `${(n / 1_000_000).toFixed(1)}M`;
 }
 
-// One-line token summary: "48.2k (in 45.1k · cached 38.0k · out 3.1k) on spark".
+// One-line token summary: "48.2k (in 45.1k · cached 38.0k · out 3.1k) on terra".
 // Always names the model — token counts are only comparable per model.
 export function formatTokens(tokens: TokenUsage, model?: string | null): string {
   const parts = [
