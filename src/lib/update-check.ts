@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 import process from 'node:process';
 
 import { resolveCoderHome } from './state.js';
+import { errStyle } from './ui.js';
 
 const PKG = '@wular/coder';
 const REGISTRY = `https://registry.npmjs.org/${PKG}/latest`;
@@ -86,13 +87,10 @@ export function maybeNotifyUpdate(currentVersion: string, cliPath: string) {
 
   const cache = readCache();
   if (cache?.latest && compareVersions(cache.latest, currentVersion) > 0) {
-    const tty = process.stderr.isTTY && !process.env.NO_COLOR;
-    const dim = (t: string) => (tty ? `\x1b[38;5;245m${t}\x1b[0m` : t);
-    const bold = (t: string) => (tty ? `\x1b[1m${t}\x1b[0m` : t);
     process.stderr.write(
-      dim(`coder ${currentVersion} -> `) +
-        bold(cache.latest) +
-        dim(' available. run: coder upgrade\n\n'),
+      errStyle.dim(`coder ${currentVersion} -> `) +
+        errStyle.bold(cache.latest) +
+        errStyle.dim(' available. run: coder upgrade\n\n'),
     );
   }
 

@@ -6,19 +6,25 @@ import * as z from 'zod/mini';
 import { baseOptions, flag, parseArgs, str } from '../lib/args.js';
 import { archiveJob, findJob, listJobs } from '../lib/state.js';
 import { CLI_PATH } from '../lib/runtime.js';
+import { archiveRun, readFlowRecord } from '../flow/runtime.js';
 import { fail, outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
 import { TERMINAL_STATUSES } from '../lib/types.js';
 
-// Finish archiving already-flagged jobs (dir move + codex session) in a detached
-// child so a `list` sweep never blocks on the fs moves. Best-effort: if it never
-// runs, the migration in listJobs/listArchivedJobs completes the move later.
-export function spawnArchiveSweep(cwd: string, jobIds: string[]) {
-  if (!jobIds.length) return;
+// Finish archiving already-flagged jobs (dir move + codex session) — or, with
+// flows, flow runs — in a detached child so a `list` sweep never blocks on the
+// fs moves. Best-effort: if it never runs, the migration in listJobs/
+// listArchivedJobs (listRuns/listArchivedRuns) completes the move later.
+export function spawnArchiveSweep(cwd: string, ids: string[], opts: { flows?: boolean } = {}) {
+  if (!ids.length) return;
   try {
-    const child = spawn(process.execPath, [CLI_PATH, '_archiveSweep', '--cwd', cwd, ...jobIds], {
-      detached: true,
-      stdio: 'ignore',
-    });
+    const child = spawn(
+      process.execPath,
+      [CLI_PATH, '_archiveSweep', '--cwd', cwd, ...(opts.flows ? ['--flows'] : []), ...ids],
+      {
+        detached: true,
+        stdio: 'ignore',
+      },
+    );
     child.unref();
   } catch {
     /* best-effort */
@@ -27,9 +33,16 @@ export function spawnArchiveSweep(cwd: string, jobIds: string[]) {
 
 // Hidden-command body invoked detached by spawnArchiveSweep.
 export async function commandArchiveSweep(argv: string[]) {
-  const { options, positionals } = parseArgs(argv, z.object({ cwd: str }));
+  const { options, positionals } = parseArgs(argv, z.object({ cwd: str, flows: flag }));
   const cwd = resolveCwd(options);
   for (const id of positionals) {
+    if (options.flows) {
+      const record = readFlowRecord(id);
+      if (record) {
+        archiveRun(record);
+      }
+      continue;
+    }
     const job = findJob(cwd, id);
     if (job) {
       archiveJob(cwd, job);

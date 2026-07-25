@@ -13,6 +13,8 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { readJsonFile } from "./fsx.js";
+
 import type { Approval } from "./types.js";
 
 /** A policy verdict: accept/decline outright, or escalate to a human. */
@@ -282,14 +284,16 @@ export function listPendingApprovals(jobDir: string): Approval[] {
   return fs
     .readdirSync(dir)
     .filter((name) => name.endsWith(".request.json"))
-    .map((name): Approval => {
+    .flatMap((name): Approval[] => {
       const id = name.replace(/\.request\.json$/, "");
-      const request = JSON.parse(fs.readFileSync(path.join(dir, name), "utf8")) as Record<string, unknown>;
-      const responseFile = path.join(dir, `${id}.response.json`);
-      const response = fs.existsSync(responseFile)
-        ? (JSON.parse(fs.readFileSync(responseFile, "utf8")) as { decision: string })
-        : null;
-      return { ...request, id, response } as Approval;
+      // A request caught mid-write parses as null — skip it; the next list
+      // pass picks it up once the write lands.
+      const request = readJsonFile<Record<string, unknown>>(path.join(dir, name));
+      if (!request) {
+        return [];
+      }
+      const response = readJsonFile<{ decision: string }>(path.join(dir, `${id}.response.json`));
+      return [{ ...request, id, response } as Approval];
     })
     .sort((left, right) => String(left.createdAt ?? "").localeCompare(String(right.createdAt ?? "")));
 }

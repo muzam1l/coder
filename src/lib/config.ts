@@ -155,6 +155,10 @@ const agentEntrySchema = z.partial(
     permissions: permissionSchema,
   }),
 );
+// One `models` entry, discriminated by shape:
+// - baseUrl present  -> a custom OpenAI-compatible endpoint (the custom agent)
+// - provider present -> an alias onto a built-in engine (codex/claude)
+// - neither          -> a bare toggle for a built-in name ({ "disabled": true })
 const customModelSchema = z.strictObject({
   baseUrl: z.url(),
   model: z.string().check(z.minLength(1)),
@@ -163,7 +167,18 @@ const customModelSchema = z.strictObject({
   // responses->chat bridge; 'responses' passes straight through. `coder model`
   // detects this automatically; the field remains as a manual override.
   wireApi: z.optional(z.enum(['chat', 'responses'])),
+  disabled: z.optional(z.boolean()),
 });
+const aliasModelSchema = z.strictObject({
+  provider: engineSchema,
+  model: z.string().check(z.minLength(1)),
+  effort: z.optional(effortSchema),
+  disabled: z.optional(z.boolean()),
+});
+const toggleModelSchema = z.strictObject({
+  disabled: z.boolean(),
+});
+const modelEntrySchema = z.union([customModelSchema, aliasModelSchema, toggleModelSchema]);
 const approvalsSchema = z.strictObject({
   escalationTimeoutMs: z.number().check(z.positive()),
   allowedNetworkHosts: z.array(z.string()),
@@ -174,8 +189,14 @@ const effectiveConfigSchema = z.strictObject({
   agents: z.partial(
     z.strictObject({ codex: agentEntrySchema, claude: agentEntrySchema, custom: agentEntrySchema }),
   ),
+  // The one model namespace: custom endpoints, engine aliases, and built-in
+  // disable toggles all live here, keyed by the name used at dispatch. A user
+  // entry named after a built-in alias shadows it.
+  // Keys are permissive enough for raw engine slugs (dots, slashes: a bare
+  // toggle may target e.g. "gpt-5.6-terra"); `coder model add`/`alias` keep
+  // their own stricter kebab-case rule for names they mint.
   models: z.optional(
-    z.record(z.string().check(z.regex(/^[a-z][a-z0-9-]*$/, 'lowercase kebab-case')), customModelSchema),
+    z.record(z.string().check(z.regex(/^[a-z0-9][a-z0-9./_-]*$/i, 'model name')), modelEntrySchema),
   ),
   approvals: approvalsSchema,
 });
@@ -188,19 +209,50 @@ export type Effort = z.infer<typeof effortSchema>;
 export type Permission = z.infer<typeof permissionSchema>;
 export type AgentConfig = z.infer<typeof agentEntrySchema>;
 export type CustomModelConfig = z.infer<typeof customModelSchema>;
+export type AliasModelConfig = z.infer<typeof aliasModelSchema>;
+export type ModelEntry = z.infer<typeof modelEntrySchema>;
+
+/** A custom OpenAI-compatible endpoint entry. */
+export function isEndpointModel(entry: ModelEntry): entry is CustomModelConfig {
+  return 'baseUrl' in entry;
+}
+
+/** An alias entry onto a built-in engine. */
+export function isAliasModel(entry: ModelEntry): entry is AliasModelConfig {
+  return 'provider' in entry;
+}
 export type ApprovalsConfig = z.infer<typeof approvalsSchema>;
 export type CoderConfig = z.infer<typeof effectiveConfigSchema>;
 
 /** Returns human-readable errors; empty array means valid. */
 export function validateConfig(candidate: unknown): string[] {
   const result = configSchema.safeParse(candidate);
-  if (result.success) {
-    return [];
+  if (!result.success) {
+    return result.error.issues.map(issue => {
+      const where = issue.path.join('.') || 'config';
+      return `${where}: ${issue.message}`;
+    });
   }
-  return result.error.issues.map(issue => {
-    const where = issue.path.join('.') || 'config';
-    return `${where}: ${issue.message}`;
-  });
+  const config = deepMerge(DEFAULT_CONFIG, result.data);
+  const errors: string[] = [];
+  for (const [name, entry] of Object.entries(result.data.models ?? {})) {
+    if (name === 'codex' || name === 'claude' || name === 'custom') {
+      errors.push(`models.${name}: reserved agent name`);
+      continue;
+    }
+    if (isAliasModel(entry)) {
+      // Alias expansion is one level: the target must be an engine model id or
+      // built-in alias, never another config entry.
+      const target = config.models?.[entry.model];
+      if (target && !isEndpointModel(target)) {
+        errors.push(`models.${name}: alias target "${entry.model}" is itself a config entry`);
+      }
+    }
+    // A bare { "disabled" } toggle is valid on any name: built-ins, entries
+    // defined in another config layer (the per-entry merge folds the flag in),
+    // or raw model slugs passed straight to an engine.
+  }
+  return errors;
 }
 
 function readJsonIfExists(filePath: string): unknown {
@@ -254,6 +306,10 @@ export function loadConfig(cwd: string): CoderConfig {
       throw new Error(`Invalid config in ${filePath}:\n  ${errors.join('\n  ')}`);
     }
     config = deepMerge(config, override);
+  }
+  const errors = validateConfig(config);
+  if (errors.length) {
+    throw new Error(`Invalid merged config:\n  ${errors.join('\n  ')}`);
   }
   return config;
 }
@@ -344,7 +400,7 @@ export function resolveCustomModel(
   bridge?: { url: string },
 ): CustomModelResolution | null {
   const entry = alias ? config.models?.[alias] : undefined;
-  if (!alias || !entry) {
+  if (!alias || !entry || !isEndpointModel(entry)) {
     return null;
   }
   const providerId = `coder-${alias}`;
@@ -371,9 +427,34 @@ export function resolveCodexModel(alias?: string | null): string | null {
   return CODEX_MODELS[alias] ?? alias;
 }
 
+/** A built-in alias name (codex or claude), independent of config state. */
+export function isBuiltinAlias(name: string): boolean {
+  return name in CODEX_MODELS || name in CLAUDE_MODELS;
+}
+
+/** Disabled via its entry's `disabled` flag (any entry kind, incl. toggles). */
+export function isModelDisabled(config: CoderConfig, name?: string | null): boolean {
+  return Boolean(name && config.models?.[name]?.disabled);
+}
+
+/**
+ * Throw a clear error when a disabled model is requested. Enforced by every
+ * model-resolution path so a disabled model cannot reach an engine.
+ */
+export function assertModelEnabled(config: CoderConfig, name?: string | null): void {
+  if (isModelDisabled(config, name)) {
+    throw new Error(`model "${name}" is disabled in config`);
+  }
+}
+
 /**
  * Parse a "<agent>:<model?>:<effort?>"-style spec, e.g. "codex", "codex:spark",
  * "codex:sol:high", "claude:opus:high", "terra:high" (agent inferred).
+ *
+ * A user alias entry (config.models with `provider`) named by the model part
+ * is expanded one level; alias targets are never themselves entries (enforced
+ * at save time), so no recursion is possible. Throws when the resolved model
+ * is disabled in config.
  */
 export function parseAgentSpec(
   spec: string | null | undefined,
@@ -382,10 +463,11 @@ export function parseAgentSpec(
   if (!spec) {
     return null;
   }
-  const parts = String(spec)
-    .split(':')
-    .map(part => part.trim())
-    .filter(Boolean);
+  const raw = String(spec).trim();
+  const parts = raw.split(':').map(part => part.trim());
+  if (!parts.length || parts.length > 3 || parts.some(part => !part)) {
+    throw new Error(`Invalid agent spec "${spec}".`);
+  }
   let agent: Agent | null = null;
   let model: string | null = null;
   let effort: Effort | null = null;
@@ -394,27 +476,51 @@ export function parseAgentSpec(
     CODEX_EFFORTS.has(value) || CLAUDE_EFFORTS.has(value);
 
   for (const part of parts) {
-    if (part === 'codex' || part === 'claude') {
+    if (part === 'codex' || part === 'claude' || part === 'custom') {
+      if (agent) {
+        throw new Error(`Invalid agent spec "${spec}".`);
+      }
       agent = part;
     } else if (isEffort(part) && !effort) {
       effort = part;
     } else if (!model) {
       model = part;
+    } else {
+      throw new Error(`Invalid agent spec "${spec}".`);
     }
+  }
+
+  // One-level alias expansion: the model part names an alias entry. Its
+  // targets are never entries themselves (enforced at save/validate time).
+  const entry = model ? config.models?.[model] : undefined;
+  if (entry && isAliasModel(entry)) {
+    if (entry.disabled) {
+      throw new Error(`model "${model}" is disabled in config`);
+    }
+    if (agent && agent !== entry.provider) {
+      throw new Error(`Alias "${model}" runs on ${entry.provider}, not ${agent}.`);
+    }
+    agent = entry.provider;
+    effort = effort ?? entry.effort ?? null;
+    model = entry.model;
   }
 
   if (!agent) {
     if (model && model in CLAUDE_MODELS) {
       agent = 'claude';
+    } else if (model && entry && isEndpointModel(entry)) {
+      agent = 'custom';
     } else {
       agent = 'codex';
     }
   }
 
   const defaults = config.agents[agent] ?? {};
+  const resolvedModel = model ?? defaults.model ?? null;
+  assertModelEnabled(config, resolvedModel);
   return {
     agent,
-    model: model ?? defaults.model ?? null,
+    model: resolvedModel,
     effort: effort ?? defaults.effort ?? null,
   };
 }

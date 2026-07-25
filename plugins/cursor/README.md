@@ -38,7 +38,7 @@ npm install -g @openai/codex && codex login
 npm install -g @anthropic-ai/claude-code && claude auth login
 ```
 
-Or a local/provider model of your own (see [Bring your own model](docs/custom-models.md)). `coder setup-host` checks what's ready.
+Or a local/provider model of your own (see [Models](docs/models.md)). `coder setup-host` checks what's ready.
 
 **3. Ask your host to use it:**
 

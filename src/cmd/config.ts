@@ -10,6 +10,69 @@ import { loadConfig, resolveUserConfigFile, validateConfig } from '../lib/config
 import { fail, outStyle, printJson, resolveCwd } from '../lib/ui.js';
 import type { AgentConfig } from '../lib/types.js';
 
+function getPath(object: unknown, dotted: string): unknown {
+  return dotted
+    .split('.')
+    .reduce<unknown>(
+      (node, part) => (node == null ? undefined : (node as Record<string, unknown>)[part]),
+      object,
+    );
+}
+
+function configTargetFile(cwd: string, workspace?: boolean): string {
+  return workspace
+    ? path.join(resolveWorkspaceRoot(cwd), 'coder.config.json')
+    : resolveUserConfigFile();
+}
+
+// Print-free core: the whole effective config, or one dotted-path value
+// (undefined when unset).
+export function configGet(cwd: string, key?: string): unknown {
+  const cfg = loadConfig(cwd);
+  return key ? getPath(cfg, key) : cfg;
+}
+
+// Print-free core: set (or unset) a dotted key in the user (or --workspace)
+// config file, validate, and return the effective value afterward.
+export function configSet(
+  cwd: string,
+  key: string,
+  value: unknown,
+  opts: { workspace?: boolean; unset?: boolean } = {},
+): { file: string; key: string; effective: unknown; value?: unknown; unset?: boolean } {
+  const targetFile = configTargetFile(cwd, opts.workspace);
+  const current: Record<string, any> = fs.existsSync(targetFile)
+    ? JSON.parse(fs.readFileSync(targetFile, 'utf8'))
+    : {};
+  const parts = key.split('.');
+  const leaf = parts.at(-1)!;
+  let node: Record<string, any> = current;
+  for (const part of parts.slice(0, -1)) {
+    if (typeof node[part] !== 'object' || node[part] === null) {
+      node[part] = {};
+    }
+    node = node[part];
+  }
+  if (opts.unset) {
+    delete node[leaf];
+  } else {
+    node[leaf] = value;
+  }
+  const errors = validateConfig(current);
+  if (errors.length) {
+    throw new Error(`Refusing to write invalid config:\n  ${errors.join('\n  ')}`);
+  }
+  fs.mkdirSync(path.dirname(targetFile), { recursive: true });
+  fs.writeFileSync(targetFile, `${JSON.stringify(current, null, 2)}\n`, 'utf8');
+  const effective = getPath(loadConfig(cwd), key) ?? null;
+  return {
+    file: targetFile,
+    key,
+    effective,
+    ...(opts.unset ? { unset: true } : { value }),
+  };
+}
+
 // coder config                      -> print effective config
 // coder config get <key>            -> print one value (dotted path)
 // coder config set <key> <value>    -> write to ~/.coder/config.json
@@ -19,18 +82,7 @@ export async function commandConfig(argv: string[]) {
   const { options, positionals } = parseArgs(argv, z.object({ ...baseOptions, workspace: flag }));
   const cwd = resolveCwd(options);
   const [action = 'list', key, ...valueParts] = positionals;
-  const targetFile = options.workspace
-    ? path.join(resolveWorkspaceRoot(cwd), 'coder.config.json')
-    : resolveUserConfigFile();
-
-  const getPath = (object: unknown, dotted: string): unknown =>
-    dotted
-      .split('.')
-      .reduce<unknown>(
-        (node, part) =>
-          node == null ? undefined : (node as Record<string, unknown>)[part],
-        object,
-      );
+  const targetFile = configTargetFile(cwd, options.workspace);
 
   if (action === 'list') {
     const cfg = loadConfig(cwd);
@@ -85,31 +137,15 @@ export async function commandConfig(argv: string[]) {
       : raw;
   }
 
-  const current: Record<string, any> = fs.existsSync(targetFile)
-    ? JSON.parse(fs.readFileSync(targetFile, 'utf8'))
-    : {};
-  const parts = key.split('.');
-  const leaf = parts.at(-1)!;
-  let node: Record<string, any> = current;
-  for (const part of parts.slice(0, -1)) {
-    if (typeof node[part] !== 'object' || node[part] === null) {
-      node[part] = {};
-    }
-    node = node[part];
+  let effective: unknown;
+  try {
+    ({ effective } = configSet(cwd, key, value, {
+      workspace: options.workspace,
+      unset: action === 'unset',
+    }));
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error));
   }
-  if (action === 'set') {
-    node[leaf] = value;
-  } else {
-    delete node[leaf];
-  }
-  const errors = validateConfig(current);
-  if (errors.length) {
-    fail(`Refusing to write invalid config:\n  ${errors.join('\n  ')}`);
-  }
-  fs.mkdirSync(path.dirname(targetFile), { recursive: true });
-  fs.writeFileSync(targetFile, `${JSON.stringify(current, null, 2)}\n`, 'utf8');
-
-  const effective = getPath(loadConfig(cwd), key) ?? null;
   if (options.json) {
     printJson({
       file: targetFile,

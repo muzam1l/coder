@@ -1,21 +1,31 @@
 {
   "name": "@wular/coder",
-  "version": "0.2.12",
+  "version": "0.3.0",
   "description": "Delegating coding-agent runtime",
   "type": "module",
+  "main": "./dist/sdk.js",
+  "types": "./dist/sdk.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/sdk.d.ts",
+      "import": "./dist/sdk.js"
+    },
+    "./flow": {
+      "types": "./dist/flow/index.d.ts",
+      "import": "./dist/flow/index.js"
+    }
+  },
   "bin": {
     "coder": "bin/coder.mjs"
   },
   "scripts": {
-    "build": "bun build src/cli.ts src/lib/broker.ts --outdir dist --root src --target node --format esm --minify",
+    "build": "tsdown && bunx prettier --write 'dist/**/*.d.ts' --log-level warn",
     "dev": "bun run build --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "validate-plugin:cursor": "node scripts/validate-template.mjs",
     "version-bump:patch": "node scripts/bump.mjs patch",
     "version-bump:minor": "node scripts/bump.mjs minor",
-    "version-bump:major": "node scripts/bump.mjs major",
-    "prepublishOnly": "bun run build && bun run typecheck",
-    "npm-publish": "npm publish --access public --tag latest --registry=https://registry.npmjs.org --//registry.npmjs.org/:_authToken=\"$NPM_TOKEN\""
+    "version-bump:major": "node scripts/bump.mjs major"
   },
   "files": [
     "bin",
@@ -33,5 +43,8 @@
   },
   "dependencies": {
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "tsdown": "^0.22.13"
   }
 }

@@ -10,6 +10,7 @@
  * /chat/completions request with the reply streamed back as Responses SSE
  * events; native Responses endpoints get a verbatim passthrough.
  */
+import crypto from 'node:crypto';
 import http from 'node:http';
 import process from 'node:process';
 
@@ -274,8 +275,17 @@ export async function startChatBridge(
     return last!;
   }
 
+  // Loopback is not an auth boundary: any local process could otherwise spend
+  // the upstream key during the turn. The bridge URL embeds a per-turn secret
+  // path segment and requests without it are rejected.
+  const token = crypto.randomBytes(16).toString('hex');
+
   const server = http.createServer((req, res) => {
-    if (req.method !== 'POST' || !req.url?.replace(/\/+$/, '').endsWith('/responses')) {
+    if (
+      req.method !== 'POST' ||
+      !req.url?.startsWith(`/${token}/`) ||
+      !req.url.replace(/\/+$/, '').endsWith('/responses')
+    ) {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: { message: 'coder chat bridge: only POST /responses is supported' } }));
       return;
@@ -337,7 +347,7 @@ export async function startChatBridge(
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   return {
-    url: `http://127.0.0.1:${port}/v1`,
+    url: `http://127.0.0.1:${port}/${token}/v1`,
     close: () =>
       new Promise<void>(resolve => {
         server.close(() => resolve());

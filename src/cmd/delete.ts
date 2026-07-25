@@ -11,7 +11,7 @@ import { deleteClaudeSession } from '../lib/claude-sessions.js';
 
 // Also delete the engine session behind a task, so it is removed from codex/
 // claude rather than lingering. Best-effort.
-function deleteSessionFor(job: Job) {
+export function deleteSessionFor(job: Job) {
   if (!job.threadId) {
     return;
   }
