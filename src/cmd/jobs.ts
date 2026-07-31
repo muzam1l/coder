@@ -130,6 +130,7 @@ export async function commandJobs(argv: string[]) {
     status: job.status,
     agent: job.agent ?? null,
     model: job.model ?? null,
+    effort: job.effort ?? null,
     name: job.name ?? null,
     cwd: job.cwd ?? null,
     prompt: String(job.prompt ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
@@ -175,16 +176,17 @@ export async function commandJobs(argv: string[]) {
         ? ` ${(t.idleMs > STALL_MS ? s.red : s.dim)(`· idle ${formatAge(t.idleMs)}`)}`
         : '';
     const who =
-      t.agent === 'custom' && t.model
+      (t.agent === 'custom' && t.model
         ? t.model
-        : (t.agent ?? '-') + (t.model ? `/${t.model}` : '');
+        : (t.agent ?? '-') + (t.model ? `/${t.model}` : '')) +
+      (t.effort ? `/${t.effort}` : '');
     process.stdout.write(
-      `${s.cyan(t.taskId.padEnd(24))} ${paintStatus(t.status, 10)} ${s.light(clipPad(who, 14))} ${s.light(clipPad(t.cwd ? path.basename(t.cwd) : '-', 12))} ${label}${idle}${mark}\n`,
+      `${s.cyan(t.taskId.padEnd(24))} ${paintStatus(t.status, 10)} ${s.light(clipPad(who, 18))} ${s.light(clipPad(t.cwd ? path.basename(t.cwd) : '-', 12))} ${label}${idle}${mark}\n`,
     );
   };
 
   process.stdout.write(
-    s.bold(s.light(`${'task-id'.padEnd(24)} ${'status'.padEnd(10)} ${'agent'.padEnd(14)} ${'cwd'.padEnd(12)} prompt\n`)),
+    s.bold(s.light(`${'task-id'.padEnd(24)} ${'status'.padEnd(10)} ${'agent'.padEnd(18)} ${'cwd'.padEnd(12)} name\n`)),
   );
 
   // Tasks stay in time order; a flow run renders as a header plus its grouped
