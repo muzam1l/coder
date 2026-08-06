@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "main": "./dist/sdk.js",
@@ -45,6 +45,8 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "tsdown": "^0.22.13"
+    "@types/node": "^26.1.2",
+    "tsdown": "^0.22.13",
+    "typescript": "^5.9.3"
   }
 }

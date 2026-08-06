@@ -69,7 +69,7 @@ export async function* streamTaskCore(
   yield* drain();
 }
 
-export async function commandStream(argv: string[]) {
+export async function commandWatch(argv: string[]) {
   const { options, positionals } = parseArgs(
     argv,
     z.object({
@@ -82,7 +82,7 @@ export async function commandStream(argv: string[]) {
       ),
     }),
   );
-  rejectExtraArgs(positionals, 1, 'task stream');
+  rejectExtraArgs(positionals, 1, 'task watch');
   const cwd = resolveCwd(options);
   const job = requireJob(cwd, positionals[0]);
 
@@ -98,7 +98,7 @@ export async function commandStream(argv: string[]) {
 
   if (!options.json) {
     process.stdout.write(
-      `${outStyle.dim(`[coder] task ${job.id} ${job.status} — streaming (Ctrl-C to stop)`)}\n`,
+      `${outStyle.dim(`[coder] task ${job.id} ${job.status} — watching (Ctrl-C to stop)`)}\n`,
     );
     const header = [
       `${outStyle.dim('agent'.padEnd(8))} ${formatAgentSpec(job)}`,

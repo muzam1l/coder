@@ -21,7 +21,8 @@ import { collectJobs, type ListOptions } from './cmd/jobs.js';
 import { stopTaskCore } from './cmd/stop.js';
 import { deleteSessionFor } from './cmd/delete.js';
 import { steerTaskCore, type SteerOutcome } from './cmd/steer.js';
-import { streamTaskCore } from './cmd/stream.js';
+import { askTaskCore } from './cmd/ask.js';
+import { streamTaskCore } from './cmd/watch.js';
 import {
   modelAddCore,
   modelAliasCore,
@@ -113,10 +114,26 @@ export const task = {
   async steer(
     id: string,
     text: string,
-    opts: { cwd?: string } = {},
+    opts: { model?: string; effort?: string; permissions?: string; cwd?: string } = {},
   ): Promise<{ taskId: string; steered: SteerOutcome }> {
     const cwd = resolveCwd(opts.cwd);
-    return steerTaskCore(cwd, mustFindJob(cwd, id), text);
+    return steerTaskCore(cwd, mustFindJob(cwd, id), text, {
+      model: opts.model,
+      effort: opts.effort,
+      permissions: opts.permissions,
+    });
+  },
+
+  /** Ask about a task via a read-only sidecar; its thread is never touched. */
+  async ask(
+    id: string,
+    question: string,
+    opts: { model?: string; effort?: string; cwd?: string } = {},
+  ): Promise<{ taskId: string; answer: string | null }> {
+    const cwd = resolveCwd(opts.cwd);
+    const job = mustFindJob(cwd, id);
+    const result = await askTaskCore(cwd, job, question, { model: opts.model, effort: opts.effort });
+    return { taskId: job.id, answer: result.finalMessage || null };
   },
 
   /** Stop a running task. */

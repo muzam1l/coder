@@ -311,7 +311,7 @@ export function answerApproval(jobDir: string, approvalId: string, decision: "ac
   );
 }
 
-async function escalate(
+export async function escalate(
   jobDir: string,
   request: EscalateRequest,
   { timeoutMs, onEvent }: { timeoutMs: number; onEvent?: ApprovalEventHandler | null }

@@ -251,7 +251,8 @@ function pidIsOurWorker(pid: number, job: Job): boolean {
     return false;
   }
   const started = processStartMs(pid);
-  const created = Date.parse(job.createdAt ?? "");
+  // A steer-resumed worker spawns at resumedAt, long after createdAt.
+  const created = Date.parse(job.resumedAt ?? job.createdAt ?? "");
   if (started === null || !Number.isFinite(created)) {
     return true; // can't verify start time — trust liveness
   }
@@ -472,6 +473,32 @@ export function appendJobLog(cwd: string, jobId: string, entry: JobLogEntry): vo
   const jobDir = resolveJobDir(cwd, jobId);
   fs.mkdirSync(jobDir, { recursive: true });
   fs.appendFileSync(path.join(jobDir, "log.jsonl"), `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`, "utf8");
+}
+
+export interface TurnResultEntry {
+  at?: string;
+  prompt?: string | null;
+  finalMessage?: string;
+  status?: number;
+  [key: string]: unknown;
+}
+
+export function readTurnResults(cwd: string, jobId: string): TurnResultEntry[] {
+  const file = path.join(resolveJobDir(cwd, jobId), "results.jsonl");
+  if (!fs.existsSync(file)) {
+    return [];
+  }
+  return fs
+    .readFileSync(file, "utf8")
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .flatMap((line): TurnResultEntry[] => {
+      try {
+        return [JSON.parse(line) as TurnResultEntry];
+      } catch {
+        return [];
+      }
+    });
 }
 
 export function readJobLog(cwd: string, jobId: string, maxLines = 40): JobLogEntry[] {

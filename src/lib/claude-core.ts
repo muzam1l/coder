@@ -8,6 +8,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
 import { CLAUDE_PERMISSION_FLAGS, claudeSandboxSettings } from "./config.js";
+import { CLI_PATH } from "./runtime.js";
 import type { AuthStatus, Availability, Effort, Permission, TokenUsage, TurnResult } from "./types.js";
 
 // Flatten a tool_result block's content (string, or array of text parts) to
@@ -70,6 +71,8 @@ export interface ClaudeTurnOptions {
   model?: string | null;
   effort?: Effort | null;
   permissions?: Permission | null;
+  /** Route unresolved permission asks to coder's approval policy (auto mode only). */
+  approvalJobId?: string | null;
   resumeSessionId?: string | null;
   onProgress?: (update: { message: string; threadId?: string }) => void;
   onHeartbeat?: () => void;
@@ -96,15 +99,26 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
     args.push("--effort", options.effort);
   }
   const permissions = options.permissions ?? "auto";
-  args.push(...(CLAUDE_PERMISSION_FLAGS[permissions] ?? CLAUDE_PERMISSION_FLAGS.auto));
-  // TODO(approval parity): in auto mode, claude's own judgment denies ambiguous
-  // escapes with no way to escalate — unlike codex, which routes escapes to the
-  // main thread. Wire claude's `--permission-prompt-tool` to a small coder MCP
-  // (a hidden `coder _permission-mcp` subcommand) whose handler calls escalate()
-  // so a would-be-denied command instead becomes a pending approval surfaced by
-  // `--wait` (exit 4) and answerable with `coder approve` — reusing the existing
-  // pending-approval flow. Direct `claude -p` path only (the Claude Code host
-  // subagent already routes permissions to the user).
+  if (permissions === "auto" && options.approvalJobId) {
+    // Prompt tool is only consulted in default mode (never auto/dontAsk):
+    // unresolved asks hit coder's policy instead of a flat deny.
+    const mcpConfig = JSON.stringify({
+      mcpServers: {
+        coder: {
+          type: "stdio",
+          command: process.execPath,
+          args: [CLI_PATH, "_mcp", options.approvalJobId, "--cwd", cwd]
+        }
+      }
+    });
+    args.push(
+      "--permission-mode", "default",
+      "--mcp-config", mcpConfig,
+      "--permission-prompt-tool", "mcp__coder__approval_prompt"
+    );
+  } else {
+    args.push(...(CLAUDE_PERMISSION_FLAGS[permissions] ?? CLAUDE_PERMISSION_FLAGS.auto));
+  }
   // Read-only is enforced by claude's OS sandbox, scoped to deny writes to this
   // workspace; passed as a settings JSON string so it needs no on-disk config.
   const sandboxSettings = claudeSandboxSettings(permissions, cwd);

@@ -69,7 +69,8 @@ Your turn is one-shot: background processes will not re-invoke you after it ends
 `.trim();
 
 function taskPrompt(job: Job): string {
-  if (job.resumeThreadId) return job.prompt ?? '';
+  // Resumed turns run currentPrompt; job.prompt stays the original task text.
+  if (job.resumeThreadId) return job.currentPrompt ?? job.prompt ?? '';
   // --system instructions sit below the worker preamble inside the <system> element.
   const system = job.system ? `\n-------\n${job.system}` : '';
   return `<system>
@@ -187,14 +188,13 @@ async function executeCodexTurn(
       },
     });
 
-    const status = result.status === 0 ? 'completed' : 'failed';
     writeJob(cwd, job.id, {
-      status,
+      status: result.status === 0 ? 'completed' : 'failed',
       threadId: result.threadId,
       turnId: result.turnId,
       completedAt: new Date().toISOString(),
     });
-    writeJsonFileAtomic(path.join(jobDir, 'result.json'), result);
+    recordTurnResult(cwd, job, jobDir, result);
     return result;
   } finally {
     await bridge?.close();
@@ -209,11 +209,13 @@ async function executeClaudeTurn(
   const jobDir = resolveJobDir(cwd, job.id);
   const onProgress = buildProgressLogger(cwd, job.id, { echo });
 
+  const mode = PERMISSION_MODES[job.permissions ?? 'auto'] ?? PERMISSION_MODES.auto;
   const result = await runClaudeTurn(cwd, {
     prompt: taskPrompt(job),
     model: job.model,
     effort: job.effort,
     permissions: job.permissions,
+    approvalJobId: mode.approvalMode === 'auto' ? job.id : null,
     resumeSessionId: job.resumeThreadId ?? null,
     onHeartbeat: buildHeartbeat(cwd, job.id),
     onProgress: update => {
@@ -229,8 +231,20 @@ async function executeClaudeTurn(
     threadId: result.threadId,
     completedAt: new Date().toISOString(),
   });
-  writeJsonFileAtomic(path.join(jobDir, 'result.json'), result);
+  recordTurnResult(cwd, job, jobDir, result);
   return result;
+}
+
+// result.json holds the LATEST turn; results.jsonl accretes every turn so a
+// follow-up never displaces the original deliverable (`result --turns`).
+function recordTurnResult(cwd: string, job: Job, jobDir: string, result: TurnResult): void {
+  writeJsonFileAtomic(path.join(jobDir, 'result.json'), result);
+  const entry = {
+    at: new Date().toISOString(),
+    prompt: job.currentPrompt ?? job.prompt ?? null,
+    ...result,
+  };
+  fs.appendFileSync(path.join(jobDir, 'results.jsonl'), `${JSON.stringify(entry)}\n`, 'utf8');
 }
 
 // The turn executor for a job's engine. Exported so the detached worker can run it.
@@ -260,7 +274,7 @@ async function drainSteerQueue(cwd: string, jobId: string): Promise<void> {
     for (const text of followUps) {
       const resumeJob = writeJob(cwd, jobId, {
         status: 'running',
-        prompt: text,
+        currentPrompt: text,
         resumeThreadId: current.threadId ?? null,
       });
       appendJobLog(cwd, jobId, { message: 'Running steered follow-up.' });
@@ -495,7 +509,7 @@ export async function commandTask(argv: string[]): Promise<void> {
         result: `coder task result ${jobId}`,
         steer: `coder task steer ${jobId} "<follow-up>"`,
         stop: `coder task stop ${jobId}`,
-        watch: `coder task stream ${jobId}`,
+        watch: `coder task watch ${jobId}`,
       },
     });
     return;

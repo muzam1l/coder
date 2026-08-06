@@ -12,9 +12,11 @@ import {
   generateJobId,
   readJob,
   readJobLog,
+  readTurnResults,
   resolveJobDir,
   writeJob,
   type JobLogEntry,
+  type TurnResultEntry,
 } from './state.js';
 import { readJsonFile } from './fsx.js';
 import { waitForTaskAttention } from './wait.js';
@@ -291,6 +293,21 @@ export interface DispatchResult {
   startupCheck: 'passed' | 'pending';
 }
 
+/** Spawn a job's detached worker (also used by steer to resume a stopped task in place). */
+export function spawnWorker(cwd: string, jobId: string): void {
+  const jobDir = resolveJobDir(cwd, jobId);
+  const logFd = fs.openSync(path.join(jobDir, 'worker.log'), 'a');
+  const child = spawn(process.execPath, [CLI_PATH, '_worker', jobId, '--cwd', cwd], {
+    cwd,
+    detached: true,
+    stdio: ['ignore', logFd, logFd],
+    env: { ...process.env, [WORKER_ENV]: '1' },
+  });
+  child.unref();
+  fs.closeSync(logFd);
+  writeJob(cwd, jobId, { pid: child.pid ?? null });
+}
+
 // One attempt on one engine: availability gate, job create, spawn, startup wait.
 async function attemptOnce(
   config: CoderConfig,
@@ -340,17 +357,7 @@ async function attemptOnce(
 
   // Always run the task in a detached worker, so interrupting the caller never
   // kills the task.
-  const jobDir = resolveJobDir(cwd, jobId);
-  const logFd = fs.openSync(path.join(jobDir, 'worker.log'), 'a');
-  const child = spawn(process.execPath, [CLI_PATH, '_worker', jobId, '--cwd', cwd], {
-    cwd,
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
-    env: { ...process.env, [WORKER_ENV]: '1' },
-  });
-  child.unref();
-  fs.closeSync(logFd);
-  writeJob(cwd, jobId, { pid: child.pid ?? null });
+  spawnWorker(cwd, jobId);
 
   // Startup check: wait until the worker reports a live thread, then until its
   // next substantive event lands (first real output, or a failure) — not a
@@ -384,7 +391,7 @@ async function attemptOnce(
   if (current.status === 'failed') {
     // Turn errors (sandbox init, usage/auth) land in result.json, not the
     // progress log, so prefer it and fall back to the log tail.
-    const resultFile = path.join(jobDir, 'result.json');
+    const resultFile = path.join(resolveJobDir(cwd, jobId), 'result.json');
     const resultError =
       readJsonFile<{ error?: { message?: string } }>(resultFile)?.error?.message ?? '';
     const logTail = readJobLog(cwd, jobId, 5)
@@ -500,6 +507,8 @@ export interface TaskResult {
   result: TurnResult | null;
   /** The last `tail` progress-log entries; [] at the default tail of 0. */
   steps: JobLogEntry[];
+  /** One entry per finished turn (a steered task accretes turns). */
+  turns: TurnResultEntry[];
   job: Job;
 }
 
@@ -550,6 +559,7 @@ export function readTask(
     status: job.status,
     result: readResultJson(cwd, taskId),
     steps: readSteps(cwd, taskId, opts.tail),
+    turns: readTurnResults(cwd, taskId),
     job,
   };
 }
@@ -582,6 +592,7 @@ export async function waitTask(
     status: final.status,
     result: readResultJson(cwd, taskId),
     steps: readSteps(cwd, taskId, opts.tail),
+    turns: readTurnResults(cwd, taskId),
     job: final,
   };
 }

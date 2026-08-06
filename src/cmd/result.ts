@@ -4,7 +4,7 @@ import * as z from 'zod/mini';
 
 import { baseOptions, flag, parseArgs, tailOption } from '../lib/args.js';
 import { readTask } from '../lib/dispatch.js';
-import { lastActivityAt, readJobLog, resolveJobDir } from '../lib/state.js';
+import { lastActivityAt, readJobLog, readTurnResults, resolveJobDir } from '../lib/state.js';
 import { waitForTaskAttention } from '../lib/wait.js';
 import { listPendingApprovals } from '../lib/approvals.js';
 import {
@@ -38,6 +38,7 @@ export async function commandResult(argv: string[]) {
       ...baseOptions,
       tail: tailOption,
       wait: flag,
+      turns: flag,
     }),
   );
   rejectExtraArgs(positionals, 1, 'task result');
@@ -58,6 +59,7 @@ export async function commandResult(argv: string[]) {
   // --tail <n|all>: include the last n progress-log steps (same as stream
   // --tail). readTask fills `steps`, so CLI --tail and SDK tail are one path.
   const { steps, result } = readTask(cwd, job.id, { tail: options.tail });
+  const turns = readTurnResults(cwd, job.id);
 
   const pending = listPendingApprovals(resolveJobDir(cwd, job.id)).filter(a => !a.response);
   const running = ACTIVE_STATUSES.includes(job.status);
@@ -87,19 +89,41 @@ export async function commandResult(argv: string[]) {
       effort: job.effort ?? null,
       permissions: job.permissions ?? null,
       cwd: job.cwd ?? null,
+      createdAt: job.createdAt ?? null,
+      completedAt: job.completedAt ?? null,
       ...(running ? { idleMs: idle, lastActivityAt: lastActivity ?? null, stalled } : {}),
       pendingApprovals: pending.map(a => ({ id: a.id, summary: a.summary })),
       ...(steps.length ? { steps } : {}),
+      turnCount: turns.length,
+      ...(options.turns ? { turns } : {}),
       result,
     });
     return exit();
   }
 
   const s = outStyle;
+  // Timing next to the status: when it started, and — once finished — when it
+  // ended and how long it ran.
+  const startedMs = job.createdAt ? ageMs(job.createdAt) : null;
+  const endMs = !running && job.completedAt ? ageMs(job.completedAt) : null;
+  const tookMs =
+    job.createdAt && job.completedAt
+      ? Date.parse(job.completedAt) - Date.parse(job.createdAt)
+      : null;
+  const timeNote = running
+    ? startedMs !== null
+      ? `started ${formatAge(startedMs)} ago`
+      : ''
+    : [
+        endMs !== null ? `finished ${formatAge(endMs)} ago` : '',
+        tookMs !== null && tookMs >= 0 ? `took ${formatAge(tookMs)}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
   const lines = [
     `${s.dim('task')}     ${s.cyan(job.id)}`,
     ...(job.name ? [`${s.dim('name')}     ${job.name}`] : []),
-    `${s.dim('status')}   ${paintStatus(job.status)}`,
+    `${s.dim('status')}   ${paintStatus(job.status)}${timeNote ? ` ${s.dim(`(${timeNote})`)}` : ''}`,
     `${s.dim('agent')}    ${formatAgentSpec(job)}`,
     ...jobOptionLines(job, s),
     ...(result?.tokens
@@ -130,8 +154,17 @@ export async function commandResult(argv: string[]) {
     lines.push(`${s.dim('last')}     ${s.dim(`${trimStep(msg)} (${formatAge(idle)} ago)`)}`);
   }
   lines.push('');
-  if (result) {
+  if (options.turns && turns.length) {
+    turns.forEach((turn, i) => {
+      if (i) lines.push('');
+      lines.push(s.dim(`— turn ${i + 1} of ${turns.length}: ${trimStep(String(turn.prompt ?? ''))}`));
+      lines.push(String(turn.finalMessage || s.dim('(no final message)')));
+    });
+  } else if (result) {
     lines.push(finalMessageLine({ ...result, error: result.error ?? undefined }, job.error, '(no final message)', s));
+    if (turns.length > 1) {
+      lines.push(s.dim(`(turn ${turns.length} of ${turns.length} — all answers: coder task result ${job.id} --turns)`));
+    }
   } else if (running) {
     lines.push(
       s.dim(
@@ -148,7 +181,7 @@ export async function commandResult(argv: string[]) {
   if (running && !options.wait) {
     const hints = [
       `Wait for it: coder task result ${job.id} --wait`,
-      `Follow live: coder task stream ${job.id}`,
+      `Follow live: coder task watch ${job.id}`,
     ];
     if (stalled) hints.push(`Check the transcript: coder task result ${job.id} --tail all`);
     lines.push('', formatHints(hints, s));

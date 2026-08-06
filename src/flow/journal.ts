@@ -70,7 +70,7 @@ export class Journal {
       return null;
     }
     hit.consumed = true;
-    const { consumed, ...clean } = hit;
+    const { consumed: _consumed, ...clean } = hit;
     this.write(clean as JournalEntry);
     return clean as JournalEntry;
   }

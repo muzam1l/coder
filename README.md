@@ -114,15 +114,16 @@ coder run "<text>"                     # dispatch a task (--wait to block for th
 coder list                             # list recent tasks (running + just stopped)
 coder result [task-id]                 # status + final answer (--wait blocks until done)
 coder task steer <task-id> "<text>"    # continue a task with new instructions
+coder task ask <task-id> "<question>"  # ask about a task without interrupting it
 coder task stop <task-id>              # interrupt it
-coder task stream [task-id]            # watch the live progress log
+coder task watch [task-id]             # watch the live progress log
 coder task approve <task-id> <appr-id> # answer an escalated permission (--deny)
 
 coder flow run <name|path> --wait      # run a flow (--dry-run to preview prompts)
 coder flow list                        # recent flow runs
 coder flow discover                    # flows runnable here (workspace + global)
 coder flow result [run-id]             # progress and result across the whole wave
-coder flow stream [run-id]             # watch the wave live (replay + follow)
+coder flow watch [run-id]              # watch the wave live (replay + follow)
 coder flow stop [run-id]               # stop a run and its tasks
 coder flow resume [run-id]             # continue a crashed or edited run
 

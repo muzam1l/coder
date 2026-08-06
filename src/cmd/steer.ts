@@ -1,17 +1,22 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
 import * as z from 'zod/mini';
 
 import { baseOptions, flag, parseArgs, str } from '../lib/args.js';
-import { enqueueSteer, readJob, resolveJobDir, waitForTerminalJob } from '../lib/state.js';
+import {
+  appendJobLog,
+  enqueueSteer,
+  readJob,
+  resolveJobDir,
+  waitForTerminalJob,
+  writeJob,
+} from '../lib/state.js';
 import { readJsonFile } from '../lib/fsx.js';
 import { steerTurn } from '../lib/codex-core.js';
 import { fail, outStyle, printJson, requireJob, resolveCwd } from '../lib/ui.js';
 import { ACTIVE_STATUSES, type Job } from '../lib/types.js';
-import { dispatchTask } from '../lib/dispatch.js';
-import { commandTask } from './task.js';
+import { spawnWorker } from '../lib/dispatch.js';
 
 /** How a steer was applied to a task. */
 export type SteerOutcome = 'live' | 'queued' | 'resumed';
@@ -61,19 +66,30 @@ export async function steerTaskCore(
   if (running) {
     return running;
   }
-  // Resume in the job's own cwd, not the steer invoker's: the claude session
-  // transcript lives under the project dir the task originally ran in, and
-  // `claude --resume` only finds sessions for the current project.
-  const dispatch = await dispatchTask({
-    prompt: text,
-    cwd: job.cwd ?? cwd,
-    resume: job.id,
-    agent: job.agent,
-    model: opts.model ?? job.model ?? undefined,
-    effort: opts.effort ?? job.effort ?? undefined,
-    permissions: opts.permissions ?? job.permissions ?? undefined,
+  resumeInPlace(cwd, job, text, opts);
+  return { taskId: job.id, steered: 'resumed' };
+}
+
+// A stopped task resumes on the SAME job record (never a stray new task id),
+// in the job's own cwd: claude finds session transcripts per project dir.
+function resumeInPlace(
+  cwd: string,
+  job: Job,
+  text: string,
+  opts: { model?: string; effort?: string; permissions?: string },
+): void {
+  writeJob(cwd, job.id, {
+    status: 'queued',
+    resumedAt: new Date().toISOString(),
+    currentPrompt: text,
+    resumeThreadId: job.threadId,
+    model: (opts.model ?? job.model ?? null) as Job['model'],
+    effort: (opts.effort ?? job.effort ?? null) as Job['effort'],
+    permissions: (opts.permissions ?? job.permissions) as Job['permissions'],
+    error: undefined,
   });
-  return { taskId: dispatch.taskId, steered: 'resumed' };
+  appendJobLog(cwd, job.id, { message: 'Resuming with steered follow-up.' });
+  spawnWorker(job.cwd ?? cwd, job.id);
 }
 
 export async function commandSteer(argv: string[]) {
@@ -92,49 +108,26 @@ export async function commandSteer(argv: string[]) {
   const job = requireJob(cwd, reference);
   if (!job.threadId) {
     fail(`Task ${job.id} has no thread to steer yet (status: ${job.status}).`, {
-      hint: `Wait for it to start: coder task stream ${job.id}`,
+      hint: `Wait for it to start: coder task watch ${job.id}`,
     });
   }
 
-  // A running task steers into its live turn rather than starting a new one.
-  const running = await trySteerRunning(cwd, job, prompt);
-  if (running) {
-    return reportRunningSteer(cwd, running.taskId, {
-      queued: running.steered === 'queued',
-      options,
-    });
-  }
-
-  // Stopped (or just-finished) task: resume as a fresh turn on its thread.
-  const forwarded = [
-    prompt,
-    '--resume',
-    job.id,
-    // The job's own cwd, not the invoker's (see steerTaskCore).
-    '--cwd',
-    job.cwd ?? cwd,
-    ...(job.agent ? ['--agent', job.agent] : []),
-    ...(options.model ? ['--model', options.model] : job.model ? ['--model', job.model] : []),
-    ...(options.effort ? ['--effort', options.effort] : job.effort ? ['--effort', job.effort] : []),
-    ...(options.permissions
-      ? ['--permissions', options.permissions]
-      : job.permissions
-        ? ['--permissions', job.permissions]
-        : []),
-    ...(options.wait ? ['--wait'] : []),
-  ];
-  await commandTask(forwarded);
+  const outcome = await steerTaskCore(cwd, job, prompt, {
+    model: options.model,
+    effort: options.effort,
+    permissions: options.permissions,
+  });
+  return reportSteer(cwd, outcome.taskId, { steered: outcome.steered, options });
 }
 
-// Report the outcome of steering a running task. A live-steered follow-up joins
-// the active turn (so --wait blocks on that turn finishing); a queued one runs
-// later, after the current turn ends, so --wait is not meaningful for it.
-async function reportRunningSteer(
+// A live/resumed follow-up extends the task's own turn (--wait blocks on it);
+// a queued one runs after the current turn ends, so --wait can't apply.
+async function reportSteer(
   cwd: string,
   jobId: string,
-  { queued, options }: { queued: boolean; options: Record<string, any> },
+  { steered, options }: { steered: SteerOutcome; options: Record<string, any> },
 ): Promise<void> {
-  if (queued) {
+  if (steered === 'queued') {
     if (options.json) {
       printJson({ taskId: jobId, steered: 'queued' });
       return;
@@ -152,17 +145,18 @@ async function reportRunningSteer(
 
   if (!options.wait) {
     if (options.json) {
-      printJson({ taskId: jobId, steered: 'live' });
+      printJson({ taskId: jobId, steered });
       return;
     }
     process.stdout.write(
-      `${outStyle.dim('[coder]')} steered follow-up into running task ${outStyle.cyan(jobId)}.\n`,
+      steered === 'live'
+        ? `${outStyle.dim('[coder]')} steered follow-up into running task ${outStyle.cyan(jobId)}.\n`
+        : `${outStyle.dim('[coder]')} resumed task ${outStyle.cyan(jobId)} with the follow-up (same thread, same id).\n`,
     );
     process.stdout.write(`\n${outStyle.dim(`  result:  coder task result ${jobId}`)}\n`);
     return;
   }
 
-  // --wait: block on the (now-extended) live turn reaching a terminal status.
   const current = readJob(cwd, jobId);
   const final = current ? await waitForTerminalJob(cwd, current) : null;
   const result = readJsonFile<any>(path.join(resolveJobDir(cwd, jobId), 'result.json'));

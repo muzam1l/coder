@@ -101,13 +101,18 @@ function firstSentence(paragraph: string): string {
 // Print-free core: no topic lists the topics; a topic returns its raw markdown.
 export function docsCore(
   topic?: string,
+  opts: { claude?: boolean } = {},
 ): { topics: { name: string; description: string }[] } | { name: string; content: string } {
   const root = resolveMarketplaceDir();
   const topics = collectTopics(root);
   if (!topic) {
     return { topics: topics.map(t => ({ name: t.name, description: t.description })) };
   }
-  const match = topics.find(t => t.name === topic.toLowerCase());
+  let match = topics.find(t => t.name === topic.toLowerCase());
+  // `docs skill --claude`: the Claude Code flavor of the host skill.
+  if (match?.name === 'skill' && opts.claude) {
+    match = { ...match, file: 'plugins/claude/skills/dispatch/SKILL.md' };
+  }
   if (!match) {
     throw new Error(`Unknown docs topic "${topic}". Available: ${topics.map(t => t.name).join(', ')}`);
   }
@@ -122,12 +127,12 @@ export function docsCore(
 }
 
 export async function commandDocs(argv: string[]): Promise<void> {
-  const { options, positionals } = parseArgs(argv, z.object({ json: flag }));
+  const { options, positionals } = parseArgs(argv, z.object({ json: flag, claude: flag }));
   const [topic] = positionals;
 
   let data: ReturnType<typeof docsCore>;
   try {
-    data = docsCore(topic);
+    data = docsCore(topic, { claude: options.claude });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Only the unknown-topic error carries a next-step hint; read failures don't.

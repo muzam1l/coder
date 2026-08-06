@@ -36,6 +36,9 @@ export interface Job {
   // The engine that executed the turn (custom-model jobs record codex).
   engine?: Engine;
   prompt?: string;
+  // The prompt of the active (resumed/steered) turn. `prompt` always keeps the
+  // task's original text; follow-ups run from here so they never displace it.
+  currentPrompt?: string | null;
   // Harness-supplied standing instructions (--system), kept separate from the
   // task prompt so previews (list/result/stream) show only the task itself.
   system?: string | null;
@@ -49,6 +52,7 @@ export interface Job {
   threadId?: string | null;
   turnId?: string | null;
   completedAt?: string;
+  resumedAt?: string;
   error?: string;
   archived?: boolean;
   archivedAt?: string;

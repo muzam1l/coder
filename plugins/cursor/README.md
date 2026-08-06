@@ -85,7 +85,7 @@ coder list                             # list recent tasks (running + just stopp
 coder result [task-id]                 # status + final answer (--wait blocks until done)
 coder task steer <task-id> "<text>"    # continue a task with new instructions
 coder task stop <task-id>              # interrupt it
-coder task stream [task-id]            # watch the live progress log
+coder task watch [task-id]            # watch the live progress log
 coder task approve <task-id> <appr-id> # answer an escalated permission (--deny)
 ```
 

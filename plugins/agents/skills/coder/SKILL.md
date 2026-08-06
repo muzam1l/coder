@@ -52,7 +52,7 @@ coder flow --help   # command reference
 
 Preview with `--dry-run` before spending tokens - and note flow tasks are normal coder tasks, so steer/stop/list work on them.
 
-Once a run is going, tell the user to run `coder flow stream <run-id>` to see live progress and overview of its tasks as the wave goes. Give them the actual run id, not a placeholder.
+Once a run is going, tell the user to run `coder flow watch <run-id>` to see live progress and overview of its tasks as the wave goes. Give them the actual run id, not a placeholder.
 
 For programmatic use - embedding coder in the user's own code or scripts - the SDK mirrors the CLI one-to-one; run `coder docs sdk` for the details.
 
@@ -67,7 +67,8 @@ With coders running in the background, don't fire-and-forget: check in on them r
 ## Controlling tasks
 
 - Continue prior work ("keep going", "apply the top fix"): `coder task steer <task-id> "<follow-up>"`.
-- Inspect: `coder task result <task-id>` (status + answer; add `--wait` to block until done) and `coder task list`. (`coder task stream <task-id>` streams the live progress log - to watch/debug in special cases, generally not for you to consume.)
+- Question a task without interrupting it (status, decisions, "why did it do X"): `coder task ask <task-id> "<question>"` - a read-only sidecar answers from the task's log and workspace; the task never sees it.
+- Inspect: `coder task result <task-id>` (status + answer; add `--wait` to block until done) and `coder task list`. (`coder task watch <task-id>` streams the live progress log - to watch/debug in special cases, generally not for you to consume.)
 - Interrupt: `coder task stop <task-id>`.
 - If status shows `pendingApprovals`, surface them to the user; apply their decision with `coder task approve <task-id> <approval-id> [--deny]`.
 

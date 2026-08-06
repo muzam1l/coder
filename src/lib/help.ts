@@ -1,7 +1,7 @@
 /**
  * Data-driven help. Task operations live under the `coder task <subcommand>`
  * namespace; several have top-level shortcut aliases (coder run/list/result/
- * stream). Specs are keyed by their canonical id ('task run', 'task
+ * watch). Specs are keyed by their canonical id ('task run', 'task
  * list', 'config', ...) so both the namespace and the shortcuts render the same
  * page.
  */
@@ -49,12 +49,17 @@ export const TASK_MENU: { sub: string; usage: string; blurb: string; alias?: str
     alias: 'result',
   },
   {
-    sub: 'stream',
-    usage: 'stream [task-id]',
+    sub: 'watch',
+    usage: 'watch [task-id]',
     blurb: 'watch a task live (progress log)',
-    alias: 'stream',
+    alias: 'watch',
   },
   { sub: 'steer', usage: 'steer <task-id> "<follow-up>"', blurb: "continue a task's thread" },
+  {
+    sub: 'ask',
+    usage: 'ask <task-id> "<question>"',
+    blurb: 'ask about a task without interrupting it',
+  },
   { sub: 'stop', usage: 'stop <task-id>', blurb: 'interrupt a running task' },
   { sub: 'archive', usage: 'archive <task-id>', blurb: 'archive a session (or --all-stopped)' },
   { sub: 'delete', usage: 'delete <task-id>', blurb: 'delete a session (or --all-archived)' },
@@ -86,7 +91,7 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
         'pick an engine via its model alias; --system adds standing instructions',
       ],
     ],
-    seeAlso: 'task result · task steer · task stop · task stream',
+    seeAlso: 'task result · task steer · task stop · task watch',
   },
   'task list': {
     list: [
@@ -113,31 +118,48 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
       "Show a task's status and its final answer (result pending while it runs), plus\nany pending approvals. --wait blocks until it finishes, then prints. --tail <n>\nincludes the last n progress-log steps (--tail all for the whole transcript).\nDefaults to the most recent task. Shortcut: `coder result`.",
     flags: [
       ['--wait', 'block until the task finishes, then print'],
+      ['--turns', "every turn's answer (a steered task accretes turns)"],
       ['--tail <n|all>', 'include the last n progress-log steps (default: 0, final result only)'],
       JSON_FLAG,
       CWD_FLAG,
     ],
-    seeAlso: 'task list · task steer · task stream',
+    seeAlso: 'task list · task steer · task watch',
   },
-  'task stream': {
-    list: ['task stream [task-id]', 'watch a task live (progress log)'],
-    usage: 'coder task stream [task-id]',
+  'task watch': {
+    list: ['task watch [task-id]', 'watch a task live (progress log)'],
+    usage: 'coder task watch [task-id]',
     summary:
-      "Watch a running task's progress log live (for you/debugging), then print its\nfinal answer. Replays the last line first so the current step is visible;\n--tail <n> replays the last n lines (--tail all for the whole transcript).\nBlocks until it finishes; exits 0 on success, 1 otherwise. For the answer\nalone, prefer `coder result`.",
+      "Watch a running task's progress log live (for you/debugging), then print its\nfinal answer. Replays the last line first so the current step is visible;\n--tail <n> replays the last n lines (--tail all for the whole transcript).\nBlocks until it finishes; exits 0 on success, 1 otherwise. For the answer\nalone, prefer `coder result`. Alias: stream.",
     flags: [
       ['--tail <n|all>', 'replay the last n log lines first (default: 1)'],
       ['--trim <n|none>', 'cap each step at n chars, text and JSON alike (default: 128)'],
       ['--json', 'emit each log entry as a JSON line, then the result'],
       CWD_FLAG,
     ],
-    examples: [['coder stream', 'follow the most recent task to completion']],
+    examples: [['coder watch', 'follow the most recent task to completion']],
     seeAlso: 'task result · task run',
+  },
+  'task ask': {
+    list: ['task ask <task-id> "<question>"', 'ask about a task without interrupting it'],
+    usage: 'coder task ask <task-id> "<question>"',
+    summary:
+      "Answer a question ABOUT a task without touching it: a read-only sidecar reads\nthe task's progress log, result, and workspace and answers; the task never\nsees the question and its thread is not steered. Works whether the task is\nrunning or stopped. To change what the task does, use `coder task steer`.",
+    flags: [
+      ['--model <alias|slug>', "sidecar model (default: the task's own)"],
+      ['--effort <low|medium|high>', 'sidecar reasoning effort'],
+      JSON_FLAG,
+      CWD_FLAG,
+    ],
+    examples: [
+      ['coder task ask task-abc "what approach did you take and why?"', 'probe a decision without derailing the task'],
+    ],
+    seeAlso: 'task steer · task result · task watch',
   },
   'task steer': {
     list: ['task steer <task-id> "<follow-up>"', "continue a task's thread"],
     usage: 'coder task steer <task-id> "<follow-up instructions>" [--wait]',
     summary:
-      "Continue a finished task's thread with new instructions. Reuses the task's\nengine, model, and permissions unless you override them.",
+      "Continue a task's thread with new instructions: injected into the live turn\n(codex), queued for after it (claude), or — for a stopped task — resumed on the\nsame task id. Reuses the task's engine, model, and permissions unless overridden.",
     flags: [
       ['--wait', 'run in the foreground and block until the answer is ready'],
       ['--model <alias|slug>', "override the task's model for this follow-up"],
@@ -195,7 +217,7 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     usage:
       "coder flow run <name|path> [--args '<json>' | key=value...] [--wait] [--concurrency N] [--max-tasks N] [--json] [--dry-run]",
     summary:
-      'Run a flow: a TypeScript file that orchestrates many coder tasks with gates,\njournaling, and resume. Prints the run id and orchestrates in the background;\n--wait follows the run in the foreground with live progress (Ctrl-C detaches;\nit keeps running), and `coder flow stream` shows the same lines any time.\nStop a run with `coder flow stop`.',
+      'Run a flow: a TypeScript file that orchestrates many coder tasks with gates,\njournaling, and resume. Prints the run id and orchestrates in the background;\n--wait follows the run in the foreground with live progress (Ctrl-C detaches;\nit keeps running), and `coder flow watch` shows the same lines any time.\nStop a run with `coder flow stop`.',
     flags: [
       ['--wait', 'follow the run in the foreground (Ctrl-C detaches; it keeps running)'],
       ['--args <json>', "the flow's input as a JSON value (or pass bare key=value pairs)"],
@@ -237,26 +259,26 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['flow result [run-id]', 'progress and result of a flow run'],
     usage: 'coder flow result [run-id] [--tail <n|all>] [--json]',
     summary:
-      "Show a flow run's status and result, with its tasks, gates, and token ledger.\n--tail <n> caps the step rows (0 for the result alone). Defaults to the most\nrecent run. To watch a run live, prefer `coder flow stream`.",
+      "Show a flow run's status and result, with its tasks, gates, and token ledger.\n--tail <n> caps the step rows (0 for the result alone). Defaults to the most\nrecent run. To watch a run live, prefer `coder flow watch`.",
     flags: [
       ['--tail <n|all>', 'show the last n step rows (default: all; 0 hides them)'],
       JSON_FLAG,
       CWD_FLAG,
     ],
     examples: [['coder flow result --tail 0', "the most recent run's result, no step rows"]],
-    seeAlso: 'flow run · flow stream · flow resume',
+    seeAlso: 'flow run · flow watch · flow resume',
   },
-  'flow stream': {
-    list: ['flow stream [run-id]', 'watch a flow run live (replay + follow)'],
-    usage: 'coder flow stream [run-id] [--tail <n|all>] [--json]',
+  'flow watch': {
+    list: ['flow watch [run-id]', 'watch a flow run live (replay + follow)'],
+    usage: 'coder flow watch [run-id] [--tail <n|all>] [--json]',
     summary:
-      'Watch a flow run live: replay its progress lines from the start, then keep\nfollowing while it runs (Ctrl-C detaches; it keeps running). Blocks until it\nfinishes; exits 0 on success, 1 otherwise. Defaults to the most recent run.\nFor the result alone, prefer `coder flow result`.',
+      'Watch a flow run live: replay its progress lines from the start, then keep\nfollowing while it runs (Ctrl-C detaches; it keeps running). Blocks until it\nfinishes; exits 0 on success, 1 otherwise. Defaults to the most recent run.\nFor the result alone, prefer `coder flow result`. Alias: stream.',
     flags: [
       ['--tail <n|all>', 'replay only the last n events first (default: all)'],
       ['--json', 'emit each event as a JSON line, then the result'],
       CWD_FLAG,
     ],
-    examples: [['coder flow stream', 'follow the most recent run to completion']],
+    examples: [['coder flow watch', 'follow the most recent run to completion']],
     seeAlso: 'flow result · flow run',
   },
   'flow stop': {
@@ -424,8 +446,11 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['docs [topic]', 'print bundled documentation (for agents to read)'],
     usage: 'coder docs [topic] [--json]',
     summary:
-      "Print bundled documentation. With no topic, list the available topics; with a\ntopic, print that doc's raw markdown to stdout (unstyled, for an agent to\nconsume).",
-    flags: [['--json', 'list topics as JSON (bare listing only)']],
+      "Print bundled documentation. With no topic, list the available topics; with a\ntopic, print that doc's raw markdown to stdout (unstyled, for an agent to\nconsume). `coder docs skill` prints the host skill so an agent can load it\nonce per session (--claude for the Claude Code flavor).",
+    flags: [
+      ['--claude', 'with the skill topic: print the Claude Code flavor'],
+      ['--json', 'list topics as JSON (bare listing only)'],
+    ],
     examples: [
       ['coder docs', 'list the available topics'],
       ['coder docs flows', 'print the Flows doc'],
@@ -453,10 +478,11 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
 export const HELP_ALIASES: Record<string, string> = {
   run: 'task run',
   list: 'task list',
-  stream: 'task stream',
-  watch: 'task stream',
+  watch: 'task watch',
+  stream: 'task watch',
   result: 'task result',
   steer: 'task steer',
+  ask: 'task ask',
   stop: 'task stop',
   archive: 'task archive',
   delete: 'task delete',
@@ -491,7 +517,7 @@ const FLOW_MENU: { usage: string; blurb: string }[] = [
   { usage: 'list', blurb: 'recent flow runs (running + just stopped)' },
   { usage: 'discover', blurb: 'list flows runnable here (workspace + global)' },
   { usage: 'result [run-id]', blurb: 'progress and result of a run' },
-  { usage: 'stream [run-id]', blurb: 'watch a run live (replay + follow)' },
+  { usage: 'watch [run-id]', blurb: 'watch a run live (replay + follow)' },
   { usage: 'stop [run-id]', blurb: 'stop a run and its still-running tasks' },
   { usage: 'resume [run-id]', blurb: 'continue a stopped or edited run' },
   {
@@ -607,6 +633,8 @@ export function renderTopHelp(): string {
     s.bold('Get started:'),
     `  ${s.cyan('coder setup-host claude')}   ${s.dim('# or agents (Codex, Pi, ...); installs the host plugin/skill')}`,
     `  ${s.cyan('coder run "explain this repo\'s layout"')}`,
+    '',
+    s.dim('Agents: load the skill once with `coder docs skill [--claude]`.'),
     '',
     s.bold('Usage:'),
     '  coder <command>',

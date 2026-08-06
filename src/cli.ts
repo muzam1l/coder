@@ -30,8 +30,9 @@ import {
 import { commandFlow } from './cmd/flow.js';
 import { commandTask, commandWorker } from './cmd/task.js';
 import { commandResult } from './cmd/result.js';
-import { commandStream } from './cmd/stream.js';
+import { commandWatch } from './cmd/watch.js';
 import { commandSteer } from './cmd/steer.js';
+import { commandAsk } from './cmd/ask.js';
 import { commandStop } from './cmd/stop.js';
 import { commandJobs } from './cmd/jobs.js';
 import { commandArchive, commandArchiveSweep } from './cmd/archive.js';
@@ -42,15 +43,18 @@ import { commandSetupHost } from './cmd/setup-host.js';
 import { commandModel } from './cmd/model.js';
 import { commandDocs } from './cmd/docs.js';
 import { commandUpgrade } from './cmd/upgrade.js';
+import { commandMcp } from './cmd/mcp.js';
 import type { CommandHandler } from './lib/types.js';
 
 // Subcommands of `coder task <sub> ...`.
 const TASK_SUBCOMMANDS: Record<string, CommandHandler> = {
   run: commandTask,
   list: commandJobs,
-  stream: commandStream,
+  watch: commandWatch,
+  stream: commandWatch, // silent alias for watch
   result: commandResult,
   steer: commandSteer,
+  ask: commandAsk,
   stop: commandStop,
   archive: commandArchive,
   delete: commandDelete,
@@ -73,7 +77,8 @@ async function commandTaskGroup(argv: string[]): Promise<void> {
     fail(`Unknown task subcommand "${sub}".`, { hint: 'Run a task: coder run "<text>"' });
   }
   if (wantsHelp(rest)) {
-    process.stdout.write(renderCommandHelp(`task ${sub}`) ?? renderTaskGroupHelp());
+    const canon = sub === 'stream' ? 'watch' : sub;
+    process.stdout.write(renderCommandHelp(`task ${canon}`) ?? renderTaskGroupHelp());
     return;
   }
   await handler(rest);
@@ -85,16 +90,17 @@ const COMMANDS: Record<string, CommandHandler> = {
   // Top-level shortcut aliases for common task subcommands.
   run: commandTask,
   list: commandJobs,
-  stream: commandStream,
+  watch: commandWatch,
   result: commandResult,
   // Back-compat flat aliases (still work; canonical form is `coder task <sub>`).
+  stream: commandWatch, // silent alias for watch
   steer: commandSteer,
+  ask: commandAsk,
   stop: commandStop,
   archive: commandArchive,
   delete: commandDelete,
   approvals: commandApprovals,
   approve: commandApprove,
-  watch: commandStream,
   // Standalone commands.
   config: commandConfig,
   'setup-host': commandSetupHost,
@@ -106,6 +112,7 @@ const COMMANDS: Record<string, CommandHandler> = {
   update: commandUpgrade,
   // Internal.
   _worker: commandWorker,
+  _mcp: commandMcp,
   _refreshUpdate: async () => refreshUpdateCache(readVersion()),
   _archiveSweep: commandArchiveSweep,
 };
@@ -153,6 +160,7 @@ async function main() {
   // detached refresher never re-triggers itself.
   if (
     subcommand !== '_worker' &&
+    subcommand !== '_mcp' &&
     subcommand !== '_refreshUpdate' &&
     subcommand !== '_archiveSweep'
   ) {

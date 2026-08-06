@@ -835,17 +835,23 @@ async function flowList(argv: string[]): Promise<void> {
     return;
   }
   const s = outStyle;
+  const col = (min: number, max: number, values: string[]) =>
+    Math.min(max, Math.max(min, ...values.map(v => v.length)));
+  const w = {
+    id: col('run-id'.length, 28, runs.map(r => r.runId)),
+    name: col('name'.length, 30, runs.map(r => r.name)),
+  };
   process.stdout.write(
     s.bold(
       s.light(
-        `${'run-id'.padEnd(24)} ${'name'.padEnd(20)} ${'status'.padEnd(10)} ${'tasks'.padEnd(9)} ${'tokens'.padEnd(10)} age\n`,
+        `${'run-id'.padEnd(w.id)}  ${'name'.padEnd(w.name)}  ${'status'.padEnd(10)}  ${'tasks'.padEnd(9)}  ${'tokens'.padEnd(10)}  age\n`,
       ),
     ),
   );
   for (const r of runs) {
     const tokens = Object.values(r.ledger).reduce((sum, t) => sum + t.total, 0);
     process.stdout.write(
-      `${s.cyan(clipPad(r.runId, 24))} ${clipPad(r.name, 20)} ${paintStatus(r.status, 10)} ${s.light(clipPad(`${r.taskCount} tasks`, 9))} ${s.light(clipPad(tokens ? `${formatTokenCount(tokens)} tok` : '-', 10))} ${s.light(formatAge(ageMs(r.startedAt)))}\n`,
+      `${s.cyan(clipPad(r.runId, w.id))}  ${clipPad(r.name, w.name)}  ${paintStatus(r.status, 10)}  ${s.light(clipPad(`${r.taskCount} tasks`, 9))}  ${s.light(clipPad(tokens ? `${formatTokenCount(tokens)} tok` : '-', 10))}  ${s.light(formatAge(ageMs(r.startedAt)))}\n`,
     );
   }
   if (clipped) {
@@ -1013,7 +1019,7 @@ function renderResult(record: FlowRecord, json: boolean, tail: number | 'all' = 
   const hints =
     record.status === 'running'
       ? [
-          `Follow live: coder flow stream ${record.runId}`,
+          `Follow live: coder flow watch ${record.runId}`,
           `Stop it: coder flow stop ${record.runId}`,
         ]
       : record.status === 'stopped' || record.status === 'failed'
@@ -1048,7 +1054,7 @@ async function flowResult(argv: string[]): Promise<void> {
 
 // Replay the run's full event stream then track it live (or, on a terminal
 // run, just replay + summary) with --wait's exit semantics.
-async function flowStream(argv: string[]): Promise<void> {
+async function flowWatch(argv: string[]): Promise<void> {
   const { options, positionals } = parseArgs(
     argv,
     z.object({ cwd: str, json: flag, tail: tailOption }),
@@ -1234,7 +1240,8 @@ const FLOW_SUBCOMMANDS: Record<string, CommandHandler> = {
   list: flowList,
   discover: flowDiscover,
   result: flowResult,
-  stream: flowStream,
+  watch: flowWatch,
+  stream: flowWatch, // silent alias for watch
   stop: flowStop,
   resume: flowResume,
   archive: flowArchive,
@@ -1254,7 +1261,8 @@ export async function commandFlow(argv: string[]): Promise<void> {
     fail(`Unknown flow subcommand "${sub}".`, { hint: 'Run a flow: coder flow run <name>' });
   }
   if (wantsHelp(rest)) {
-    process.stdout.write(renderCommandHelp(`flow ${sub}`) ?? renderFlowGroupHelp());
+    const canon = sub === 'stream' ? 'watch' : sub;
+    process.stdout.write(renderCommandHelp(`flow ${canon}`) ?? renderFlowGroupHelp());
     return;
   }
   await handler(rest);

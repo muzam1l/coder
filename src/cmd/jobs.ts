@@ -168,6 +168,19 @@ export async function commandJobs(argv: string[]) {
   }
   const s = outStyle;
   type Row = (typeof tasks)[number];
+  const whoOf = (t: Row) =>
+    (t.agent === 'custom' && t.model
+      ? t.model
+      : (t.agent ?? '-') + (t.model ? `/${t.model}` : '')) + (t.effort ? `/${t.effort}` : '');
+  const cwdOf = (t: Row) => (t.cwd ? path.basename(t.cwd) : '-');
+  // Widths follow the actual values, capped so one outlier can't blow up the table.
+  const col = (min: number, max: number, values: string[]) =>
+    Math.min(max, Math.max(min, ...values.map(v => v.length)));
+  const w = {
+    id: col('task-id'.length, 28, tasks.map(t => t.taskId)),
+    who: col('agent'.length, 26, tasks.map(whoOf)),
+    cwd: col('cwd'.length, 24, tasks.map(cwdOf)),
+  };
   const renderRow = (t: Row) => {
     const mark = t.archived ? ` ${s.dim('(archived)')}` : '';
     const label = t.name ? t.name : s.light(t.prompt);
@@ -175,18 +188,13 @@ export async function commandJobs(argv: string[]) {
       t.idleMs !== null && t.idleMs >= IDLE_SHOW_MS
         ? ` ${(t.idleMs > STALL_MS ? s.red : s.dim)(`· idle ${formatAge(t.idleMs)}`)}`
         : '';
-    const who =
-      (t.agent === 'custom' && t.model
-        ? t.model
-        : (t.agent ?? '-') + (t.model ? `/${t.model}` : '')) +
-      (t.effort ? `/${t.effort}` : '');
     process.stdout.write(
-      `${s.cyan(t.taskId.padEnd(24))} ${paintStatus(t.status, 10)} ${s.light(clipPad(who, 18))} ${s.light(clipPad(t.cwd ? path.basename(t.cwd) : '-', 12))} ${label}${idle}${mark}\n`,
+      `${s.cyan(t.taskId.padEnd(w.id))}  ${paintStatus(t.status, 10)}  ${s.light(clipPad(whoOf(t), w.who))}  ${s.light(clipPad(cwdOf(t), w.cwd))}  ${label}${idle}${mark}\n`,
     );
   };
 
   process.stdout.write(
-    s.bold(s.light(`${'task-id'.padEnd(24)} ${'status'.padEnd(10)} ${'agent'.padEnd(18)} ${'cwd'.padEnd(12)} name\n`)),
+    s.bold(s.light(`${'task-id'.padEnd(w.id)}  ${'status'.padEnd(10)}  ${'agent'.padEnd(w.who)}  ${'cwd'.padEnd(w.cwd)}  name\n`)),
   );
 
   // Tasks stay in time order; a flow run renders as a header plus its grouped
