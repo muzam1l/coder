@@ -63,8 +63,8 @@ export const TASK_MENU: { sub: string; usage: string; blurb: string; alias?: str
   { sub: 'stop', usage: 'stop <task-id>', blurb: 'interrupt a running task' },
   { sub: 'archive', usage: 'archive <task-id>', blurb: 'archive a session (or --all-stopped)' },
   { sub: 'delete', usage: 'delete <task-id>', blurb: 'delete a session (or --all-archived)' },
-  { sub: 'approvals', usage: 'approvals <task-id>', blurb: 'list escalated approvals' },
-  { sub: 'approve', usage: 'approve <task-id> <id>', blurb: 'answer an escalated permission' },
+  { sub: 'approvals', usage: 'approvals [task-id]', blurb: 'pending approvals (all tasks, or one)' },
+  { sub: 'approve', usage: 'approve <id>', blurb: 'answer an escalated permission' },
 ];
 
 // Detailed specs, keyed by canonical id.
@@ -85,7 +85,8 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     ],
     examples: [
       ['coder run "add a /health endpoint"', 'dispatch in the background, print a task id'],
-      ['coder run --wait "fix the failing test"', 'block until done, print the answer'],
+      ['coder result <task-id> --wait', 'then block until it finishes and print the answer'],
+      ['coder run --wait "fix the failing test"', 'or block on the run itself'],
       [
         'coder task run --model mini --system "tests live in test/, don\'t touch anything outside of it" "rename foo to bar"',
         'pick an engine via its model alias; --system adds standing instructions',
@@ -122,6 +123,10 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
       ['--tail <n|all>', 'include the last n progress-log steps (default: 0, final result only)'],
       JSON_FLAG,
       CWD_FLAG,
+    ],
+    examples: [
+      ['coder result <task-id> --wait', 'block until the task finishes, print the answer'],
+      ['coder result <task-id> --turns', "every turn's answer for a steered task"],
     ],
     seeAlso: 'task list · task steer · task watch',
   },
@@ -196,16 +201,18 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     seeAlso: 'task archive · task stop',
   },
   'task approvals': {
-    list: ['task approvals <task-id>', 'list escalated approvals'],
-    usage: 'coder task approvals <task-id>',
-    summary: 'List permission escalations a task has raised, and how each was answered.',
+    list: ['task approvals [task-id]', 'pending approvals (all tasks, or one)'],
+    usage: 'coder task approvals [task-id]',
+    summary:
+      'Without a task id: pending approvals across all tasks. With one: that task\'s\npermission escalations and how each was answered. Shortcut: `coder approvals`.',
     flags: [JSON_FLAG, CWD_FLAG],
     seeAlso: 'task approve',
   },
   'task approve': {
-    list: ['task approve <task-id> <id> [--deny]', 'answer an escalated permission'],
-    usage: 'coder task approve <task-id> <approval-id> [--deny]',
-    summary: 'Answer an escalated permission request. Accepts by default; --deny rejects it.',
+    list: ['task approve <id> [--deny]', 'answer an escalated permission'],
+    usage: 'coder task approve [task-id] <approval-id> [--deny]',
+    summary:
+      'Answer an escalated permission request. Accepts by default; --deny rejects it.\nApproval ids are unique, so the task id is optional. Shortcut: `coder approve`.',
     flags: [['--deny', 'reject the request instead of accepting'], JSON_FLAG, CWD_FLAG],
     seeAlso: 'task approvals · task result',
   },

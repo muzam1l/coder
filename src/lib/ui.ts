@@ -34,6 +34,7 @@ export function makeStyle(stream: NodeJS.WriteStream): Style {
     light: text => paint('38;5;249', text),
     green: text => paint('32', text),
     red: text => paint('31', text),
+    yellow: text => paint('33', text),
   };
 }
 export const outStyle = makeStyle(process.stdout);
@@ -453,6 +454,9 @@ export function paintStatus(status: string, width = 0): string {
   const text = status.padEnd(width);
   if (status === 'running') {
     return outStyle.green(text);
+  }
+  if (status === 'waiting-approval') {
+    return outStyle.yellow(text);
   }
   if (status === 'failed' || status === 'cancelled') {
     return outStyle.red(text);

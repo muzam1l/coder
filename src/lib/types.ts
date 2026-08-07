@@ -143,6 +143,7 @@ export interface Style {
   light: Painter;
   green: Painter;
   red: Painter;
+  yellow: Painter;
 }
 
 /** A [flag-or-command, description] pair rendered in help tables. */

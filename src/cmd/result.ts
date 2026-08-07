@@ -63,6 +63,7 @@ export async function commandResult(argv: string[]) {
 
   const pending = listPendingApprovals(resolveJobDir(cwd, job.id)).filter(a => !a.response);
   const running = ACTIVE_STATUSES.includes(job.status);
+  const status = running && pending.length ? 'waiting-approval' : job.status;
   // Last progress event, and how long ago — the signal for slow-vs-hung.
   const lastLog = running ? readJobLog(cwd, job.id, 1)[0] : undefined;
   // Latest sign of life (log, heartbeat, or job update) — heartbeats cover
@@ -83,7 +84,7 @@ export async function commandResult(argv: string[]) {
       name: job.name ?? null,
       prompt: job.prompt ?? null,
       system: job.system ?? null,
-      status: job.status,
+      status,
       agent: job.agent,
       model: job.model ?? null,
       effort: job.effort ?? null,
@@ -123,7 +124,7 @@ export async function commandResult(argv: string[]) {
   const lines = [
     `${s.dim('task')}     ${s.cyan(job.id)}`,
     ...(job.name ? [`${s.dim('name')}     ${job.name}`] : []),
-    `${s.dim('status')}   ${paintStatus(job.status)}${timeNote ? ` ${s.dim(`(${timeNote})`)}` : ''}`,
+    `${s.dim('status')}   ${paintStatus(status)}${timeNote ? ` ${s.dim(`(${timeNote})`)}` : ''}`,
     `${s.dim('agent')}    ${formatAgentSpec(job)}`,
     ...jobOptionLines(job, s),
     ...(result?.tokens
@@ -139,6 +140,7 @@ export async function commandResult(argv: string[]) {
     lines.push('', s.dim('pending approvals:'));
     for (const a of pending) {
       lines.push(`  ${s.cyan(a.id)}  ${a.summary}`);
+      lines.push(`  ${s.bold(`coder approve ${job.id} ${a.id}`)}  ${s.dim('(--deny to reject)')}`);
     }
   }
   if (steps.length) {
@@ -147,11 +149,6 @@ export async function commandResult(argv: string[]) {
       const msg = entry.message ?? entry.kind;
       if (msg) lines.push(`  ${s.dim(trimStep(msg))}`);
     }
-  }
-  // For a running task, surface last activity + how long ago (slow vs hung).
-  if (running && lastLog) {
-    const msg = lastLog.message ?? lastLog.kind ?? '';
-    lines.push(`${s.dim('last')}     ${s.dim(`${trimStep(msg)} (${formatAge(idle)} ago)`)}`);
   }
   lines.push('');
   if (options.turns && turns.length) {
@@ -169,7 +166,9 @@ export async function commandResult(argv: string[]) {
     lines.push(
       s.dim(
         stalled
-          ? `Result pending, but no progress for ${formatAge(idle)} — the task may be stalled.`
+          ? `Result pending, but no progress for ${formatAge(idle)} — the task may be stalled.${
+              lastLog ? ` Last: ${trimStep(lastLog.message ?? lastLog.kind ?? '')}` : ''
+            }`
           : 'Result pending — task is still running.',
       ),
     );

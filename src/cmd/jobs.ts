@@ -10,8 +10,10 @@ import {
   listArchivedJobs,
   listJobs,
   markJobArchived,
+  resolveJobDir,
   resolveWorkspaceRoot,
 } from '../lib/state.js';
+import { listPendingApprovals } from '../lib/approvals.js';
 import { spawnArchiveSweep } from './archive.js';
 import { readFlowRecord } from '../flow/runtime.js';
 import {
@@ -125,22 +127,28 @@ export async function commandJobs(argv: string[]) {
     limit: options.limit,
   });
 
-  const tasks = jobs.map(job => ({
-    taskId: job.id,
-    status: job.status,
-    agent: job.agent ?? null,
-    model: job.model ?? null,
-    effort: job.effort ?? null,
-    name: job.name ?? null,
-    cwd: job.cwd ?? null,
-    prompt: String(job.prompt ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
-    updatedAt: job.updatedAt,
-    archived: job.archived ?? false,
-    flowRunId: job.flowRunId ?? null,
-    // Idle = time since the agent last emitted anything (log, heartbeat, or
-    // job update), not just since the job record changed.
-    idleMs: ACTIVE_STATUSES.includes(job.status) ? ageMs(lastActivityAt(cwd, job)) : null,
-  }));
+  const tasks = jobs.map(job => {
+    const pendingApprovals = ACTIVE_STATUSES.includes(job.status)
+      ? listPendingApprovals(resolveJobDir(cwd, job.id)).filter(a => !a.response).length
+      : 0;
+    return {
+      taskId: job.id,
+      status: pendingApprovals ? ('waiting-approval' as const) : job.status,
+      pendingApprovals,
+      agent: job.agent ?? null,
+      model: job.model ?? null,
+      effort: job.effort ?? null,
+      name: job.name ?? null,
+      cwd: job.cwd ?? null,
+      prompt: String(job.prompt ?? '').replace(/\s+/g, ' ').trim().slice(0, 80),
+      updatedAt: job.updatedAt,
+      archived: job.archived ?? false,
+      flowRunId: job.flowRunId ?? null,
+      // Idle = time since the agent last emitted anything (log, heartbeat, or
+      // job update), not just since the job record changed.
+      idleMs: ACTIVE_STATUSES.includes(job.status) ? ageMs(lastActivityAt(cwd, job)) : null,
+    };
+  });
 
   if (options.json) {
     printJson(tasks);
@@ -178,6 +186,7 @@ export async function commandJobs(argv: string[]) {
     Math.min(max, Math.max(min, ...values.map(v => v.length)));
   const w = {
     id: col('task-id'.length, 28, tasks.map(t => t.taskId)),
+    status: col('status'.length, 16, tasks.map(t => t.status)),
     who: col('agent'.length, 26, tasks.map(whoOf)),
     cwd: col('cwd'.length, 24, tasks.map(cwdOf)),
   };
@@ -189,12 +198,12 @@ export async function commandJobs(argv: string[]) {
         ? ` ${(t.idleMs > STALL_MS ? s.red : s.dim)(`· idle ${formatAge(t.idleMs)}`)}`
         : '';
     process.stdout.write(
-      `${s.cyan(t.taskId.padEnd(w.id))}  ${paintStatus(t.status, 10)}  ${s.light(clipPad(whoOf(t), w.who))}  ${s.light(clipPad(cwdOf(t), w.cwd))}  ${label}${idle}${mark}\n`,
+      `${s.cyan(t.taskId.padEnd(w.id))}  ${paintStatus(t.status, w.status)}  ${s.light(clipPad(whoOf(t), w.who))}  ${s.light(clipPad(cwdOf(t), w.cwd))}  ${label}${idle}${mark}\n`,
     );
   };
 
   process.stdout.write(
-    s.bold(s.light(`${'task-id'.padEnd(w.id)}  ${'status'.padEnd(10)}  ${'agent'.padEnd(w.who)}  ${'cwd'.padEnd(w.cwd)}  name\n`)),
+    s.bold(s.light(`${'task-id'.padEnd(w.id)}  ${'status'.padEnd(w.status)}  ${'agent'.padEnd(w.who)}  ${'cwd'.padEnd(w.cwd)}  name\n`)),
   );
 
   // Tasks stay in time order; a flow run renders as a header plus its grouped

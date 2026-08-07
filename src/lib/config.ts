@@ -123,16 +123,20 @@ export const CLAUDE_SANDBOX_UNAVAILABLE_PATTERN =
  * modes that need no sandbox.
  */
 export function claudeSandboxSettings(permissions: Permission, cwd: string): string | null {
-  if (permissions !== 'read-only') {
-    return null;
+  if (permissions === 'read-only') {
+    return JSON.stringify({
+      sandbox: {
+        enabled: true,
+        failIfUnavailable: true,
+        autoAllowBashIfSandboxed: true,
+        filesystem: { denyWrite: [cwd] },
+      },
+    });
   }
+  // auto/workspace-write: sandboxed commands skip the permission prompt; only
+  // escapes hit the permission layer, which alone still gates safely.
   return JSON.stringify({
-    sandbox: {
-      enabled: true,
-      failIfUnavailable: true,
-      autoAllowBashIfSandboxed: true,
-      filesystem: { denyWrite: [cwd] },
-    },
+    sandbox: { enabled: true, autoAllowBashIfSandboxed: true },
   });
 }
 

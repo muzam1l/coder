@@ -328,7 +328,7 @@ export async function escalate(
     kind: "approval-escalated",
     approvalId: id,
     summary: request.summary,
-    message: `Approval needed (${id}): ${request.summary}. Answer with: coder approve <job> ${id} [--deny]`
+    message: `Approval needed (${id}): ${request.summary}. Answer with: coder approve ${path.basename(jobDir)} ${id} [--deny]`
   });
 
   const responseFile = path.join(dir, `${id}.response.json`);
