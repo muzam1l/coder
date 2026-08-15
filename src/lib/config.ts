@@ -3,6 +3,7 @@
  * defaults -> ~/.coder/config.json -> <workspace>/coder.config.json -> CLI flags.
  */
 import fs from 'node:fs';
+import net from 'node:net';
 import * as z from 'zod/mini';
 import path from 'node:path';
 import { resolveCoderHome, resolveWorkspaceRoot } from './state.js';
@@ -113,6 +114,18 @@ export const CLAUDE_PERMISSION_FLAGS: Record<Permission, string[]> = {
 export const CLAUDE_SANDBOX_UNAVAILABLE_PATTERN =
   /failIfUnavailable|sandbox\b[^.\n]*?(?:failed|could ?n[o']t|cannot|unavailable|not available|not supported)/i;
 
+// approvals.allowedNetworkHosts entries as claude sandbox allowedDomains:
+// a bare hostname also covers its subdomains (matching the codex policy's
+// endsWith check), bare IPv6 gets bracket form, IPs / host:port / already
+// bracketed entries pass through as-is.
+function claudeAllowedDomains(hosts: string[]): string[] {
+  return hosts.flatMap(host => {
+    if (net.isIPv6(host)) return [`[${host}]`];
+    if (host.startsWith('[') || host.includes(':') || net.isIP(host)) return [host];
+    return [host, `*.${host}`];
+  });
+}
+
 /**
  * Read-only Bash is enforced by Claude Code's native OS sandbox (Seatbelt on
  * macOS, bubblewrap + socat on Linux/WSL2) rather than a command allowlist: the
@@ -122,7 +135,11 @@ export const CLAUDE_SANDBOX_UNAVAILABLE_PATTERN =
  * cannot start. Returns a JSON string for `claude --settings`, or null for
  * modes that need no sandbox.
  */
-export function claudeSandboxSettings(permissions: Permission, cwd: string): string | null {
+export function claudeSandboxSettings(
+  permissions: Permission,
+  cwd: string,
+  allowedNetworkHosts: string[] = [],
+): string | null {
   if (permissions === 'read-only') {
     return JSON.stringify({
       sandbox: {
@@ -135,8 +152,17 @@ export function claudeSandboxSettings(permissions: Permission, cwd: string): str
   }
   // auto/workspace-write: sandboxed commands skip the permission prompt; only
   // escapes hit the permission layer, which alone still gates safely.
+  // In auto mode, approvals.allowedNetworkHosts are reachable inside the
+  // sandbox (no escape, no ask) — the same hosts the codex approval policy
+  // auto-accepts network escalations for.
   return JSON.stringify({
-    sandbox: { enabled: true, autoAllowBashIfSandboxed: true },
+    sandbox: {
+      enabled: true,
+      autoAllowBashIfSandboxed: true,
+      ...(permissions === 'auto' && allowedNetworkHosts.length
+        ? { network: { allowedDomains: claudeAllowedDomains(allowedNetworkHosts) } }
+        : {}),
+    },
   });
 }
 

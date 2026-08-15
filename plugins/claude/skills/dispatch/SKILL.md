@@ -38,6 +38,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
 - When the first engine can't start (auth, quota, rate limit), the runtime automatically falls back to the next engine in the chain, runs the same task on it, and still exits 0 - so just fetch the result. If the failure mentions a usage-limit reset time, relay that to the user.
 - Model choice: config holds the defaults; matching the dispatch to the task is on you - pick `--agent` / `--model` / `--effort` by the task's weight and the user's ask (light -> cheap/fast model, hard -> stronger model or higher effort). `coder task run --help` lists agents, models, and efforts; `coder model list` shows custom models.
 - Permissions default to auto mode (workspace-write + policy-answered escalations). Pass `--permissions read-only` when the task is read-only; `--permissions workspace-write` to forbid any escalation beyond the project.
+- Network access escalates by default in auto mode; hosts in `approvals.allowedNetworkHosts` (coder config, subdomains included) need no approval. If a trusted host keeps escalating, suggest allowlisting it: `coder config set approvals.allowedNetworkHosts '["registry.npmjs.org"]'`.
 
 ## Flows (multi-task workflows)
 

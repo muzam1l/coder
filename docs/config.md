@@ -30,6 +30,10 @@ coder config set agents.codex.model terra
     "fast": { "provider": "codex", "model": "gpt-5.4-mini" },
     "big": { "provider": "claude", "model": "opus", "effort": "high" },
     "luna": { "disabled": true }
+  },
+  "approvals": {
+    "escalationTimeoutMs": 120000,
+    "allowedNetworkHosts": ["localhost", "127.0.0.1", "registry.npmjs.org"]
   }
 }
 ```
@@ -61,6 +65,17 @@ One namespace for every model you can name as `--model`, keyed by that name. An 
 | `{ "disabled": true }` | bare toggle turning off any model name (built-in, entry from another config layer, or raw engine slug) | `coder model disable/enable` |
 
 Every shape also accepts `"disabled": true` to park the entry without deleting it. An entry named after a built-in alias (e.g. `mini`) shadows it. See [Models](models.md).
+
+## `approvals`
+
+Tunes the `auto` permission mode; ignored by `read-only` and `workspace-write`.
+
+| Key | Meaning |
+| --- | --- |
+| `escalationTimeoutMs` | How long an escalated approval waits for an answer before auto-denying and letting the task move on. Default `120000`. |
+| `allowedNetworkHosts` | Hosts (and their subdomains) coders may reach without an approval. Default `[]` — all network access escalates. |
+
+`allowedNetworkHosts` works on both engines — auto-accepted by the codex approval policy, pre-allowed in the claude sandbox. A bare hostname covers its subdomains; anything else escalates as usual.
 
 ---
 

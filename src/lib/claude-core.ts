@@ -73,6 +73,8 @@ export interface ClaudeTurnOptions {
   permissions?: Permission | null;
   /** Route unresolved permission asks to coder's approval policy (auto mode only). */
   approvalJobId?: string | null;
+  /** Hosts reachable inside the sandbox without approval (auto mode only). */
+  allowedNetworkHosts?: string[];
   resumeSessionId?: string | null;
   onProgress?: (update: { message: string; threadId?: string }) => void;
   onHeartbeat?: () => void;
@@ -121,7 +123,7 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
   }
   // Read-only is enforced by claude's OS sandbox, scoped to deny writes to this
   // workspace; passed as a settings JSON string so it needs no on-disk config.
-  const sandboxSettings = claudeSandboxSettings(permissions, cwd);
+  const sandboxSettings = claudeSandboxSettings(permissions, cwd, options.allowedNetworkHosts ?? []);
   if (sandboxSettings) {
     args.push("--settings", sandboxSettings);
   }

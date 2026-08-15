@@ -207,6 +207,7 @@ async function executeClaudeTurn(
   { echo }: { echo: boolean },
 ): Promise<TurnResult> {
   const jobDir = resolveJobDir(cwd, job.id);
+  const config = loadConfig(cwd);
   const onProgress = buildProgressLogger(cwd, job.id, { echo });
 
   const mode = PERMISSION_MODES[job.permissions ?? 'auto'] ?? PERMISSION_MODES.auto;
@@ -216,6 +217,7 @@ async function executeClaudeTurn(
     effort: job.effort,
     permissions: job.permissions,
     approvalJobId: mode.approvalMode === 'auto' ? job.id : null,
+    allowedNetworkHosts: config.approvals.allowedNetworkHosts,
     resumeSessionId: job.resumeThreadId ?? null,
     onHeartbeat: buildHeartbeat(cwd, job.id),
     onProgress: update => {

@@ -71,7 +71,8 @@ export async function commandApprovals(argv: string[]) {
     }
     const pending = items.filter(item => !item.answered);
     if (pending.length) {
-      process.stdout.write(`\n${formatHints([`Answer: coder approve ${pending[0]!.id} [--deny]`], s)}\n`);
+      const ref = pending.length === 1 ? pending[0]!.id : '<approval-id>';
+      process.stdout.write(`\n${formatHints([`Answer: coder approve ${ref} [--deny]`], s)}\n`);
     }
     return;
   }
@@ -98,7 +99,8 @@ export async function commandApprovals(argv: string[]) {
       `${s.cyan(r.id.padEnd(w.id))}  ${s.cyan(r.taskId.padEnd(w.task))}  ${age.padEnd(5)}  ${s.light(r.summary)}\n`,
     );
   }
-  process.stdout.write(`\n${formatHints([`Answer: coder approve ${rows[0]!.id} [--deny]`], s)}\n`);
+  const ref = rows.length === 1 ? rows[0]!.id : '<approval-id>';
+  process.stdout.write(`\n${formatHints([`Answer: coder approve ${ref} [--deny]`], s)}\n`);
 }
 
 export async function commandApprove(argv: string[]) {
