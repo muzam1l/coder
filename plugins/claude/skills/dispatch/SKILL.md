@@ -30,7 +30,7 @@ If `coder` is not on PATH, install it yourself without asking (`npm install -g @
   coder task run --system "<standing instructions>" "<task text>"
   ```
 
-  Fetch the answer with `coder task result <task-id> --wait` - blocks until done, prints only the final result. Run it as a background Bash call (run_in_background: true) so it does not block you and you are re-invoked on completion; without one, poll without `--wait`, or put `--wait` on the run itself.
+  Fetch the answer with `coder task result <task-id> --wait` - blocks until done, prints only the final result. Run it as a background Bash call (run_in_background: true) so it does not block you and you are re-invoked on completion. For a fan-out, start one such background waiter per dispatched task (see Supervision loop).
 
 - A `--wait` (on `run` or `result`) exits **4** when the task is waiting on a permission approval: relay the approval to the user, apply their decision with `coder approve <task-id> <approval-id> [--deny]`, then re-fetch with `coder task result <task-id> --wait`. (Unanswered approvals auto-deny after 120s and the task moves on.)
 
@@ -61,7 +61,7 @@ When no coder engine can start (missing binaries, auth, quota across the whole c
 
 ## Supervision loop
 
-With coders running in the background, don't fire-and-forget: schedule recurring check-ins (the `/loop` skill or ScheduleWakeup; interval by the work's pace, 10m default). Each tick: `coder task list`, fetch finished results, dispatch newly unblocked coders, steer stuck ones, stop off-track ones, surface pending approvals. Stop the loop when all tasks are done and relayed.
+With coders running in the background, don't fire-and-forget: hold one background `coder task result <task-id> --wait` per task - each re-invokes you when its task finishes (relay the answer, dispatch newly unblocked coders) or escalates an approval (exit 4, see above; restart the waiter after answering). Only without background shells, fall back to recurring check-ins (the `/loop` skill or ScheduleWakeup; interval by the work's pace, 10m default; bump `approvals.escalationTimeoutMs` above it so escalations survive between ticks): each tick `coder task list`, fetch finished results, surface pending approvals.
 
 ## Controlling tasks
 
