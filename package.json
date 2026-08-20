@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "main": "./dist/sdk.js",

@@ -10,7 +10,8 @@ import * as z from 'zod/mini';
 
 import { parseArgs, str } from '../lib/args.js';
 import { decideCommand, decideFileChange, escalate } from '../lib/approvals.js';
-import { appendJobLog, resolveJobDir, resolveWorkspaceRoot } from '../lib/state.js';
+import { decideSidecar } from '../lib/sidecar.js';
+import { appendJobLog, readJob, resolveJobDir, resolveWorkspaceRoot } from '../lib/state.js';
 import { loadConfig } from '../lib/config.js';
 import { resolveCwd } from '../lib/ui.js';
 import { readVersion } from '../lib/runtime.js';
@@ -52,16 +53,28 @@ export async function decidePermission(
   onEvent({ kind: 'approval-decision', method: toolName, decision: verdict.decision, reason: verdict.reason, summary });
 
   let decision = verdict.decision;
+  let reason = verdict.reason;
   if (decision === 'escalate') {
-    decision = await escalate(
-      jobDir,
-      { method: `claude/${toolName}`, summary, params: { tool_name: toolName, input } },
-      { timeoutMs: config.approvals.escalationTimeoutMs, onEvent },
-    );
+    const sidecar = await decideSidecar(cwd, jobDir, {
+      taskGoal: readJob(cwd, jobId)?.prompt ?? null,
+      summary,
+    });
+    onEvent({ kind: 'sidecar-decision', decision: sidecar.decision, reason: sidecar.reason, summary });
+    if (sidecar.decision === 'escalate') {
+      decision = await escalate(
+        jobDir,
+        { method: `claude/${toolName}`, summary, params: { tool_name: toolName, input } },
+        { timeoutMs: config.approvals.escalationTimeoutMs, onEvent },
+      );
+      reason = 'escalated for human review';
+    } else {
+      decision = sidecar.decision;
+      reason = sidecar.reason;
+    }
   }
   return decision === 'accept'
     ? { behavior: 'allow', updatedInput: input }
-    : { behavior: 'deny', message: `Denied by coder policy: ${verdict.reason}` };
+    : { behavior: 'deny', message: `Denied by coder policy: ${reason}` };
 }
 
 interface McpTool {

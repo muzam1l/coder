@@ -109,6 +109,8 @@ export interface RunTurnOptions {
   effort?: Effort | null;
   sandbox?: string;
   approvalPolicy?: string;
+  /** "auto_review" routes approvals to codex's native reviewer subagent. */
+  approvalsReviewer?: string | null;
   onApprovalRequest?: ApprovalRequestHandler;
   resumeThreadId?: string | null;
   onProgress?: ProgressReporter;
@@ -475,6 +477,17 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
       }
       break;
     }
+    case "item/autoApprovalReview/completed": {
+      const review = message.params?.review ?? {};
+      const action = message.params?.action ?? {};
+      const target = action.command ?? action.type ?? "";
+      emitProgress(
+        state.onProgress,
+        `auto-review ${review.status}${review.riskLevel ? ` (${review.riskLevel} risk)` : ""}: ${shorten(target)}${review.rationale ? ` — ${shorten(review.rationale, 120)}` : ""}`,
+        null
+      );
+      break;
+    }
     case "error":
       state.error = message.params.error;
       emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
@@ -735,7 +748,9 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
         modelProvider: options.modelProvider ?? null,
         config: options.configOverrides ?? null,
         approvalPolicy: options.approvalPolicy ?? "never",
-        sandbox: options.sandbox ?? "read-only"
+        sandbox: options.sandbox ?? "read-only",
+        // Only sent when set: older codex builds reject unknown enum-bearing fields.
+        ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {})
       });
       threadId = response.thread.id;
     } else {
@@ -747,6 +762,7 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
         config: options.configOverrides ?? null,
         approvalPolicy: options.approvalPolicy ?? "never",
         sandbox: options.sandbox ?? "read-only",
+        ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
         serviceName: SERVICE_NAME,
         // Persist by default so status/steer/stop can target the thread later.
         ephemeral: options.ephemeral ?? false

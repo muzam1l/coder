@@ -171,6 +171,7 @@ async function executeCodexTurn(
       effort: job.effort,
       sandbox: mode.sandbox,
       approvalPolicy: mode.approvalPolicy,
+      approvalsReviewer: mode.approvalMode === 'auto' ? 'auto_review' : null,
       onApprovalRequest,
       onHeartbeat: buildHeartbeat(cwd, job.id),
       resumeThreadId: job.resumeThreadId ?? null,
