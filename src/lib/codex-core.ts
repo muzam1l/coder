@@ -275,6 +275,16 @@ function describeStartedItem(item: TurnItem) {
 
 function describeCompletedItem(item: TurnItem) {
   switch (item.type) {
+    case "agentMessage": {
+      const text = String(item.text ?? "").trim();
+      return text ? { message: text, phase: null } : null;
+    }
+    case "reasoning": {
+      const firstLine = extractReasoningSections(item.summary)[0]?.split("\n")[0] ?? "";
+      if (!firstLine) return null;
+      const preview = firstLine.length > 100 ? `${firstLine.slice(0, 100)}…` : firstLine;
+      return { message: `Thinking: ${preview}`, phase: null };
+    }
     case "commandExecution": {
       const output = String(item.aggregatedOutput ?? "").trim();
       return {

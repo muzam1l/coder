@@ -136,6 +136,8 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
     let stderr = "";
     let resultEvent: any = null;
     let streamSessionId = sessionId;
+    // Timestamp of the previous stream event, to estimate thinking duration.
+    let lastEventAt = Date.now();
 
     const handleEvent = (event: any) => {
       if (!event || typeof event !== "object") {
@@ -145,13 +147,21 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
       if (event.type === "system" && event.subtype === "init" && event.session_id) {
         streamSessionId = event.session_id;
       } else if (event.type === "assistant") {
-        // Forward each tool call raw: name + the full untruncated input.
+        // Forward tool calls raw (name + full input), assistant text in full,
+        // and thinking as a one-liner preview with elapsed time.
         for (const block of event.message?.content ?? []) {
           if (block?.type === "tool_use") {
             options.onProgress?.({
               message: `${block.name} ${JSON.stringify(block.input ?? {})}`,
               threadId: streamSessionId
             });
+          } else if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
+            options.onProgress?.({ message: block.text.trim(), threadId: streamSessionId });
+          } else if (block?.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
+            const seconds = Math.max(1, Math.round((Date.now() - lastEventAt) / 1000));
+            const firstLine = block.thinking.trim().split("\n")[0]!;
+            const preview = firstLine.length > 100 ? `${firstLine.slice(0, 100)}…` : firstLine;
+            options.onProgress?.({ message: `Thought for ${seconds}s: ${preview}`, threadId: streamSessionId });
           }
         }
       } else if (event.type === "user") {
@@ -170,6 +180,7 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
           streamSessionId = event.session_id;
         }
       }
+      lastEventAt = Date.now();
     };
 
     child.stdout.on("data", (chunk) => {
