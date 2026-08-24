@@ -18,7 +18,7 @@ export const TASK_FLAGS: HelpRow[] = [
   ],
   [
     '--model <alias|slug>',
-    'mini/luna/terra/sol (codex) · haiku/sonnet/opus/fable (claude) · a custom model (coder model list)',
+    'spark/luna/terra/sol (codex) · haiku/sonnet/opus/fable (claude) · a custom model (coder model list)',
   ],
   ['--effort <low|medium|high>', 'reasoning effort'],
   ['--permissions <mode>', 'read-only · workspace-write · auto (default: auto)'],
@@ -88,7 +88,7 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
       ['coder result <task-id> --wait', 'then block until it finishes and print the answer'],
       ['coder run --wait "fix the failing test"', 'or block on the run itself'],
       [
-        'coder task run --model mini --system "tests live in test/, don\'t touch anything outside of it" "rename foo to bar"',
+        'coder task run --model spark --system "tests live in test/, don\'t touch anything outside of it" "rename foo to bar"',
         'pick an engine via its model alias; --system adds standing instructions',
       ],
     ],
@@ -438,7 +438,7 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['model alias <name> <spec>', 'add or replace a user alias'],
     usage: 'coder model alias <name> <spec> [--workspace]',
     summary:
-      'Save an alias for an agent spec, e.g. fast -> codex:mini. An alias may reuse a\nbuilt-in name to override it.',
+      'Save an alias for an agent spec, e.g. fast -> codex:spark. An alias may reuse a\nbuilt-in name to override it.',
     flags: [['--workspace', 'target <repo>/coder.config.json instead of the user file'], JSON_FLAG],
     seeAlso: 'model unalias · model list',
   },
@@ -511,7 +511,7 @@ const MODEL_MENU: { usage: string; blurb: string }[] = [
   { usage: 'remove <name>', blurb: 'delete a custom model' },
   { usage: 'disable <name>', blurb: 'turn off a model (built-in, custom, or alias)' },
   { usage: 'enable <name>', blurb: 're-enable a disabled model' },
-  { usage: 'alias <name> <spec>', blurb: 'name a spec, e.g. fast codex:mini' },
+  { usage: 'alias <name> <spec>', blurb: 'name a spec, e.g. fast codex:spark' },
   { usage: 'unalias <name>', blurb: 'remove an alias' },
 ];
 
@@ -567,7 +567,7 @@ export function renderModelGroupHelp(): string {
     'Manage the models coder can dispatch to. `add` connects any OpenAI-compatible',
     'endpoint (Ollama, vLLM, OpenRouter, ...) as the custom agent, alongside the',
     'built-in codex/claude models. Name your own shortcuts with `alias`',
-    '(e.g. fast -> codex:mini); disable/enable turns any model off and on.',
+    '(e.g. fast -> codex:spark); disable/enable turns any model off and on.',
     '',
     s.bold('Subcommands:'),
     ...rows,

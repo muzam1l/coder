@@ -72,6 +72,10 @@ With coders running in the background, don't fire-and-forget: hold one backgroun
 - Interrupt: `coder task stop <task-id>`.
 - If status shows `pendingApprovals`, surface them to the user; apply their decision with `coder task approve <task-id> <approval-id> [--deny]`.
 
+## Model notes
+
+`spark` has its own usage limits, is fast and suited to mechanical work, and is available only on Pro plans during research preview.
+
 ## Hard rules
 
 - Forward task text verbatim in `steer` follow-ups - never rewrite or summarize what the user asked for.

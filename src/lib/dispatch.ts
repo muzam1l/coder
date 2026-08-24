@@ -139,7 +139,7 @@ export function resolveTaskOptions(
   config: CoderConfig,
 ): ResolvedTaskOptions {
   // A bare model implies its agent: haiku/sonnet/opus/fable -> claude,
-  // mini/luna/terra/sol -> codex, a configured custom-model name -> custom.
+  // spark/luna/terra/sol -> codex, a configured custom-model name -> custom.
   // Explicit --agent always wins; unknown/raw slugs keep the chain default.
   let agent = options.agent;
   const explicitAgent = Boolean(agent);

@@ -211,7 +211,7 @@ export const model = {
     modelRemoveCore(resolveCwd(opts.cwd), name, opts),
   /** Every dispatchable model: built-ins, aliases, custom endpoints. */
   list: (opts: { cwd?: string } = {}) => modelListData(resolveCwd(opts.cwd)),
-  /** Alias a name to an engine spec, e.g. alias('fast', 'codex:mini'). */
+  /** Alias a name to an engine spec, e.g. alias('fast', 'codex:spark'). */
   alias: (name: string, spec: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
     modelAliasCore(resolveCwd(opts.cwd), name, spec, opts),
   /** Remove a user-defined alias. */

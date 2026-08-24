@@ -27,7 +27,7 @@ coder config set agents.codex.model terra
   },
   "models": {
     "qwen": { "baseUrl": "http://localhost:11434/v1", "model": "qwen2.5-coder:32b" },
-    "fast": { "provider": "codex", "model": "gpt-5.4-mini" },
+    "fast": { "provider": "codex", "model": "gpt-5.3-codex-spark" },
     "big": { "provider": "claude", "model": "opus", "effort": "high" },
     "luna": { "disabled": true }
   },
@@ -48,7 +48,7 @@ Per-agent defaults, used when a dispatch doesn't override them:
 
 | Key | Values |
 | --- | --- |
-| `model` | codex: `mini`, `luna`, `terra`, `sol` · claude: `haiku`, `sonnet`, `opus`, `fable` · custom: any name from `models` |
+| `model` | codex: `spark`, `luna`, `terra`, `sol` · claude: `haiku`, `sonnet`, `opus`, `fable` · custom: any name from `models` |
 | `effort` | `low`, `medium`, `high` |
 | `permissions` | `read-only`, `workspace-write`, `auto` |
 
@@ -64,7 +64,7 @@ One namespace for every model you can name as `--model`, keyed by that name. An 
 | `{ "provider": "codex"\|"claude", "model", "effort"? }` | alias onto a built-in engine | `coder model alias/unalias` |
 | `{ "disabled": true }` | bare toggle turning off any model name (built-in, entry from another config layer, or raw engine slug) | `coder model disable/enable` |
 
-Every shape also accepts `"disabled": true` to park the entry without deleting it. An entry named after a built-in alias (e.g. `mini`) shadows it. See [Models](models.md).
+Every shape also accepts `"disabled": true` to park the entry without deleting it. An entry named after a built-in alias (e.g. `spark`) shadows it. See [Models](models.md).
 
 ## `approvals`
 

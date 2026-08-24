@@ -298,7 +298,7 @@ async function commandModelList(argv: string[]): Promise<void> {
   }
 
   lines.push(
-    s.dim('Alias one: coder model alias <name> <spec>  (e.g. fast codex:mini)'),
+    s.dim('Alias one: coder model alias <name> <spec>  (e.g. fast codex:spark)'),
     s.dim('Use one:   coder run --model <name> "<task>"  (or coder run --agent custom)'),
   );
   process.stdout.write(`${lines.join('\n')}\n`);
@@ -544,7 +544,7 @@ async function toggleModel(argv: string[], disable: boolean): Promise<void> {
 
 async function commandModelAlias(argv: string[]): Promise<void> {
   const usage =
-    'Usage: coder model alias <name> <spec>   (e.g. coder model alias fast codex:mini)';
+    'Usage: coder model alias <name> <spec>   (e.g. coder model alias fast codex:spark)';
   const { options, positionals } = parseArgs(argv, MODEL_FLAG_SPEC);
   const cwd = resolveCwd(options);
   const name = validateName(positionals[0], usage, 'alias');

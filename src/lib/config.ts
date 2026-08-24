@@ -39,7 +39,7 @@ export const DEFAULT_CONFIG: CoderConfig = {
 
 // Model aliases per agent. Values map alias -> concrete identifier.
 export const CODEX_MODELS: Record<string, string> = {
-  mini: 'gpt-5.4-mini',
+  spark: 'gpt-5.3-codex-spark',
   luna: 'gpt-5.6-luna',
   terra: 'gpt-5.6-terra',
   sol: 'gpt-5.6-sol',
@@ -479,7 +479,7 @@ export function assertModelEnabled(config: CoderConfig, name?: string | null): v
 }
 
 /**
- * Parse a "<agent>:<model?>:<effort?>"-style spec, e.g. "codex", "codex:mini",
+ * Parse a "<agent>:<model?>:<effort?>"-style spec, e.g. "codex", "codex:spark",
  * "codex:sol:high", "claude:opus:high", "terra:high" (agent inferred).
  *
  * A user alias entry (config.models with `provider`) named by the model part

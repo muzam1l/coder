@@ -51,11 +51,15 @@ coder model disable terra
 coder model enable terra
 ```
 
-Create an alias for an agent spec with `coder model alias fast codex:mini`
+Create an alias for an agent spec with `coder model alias fast codex:spark`
 (effort can ride along: `coder model alias big claude:opus:high`); remove it
 with `coder model unalias fast`. Aliases may reuse a built-in name, so
-`coder model alias mini codex:gpt-x` intentionally overrides the built-in
-`mini`, and `model list` shows the override in its place.
+`coder model alias spark codex:gpt-x` intentionally overrides the built-in
+`spark`, and `model list` shows the override in its place.
+
+`spark` maps to GPT-5.3-Codex-Spark: a fast, less-capable model suited to
+mechanical work. It has its own usage limits and, during research preview, is
+available only on ChatGPT Pro plans.
 
 ## Config shape
 
@@ -67,7 +71,7 @@ engine alias, or a bare disable toggle for any model name):
 {
   "models": {
     "qwen": { "baseUrl": "http://localhost:11434/v1", "model": "qwen2.5-coder:32b", "envKey": "MY_KEY" },
-    "fast": { "provider": "codex", "model": "gpt-5.4-mini" },
+    "fast": { "provider": "codex", "model": "gpt-5.3-codex-spark" },
     "big": { "provider": "claude", "model": "opus", "effort": "high" },
     "terra": { "disabled": true }
   }
