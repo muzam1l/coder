@@ -778,12 +778,15 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
         ephemeral: options.ephemeral ?? false
       });
       threadId = response.thread.id;
-      try {
-        await client.request("thread/name/set", { threadId, name: buildTaskThreadName(prompt) });
-      } catch (err) {
-        const msg = String((err as Error)?.message ?? err ?? "");
-        if (!msg.includes("unknown variant") && !msg.includes("unknown method")) {
-          throw err;
+      // Ephemeral threads reject metadata updates; they are never listed anyway.
+      if (!(options.ephemeral ?? false)) {
+        try {
+          await client.request("thread/name/set", { threadId, name: buildTaskThreadName(prompt) });
+        } catch (err) {
+          const msg = String((err as Error)?.message ?? err ?? "");
+          if (!msg.includes("unknown variant") && !msg.includes("unknown method")) {
+            throw err;
+          }
         }
       }
     }
