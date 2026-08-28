@@ -7,10 +7,13 @@ import { baseOptions, parseArgs, str } from '../lib/args.js';
 import { resolveJobDir } from '../lib/state.js';
 import { runTurn } from '../lib/codex-core.js';
 import { runClaudeTurn } from '../lib/claude-core.js';
+import type { ClaudeTurnOptions } from '../lib/claude-core.js';
 import { isEndpointModel, loadConfig, resolveCodexModel, resolveCustomModel } from '../lib/config.js';
 import { startChatBridge } from '../lib/chat-bridge.js';
 import { fail, outStyle, printJson, requireJob, resolveCwd } from '../lib/ui.js';
 import type { Effort, Job, TurnResult } from '../lib/types.js';
+
+const CLAUDE_SIDECAR_INSPECTION_TOOLS = ['Read', 'Glob', 'Grep'];
 
 // Read-only sidecar: answers ABOUT a task from its on-disk state, never
 // touching its thread or creating a task record.
@@ -44,6 +47,26 @@ Question: ${question}
 Answer the question directly and concisely.`;
 }
 
+export function claudeAskOptions(
+  job: Job,
+  jobDir: string,
+  prompt: string,
+  opts: { model?: string; effort: Effort | null },
+): ClaudeTurnOptions {
+  return {
+    prompt,
+    model: opts.model ?? job.model,
+    effort: opts.effort,
+    permissions: 'read-only',
+    // Global task state lives outside the task workspace. Grant this sidecar
+    // exactly its own job directory so it can read the progress artifacts.
+    additionalDirectories: [jobDir],
+    // dontAsk denies tools that are not explicit. Keep this sidecar to native
+    // inspection tools; its filesystem scope is cwd plus jobDir.
+    readOnlyAllowedTools: CLAUDE_SIDECAR_INSPECTION_TOOLS,
+  };
+}
+
 // Print-free core (SDK `task.ask`).
 export async function askTaskCore(
   cwd: string,
@@ -55,12 +78,7 @@ export async function askTaskCore(
   const prompt = sidecarPrompt(job, jobDir, question);
   const effort = (opts.effort ?? job.effort ?? null) as Effort | null;
   if (job.engine === 'claude') {
-    return runClaudeTurn(job.cwd ?? cwd, {
-      prompt,
-      model: opts.model ?? job.model,
-      effort,
-      permissions: 'read-only',
-    });
+    return runClaudeTurn(job.cwd ?? cwd, claudeAskOptions(job, jobDir, prompt, { model: opts.model, effort }));
   }
   const config = loadConfig(cwd);
   const name = opts.model ?? job.model;

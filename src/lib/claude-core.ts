@@ -75,6 +75,10 @@ export interface ClaudeTurnOptions {
   approvalJobId?: string | null;
   /** Hosts reachable inside the sandbox without approval (auto mode only). */
   allowedNetworkHosts?: string[];
+  /** Extra existing directories the turn may inspect; read-only turns deny writes there too. */
+  additionalDirectories?: string[];
+  /** Inspection tools permitted only for this read-only turn. */
+  readOnlyAllowedTools?: string[];
   resumeSessionId?: string | null;
   onProgress?: (update: { message: string; threadId?: string }) => void;
   onHeartbeat?: () => void;
@@ -87,8 +91,12 @@ export interface ClaudeTurnResult extends TurnResult {
   error: { message: string } | null;
 }
 
-export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<ClaudeTurnResult> {
-  const sessionId = options.resumeSessionId ?? randomUUID();
+/** Build the native CLI invocation so every Claude caller shares one permission policy. */
+export function buildClaudeTurnArgs(
+  cwd: string,
+  options: ClaudeTurnOptions,
+  sessionId: string,
+): string[] {
   // stream-json emits newline-delimited events (tool calls, result) as the turn
   // runs, so progress is visible instead of a single blob at the end like the
   // plain "json" format. --verbose is required for stream-json in print mode.
@@ -101,6 +109,11 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
     args.push("--effort", options.effort);
   }
   const permissions = options.permissions ?? "auto";
+  // Extra directories are exclusively a read-only sidecar capability. Keeping
+  // them out of other modes prevents a future caller from widening a writable
+  // turn's filesystem scope by accident.
+  const additionalDirectories = permissions === "read-only" ? (options.additionalDirectories ?? []) : [];
+  const readOnlyAllowedTools = permissions === "read-only" ? (options.readOnlyAllowedTools ?? []) : [];
   if (permissions === "auto" && options.approvalJobId) {
     // Prompt tool is only consulted in default mode (never auto/dontAsk):
     // unresolved asks hit coder's policy instead of a flat deny.
@@ -121,12 +134,30 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
   } else {
     args.push(...(CLAUDE_PERMISSION_FLAGS[permissions] ?? CLAUDE_PERMISSION_FLAGS.auto));
   }
+  if (readOnlyAllowedTools.length) {
+    args.push("--allowedTools", ...readOnlyAllowedTools);
+  }
+  for (const directory of additionalDirectories) {
+    args.push("--add-dir", directory);
+  }
   // Read-only is enforced by claude's OS sandbox, scoped to deny writes to this
   // workspace; passed as a settings JSON string so it needs no on-disk config.
-  const sandboxSettings = claudeSandboxSettings(permissions, cwd, options.allowedNetworkHosts ?? []);
+  const sandboxSettings = claudeSandboxSettings(
+    permissions,
+    cwd,
+    options.allowedNetworkHosts ?? [],
+    additionalDirectories,
+  );
   if (sandboxSettings) {
     args.push("--settings", sandboxSettings);
   }
+
+  return args;
+}
+
+export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<ClaudeTurnResult> {
+  const sessionId = options.resumeSessionId ?? randomUUID();
+  const args = buildClaudeTurnArgs(cwd, options, sessionId);
 
   options.onProgress?.({ message: `claude turn started (session ${sessionId})`, threadId: sessionId });
 

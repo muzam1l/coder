@@ -86,10 +86,9 @@ export const PERMISSION_MODES: Record<Permission, PermissionMode> = {
 /**
  * Claude (claude CLI print mode; unanswered permission requests are denied,
  * so every mode is deny-by-default beyond what it grants):
- * - read-only:       edit/write tools disallowed; Bash runs inside the native
- *                    OS sandbox (see claudeSandboxSettings) so reads and
- *                    inspection pipelines work while workspace writes are
- *                    blocked at the kernel level
+ * - read-only:       edit/write tools are disallowed. A caller can provide a
+ *                    narrow, read-only inspection-tool allowlist for a
+ *                    sidecar; it is never a shared Bash or Read wildcard.
  * - workspace-write: edits auto-accepted, everything else denied
  * - auto:            claude's own safe/unsafe judgment; unresolved asks denied
  */
@@ -139,6 +138,7 @@ export function claudeSandboxSettings(
   permissions: Permission,
   cwd: string,
   allowedNetworkHosts: string[] = [],
+  additionalReadOnlyDirectories: string[] = [],
 ): string | null {
   if (permissions === 'read-only') {
     return JSON.stringify({
@@ -146,7 +146,7 @@ export function claudeSandboxSettings(
         enabled: true,
         failIfUnavailable: true,
         autoAllowBashIfSandboxed: true,
-        filesystem: { denyWrite: [cwd] },
+        filesystem: { denyWrite: [cwd, ...additionalReadOnlyDirectories] },
       },
     });
   }
