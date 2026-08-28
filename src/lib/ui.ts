@@ -145,12 +145,16 @@ const PROMPT_HEAD_CHARS = 500;
 const PROMPT_TAIL_CHARS = 500;
 export const PROMPT_PREVIEW_CHARS = PROMPT_HEAD_CHARS + PROMPT_TAIL_CHARS;
 
-// Dim, indented prompt block for result/stream: 'prompt:' plus the prompt's
-// lines, capped so a huge prompt doesn't drown the output. Over the cap, the
-// middle is elided so both the opening and the final instructions stay visible.
-export function promptBlock(prompt: string, style: Style = outStyle): string[] {
+// Dim, indented prompt block: 'prompt:' plus the prompt's lines. Result views
+// use the compact preview by default, while watch views can opt into the full
+// prompt they are following.
+export function promptBlock(
+  prompt: string,
+  style: Style = outStyle,
+  { truncate = true }: { truncate?: boolean } = {},
+): string[] {
   const indent = (text: string) => text.split('\n').map(line => `  ${style.dim(line)}`);
-  if (prompt.length <= PROMPT_PREVIEW_CHARS) {
+  if (!truncate || prompt.length <= PROMPT_PREVIEW_CHARS) {
     return [style.dim('prompt:'), ...indent(prompt)];
   }
   // The elision marker is a shade brighter than the prompt text, so it can't

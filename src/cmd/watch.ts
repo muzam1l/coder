@@ -106,7 +106,7 @@ export async function commandWatch(argv: string[]) {
     ];
     process.stdout.write(`${header.join('\n')}\n`);
     if (job.prompt) {
-      process.stdout.write(`${promptBlock(job.prompt, outStyle).join('\n')}\n`);
+      process.stdout.write(`${promptBlock(job.prompt, outStyle, { truncate: false }).join('\n')}\n`);
     }
   }
   for await (const entry of streamTaskCore(cwd, job.id, { tail })) {
