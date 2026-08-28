@@ -17,7 +17,7 @@ const CLAUDE_SIDECAR_INSPECTION_TOOLS = ['Read', 'Glob', 'Grep'];
 
 // Read-only sidecar: answers ABOUT a task from its on-disk state, never
 // touching its thread or creating a task record.
-function sidecarPrompt(job: Job, jobDir: string, question: string): string {
+export function sidecarPrompt(job: Job, jobDir: string, question: string): string {
   const meta = [
     `id: ${job.id}`,
     ...(job.name ? [`name: ${job.name}`] : []),
@@ -61,8 +61,8 @@ export function claudeAskOptions(
     // Global task state lives outside the task workspace. Grant this sidecar
     // exactly its own job directory so it can read the progress artifacts.
     additionalDirectories: [jobDir],
-    // dontAsk denies tools that are not explicit. Keep this sidecar to native
-    // inspection tools; its filesystem scope is cwd plus jobDir.
+    // Native inspection tools only; everything else (Bash, network, subagents)
+    // is denied by CLAUDE_SIDECAR_FLAGS, since --allowedTools only ever grants.
     readOnlyAllowedTools: CLAUDE_SIDECAR_INSPECTION_TOOLS,
   };
 }

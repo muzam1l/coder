@@ -86,9 +86,10 @@ export const PERMISSION_MODES: Record<Permission, PermissionMode> = {
 /**
  * Claude (claude CLI print mode; unanswered permission requests are denied,
  * so every mode is deny-by-default beyond what it grants):
- * - read-only:       edit/write tools are disallowed. A caller can provide a
- *                    narrow, read-only inspection-tool allowlist for a
- *                    sidecar; it is never a shared Bash or Read wildcard.
+ * - read-only:       edit/write tools disallowed; Bash runs inside the native
+ *                    OS sandbox (see claudeTurnSettings) so reads and
+ *                    inspection pipelines work while workspace writes are
+ *                    blocked at the kernel level
  * - workspace-write: edits auto-accepted, everything else denied
  * - auto:            claude's own safe/unsafe judgment; unresolved asks denied
  */
@@ -104,6 +105,28 @@ export const CLAUDE_PERMISSION_FLAGS: Record<Permission, string[]> = {
   'workspace-write': ['--permission-mode', 'acceptEdits'],
   auto: ['--permission-mode', 'auto'],
 };
+
+/**
+ * Sidecars (`task ask`, approval review) answer ABOUT a task from its on-disk
+ * state, so their reach is narrower than a read-only task turn: the caller's
+ * --allowedTools plus an --add-dir scope, nothing else. Bash is denied outright
+ * rather than left to the sandbox — --allowedTools only *grants* (it never
+ * restricts), and the sandbox denies writes, not reads, so an
+ * autoAllowBashIfSandboxed Bash would read the whole machine. WebFetch/
+ * WebSearch/Task go too: a question about a task is answered from disk.
+ */
+export const CLAUDE_SIDECAR_FLAGS: string[] = [
+  '--permission-mode',
+  'dontAsk',
+  '--disallowedTools',
+  'Edit',
+  'Write',
+  'NotebookEdit',
+  'Bash',
+  'WebFetch',
+  'WebSearch',
+  'Task',
+];
 
 // Matches claude's startup error when the OS sandbox cannot initialise (its
 // message names the escape hatch, e.g. "Set sandbox.failIfUnavailable=false").
@@ -133,8 +156,14 @@ function claudeAllowedDomains(hosts: string[]): string[] {
  * the turn error instead of silently downgrading to read-write when the sandbox
  * cannot start. Returns a JSON string for `claude --settings`, or null for
  * modes that need no sandbox.
+ *
+ * Extra read-only directories are sent twice on purpose: as
+ * permissions.additionalDirectories here and as --add-dir flags. They are the
+ * two documented forms of the same grant, and a working directory the CLI does
+ * not register is a hard read denial ("Path is outside allowed working
+ * directories"), so it is worth not depending on one of them.
  */
-export function claudeSandboxSettings(
+export function claudeTurnSettings(
   permissions: Permission,
   cwd: string,
   allowedNetworkHosts: string[] = [],
@@ -142,6 +171,9 @@ export function claudeSandboxSettings(
 ): string | null {
   if (permissions === 'read-only') {
     return JSON.stringify({
+      ...(additionalReadOnlyDirectories.length
+        ? { permissions: { additionalDirectories: additionalReadOnlyDirectories } }
+        : {}),
       sandbox: {
         enabled: true,
         failIfUnavailable: true,

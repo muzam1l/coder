@@ -7,7 +7,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 
-import { CLAUDE_PERMISSION_FLAGS, claudeSandboxSettings } from "./config.js";
+import { CLAUDE_PERMISSION_FLAGS, CLAUDE_SIDECAR_FLAGS, claudeTurnSettings } from "./config.js";
 import { CLI_PATH } from "./runtime.js";
 import type { AuthStatus, Availability, Effort, Permission, TokenUsage, TurnResult } from "./types.js";
 
@@ -77,7 +77,7 @@ export interface ClaudeTurnOptions {
   allowedNetworkHosts?: string[];
   /** Extra existing directories the turn may inspect; read-only turns deny writes there too. */
   additionalDirectories?: string[];
-  /** Inspection tools permitted only for this read-only turn. */
+  /** Inspection tools for a read-only sidecar; supplying any also applies CLAUDE_SIDECAR_FLAGS. */
   readOnlyAllowedTools?: string[];
   resumeSessionId?: string | null;
   onProgress?: (update: { message: string; threadId?: string }) => void;
@@ -131,25 +131,26 @@ export function buildClaudeTurnArgs(
       "--mcp-config", mcpConfig,
       "--permission-prompt-tool", "mcp__coder__approval_prompt"
     );
+  } else if (readOnlyAllowedTools.length) {
+    // Sidecar: a stricter deny list than plain read-only, then the inspection
+    // tools it is granted. See CLAUDE_SIDECAR_FLAGS for why Bash goes too.
+    args.push(...CLAUDE_SIDECAR_FLAGS, "--allowedTools", ...readOnlyAllowedTools);
   } else {
     args.push(...(CLAUDE_PERMISSION_FLAGS[permissions] ?? CLAUDE_PERMISSION_FLAGS.auto));
-  }
-  if (readOnlyAllowedTools.length) {
-    args.push("--allowedTools", ...readOnlyAllowedTools);
   }
   for (const directory of additionalDirectories) {
     args.push("--add-dir", directory);
   }
   // Read-only is enforced by claude's OS sandbox, scoped to deny writes to this
   // workspace; passed as a settings JSON string so it needs no on-disk config.
-  const sandboxSettings = claudeSandboxSettings(
+  const turnSettings = claudeTurnSettings(
     permissions,
     cwd,
     options.allowedNetworkHosts ?? [],
     additionalDirectories,
   );
-  if (sandboxSettings) {
-    args.push("--settings", sandboxSettings);
+  if (turnSettings) {
+    args.push("--settings", turnSettings);
   }
 
   return args;

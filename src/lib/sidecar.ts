@@ -12,6 +12,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 
+import { CLAUDE_SIDECAR_FLAGS } from "./config.js";
 import { readJsonFile, writeJsonFileAtomic } from "./fsx.js";
 
 export interface SidecarAsk {
@@ -93,17 +94,24 @@ async function acquireLock(jobDir: string): Promise<() => void> {
   }
 }
 
-/** One claude print-mode call; returns the final text or throws. */
-function callClaude(cwd: string, sessionId: string, resume: boolean, prompt: string): Promise<string> {
-  const args = [
+/** Native CLI args for one reviewer call; shares the class-level sidecar policy. */
+export function buildSidecarArgs(jobDir: string, sessionId: string, resume: boolean, prompt: string): string[] {
+  return [
     "-p", prompt,
     "--output-format", "json",
     "--model", MODEL,
     "--effort", "low",
     resume ? "--resume" : "--session-id", sessionId,
-    "--permission-mode", "dontAsk",
-    "--disallowedTools", "Bash", "Edit", "Write", "NotebookEdit", "WebFetch", "WebSearch", "Task"
+    ...CLAUDE_SIDECAR_FLAGS,
+    // The job dir sits outside the workspace, and the seed prompt points the
+    // reviewer at the progress log inside it; without this the read is denied.
+    "--add-dir", jobDir
   ];
+}
+
+/** One claude print-mode call; returns the final text or throws. */
+function callClaude(cwd: string, jobDir: string, sessionId: string, resume: boolean, prompt: string): Promise<string> {
+  const args = buildSidecarArgs(jobDir, sessionId, resume, prompt);
   return new Promise((resolve, reject) => {
     const child = spawn("claude", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
@@ -174,12 +182,12 @@ export async function decideSidecar(cwd: string, jobDir: string, ask: SidecarAsk
       const sessionId = randomUUID();
       const goal = ask.taskGoal ? `\n\nTask goal: ${ask.taskGoal.replace(/\s+/g, " ").slice(0, 500)}` : "";
       const log = `\nTask progress log: ${path.join(jobDir, "log.jsonl")}`;
-      await callClaude(cwd, sessionId, false, `${SEED_RULES}${goal}${log}`);
+      await callClaude(cwd, jobDir, sessionId, false, `${SEED_RULES}${goal}${log}`);
       state.sessionId = sessionId;
       writeJsonFileAtomic(statePath(jobDir), state);
     }
 
-    const text = await callClaude(cwd, state.sessionId, true, `action: ${ask.summary.slice(0, 500)}`);
+    const text = await callClaude(cwd, jobDir, state.sessionId, true, `action: ${ask.summary.slice(0, 500)}`);
     const verdict = parseVerdict(text);
 
     if (verdict?.decision === "decline") {
