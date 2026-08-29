@@ -5,6 +5,7 @@ import * as z from 'zod/mini';
 import { baseOptions, parseArgs } from '../lib/args.js';
 import { writeJob } from '../lib/state.js';
 import { interruptTurn } from '../lib/codex-core.js';
+import { removeCodexControlEndpoint } from '../lib/codex-control.js';
 import { outStyle, printJson, rejectExtraArgs, requireJob, resolveCwd } from '../lib/ui.js';
 import type { Job } from '../lib/types.js';
 
@@ -13,13 +14,21 @@ import type { Job } from '../lib/types.js';
 export async function stopTaskCore(
   cwd: string,
   job: Job,
+  adapters: { interrupt?: typeof interruptTurn } = {},
 ): Promise<{ taskId: string; status: 'cancelled'; interrupt: string }> {
   // Claude tasks have no app-server turn to interrupt; killing the worker
   // takes the claude child down with it (SIGTERM handler in claude-core).
   const interrupt =
     job.engine === 'claude'
       ? { detail: 'claude worker terminated' }
-      : await interruptTurn(cwd, { threadId: job.threadId, turnId: job.turnId });
+      : await (adapters.interrupt ?? interruptTurn)(cwd, {
+          endpoint: job.steerEndpoint,
+          threadId: job.threadId,
+          turnId: job.turnId,
+        });
+  if (job.engine !== 'claude') {
+    removeCodexControlEndpoint(job.steerEndpoint);
+  }
   if (job.pid && job.status === 'running') {
     try {
       process.kill(job.pid, 'SIGTERM');

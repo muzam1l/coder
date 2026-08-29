@@ -175,6 +175,9 @@ async function executeCodexTurn(
       onApprovalRequest,
       onHeartbeat: buildHeartbeat(cwd, job.id),
       resumeThreadId: job.resumeThreadId ?? null,
+      onControlReady: (steerEndpoint, threadId, turnId) => {
+        writeJob(cwd, job.id, { status: 'running', steerEndpoint, threadId, turnId });
+      },
       onProgress: (update: ProgressUpdate) => {
         onProgress(update);
         const threadId = typeof update === 'object' ? update.threadId : null;
@@ -193,11 +196,15 @@ async function executeCodexTurn(
       status: result.status === 0 ? 'completed' : 'failed',
       threadId: result.threadId,
       turnId: result.turnId,
+      steerEndpoint: null,
       completedAt: new Date().toISOString(),
     });
     recordTurnResult(cwd, job, jobDir, result);
     return result;
   } finally {
+    // Clear the owner endpoint after normal completion, client close, or any
+    // startup/protocol error. The outer worker catch owns final failure state.
+    writeJob(cwd, job.id, { steerEndpoint: null });
     await bridge?.close();
   }
 }

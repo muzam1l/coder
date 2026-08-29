@@ -10,6 +10,7 @@ import fs from "node:fs";
 
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.js";
 import type { ProtocolError } from "./app-server.js";
+import { requestCodexControl, startCodexControlServer } from "./codex-control.js";
 import { binaryAvailable } from "./process.js";
 import { isCodexSessionArchived, unarchiveCodexSession } from "./codex-sessions.js";
 import type { Availability, AuthStatus, Effort, ProgressUpdate, TokenUsage, TurnResult } from "./types.js";
@@ -102,6 +103,7 @@ interface CaptureTurnOptions {
   onProgress?: ProgressReporter | null;
   onHeartbeat?: (() => void) | null;
   onApprovalRequest?: ApprovalRequestHandler;
+  onTurnStarted?: (turnId: string) => Promise<void> | void;
 }
 
 /** Options accepted by runTurn. */
@@ -123,6 +125,8 @@ export interface RunTurnOptions {
   onHeartbeat?: () => void;
   ephemeral?: boolean;
   outputSchema?: unknown;
+  /** Publishes control for the exact client only after turn/start returns its active turnId. */
+  onControlReady?: (endpoint: string, threadId: string, turnId: string) => void;
 }
 
 function cleanCodexStderr(stderr: string) {
@@ -650,6 +654,7 @@ async function captureTurn(
     state.turnId = response.turn?.id ?? null;
     if (state.turnId) {
       state.threadTurnIds.set(state.threadId, state.turnId);
+      await options.onTurnStarted?.(state.turnId);
     }
     for (const message of state.bufferedNotifications) {
       if (belongsToTurn(state, message)) {
@@ -672,10 +677,15 @@ async function captureTurn(
   }
 }
 
-async function withAppServer<T>(cwd: string, fn: (client: AppServerClient) => Promise<T>): Promise<T> {
+async function withAppServer<T>(
+  cwd: string,
+  fn: (client: AppServerClient) => Promise<T>,
+  internals: { connect?: typeof CodexAppServerClient.connect } = {},
+): Promise<T> {
+  const connect = internals.connect ?? CodexAppServerClient.connect;
   let client: AppServerClient | null = null;
   try {
-    client = await CodexAppServerClient.connect(cwd);
+    client = await connect(cwd);
     const result = await fn(client);
     await client.close();
     return result;
@@ -695,7 +705,7 @@ async function withAppServer<T>(cwd: string, fn: (client: AppServerClient) => Pr
       throw error;
     }
 
-    const directClient = await CodexAppServerClient.connect(cwd, { disableBroker: true });
+    const directClient = await connect(cwd, { disableBroker: true });
     try {
       return await fn(directClient);
     } finally {
@@ -763,22 +773,16 @@ export async function getCodexAuthStatus(cwd: string): Promise<AuthStatus & { av
 }
 
 export async function interruptTurn(
-  cwd: string,
-  { threadId, turnId }: { threadId?: string | null; turnId?: string | null }
+  _cwd: string,
+  { endpoint, threadId, turnId }: { endpoint?: string | null; threadId?: string | null; turnId?: string | null }
 ): Promise<{ interrupted: boolean; detail: string }> {
   if (!threadId || !turnId) {
     return { interrupted: false, detail: "missing threadId or turnId" };
   }
-  let client: AppServerClient | null = null;
-  try {
-    client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
-    await client.request("turn/interrupt", { threadId, turnId });
-    return { interrupted: true, detail: `Interrupted ${turnId} on ${threadId}.` };
-  } catch (error) {
-    return { interrupted: false, detail: error instanceof Error ? error.message : String(error) };
-  } finally {
-    await client?.close().catch(() => {});
-  }
+  const response = await requestCodexControl(endpoint, "turn/interrupt", { threadId, turnId });
+  return response.ok
+    ? { interrupted: true, detail: `Interrupted ${turnId} on ${threadId}.` }
+    : { interrupted: false, detail: response.detail };
 }
 
 /**
@@ -787,17 +791,18 @@ export async function interruptTurn(
  * one; the worker that owns the turn keeps capturing it and completes when the
  * (now-extended) turn finishes.
  *
- * Reaches the running turn over the shared broker exactly like interruptTurn:
- * the broker forwards turn/steer from this separate process to the app-server
- * that owns the active stream. Returns steered:false (with a detail) when there
- * is no steerable active turn — no live broker, the turn just ended, or a
- * non-steerable turn kind (review/compact) — so callers can fall back to
- * queueing the follow-up.
+ * Reaches the running turn only through its worker-owned endpoint, which is
+ * bound to the exact app-server client executing the turn. This remains true
+ * when broker-busy workers fall back to private app-server processes.
  */
 export async function steerTurn(
-  cwd: string,
-  { threadId, turnId, text }: { threadId?: string | null; turnId?: string | null; text: string },
-  internals: { connect?: () => Promise<Pick<AppServerClient, "request" | "close">> } = {}
+  _cwd: string,
+  { endpoint, threadId, turnId, text }: {
+    endpoint?: string | null;
+    threadId?: string | null;
+    turnId?: string | null;
+    text: string;
+  },
 ): Promise<{ steered: boolean; retryable: boolean; detail: string }> {
   if (!threadId) {
     return { steered: false, retryable: true, detail: "missing active threadId" };
@@ -809,38 +814,22 @@ export async function steerTurn(
   if (!trimmed) {
     return { steered: false, retryable: false, detail: "empty follow-up" };
   }
-  let client: Pick<AppServerClient, "request" | "close"> | null = null;
-  try {
-    client = internals.connect
-      ? await internals.connect()
-      : await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
-    const response = await client.request("turn/steer", {
-      threadId,
-      input: [{ type: "text", text: trimmed, text_elements: [] }],
-      expectedTurnId: turnId,
-    });
-    if (response?.turnId !== turnId) {
-      return {
-        steered: false,
-        retryable: false,
-        detail: `turn/steer returned unexpected turnId ${String(response?.turnId ?? "(missing)")}; expected ${turnId}`,
-      };
-    }
-    return { steered: true, retryable: false, detail: `Steered follow-up into ${turnId} on ${threadId}.` };
-  } catch (error) {
-    const err = error as ProtocolError & NodeJS.ErrnoException;
-    const detail = error instanceof Error ? error.message : String(error);
-    // These are timing windows, not malformed requests: the worker can safely
-    // run the follow-up as a resumed turn after the current one completes.
-    const retryable =
-      err.rpcCode === BROKER_BUSY_RPC_CODE ||
-      err.code === "ENOENT" ||
-      err.code === "ECONNREFUSED" ||
-      /no active turn|active turn.*(?:ended|completed)|turn.*not active|expected turn.*(?:mismatch|does not match)|turn id.*(?:mismatch|does not match)/i.test(detail);
-    return { steered: false, retryable, detail };
-  } finally {
-    await client?.close().catch(() => {});
+  const response = await requestCodexControl(endpoint, "turn/steer", {
+    threadId,
+    input: [{ type: "text", text: trimmed, text_elements: [] }],
+    expectedTurnId: turnId,
+  });
+  if (!response.ok) {
+    return { steered: false, retryable: response.retryable, detail: response.detail };
   }
+  if (response.result?.turnId !== turnId) {
+    return {
+      steered: false,
+      retryable: false,
+      detail: `turn/steer returned unexpected turnId ${String(response.result?.turnId ?? "(missing)")}; expected ${turnId}`,
+    };
+  }
+  return { steered: true, retryable: false, detail: `Steered follow-up into ${turnId} on ${threadId}.` };
 }
 
 /**
@@ -864,6 +853,7 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
   }
 
   return withAppServer(cwd, async (client): Promise<TurnResult> => {
+    let controlServer: Awaited<ReturnType<typeof startCodexControlServer>> | null = null;
     let threadId: string;
 
     if (options.resumeThreadId) {
@@ -915,23 +905,34 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
 
     emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", { threadId });
 
-    const turnState = await captureTurn(
-      client,
-      threadId,
-      () =>
-        client.request("turn/start", {
-          threadId,
-          input: [{ type: "text", text: prompt, text_elements: [] }],
-          model: options.model ?? null,
-          effort: options.effort ?? null,
-          outputSchema: options.outputSchema ?? null
-        }),
-      {
-        onProgress: options.onProgress,
-        onHeartbeat: options.onHeartbeat,
-        onApprovalRequest: options.onApprovalRequest
-      }
-    );
+    let turnState: TurnCaptureState;
+    try {
+      turnState = await captureTurn(
+        client,
+        threadId,
+        () =>
+          client.request("turn/start", {
+            threadId,
+            input: [{ type: "text", text: prompt, text_elements: [] }],
+            model: options.model ?? null,
+            effort: options.effort ?? null,
+            outputSchema: options.outputSchema ?? null
+          }),
+        {
+          onProgress: options.onProgress,
+          onHeartbeat: options.onHeartbeat,
+          onApprovalRequest: options.onApprovalRequest,
+          onTurnStarted: options.onControlReady
+            ? async (turnId) => {
+                controlServer = await startCodexControlServer(client, { threadId, turnId });
+                options.onControlReady?.(controlServer.endpoint, threadId, turnId);
+              }
+            : undefined,
+        }
+      );
+    } finally {
+      await (controlServer as Awaited<ReturnType<typeof startCodexControlServer>> | null)?.close();
+    }
 
     return {
       status: turnState.finalTurn?.status === "completed" ? 0 : 1,
@@ -952,3 +953,6 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
 }
 
 export { TASK_THREAD_PREFIX };
+
+// Narrow test seam for deterministic broker-busy ownership regressions.
+export const codexCoreTestInternals = { withAppServer };

@@ -41,6 +41,7 @@ async function trySteerRunning(
     job.engine === 'claude'
       ? await (adapters.claude ?? steerClaudeTurn)(job.steerEndpoint, text)
       : await (adapters.codex ?? steerTurn)(cwd, {
+          endpoint: job.steerEndpoint,
           threadId: job.threadId,
           turnId: job.turnId,
           text,
