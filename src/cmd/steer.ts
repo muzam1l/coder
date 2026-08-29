@@ -14,6 +14,7 @@ import {
 } from '../lib/state.js';
 import { readJsonFile } from '../lib/fsx.js';
 import { steerTurn } from '../lib/codex-core.js';
+import { steerClaudeTurn } from '../lib/claude-core.js';
 import { fail, outStyle, printJson, requireJob, resolveCwd } from '../lib/ui.js';
 import { ACTIVE_STATUSES, type Job } from '../lib/types.js';
 import { spawnWorker } from '../lib/dispatch.js';
@@ -28,25 +29,46 @@ async function trySteerRunning(
   cwd: string,
   job: Job,
   text: string,
+  adapters: {
+    codex?: typeof steerTurn;
+    claude?: typeof steerClaudeTurn;
+  } = {},
 ): Promise<{ taskId: string; steered: 'live' | 'queued' } | null> {
   if (job.status !== 'running') {
     return null;
   }
-  // Codex (and custom models, which run on the codex engine) can inject the
-  // follow-up straight into the active turn over the shared broker.
-  if (job.engine !== 'claude') {
-    const result = await steerTurn(cwd, { threadId: job.threadId!, text });
-    if (result.steered) {
-      return { taskId: job.id, steered: 'live' };
-    }
+  const result =
+    job.engine === 'claude'
+      ? await (adapters.claude ?? steerClaudeTurn)(job.steerEndpoint, text)
+      : await (adapters.codex ?? steerTurn)(cwd, {
+          threadId: job.threadId,
+          turnId: job.turnId,
+          text,
+        });
+  if (result.steered) {
+    appendJobLog(cwd, job.id, {
+      kind: 'steer',
+      message: `Steer accepted live:\n${text}`,
+    });
+    return { taskId: job.id, steered: 'live' };
   }
-  // Not injectable live - a codex non-steerable window (e.g. compaction) or
-  // the claude engine, which has no live steering. Re-read: if the turn just
+  if (!result.retryable) {
+    appendJobLog(cwd, job.id, {
+      kind: 'error',
+      message: `Live steer failed: ${result.detail}`,
+    });
+    throw new Error(`Could not steer running task ${job.id}: ${result.detail}`);
+  }
+  // Not injectable live during a genuine startup/completion race. Re-read: if the turn just
   // finished, fall back to the resume path; otherwise queue the follow-up
   // for the worker to run when the current turn ends.
   const fresh = readJob(cwd, job.id) ?? job;
   if (ACTIVE_STATUSES.includes(fresh.status)) {
     enqueueSteer(cwd, fresh.id, text);
+    appendJobLog(cwd, fresh.id, {
+      kind: 'steer',
+      message: `Steer queued for the next turn:\n${text}`,
+    });
     return { taskId: fresh.id, steered: 'queued' };
   }
   return null;
@@ -58,11 +80,15 @@ export async function steerTaskCore(
   job: Job,
   text: string,
   opts: { model?: string; effort?: string; permissions?: string } = {},
+  adapters: {
+    codex?: typeof steerTurn;
+    claude?: typeof steerClaudeTurn;
+  } = {},
 ): Promise<{ taskId: string; steered: SteerOutcome }> {
   if (!job.threadId) {
     throw new Error(`Task ${job.id} has no thread to steer yet (status: ${job.status}).`);
   }
-  const running = await trySteerRunning(cwd, job, text);
+  const running = await trySteerRunning(cwd, job, text, adapters);
   if (running) {
     return running;
   }
@@ -83,12 +109,16 @@ function resumeInPlace(
     resumedAt: new Date().toISOString(),
     currentPrompt: text,
     resumeThreadId: job.threadId,
+    steerEndpoint: null,
     model: (opts.model ?? job.model ?? null) as Job['model'],
     effort: (opts.effort ?? job.effort ?? null) as Job['effort'],
     permissions: (opts.permissions ?? job.permissions) as Job['permissions'],
     error: undefined,
   });
-  appendJobLog(cwd, job.id, { message: 'Resuming with steered follow-up.' });
+  appendJobLog(cwd, job.id, {
+    kind: 'steer',
+    message: `Resuming with steer:\n${text}`,
+  });
   spawnWorker(job.cwd ?? cwd, job.id);
 }
 

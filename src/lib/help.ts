@@ -164,7 +164,7 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
     list: ['task steer <task-id> "<follow-up>"', "continue a task's thread"],
     usage: 'coder task steer <task-id> "<follow-up instructions>" [--wait]',
     summary:
-      "Continue a task's thread with new instructions: injected into the live turn\n(codex), queued for after it (claude), or — for a stopped task — resumed on the\nsame task id. Reuses the task's engine, model, and permissions unless overridden.",
+      "Continue a task's thread with new instructions: injected into a live Codex or\nClaude turn at its next tool boundary, queued across a startup/completion race,\nor — for a stopped task — resumed on the same task id. Reuses the task's engine,\nmodel, and permissions unless overridden.",
     flags: [
       ['--wait', 'run in the foreground and block until the answer is ready'],
       ['--model <alias|slug>', "override the task's model for this follow-up"],

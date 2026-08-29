@@ -27,7 +27,7 @@ export async function stopTaskCore(
       // Worker already exited.
     }
   }
-  writeJob(cwd, job.id, { status: 'cancelled', completedAt: new Date().toISOString() });
+  writeJob(cwd, job.id, { status: 'cancelled', steerEndpoint: null, completedAt: new Date().toISOString() });
   return { taskId: job.id, status: 'cancelled', interrupt: interrupt.detail };
 }
 

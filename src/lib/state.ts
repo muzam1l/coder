@@ -419,8 +419,8 @@ export async function waitForTerminalJob(cwd: string, job: Job, pollMs = 400): P
 }
 
 // Follow-ups steered into a still-running task that could not be injected into
-// the live turn (a codex non-steerable window, or the claude engine, which has
-// no live steering) are queued in this file. The worker that owns the task
+// the live turn because it was starting or completing are queued in this file.
+// The worker that owns the task
 // drains it when its turn finishes, running each as a resumed turn.
 const STEER_QUEUE_FILE = "steer-queue.jsonl";
 

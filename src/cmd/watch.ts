@@ -110,13 +110,16 @@ export async function commandWatch(argv: string[]) {
     }
   }
   for await (const entry of streamTaskCore(cwd, job.id, { tail })) {
+    // Steers are user instructions, like the initial prompt: show them in full
+    // so a watcher can audit exactly what changed the active turn.
+    const entryTrim = entry.kind === 'steer' ? Number.MAX_SAFE_INTEGER : trim;
     if (options.json) {
-      const out = entry.message ? { ...entry, message: trimStep(entry.message, trim, { plain: true }) } : entry;
+      const out = entry.message ? { ...entry, message: trimStep(entry.message, entryTrim, { plain: true }) } : entry;
       process.stdout.write(`${JSON.stringify(out)}\n`);
     } else {
       const message = entry.message ?? entry.kind;
       if (message) {
-        process.stdout.write(`${outStyle.dim('[coder]')} ${trimStep(message, trim)}\n`);
+        process.stdout.write(`${outStyle.dim('[coder]')} ${trimStep(message, entryTrim)}\n`);
       }
     }
   }

@@ -212,30 +212,40 @@ async function executeClaudeTurn(
   const onProgress = buildProgressLogger(cwd, job.id, { echo });
 
   const mode = PERMISSION_MODES[job.permissions ?? 'auto'] ?? PERMISSION_MODES.auto;
-  const result = await runClaudeTurn(cwd, {
-    prompt: taskPrompt(job),
-    model: job.model,
-    effort: job.effort,
-    permissions: job.permissions,
-    approvalJobId: mode.approvalMode === 'auto' ? job.id : null,
-    allowedNetworkHosts: config.approvals.allowedNetworkHosts,
-    resumeSessionId: job.resumeThreadId ?? null,
-    onHeartbeat: buildHeartbeat(cwd, job.id),
-    onProgress: update => {
-      onProgress(update);
-      if (update.threadId) {
-        writeJob(cwd, job.id, { status: 'running', threadId: update.threadId });
-      }
-    },
-  });
+  try {
+    const result = await runClaudeTurn(cwd, {
+      prompt: taskPrompt(job),
+      model: job.model,
+      effort: job.effort,
+      permissions: job.permissions,
+      approvalJobId: mode.approvalMode === 'auto' ? job.id : null,
+      allowedNetworkHosts: config.approvals.allowedNetworkHosts,
+      resumeSessionId: job.resumeThreadId ?? null,
+      onHeartbeat: buildHeartbeat(cwd, job.id),
+      onSteerReady: steerEndpoint => {
+        writeJob(cwd, job.id, { status: 'running', steerEndpoint });
+      },
+      onProgress: update => {
+        onProgress(update);
+        if (update.threadId) {
+          writeJob(cwd, job.id, { status: 'running', threadId: update.threadId });
+        }
+      },
+    });
 
-  writeJob(cwd, job.id, {
-    status: result.status === 0 ? 'completed' : 'failed',
-    threadId: result.threadId,
-    completedAt: new Date().toISOString(),
-  });
-  recordTurnResult(cwd, job, jobDir, result);
-  return result;
+    writeJob(cwd, job.id, {
+      status: result.status === 0 ? 'completed' : 'failed',
+      threadId: result.threadId,
+      steerEndpoint: null,
+      completedAt: new Date().toISOString(),
+    });
+    recordTurnResult(cwd, job, jobDir, result);
+    return result;
+  } finally {
+    // Also clear a stale endpoint on spawn/protocol failures. The worker's
+    // outer catch owns the final failed status and error log in that case.
+    writeJob(cwd, job.id, { steerEndpoint: null });
+  }
 }
 
 // result.json holds the LATEST turn; results.jsonl accretes every turn so a
@@ -257,7 +267,7 @@ export function executeTurnFor(job: Job) {
 
 // After a turn completes, run any follow-ups that were queued by `coder task
 // steer` while the task was running but could not be injected into the live
-// turn (a codex non-steerable window, or the claude engine). Each runs as a
+// turn (an engine startup/completion race). Each runs as a
 // resumed turn on the same thread, in order. A short grace re-check closes the
 // race with a steer that lands as the turn is completing; a failed/cancelled
 // task is left terminal rather than resumed.

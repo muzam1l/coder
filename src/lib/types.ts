@@ -51,6 +51,9 @@ export interface Job {
   pid?: number | null;
   threadId?: string | null;
   turnId?: string | null;
+  // Ephemeral worker-owned endpoint used to inject messages into a live
+  // Claude stream-json turn. Cleared as soon as that turn stops accepting.
+  steerEndpoint?: string | null;
   completedAt?: string;
   resumedAt?: string;
   error?: string;

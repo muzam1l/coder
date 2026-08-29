@@ -6,6 +6,7 @@
  * - persistent (non-ephemeral) threads by default so runs can be steered later
  */
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
 
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.js";
 import type { ProtocolError } from "./app-server.js";
@@ -31,7 +32,11 @@ interface TurnItem {
   phase?: string;
   command?: string;
   exitCode?: number | null;
-  changes?: Array<{ path?: string }>;
+  changes?: Array<{
+    path?: string;
+    kind?: string | { type?: string; move_path?: string | null };
+    diff?: string;
+  }>;
   server?: string;
   tool?: string;
   query?: string;
@@ -87,6 +92,7 @@ interface TurnCaptureState {
   commandExecutions: TurnItem[];
   // threadId -> latest cumulative token usage reported for that thread.
   tokenUsageByThread: Map<string, TokenUsage>;
+  lastDiffSummary: string;
   itemIndex: Map<string, TurnItem>;
   onProgress: ProgressReporter | null;
   onHeartbeat: (() => void) | null;
@@ -167,6 +173,84 @@ function collectTouchedFiles(fileChanges: TurnItem[]): string[] {
     }
   }
   return [...paths];
+}
+
+function changedLineRanges(diff: string, kind: string): string[] {
+  const ranges: string[] = [];
+  const hunks = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/gm;
+  for (const match of diff.matchAll(hunks)) {
+    const deleting = kind === "delete";
+    const start = Number(deleting ? match[1] : match[3]);
+    const count = Number((deleting ? match[2] : match[4]) ?? 1);
+    if (!Number.isFinite(start) || !Number.isFinite(count)) continue;
+    ranges.push(count <= 1 ? `L${start}` : `L${start}-L${start + count - 1}`);
+  }
+  return ranges;
+}
+
+function currentFileRange(file: string): string[] {
+  try {
+    const content = fs.readFileSync(file, "utf8");
+    const lines = content ? content.split(/\r\n|\r|\n/).length - (content.endsWith("\n") ? 1 : 0) : 0;
+    return lines > 0 ? [lines === 1 ? "L1" : `L1-L${lines}`] : [];
+  } catch {
+    return [];
+  }
+}
+
+function describeFileChange(
+  change: NonNullable<TurnItem["changes"]>[number],
+  readAddedFile: boolean,
+): string {
+  const kind = typeof change.kind === "string" ? change.kind : change.kind?.type ?? "change";
+  const path = change.path || "(unknown path)";
+  const diffRanges = changedLineRanges(change.diff ?? "", kind);
+  const ranges = diffRanges.length || kind !== "add" || !readAddedFile ? diffRanges : currentFileRange(path);
+  const moved = typeof change.kind === "object" && change.kind?.move_path
+    ? ` -> ${change.kind.move_path}`
+    : "";
+  return `${kind} ${path}${moved}${ranges.length ? ` ${ranges.join(", ")}` : ""}`;
+}
+
+export function describeCodexFileChanges(item: TurnItem, readAddedFiles = false): string {
+  return (item.changes ?? []).map(change => describeFileChange(change, readAddedFiles)).join("; ");
+}
+
+function diffPath(header: string): string {
+  const value = header.trim().split("\t")[0] ?? "";
+  return value === "/dev/null" ? "" : value.replace(/^[ab]\//, "");
+}
+
+/** Summarize an aggregate unified diff as path plus destination line spans. */
+export function describeCodexTurnDiff(diff: string): string {
+  const files = new Map<string, string[]>();
+  let oldPath = "";
+  let newPath = "";
+  for (const line of diff.split(/\r?\n/)) {
+    if (line.startsWith("--- ")) {
+      oldPath = diffPath(line.slice(4));
+      continue;
+    }
+    if (line.startsWith("+++ ")) {
+      newPath = diffPath(line.slice(4));
+      continue;
+    }
+    const hunk = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/.exec(line);
+    if (!hunk) continue;
+    const oldStart = Number(hunk[1]);
+    const oldCount = Number(hunk[2] ?? 1);
+    const newStart = Number(hunk[3]);
+    const newCount = Number(hunk[4] ?? 1);
+    const deleting = newCount === 0;
+    const file = (deleting ? oldPath : newPath) || newPath || oldPath || "(unknown path)";
+    const start = deleting ? oldStart : newStart;
+    const count = deleting ? oldCount : newCount;
+    const range = count <= 1 ? `L${start}` : `L${start}-L${start + count - 1}`;
+    const ranges = files.get(file) ?? [];
+    ranges.push(range);
+    files.set(file, ranges);
+  }
+  return [...files].map(([file, ranges]) => `${file} ${ranges.join(", ")}`).join("; ");
 }
 
 // Normalize an app-server TokenUsage ({inputTokens, cachedInputTokens,
@@ -261,7 +345,10 @@ function describeStartedItem(item: TurnItem) {
     case "commandExecution":
       return { message: `Running command: ${String(item.command ?? "").trim()}`, phase: "running" };
     case "fileChange":
-      return { message: `Applying ${item.changes!.length} file change(s).`, phase: "editing" };
+      return {
+        message: `Applying file changes: ${describeCodexFileChanges(item) || "(details unavailable)"}.`,
+        phase: "editing"
+      };
     case "mcpToolCall":
       return { message: `Calling ${item.server}/${item.tool}.`, phase: "investigating" };
     case "dynamicToolCall":
@@ -295,7 +382,10 @@ function describeCompletedItem(item: TurnItem) {
       };
     }
     case "fileChange":
-      return { message: `File changes ${item.status}.`, phase: "editing" };
+      return {
+        message: `File changes ${item.status}: ${describeCodexFileChanges(item, true) || "(details unavailable)"}.`,
+        phase: "editing"
+      };
     case "mcpToolCall":
       return { message: `Tool ${item.server}/${item.tool} ${item.status}.`, phase: "investigating" };
     case "dynamicToolCall":
@@ -335,6 +425,7 @@ function createTurnCaptureState(threadId: string, options: CaptureTurnOptions = 
     fileChanges: [],
     commandExecutions: [],
     tokenUsageByThread: new Map(),
+    lastDiffSummary: "",
     // itemId -> item, populated on item/started so approval callbacks can look
     // up the pending command/file change they refer to.
     itemIndex: new Map(),
@@ -484,6 +575,14 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
       const usageThreadId = extractThreadId(message);
       if (usage && usageThreadId) {
         state.tokenUsageByThread.set(usageThreadId, usage);
+      }
+      break;
+    }
+    case "turn/diff/updated": {
+      const summary = describeCodexTurnDiff(String(message.params?.diff ?? ""));
+      if (summary && summary !== state.lastDiffSummary) {
+        state.lastDiffSummary = summary;
+        emitProgress(state.onProgress, `Changed lines: ${summary}.`, "editing");
       }
       break;
     }
@@ -697,25 +796,48 @@ export async function interruptTurn(
  */
 export async function steerTurn(
   cwd: string,
-  { threadId, text }: { threadId?: string | null; text: string }
-): Promise<{ steered: boolean; detail: string }> {
+  { threadId, turnId, text }: { threadId?: string | null; turnId?: string | null; text: string },
+  internals: { connect?: () => Promise<Pick<AppServerClient, "request" | "close">> } = {}
+): Promise<{ steered: boolean; retryable: boolean; detail: string }> {
   if (!threadId) {
-    return { steered: false, detail: "missing threadId" };
+    return { steered: false, retryable: true, detail: "missing active threadId" };
+  }
+  if (!turnId) {
+    return { steered: false, retryable: true, detail: "missing active turnId" };
   }
   const trimmed = text.trim();
   if (!trimmed) {
-    return { steered: false, detail: "empty follow-up" };
+    return { steered: false, retryable: false, detail: "empty follow-up" };
   }
-  let client: AppServerClient | null = null;
+  let client: Pick<AppServerClient, "request" | "close"> | null = null;
   try {
-    client = await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
-    await client.request("turn/steer", {
+    client = internals.connect
+      ? await internals.connect()
+      : await CodexAppServerClient.connect(cwd, { reuseExistingBroker: true });
+    const response = await client.request("turn/steer", {
       threadId,
-      input: [{ type: "text", text: trimmed, text_elements: [] }]
+      input: [{ type: "text", text: trimmed, text_elements: [] }],
+      expectedTurnId: turnId,
     });
-    return { steered: true, detail: `Steered follow-up into the active turn on ${threadId}.` };
+    if (response?.turnId !== turnId) {
+      return {
+        steered: false,
+        retryable: false,
+        detail: `turn/steer returned unexpected turnId ${String(response?.turnId ?? "(missing)")}; expected ${turnId}`,
+      };
+    }
+    return { steered: true, retryable: false, detail: `Steered follow-up into ${turnId} on ${threadId}.` };
   } catch (error) {
-    return { steered: false, detail: error instanceof Error ? error.message : String(error) };
+    const err = error as ProtocolError & NodeJS.ErrnoException;
+    const detail = error instanceof Error ? error.message : String(error);
+    // These are timing windows, not malformed requests: the worker can safely
+    // run the follow-up as a resumed turn after the current one completes.
+    const retryable =
+      err.rpcCode === BROKER_BUSY_RPC_CODE ||
+      err.code === "ENOENT" ||
+      err.code === "ECONNREFUSED" ||
+      /no active turn|active turn.*(?:ended|completed)|turn.*not active|expected turn.*(?:mismatch|does not match)|turn id.*(?:mismatch|does not match)/i.test(detail);
+    return { steered: false, retryable, detail };
   } finally {
     await client?.close().catch(() => {});
   }
