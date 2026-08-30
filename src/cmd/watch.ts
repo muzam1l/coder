@@ -8,6 +8,7 @@ import {
   readJob,
   reconcileJob,
   resolveJobDir,
+  tailSteps,
   type JobLogEntry,
 } from '../lib/state.js';
 import { createJsonlTail, readJsonFile, shortPath } from '../lib/fsx.js';
@@ -30,7 +31,7 @@ import { ACTIVE_STATUSES, type TokenUsage } from '../lib/types.js';
 
 // Print-free core (SDK `task.stream`): follow a task's progress log, yielding
 // each JobLogEntry until the task reaches a terminal state. `tail` replays only
-// the last n entries already logged ('all' for the whole transcript; default 1,
+// the last n steps already logged ('all' for the whole transcript; default 1,
 // so just the step in progress).
 export async function* streamTaskCore(
   cwd: string,
@@ -42,25 +43,23 @@ export async function* streamTaskCore(
   if (!current) {
     throw new Error(`No task found for "${taskId}".`);
   }
-  // Skip everything older than the last `tail` entries, then follow the file
+  // Skip everything older than the last `tail` steps, then follow the file
   // incrementally — each tick reads only the appended bytes instead of
   // re-parsing the whole (unbounded) log.
   const tail = opts.tail ?? 1;
   const tailLines = createJsonlTail(path.join(resolveJobDir(cwd, taskId), 'log.jsonl'));
   let first = true;
   const drain = (): JobLogEntry[] => {
-    let lines = tailLines();
-    if (first) {
-      first = false;
-      if (tail !== 'all') lines = tail === 0 ? [] : lines.slice(-tail);
-    }
-    return lines.map((line): JobLogEntry => {
+    const entries = tailLines().map((line): JobLogEntry => {
       try {
         return JSON.parse(line) as JobLogEntry;
       } catch {
         return { message: line };
       }
     });
+    if (!first) return entries;
+    first = false;
+    return tail === 'all' ? entries : tailSteps(entries, tail);
   };
   yield* drain();
   while (!terminal.has(current.status)) {

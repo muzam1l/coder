@@ -501,6 +501,18 @@ export function readTurnResults(cwd: string, jobId: string): TurnResultEntry[] {
     });
 }
 
+// Keep the last `tail` steps, plus whatever trails them. Token snapshots are
+// bookkeeping, not steps: counting them lets a tail land on an entry that
+// renders to nothing, which is why `--tail 1` could show an empty transcript.
+export function tailSteps(entries: JobLogEntry[], tail: number): JobLogEntry[] {
+  if (tail <= 0) return [];
+  let steps = 0;
+  for (let i = entries.length - 1; i >= 0; i -= 1) {
+    if (entries[i]?.kind !== "usage" && (steps += 1) === tail) return entries.slice(i);
+  }
+  return entries;
+}
+
 export function readJobLog(cwd: string, jobId: string, maxLines = 40): JobLogEntry[] {
   const logFile = path.join(resolveJobDir(cwd, jobId), "log.jsonl");
   if (!fs.existsSync(logFile)) {

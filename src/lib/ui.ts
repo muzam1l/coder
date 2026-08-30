@@ -35,7 +35,7 @@ export function makeStyle(stream: NodeJS.WriteStream): Style {
     // Faint (SGR 2) rather than a fixed grey, so the shade follows the theme's
     // foreground instead of assuming a dark background.
     dim: text => paint('2', text),
-    light: text => paint('38;5;249', text),
+    light: text => paint('38;5;246', text),
     green: text => paint('32', text),
     red: text => paint('31', text),
     yellow: text => paint('33', text),
@@ -270,10 +270,9 @@ export function taskHeaderLines(
     ...jobOptionLines(job, style),
     ...(tokens
       ? [
-          `${label('tokens')} ${
-            live ? formatTokensCompact(tokens) : formatTokens(tokens, tokenModel ?? job.model)
-          }${live ? style.dim(' (so far)') : ''}`,
-        ]
+        `${label('tokens')} ${live ? formatTokensCompact(tokens) : formatTokens(tokens, tokenModel ?? job.model)
+        }${live ? style.dim(' (so far)') : ''}`,
+      ]
       : []),
     ...(files?.length ? [`${label('files')} ${files.join(', ')}`] : []),
   ];
@@ -309,10 +308,9 @@ export function taskSummaryLines(
   return [
     ...(statusChanged
       ? [
-          `${label('status')} ${paintStatus(job.status)}${
-            took !== null && took >= 0 ? ` ${style.dim(`(took ${formatAge(took)})`)}` : ''
-          }`,
-        ]
+        `${label('status')} ${paintStatus(job.status)}${took !== null && took >= 0 ? ` ${style.dim(`(took ${formatAge(took)})`)}` : ''
+        }`,
+      ]
       : []),
     ...(tokens ? [`${label('tokens')} ${formatTokens(tokens, tokenModel ?? job.model)}`] : []),
     ...(files?.length ? [`${label('files')} ${files.join(', ')}`] : []),
@@ -721,7 +719,7 @@ export function visibleWidth(line: string): number {
 // through without counting.
 function widthCut(line: string, width: number): number {
   let visible = 0;
-  for (let i = 0; i < line.length; ) {
+  for (let i = 0; i < line.length;) {
     const m = line[i] === '\x1b' ? /^\x1b\[[0-9;]*m/.exec(line.slice(i)) : null;
     if (m) {
       i += m[0].length;
@@ -762,7 +760,7 @@ export function wrapAnsi(line: string, width: number, rows: number): string[] {
 export function clipAnsi(line: string, max: number): string {
   let visible = 0;
   let out = '';
-  for (let i = 0; i < line.length; ) {
+  for (let i = 0; i < line.length;) {
     const m = line[i] === '\x1b' ? /^\x1b\[[0-9;]*m/.exec(line.slice(i)) : null;
     if (m) {
       out += m[0];
@@ -788,7 +786,7 @@ export function clipAnsi(line: string, max: number): string {
 // Returns a restore function; no-op when stdin or stdout isn't a TTY.
 export function muteKeys(): () => void {
   const stdin = process.stdin;
-  if (!stdin.isTTY || !process.stdout.isTTY) return () => {};
+  if (!stdin.isTTY || !process.stdout.isTTY) return () => { };
   stdin.setRawMode(true);
   stdin.resume();
   const onData = (chunk: Buffer): void => {

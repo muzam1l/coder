@@ -91,7 +91,7 @@ export const task = {
   /**
    * A task's result. With `wait`, blocks until the task is terminal (a pending
    * approval throws a CoderError with code 'approval-pending'). `tail` fills
-   * `steps` with the last n log entries (default 0: []). Omit the id for the
+   * `steps` with the last n steps (default 0: []). Omit the id for the
    * most recent task.
    */
   async result(
@@ -184,7 +184,7 @@ export const task = {
     return listPendingApprovals(resolveJobDir(cwd, job.id));
   },
 
-  /** Follow a task live: an async iterable of progress log entries. `tail` replays only the last n (default 1). */
+  /** Follow a task live: an async iterable of progress log entries. `tail` replays only the last n steps (default 1). */
   stream(
     id?: string,
     opts: { tail?: number | 'all'; cwd?: string } = {},

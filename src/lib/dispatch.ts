@@ -14,6 +14,7 @@ import {
   readJobLog,
   readTurnResults,
   resolveJobDir,
+  tailSteps,
   writeJob,
   type JobLogEntry,
   type TurnResultEntry,
@@ -547,7 +548,8 @@ function readResultJson(cwd: string, taskId: string): TurnResult | null {
 // The last `tail` log entries ('all' for the whole transcript; default 0: none).
 function readSteps(cwd: string, taskId: string, tail: number | 'all' = 0): JobLogEntry[] {
   if (tail === 0) return [];
-  return readJobLog(cwd, taskId, tail === 'all' ? Number.MAX_SAFE_INTEGER : tail);
+  const all = readJobLog(cwd, taskId, Number.MAX_SAFE_INTEGER);
+  return tail === 'all' ? all : tailSteps(all, tail);
 }
 
 /** Read a task's current state and result.json without waiting. `tail` fills `steps`. */
