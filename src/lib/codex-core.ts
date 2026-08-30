@@ -569,7 +569,9 @@ function recordItem(state: TurnCaptureState, item: TurnItem, lifecycle: Lifecycl
 
   if (item.type === "agentMessage") {
     if (item.text && (!threadId || threadId === state.threadId)) {
-      state.lastAgentMessage = item.text;
+      // Models end an answer with a newline as often as not; every caller that
+      // prints this adds its own spacing, so the padding is theirs to decide.
+      state.lastAgentMessage = item.text.trim();
       if (lifecycle === "completed" && item.phase === "final_answer") {
         state.finalAnswerSeen = true;
         scheduleInferredCompletion(state);
@@ -660,11 +662,21 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
     case "item/autoApprovalReview/completed": {
       const review = message.params?.review ?? {};
       const action = message.params?.action ?? {};
-      const target = action.command ?? action.type ?? "";
+      // Unwrapped like the tool line above it, so the views can tell it is the
+      // same command and skip repeating it. The message is what --echo prints;
+      // the fields are what the transcript renders as an approval.
+      const target = unwrapShell(String(action.command ?? action.type ?? "").trim());
       emitProgress(
         state.onProgress,
-        `auto-review ${review.status}${review.riskLevel ? ` (${review.riskLevel} risk)` : ""}: ${shorten(target)}${review.rationale ? ` — ${shorten(review.rationale, 120)}` : ""}`,
-        null
+        `auto-review ${review.status}${review.riskLevel ? ` (${review.riskLevel} risk)` : ""}: ${shorten(target, 48)}${review.rationale ? ` — ${shorten(review.rationale, 320)}` : ""}`,
+        null,
+        {
+          kind: "auto-review",
+          decision: String(review.status ?? ""),
+          ...(review.riskLevel ? { riskLevel: String(review.riskLevel) } : {}),
+          ...(target ? { summary: `run command: ${target}` } : {}),
+          ...(review.rationale ? { reason: String(review.rationale) } : {})
+        }
       );
       break;
     }

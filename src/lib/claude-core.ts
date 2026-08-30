@@ -741,7 +741,9 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
           );
         }
       }
-      const finalMessage = resultEvent?.result ?? "";
+      // Trailing newlines are the model's, not the caller's: every consumer
+      // prints this with spacing of its own.
+      const finalMessage = (resultEvent?.result ?? "").trim();
       // No result event means the turn never completed (sandbox init failure,
       // auth error printed to stderr); treat that as failed too.
       const failed = code !== 0 || resultEvent?.is_error === true || resultEvent == null || protocolErrors.length > 0;

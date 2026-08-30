@@ -32,7 +32,9 @@ export function makeStyle(stream: NodeJS.WriteStream): Style {
     blue: text => paint('34', text),
     bold: text => paint('1', text),
     cyan: text => paint('36', text),
-    dim: text => paint('38;5;246', text),
+    // Faint (SGR 2) rather than a fixed grey, so the shade follows the theme's
+    // foreground instead of assuming a dark background.
+    dim: text => paint('2', text),
     light: text => paint('38;5;249', text),
     green: text => paint('32', text),
     red: text => paint('31', text),
@@ -339,9 +341,19 @@ export function trimStep(
 export const OUTPUT_PREVIEW_CHARS = 500;
 const OUTPUT_PREVIEW_LINES = 6;
 
+// Display budgets, in terminal rows, for the entries that are wrapped rather
+// than capped — a one-row clip on a line this long hides the half that says
+// what it did. --trim lifts them.
+const TOOL_ROWS = 2;
+const REASONING_ROWS = 3;
+const STATUS_ROWS = 3;
+
 // Left gutter: elapsed-since-dispatch stamp, then a one-column kind glyph.
 const GUTTER_WIDTH = 5;
 const BODY_INDENT = ' '.repeat(GUTTER_WIDTH + 3);
+// Floor for the wrapped body on a terminal too narrow to hold gutter and text
+// both; below this it stops being a transcript either way.
+const MIN_BODY_WIDTH = 24;
 
 const KIND_GLYPHS: Record<string, string> = {
   assistant: '●',
@@ -356,7 +368,7 @@ const KIND_GLYPHS: Record<string, string> = {
 };
 
 function isApproval(kind: string): boolean {
-  return kind.includes('approval') || kind === 'sidecar-decision';
+  return kind.includes('approval') || kind === 'sidecar-decision' || kind === 'auto-review';
 }
 
 // The workspace is named once in the header; repeating it on every tool line
@@ -368,45 +380,67 @@ function stripCwd(text: string, cwd?: string): string {
   return text.split(`${cwd}/`).join('').split(cwd).join('.');
 }
 
-// Approval and sidecar entries carry structured fields but no message. Compose
-// the line from what they do have, leading with the verdict. `subject` is the
-// tool line the approval is about, when it is already on screen — no point
-// repeating a command that sits one row above.
-function describeApproval(entry: JobLogEntry, subject: string): string {
-  const label = entry.kind === 'sidecar-decision' ? 'sidecar' : 'approval';
+// Approval, sidecar and auto-review entries carry structured fields rather than
+// a message. Split them the way a tool call is split from its output: the
+// verdict is what a transcript is scanned for, the reason is prose about it.
+// `subject` is the tool line the approval is about, when it is already on
+// screen — no point repeating a command that sits one row above.
+function describeApproval(
+  entry: JobLogEntry,
+  subject: string,
+  cwd?: string,
+): { head: string; reason: string } {
+  const kind = String(entry.kind ?? '');
+  const label = kind === 'sidecar-decision' ? 'sidecar' : kind === 'auto-review' ? 'auto-review' : 'approval';
   const decision = String(entry.decision ?? '');
-  const summaryText = entry.summary ? String(entry.summary) : '';
+  const risk = entry.riskLevel ? `(${String(entry.riskLevel)} risk)` : '';
+  const summaryText = stripCwd(entry.summary ? String(entry.summary) : '', cwd);
   // Summaries read "run command: <cmd>" / "Edit: <path>"; the part after the
   // colon is what the tool line already showed.
   const target = summaryText.slice(summaryText.indexOf(': ') + 2);
   const shown = summaryText && target && subject.includes(target) ? '' : summaryText;
   const method = shown ? '' : String(entry.method ?? '');
-  const reason = entry.reason ? ` — ${String(entry.reason)}` : '';
-  return `${[label, decision, method].filter(Boolean).join(' ')}${shown ? ` · ${shown}` : ''}${reason}`;
+  return {
+    head: `${[label, decision, risk, method].filter(Boolean).join(' ')}${shown ? ` · ${shown}` : ''}`,
+    reason: stripCwd(entry.reason ? String(entry.reason) : '', cwd),
+  };
 }
+
+// Shade one row. Output carries the program's own colour often enough (rg,
+// cargo and friends colour whenever they think they are on a tty), and the
+// reset that ends it would end the shading with it, leaving the rest of the row
+// at the terminal default — brighter than either grey. Re-arm after each reset,
+// so the program keeps its colour and everything around it stays shaded.
+function shade(line: string, paint: (text: string) => string): string {
+  const open = /^\x1b\[[0-9;]*m/.exec(paint(''))?.[0];
+  return paint(open && line.includes(RESET) ? line.split(RESET).join(`${RESET}${open}`) : line);
+}
+const RESET = '\x1b[0m';
 
 // Cap text by characters and (unless the caller asked for a specific budget)
 // by lines, noting in both cases how much was withheld. Markers are a shade
 // brighter than the output they stand in for, so they can't be misread as it.
-function capBody(text: string, chars: number, lines: number, style: Style): string {
-  let out = text;
-  if (out.length > chars) {
-    out = `${out.slice(0, chars)} ${style.light(`<${text.length - chars} more chars>`)}`;
-  }
-  const split = out.split('\n');
-  if (split.length > lines) {
-    out = `${split.slice(0, lines).join('\n')}\n${style.light(`… +${split.length - lines} more lines`)}`;
-  }
-  return out;
-}
-
-// Shade a block one line at a time: wrapping a body that already contains a
-// styled marker would let the marker's reset end the shading early.
-function dimBlock(text: string, style: Style): string {
-  return text
+// Shading is applied per row, and to text and marker separately: a style
+// spanning a newline would colour the body indent too, and one spanning a
+// marker would end at the marker's reset.
+function capBody(
+  text: string,
+  chars: number,
+  lines: number,
+  style: Style,
+  paint: (line: string) => string = style.dim,
+): string {
+  if (!text) return '';
+  const rows = (text.length > chars ? text.slice(0, chars) : text)
     .split('\n')
-    .map(line => (line.includes('\x1b') ? line : style.dim(line)))
-    .join('\n');
+    .map(line => shade(line, paint));
+  if (text.length > chars) {
+    rows[rows.length - 1] += ` ${style.light(`<${text.length - chars} more chars>`)}`;
+  }
+  if (rows.length > lines) {
+    return [...rows.slice(0, lines), style.light(`… +${rows.length - lines} more lines`)].join('\n');
+  }
+  return rows.join('\n');
 }
 
 export interface LogRenderOptions {
@@ -472,11 +506,15 @@ export class LogRenderer {
       return this.compose(kind, s.dim(formatTokensCompact(tokens)), false);
     }
 
-    const raw = entry.message
-      ? String(entry.message)
-      : isApproval(kind)
-        ? describeApproval(entry, this.lastToolText)
-        : String(entry.kind ?? '');
+    // An approval that carries a message too (auto-review keeps one for --echo)
+    // still renders from its fields; the message-only kinds — escalated,
+    // timed out — have no verdict to compose from and fall through.
+    if (isApproval(kind) && (entry.decision || !entry.message)) {
+      const { head, reason } = describeApproval(entry, this.lastToolText, this.opts.cwd);
+      return this.compose(kind, this.approval(head, reason), false);
+    }
+
+    const raw = entry.message ? String(entry.message) : String(entry.kind ?? '');
     if (!raw && !(kind === 'tool-result' && (entry.exitCode != null || entry.isError))) return [];
     const text = stripCwd(raw, this.opts.cwd);
 
@@ -491,20 +529,20 @@ export class LogRenderer {
       return this.compose(kind, s.red(text), true);
     }
     if (kind === 'reasoning') {
-      // A one-line preview by default: enough to see where the agent's head is
+      // A short preview by default: enough to see where the agent's head is
       // without burying the work. --trim opens it up.
       const seconds = typeof entry.durationMs === 'number' ? Math.round(entry.durationMs / 1000) : 0;
-      const stamp = seconds >= 1 ? s.dim(`thought ${formatAge(seconds * 1000)} · `) : '';
+      const stamp = seconds >= 1 ? `thought ${formatAge(seconds * 1000)} · ` : '';
       const body =
         lineCap === Infinity
-          ? capBody(text, trim, Infinity, s)
-          : this.clip(text.split('\n')[0] ?? '');
-      return this.compose(kind, `${stamp}${dimBlock(body, s)}`, false);
+          ? `${s.dim(stamp)}${capBody(text, trim, Infinity, s)}`
+          : this.clip(`${stamp}${text.split('\n')[0] ?? ''}`, REASONING_ROWS, s.dim);
+      return this.compose(kind, body, false);
     }
     if (kind === 'tool') {
       this.lastTool = entry.tool ? String(entry.tool) : null;
       this.lastToolText = text;
-      return this.compose(kind, s.light(this.clip(text.replace(/\s*\n\s*/g, ' '))), false);
+      return this.compose(kind, this.clip(text.replace(/\s*\n\s*/g, ' '), TOOL_ROWS, s.light), false);
     }
     if (kind === 'tool-result') {
       const exit = typeof entry.exitCode === 'number' ? entry.exitCode : null;
@@ -520,10 +558,10 @@ export class LogRenderer {
         ms >= 3000 ? s.dim(formatAge(ms)) : '',
       ].filter(Boolean);
       const body = capBody(text, trim, lineCap, s);
-      const lines = [...(notes.length ? [notes.join(s.dim(' · '))] : []), ...(body ? [dimBlock(body, s)] : [])];
+      const lines = [...(notes.length ? [notes.join(s.dim(' · '))] : []), ...(body ? [body] : [])];
       return this.compose(kind, lines.join('\n'), false);
     }
-    return this.compose(kind, s.dim(this.clip(text)), false);
+    return this.compose(kind, this.clip(text, STATUS_ROWS, s.dim), false);
   }
 
   // A blank line wherever the agent changes register; tool output stays welded
@@ -536,9 +574,36 @@ export class LogRenderer {
     return false;
   }
 
-  private clip(line: string): string {
+  // Verdict first, reason under it — but only once the pair outgrows a single
+  // row. Most approvals are a few words either side and a forced second row
+  // would double the height of a quiet transcript; the ones that don't fit are
+  // exactly the ones worth reading, and there the verdict owns its row, so the
+  // command in it can run as far as that row allows.
+  private approval(head: string, reason: string): string {
+    const s = this.style;
+    const body = this.opts.width ? this.opts.width - BODY_INDENT.length : Infinity;
+    const inline = `${head}${reason ? ` — ${reason}` : ''}`;
+    if (!reason || visibleWidth(inline) <= body) {
+      return `${s.light(head)}${reason ? s.dim(` — ${reason}`) : ''}`;
+    }
+    return [this.clip(head, 1, s.light), this.clip(reason, STATUS_ROWS - 1, s.dim)].join('\n');
+  }
+
+  // Wrap a one-line entry to its row budget, shading each row on its own. The
+  // width is the body's, not the terminal's — the gutter sits to the left of
+  // it, and clipping against the full width is what makes these lines spill
+  // onto a row the indent never reaches. --trim is the escape hatch: an
+  // explicit budget caps characters instead of rows, `none` caps neither.
+  private clip(line: string, rows: number, paint: (text: string) => string): string {
+    const trim = this.opts.trim ?? OUTPUT_PREVIEW_CHARS;
+    if (this.opts.explicitTrim || trim === Infinity) {
+      return capBody(line, trim, Infinity, this.style, paint);
+    }
     const width = this.opts.width;
-    return width && visibleWidth(line) > width - 1 ? clipAnsi(line, width - 1) : line;
+    if (!width) return paint(line);
+    return wrapAnsi(line, Math.max(width - BODY_INDENT.length, MIN_BODY_WIDTH), rows)
+      .map(row => shade(row, paint))
+      .join('\n');
   }
 
   private compose(kind: string, body: string, wrap: boolean): string[] {
@@ -650,6 +715,45 @@ export function visibleWidth(line: string): number {
   let width = 0;
   for (const ch of line.replace(/\x1b\[[0-9;]*m/g, '')) width += charWidth(ch.codePointAt(0)!);
   return width;
+}
+
+// Index at which `line` reaches `width` visible columns; SGR sequences pass
+// through without counting.
+function widthCut(line: string, width: number): number {
+  let visible = 0;
+  for (let i = 0; i < line.length; ) {
+    const m = line[i] === '\x1b' ? /^\x1b\[[0-9;]*m/.exec(line.slice(i)) : null;
+    if (m) {
+      i += m[0].length;
+      continue;
+    }
+    const ch = String.fromCodePoint(line.codePointAt(i)!);
+    const w = charWidth(ch.codePointAt(0)!);
+    if (visible + w > width) return i;
+    visible += w;
+    i += ch.length;
+  }
+  return line.length;
+}
+
+// Break a line into at most `rows` rows of `width` visible columns, ellipsising
+// whatever is left over. Breaks at a space when one sits in the last third of
+// the row, so words survive wherever that is affordable.
+export function wrapAnsi(line: string, width: number, rows: number): string[] {
+  if (width < 4 || rows < 1) return [line];
+  const out: string[] = [];
+  let rest = line;
+  while (visibleWidth(rest) > width) {
+    if (out.length === rows - 1) {
+      return [...out, `${rest.slice(0, widthCut(rest, width - 1))}…`];
+    }
+    const edge = widthCut(rest, width);
+    const space = rest.lastIndexOf(' ', edge);
+    const cut = space > width * 0.66 ? space : edge;
+    out.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).replace(/^\s+/, '');
+  }
+  return [...out, rest];
 }
 
 // Clip a styled line to at most `max` visible columns, preserving ANSI
