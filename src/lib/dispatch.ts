@@ -366,8 +366,14 @@ async function attemptOnce(
   // rejects a over-limit turn ~2.5s in), and that must fail over inside the
   // gate, not surface mid-turn.
   const ALL = Number.MAX_SAFE_INTEGER;
+  // Lifecycle greetings and token snapshots aren't work: an engine can say
+  // hello, report its context size, and still die before doing anything.
+  const LIFECYCLE = new Set(['status', 'usage']);
   const substantive = () =>
-    readJobLog(cwd, jobId, ALL).filter(e => (e as { phase?: string }).phase !== 'starting').length;
+    readJobLog(cwd, jobId, ALL).filter(entry => {
+      const { phase, kind } = entry as { phase?: string; kind?: string };
+      return phase !== 'starting' && !LIFECYCLE.has(String(kind ?? ''));
+    }).length;
   const deadline = Date.now() + 15_000;
   let current = job;
   let baseline: number | null = null;

@@ -12,8 +12,16 @@ import path from "node:path";
 import process from "node:process";
 
 import { CLAUDE_PERMISSION_FLAGS, CLAUDE_SIDECAR_FLAGS, claudeTurnSettings } from "./config.js";
+import { shortPath } from "./fsx.js";
 import { CLI_PATH } from "./runtime.js";
-import type { AuthStatus, Availability, Effort, Permission, TokenUsage, TurnResult } from "./types.js";
+import type { AuthStatus, Availability, Effort, Permission, ProgressUpdate, TokenUsage, TurnResult } from "./types.js";
+
+// A token snapshot is only worth logging once the count has actually moved;
+// every block of an assistant message reports usage.
+const USAGE_LOG_STEP = 1000;
+
+// Tools whose file_path names a file the turn changed.
+const WRITING_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 
 // Flatten a tool_result block's content (string, or array of text parts) to
 // raw text for progress output.
@@ -59,30 +67,73 @@ function matchingLineRanges(file: string, needle: string, replaceAll = false): s
   return ranges;
 }
 
+// One argument of an unrecognized tool, short enough to sit on a shared line.
+function compactValue(value: unknown): string {
+  const text = typeof value === "string" ? value : JSON.stringify(value) ?? String(value);
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > 80 ? `${flat.slice(0, 80)}…` : flat;
+}
+
 /** Compact, path-first tool detail for task logs and watch output. */
 export function describeClaudeToolUse(name: string, input: Record<string, any>, cwd: string): string {
-  const target = String(input.file_path ?? input.notebook_path ?? "");
+  const target = String(input.file_path ?? input.notebook_path ?? input.path ?? "");
   const resolved = target ? (path.isAbsolute(target) ? target : path.resolve(cwd, target)) : "";
+  // Paths read best relative to the workspace, which every view names already.
+  const shown = target ? shortPath(cwd, resolved) || target : "(unknown path)";
+  const where = input.path ? ` in ${shortPath(cwd, String(input.path))}` : "";
   if (name === "Write") {
     const lines = textLineCount(String(input.content ?? ""));
-    return `Write ${target || "(unknown path)"} ${lines ? `L1-L${lines}` : "(empty file)"}`;
+    return `Write ${shown} ${lines ? `L1-L${lines}` : "(empty file)"}`;
   }
   if (name === "Edit") {
     const ranges = matchingLineRanges(resolved, String(input.old_string ?? ""), input.replace_all === true);
-    return `Edit ${target || "(unknown path)"}${ranges.length ? ` ${ranges.join(", ")}` : ""}`;
+    return `Edit ${shown}${ranges.length ? ` ${ranges.join(", ")}` : ""}`;
   }
   if (name === "MultiEdit") {
     const edits = Array.isArray(input.edits) ? input.edits : [];
     const ranges = edits.flatMap((edit: any) =>
       matchingLineRanges(resolved, String(edit?.old_string ?? ""), edit?.replace_all === true)
     );
-    return `MultiEdit ${target || "(unknown path)"}${ranges.length ? ` ${ranges.join(", ")}` : ""} (${edits.length} edits)`;
+    return `MultiEdit ${shown}${ranges.length ? ` ${ranges.join(", ")}` : ""} (${edits.length} edits)`;
   }
   if (name === "NotebookEdit") {
     const cell = input.cell_id ?? input.cell_number;
-    return `NotebookEdit ${target || "(unknown path)"}${cell == null ? "" : ` cell ${cell}`}`;
+    return `NotebookEdit ${shown}${cell == null ? "" : ` cell ${cell}`}`;
   }
-  return `${name} ${JSON.stringify(input ?? {})}`;
+  if (name === "Read") {
+    const from = Number(input.offset ?? 0);
+    const count = Number(input.limit ?? 0);
+    const range = from && count ? ` L${from}-L${from + count - 1}` : from ? ` from L${from}` : "";
+    return `Read ${shown}${range}`;
+  }
+  if (name === "Bash") {
+    return `Bash ${String(input.command ?? "").trim() || "(no command)"}`;
+  }
+  if (name === "Glob") {
+    return `Glob ${String(input.pattern ?? "")}${where}`;
+  }
+  if (name === "Grep") {
+    const glob = input.glob ? ` (${String(input.glob)})` : "";
+    return `Grep ${String(input.pattern ?? "")}${where}${glob}`;
+  }
+  if (name === "Task") {
+    const agent = input.subagent_type ? `${String(input.subagent_type)}: ` : "";
+    return `Task ${agent}${compactValue(input.description ?? input.prompt ?? "")}`;
+  }
+  if (name === "WebFetch") {
+    return `WebFetch ${String(input.url ?? "")}`;
+  }
+  if (name === "WebSearch") {
+    return `WebSearch ${String(input.query ?? "")}`;
+  }
+  if (name === "TodoWrite") {
+    const todos = Array.isArray(input.todos) ? input.todos : [];
+    return `TodoWrite ${todos.length} item${todos.length === 1 ? "" : "s"}`;
+  }
+  const args = Object.entries(input ?? {})
+    .map(([key, value]) => `${key}=${compactValue(value)}`)
+    .join(" ");
+  return args ? `${name} ${args}` : name;
 }
 
 // Normalize the result event's usage block ({input_tokens,
@@ -142,7 +193,7 @@ export interface ClaudeTurnOptions {
   /** Inspection tools for a read-only sidecar; supplying any also applies CLAUDE_SIDECAR_FLAGS. */
   readOnlyAllowedTools?: string[];
   resumeSessionId?: string | null;
-  onProgress?: (update: { message: string; threadId?: string }) => void;
+  onProgress?: (update: Exclude<ProgressUpdate, string>) => void;
   onHeartbeat?: () => void;
   /** Publishes the worker-owned endpoint once this turn can accept live input. */
   onSteerReady?: (endpoint: string) => void;
@@ -489,6 +540,7 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
   const args = buildClaudeTurnArgs(cwd, options, sessionId);
 
   options.onProgress?.({
+    kind: "status",
     message: `claude turn started (session ${sessionId})`,
     threadId: sessionId,
   });
@@ -508,6 +560,16 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
     const input = createClaudeInputController((frame, callback) => child.stdin.write(frame, callback));
     // Timestamp of the previous stream event, to estimate thinking duration.
     let lastEventAt = Date.now();
+    // tool_use id -> the call it opened, so its result can report which tool
+    // produced it and how long it took.
+    const openCalls = new Map<string, { name: string; at: number }>();
+    // Output accrues across the turn's requests; input/cached describe the
+    // latest one (the context the model is holding right now).
+    let outputSoFar = 0;
+    let loggedTokens = 0;
+    // Files the turn wrote, mirroring codex's touchedFiles so both engines
+    // report what changed.
+    const touched = new Set<string>();
 
     const handleEvent = (event: any) => {
       if (!event || typeof event !== "object") {
@@ -517,25 +579,50 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
       if (event.type === "system" && event.subtype === "init" && event.session_id) {
         streamSessionId = event.session_id;
       } else if (event.type === "assistant") {
-        // Forward tool calls raw (name + full input), assistant text in full,
-        // and thinking as a one-liner preview with elapsed time.
+        // Each block is logged with its kind, so the text views can tell a
+        // command apart from prose without parsing the message back out.
+        const usage = normalizeClaudeUsage(event.message?.usage);
+        if (usage) {
+          outputSoFar += usage.output;
+          const total = usage.input + usage.cachedInput + outputSoFar;
+          // Every block of a message reports usage; log a snapshot only when
+          // the count has actually moved, or the log fills with near-copies.
+          if (!loggedTokens || total - loggedTokens >= USAGE_LOG_STEP) {
+            loggedTokens = total;
+            options.onProgress?.({
+              kind: "usage",
+              tokens: { ...usage, output: outputSoFar, total },
+              threadId: streamSessionId,
+            });
+          }
+        }
         for (const block of event.message?.content ?? []) {
           if (block?.type === "tool_use") {
+            const name = String(block.name ?? "Tool");
+            if (block.id) openCalls.set(String(block.id), { name, at: Date.now() });
+            if (WRITING_TOOLS.has(name)) {
+              const target = String(block.input?.file_path ?? block.input?.notebook_path ?? "");
+              if (target) touched.add(path.isAbsolute(target) ? target : path.resolve(cwd, target));
+            }
             options.onProgress?.({
-              message: describeClaudeToolUse(String(block.name ?? "Tool"), block.input ?? {}, cwd),
+              kind: "tool",
+              tool: name,
+              message: describeClaudeToolUse(name, block.input ?? {}, cwd),
               threadId: streamSessionId,
             });
           } else if (block?.type === "text" && typeof block.text === "string" && block.text.trim()) {
             options.onProgress?.({
+              kind: "assistant",
               message: block.text.trim(),
               threadId: streamSessionId,
             });
           } else if (block?.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
-            const seconds = Math.max(1, Math.round((Date.now() - lastEventAt) / 1000));
-            const firstLine = block.thinking.trim().split("\n")[0]!;
-            const preview = firstLine.length > 100 ? `${firstLine.slice(0, 100)}…` : firstLine;
+            // Logged in full; the views preview its first line and open it up
+            // on --trim.
             options.onProgress?.({
-              message: `Thought for ${seconds}s: ${preview}`,
+              kind: "reasoning",
+              message: block.thinking.trim(),
+              durationMs: Math.max(1000, Date.now() - lastEventAt),
               threadId: streamSessionId,
             });
           }
@@ -545,12 +632,17 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
         for (const block of event.message?.content ?? []) {
           if (block?.type === "tool_result") {
             const text = toolResultText(block.content).trim();
-            if (text) {
-              options.onProgress?.({
-                message: text,
-                threadId: streamSessionId,
-              });
-            }
+            const failed = block.is_error === true;
+            if (!text && !failed) continue;
+            const call = block.tool_use_id ? openCalls.get(String(block.tool_use_id)) : undefined;
+            if (block.tool_use_id) openCalls.delete(String(block.tool_use_id));
+            options.onProgress?.({
+              kind: "tool-result",
+              ...(call ? { tool: call.name, durationMs: Date.now() - call.at } : {}),
+              ...(failed ? { isError: true } : {}),
+              message: text || "(tool failed with no output)",
+              threadId: streamSessionId,
+            });
           }
         }
       } else if (event.type === "result") {
@@ -658,6 +750,7 @@ export async function runClaudeTurn(cwd: string, options: ClaudeTurnOptions): Pr
         threadId: resultEvent?.session_id ?? streamSessionId,
         turnId: null,
         finalMessage,
+        touchedFiles: [...touched],
         tokens: normalizeClaudeUsage(resultEvent?.usage),
         // modelUsage is keyed by the actual model id(s) that served the turn.
         model: (resultEvent?.modelUsage && Object.keys(resultEvent.modelUsage).join("+")) || options.model || null,

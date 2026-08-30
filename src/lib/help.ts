@@ -137,7 +137,7 @@ export const COMMAND_HELP: Record<string, CommandHelpSpec> = {
       "Watch a running task's progress log live (for you/debugging), then print its\nfinal answer. Replays the last line first so the current step is visible;\n--tail <n> replays the last n lines (--tail all for the whole transcript).\nBlocks until it finishes; exits 0 on success, 1 otherwise. For the answer\nalone, prefer `coder result`. Alias: stream.",
     flags: [
       ['--tail <n|all>', 'replay the last n log lines first (default: 1)'],
-      ['--trim <n|none>', 'cap each step at n chars, text and JSON alike (default: 128)'],
+      ['--trim <n|none>', 'budget for tool output and thinking (default: 1200 chars, 12 lines)'],
       ['--json', 'emit each log entry as a JSON line, then the result'],
       CWD_FLAG,
     ],

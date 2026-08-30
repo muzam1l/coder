@@ -11,11 +11,14 @@ import fs from "node:fs";
 import { BROKER_BUSY_RPC_CODE, BROKER_ENDPOINT_ENV, CodexAppServerClient } from "./app-server.js";
 import type { ProtocolError } from "./app-server.js";
 import { requestCodexControl, startCodexControlServer } from "./codex-control.js";
+import { shortPath } from "./fsx.js";
 import { binaryAvailable } from "./process.js";
 import { isCodexSessionArchived, unarchiveCodexSession } from "./codex-sessions.js";
 import type { Availability, AuthStatus, Effort, ProgressUpdate, TokenUsage, TurnResult } from "./types.js";
 
 const SERVICE_NAME = "coder_runtime";
+// Only log a token snapshot once the count has moved this far.
+const USAGE_LOG_STEP = 1000;
 const TASK_THREAD_PREFIX = "Coder Task";
 
 /** The connected app-server client (spawned or broker transport). */
@@ -94,12 +97,19 @@ interface TurnCaptureState {
   // threadId -> latest cumulative token usage reported for that thread.
   tokenUsageByThread: Map<string, TokenUsage>;
   lastDiffSummary: string;
+  loggedTokens: number;
+  // Files already reported by a fileChange item, so the turn's aggregate diff
+  // only has to mention what they missed.
+  reportedChanges: Set<string>;
+  /** Workspace root, so logged paths are relative to it. */
+  cwd: string;
   itemIndex: Map<string, TurnItem>;
   onProgress: ProgressReporter | null;
   onHeartbeat: (() => void) | null;
 }
 
 interface CaptureTurnOptions {
+  cwd?: string;
   onProgress?: ProgressReporter | null;
   onHeartbeat?: (() => void) | null;
   onApprovalRequest?: ApprovalRequestHandler;
@@ -205,19 +215,21 @@ function currentFileRange(file: string): string[] {
 function describeFileChange(
   change: NonNullable<TurnItem["changes"]>[number],
   readAddedFile: boolean,
+  cwd?: string,
 ): string {
   const kind = typeof change.kind === "string" ? change.kind : change.kind?.type ?? "change";
-  const path = change.path || "(unknown path)";
+  const file = change.path || "(unknown path)";
   const diffRanges = changedLineRanges(change.diff ?? "", kind);
-  const ranges = diffRanges.length || kind !== "add" || !readAddedFile ? diffRanges : currentFileRange(path);
+  const ranges = diffRanges.length || kind !== "add" || !readAddedFile ? diffRanges : currentFileRange(file);
   const moved = typeof change.kind === "object" && change.kind?.move_path
-    ? ` -> ${change.kind.move_path}`
+    ? ` -> ${cwd ? shortPath(cwd, change.kind.move_path) : change.kind.move_path}`
     : "";
-  return `${kind} ${path}${moved}${ranges.length ? ` ${ranges.join(", ")}` : ""}`;
+  const shown = cwd ? shortPath(cwd, file) : file;
+  return `${kind} ${shown}${moved}${ranges.length ? ` ${ranges.join(", ")}` : ""}`;
 }
 
-export function describeCodexFileChanges(item: TurnItem, readAddedFiles = false): string {
-  return (item.changes ?? []).map(change => describeFileChange(change, readAddedFiles)).join("; ");
+export function describeCodexFileChanges(item: TurnItem, readAddedFiles = false, cwd?: string): string {
+  return (item.changes ?? []).map(change => describeFileChange(change, readAddedFiles, cwd)).join("; ");
 }
 
 function diffPath(header: string): string {
@@ -226,7 +238,7 @@ function diffPath(header: string): string {
 }
 
 /** Summarize an aggregate unified diff as path plus destination line spans. */
-export function describeCodexTurnDiff(diff: string): string {
+export function describeCodexTurnDiff(diff: string, cwd?: string): string {
   const files = new Map<string, string[]>();
   let oldPath = "";
   let newPath = "";
@@ -254,7 +266,9 @@ export function describeCodexTurnDiff(diff: string): string {
     ranges.push(range);
     files.set(file, ranges);
   }
-  return [...files].map(([file, ranges]) => `${file} ${ranges.join(", ")}`).join("; ");
+  return [...files]
+    .map(([file, ranges]) => `${cwd ? shortPath(cwd, file) : file} ${ranges.join(", ")}`)
+    .join("; ");
 }
 
 // Normalize an app-server TokenUsage ({inputTokens, cachedInputTokens,
@@ -330,70 +344,107 @@ function mergeReasoningSections(existingSections: string[], nextSections: string
   return merged;
 }
 
+interface ProgressLine {
+  message: string;
+  phase?: string | null;
+  /** Structured fields carried alongside the text (kind, exit code, ...). */
+  extra?: Record<string, unknown>;
+}
+
 function emitProgress(
   onProgress: ProgressReporter | null | undefined,
   message: string | null | undefined,
   phase: string | null = null,
   extra: Record<string, unknown> = {}
 ) {
-  if (!onProgress || !message) {
+  // An empty message is still worth logging when the entry carries structure
+  // (a failed command that printed nothing); only "no line at all" is skipped.
+  if (!onProgress || message == null) {
     return;
   }
   onProgress({ message, phase, ...extra });
 }
 
+function emitLine(onProgress: ProgressReporter | null | undefined, line: ProgressLine | null) {
+  if (line) emitProgress(onProgress, line.message, line.phase ?? null, line.extra ?? {});
+}
+
+// Codex runs everything through a login shell; the wrapper is the same on
+// every line and only crowds out the command that varies. The raw invocation
+// is still on the turn result.
+function unwrapShell(command: string): string {
+  return command.replace(/^\/(?:usr\/)?bin\/\w*sh\s+-l?c\s+/, "");
+}
+
 // Messages are logged raw (full command, full output) like the claude core;
 // the text views trim them for display and --json keeps everything.
-function describeStartedItem(item: TurnItem) {
+function describeStartedItem(item: TurnItem, cwd?: string): ProgressLine | null {
   switch (item.type) {
     case "commandExecution":
-      return { message: `Running command: ${String(item.command ?? "").trim()}`, phase: "running" };
-    case "fileChange":
       return {
-        message: `Applying file changes: ${describeCodexFileChanges(item) || "(details unavailable)"}.`,
-        phase: "editing"
+        message: unwrapShell(String(item.command ?? "").trim()),
+        phase: "running",
+        extra: { kind: "tool", tool: "command" }
       };
+    // File changes are reported once, on completion — an "applying"/"applied"
+    // pair says the same thing twice.
+    case "fileChange":
+      return null;
     case "mcpToolCall":
-      return { message: `Calling ${item.server}/${item.tool}.`, phase: "investigating" };
+      return { message: `${item.server}/${item.tool}`, phase: "investigating", extra: { kind: "tool", tool: String(item.tool ?? "") } };
     case "dynamicToolCall":
-      return { message: `Running tool: ${item.tool}.`, phase: "investigating" };
+      return { message: String(item.tool ?? ""), phase: "investigating", extra: { kind: "tool", tool: String(item.tool ?? "") } };
     case "webSearch":
-      return { message: `Searching: ${String(item.query ?? "").trim()}`, phase: "investigating" };
+      return { message: `search: ${String(item.query ?? "").trim()}`, phase: "investigating", extra: { kind: "tool", tool: "search" } };
     default:
       return null;
   }
 }
 
-function describeCompletedItem(item: TurnItem) {
+function describeCompletedItem(item: TurnItem, cwd?: string): ProgressLine | null {
   switch (item.type) {
     case "agentMessage": {
       const text = String(item.text ?? "").trim();
-      return text ? { message: text, phase: null } : null;
+      return text ? { message: text, phase: null, extra: { kind: "assistant" } } : null;
     }
     case "reasoning": {
-      const firstLine = extractReasoningSections(item.summary)[0]?.split("\n")[0] ?? "";
-      if (!firstLine) return null;
-      const preview = firstLine.length > 100 ? `${firstLine.slice(0, 100)}…` : firstLine;
-      return { message: `Thinking: ${preview}`, phase: null };
+      // Logged whole; the views preview it and open it up on --trim.
+      const summary = extractReasoningSections(item.summary).join("\n");
+      return summary ? { message: summary, phase: null, extra: { kind: "reasoning" } } : null;
     }
     case "commandExecution": {
-      const output = String(item.aggregatedOutput ?? "").trim();
+      // The command is already on the line above — repeat it here and it just
+      // crowds out the output that this entry exists to carry.
+      const exitCode = typeof item.exitCode === "number" ? item.exitCode : null;
       return {
-        message:
-          `Command ${item.status === "completed" ? "completed" : item.status}: ${String(item.command ?? "").trim()} (exit ${item.exitCode ?? "?"})` +
-          (output ? `\n${output}` : ""),
-        phase: "running"
+        message: String(item.aggregatedOutput ?? "").trim(),
+        phase: "running",
+        extra: {
+          kind: "tool-result",
+          tool: "command",
+          command: String(item.command ?? "").trim(),
+          ...(exitCode === null ? { isError: item.status !== "completed" } : { exitCode })
+        }
       };
     }
     case "fileChange":
       return {
-        message: `File changes ${item.status}: ${describeCodexFileChanges(item, true) || "(details unavailable)"}.`,
-        phase: "editing"
+        message: describeCodexFileChanges(item, true, cwd) || "(details unavailable)",
+        phase: "editing",
+        extra: { kind: "tool", tool: "edit" }
       };
     case "mcpToolCall":
-      return { message: `Tool ${item.server}/${item.tool} ${item.status}.`, phase: "investigating" };
+      return {
+        message: `${item.server}/${item.tool} ${item.status}`,
+        phase: "investigating",
+        extra: { kind: "tool-result", isError: item.status !== "completed" }
+      };
     case "dynamicToolCall":
-      return { message: `Tool ${item.tool} ${item.status}.`, phase: "investigating" };
+      return {
+        message: `${item.tool} ${item.status}`,
+        phase: "investigating",
+        extra: { kind: "tool-result", isError: item.status !== "completed" }
+      };
     default:
       return null;
   }
@@ -430,6 +481,9 @@ function createTurnCaptureState(threadId: string, options: CaptureTurnOptions = 
     commandExecutions: [],
     tokenUsageByThread: new Map(),
     lastDiffSummary: "",
+    loggedTokens: 0,
+    reportedChanges: new Set(),
+    cwd: options.cwd ?? "",
     // itemId -> item, populated on item/started so approval callbacks can look
     // up the pending command/file change they refer to.
     itemIndex: new Map(),
@@ -554,24 +608,26 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
         state.activeSubagentTurns.add(message.params.threadId);
       }
       emitProgress(state.onProgress, `Turn started (${message.params.turn.id}).`, "starting", {
+        kind: "status",
         threadId: message.params.threadId ?? null,
         turnId: message.params.turn.id ?? null
       });
       break;
     case "item/started":
       recordItem(state, message.params.item, "started", message.params.threadId ?? null);
-      {
-        const update = describeStartedItem(message.params.item);
-        emitProgress(state.onProgress, update?.message, update?.phase ?? null);
-      }
+      emitLine(state.onProgress, describeStartedItem(message.params.item, state.cwd));
       break;
-    case "item/completed":
+    case "item/completed": {
       recordItem(state, message.params.item, "completed", message.params.threadId ?? null);
-      {
-        const update = describeCompletedItem(message.params.item);
-        emitProgress(state.onProgress, update?.message, update?.phase ?? null);
+      const item = message.params.item;
+      if (item?.type === "fileChange") {
+        for (const change of item.changes ?? []) {
+          if (change.path) state.reportedChanges.add(shortPath(state.cwd, change.path));
+        }
       }
+      emitLine(state.onProgress, describeCompletedItem(item, state.cwd));
       break;
+    }
     case "thread/tokenUsage/updated": {
       // Cumulative per-thread usage; keep the latest snapshot per thread and
       // sum across threads (subagents included) when the turn completes.
@@ -579,14 +635,25 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
       const usageThreadId = extractThreadId(message);
       if (usage && usageThreadId) {
         state.tokenUsageByThread.set(usageThreadId, usage);
+        const total = collectTokenUsage(state);
+        if (total && (!state.loggedTokens || total.total - state.loggedTokens >= USAGE_LOG_STEP)) {
+          state.loggedTokens = total.total;
+          state.onProgress?.({ kind: "usage", tokens: total });
+        }
       }
       break;
     }
     case "turn/diff/updated": {
-      const summary = describeCodexTurnDiff(String(message.params?.diff ?? ""));
+      // Every file the turn touched via a fileChange item already has its own
+      // line; only report what the aggregate diff adds (an apply_patch run as
+      // a plain command, say).
+      const summary = describeCodexTurnDiff(String(message.params?.diff ?? ""), state.cwd)
+        .split("; ")
+        .filter(part => !state.reportedChanges.has(part.split(" ")[0] ?? ""))
+        .join("; ");
       if (summary && summary !== state.lastDiffSummary) {
         state.lastDiffSummary = summary;
-        emitProgress(state.onProgress, `Changed lines: ${summary}.`, "editing");
+        emitProgress(state.onProgress, `changed: ${summary}`, "editing", { kind: "status" });
       }
       break;
     }
@@ -603,7 +670,7 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
     }
     case "error":
       state.error = message.params.error;
-      emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed");
+      emitProgress(state.onProgress, `Codex error: ${message.params.error.message}`, "failed", { kind: "error" });
       break;
     case "turn/completed":
       if ((message.params.threadId ?? null) !== state.threadId) {
@@ -611,7 +678,7 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
         scheduleInferredCompletion(state);
         break;
       }
-      emitProgress(state.onProgress, `Turn ${message.params.turn.status}.`, "finalizing");
+      emitProgress(state.onProgress, `Turn ${message.params.turn.status}.`, "finalizing", { kind: "status" });
       completeTurn(state, message.params.turn);
       break;
     default:
@@ -857,7 +924,7 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
     let threadId: string;
 
     if (options.resumeThreadId) {
-      emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting");
+      emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, "starting", { kind: "status" });
       // Sessions may have been auto-archived since the task stopped; resume
       // rejects archived sessions.
       if (isCodexSessionArchived(options.resumeThreadId)) {
@@ -876,7 +943,7 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
       });
       threadId = response.thread.id;
     } else {
-      emitProgress(options.onProgress, "Starting Codex task thread.", "starting");
+      emitProgress(options.onProgress, "Starting Codex task thread.", "starting", { kind: "status" });
       const response = await client.request("thread/start", {
         cwd,
         model: options.model ?? null,
@@ -903,7 +970,7 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
       }
     }
 
-    emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", { threadId });
+    emitProgress(options.onProgress, `Thread ready (${threadId}).`, "starting", { kind: "status", threadId });
 
     let turnState: TurnCaptureState;
     try {
@@ -919,6 +986,7 @@ export async function runTurn(cwd: string, options: RunTurnOptions = {}): Promis
             outputSchema: options.outputSchema ?? null
           }),
         {
+          cwd,
           onProgress: options.onProgress,
           onHeartbeat: options.onHeartbeat,
           onApprovalRequest: options.onApprovalRequest,

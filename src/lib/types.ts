@@ -81,12 +81,28 @@ export interface ResolvedTaskOptions {
   permissions: Permission;
 }
 
+/**
+ * Semantic type of a progress-log entry. Engines tag every update with one so
+ * the text views can group, indent, and shade them; untagged entries render as
+ * plain status lines.
+ */
+export type LogKind =
+  | 'status' // lifecycle: thread ready, turn started/completed
+  | 'assistant' // assistant prose
+  | 'reasoning' // thinking summary
+  | 'tool' // a tool call, command, or file change
+  | 'tool-result' // its output
+  | 'usage' // running token usage
+  | 'steer'
+  | 'error'
+  | 'info';
+
 /** A single progress update emitted during a turn (string or structured). */
 export type ProgressUpdate =
   | string
   | {
       message?: string;
-      kind?: string;
+      kind?: LogKind | string;
       threadId?: string | null;
       turnId?: string | null;
       [key: string]: unknown;

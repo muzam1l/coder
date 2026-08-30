@@ -10,21 +10,23 @@ import {
   resolveJobDir,
   type JobLogEntry,
 } from '../lib/state.js';
-import { createJsonlTail, readJsonFile } from '../lib/fsx.js';
+import { createJsonlTail, readJsonFile, shortPath } from '../lib/fsx.js';
 import {
+  LogRenderer,
+  OUTPUT_PREVIEW_CHARS,
   finalMessageLine,
-  formatTokens,
-  formatAgentSpec,
-  jobOptionLines,
   outStyle,
   printJson,
   promptBlock,
   rejectExtraArgs,
   requireJob,
   resolveCwd,
-  STEP_PREVIEW_CHARS,
+  taskHeaderLines,
+  taskSummaryLines,
+  termCols,
   trimStep,
 } from '../lib/ui.js';
+import { ACTIVE_STATUSES, type TokenUsage } from '../lib/types.js';
 
 // Print-free core (SDK `task.stream`): follow a task's progress log, yielding
 // each JobLogEntry until the task reaches a terminal state. `tail` replays only
@@ -91,37 +93,66 @@ export async function commandWatch(argv: string[]) {
   // whole transcript.
   const tail = options.tail;
 
-  // Per-step display cap, applied to text and JSON alike (the job log keeps
-  // full entries). --trim <n> overrides the default; --trim none disables it.
+  // Display budget for tool output and thinking, applied to text and JSON
+  // alike (the job log keeps full entries). --trim <n> names a budget and
+  // lifts the line cap with it; --trim none shows everything.
   const trimOpt = options.trim;
-  const trim = trimOpt === undefined ? STEP_PREVIEW_CHARS : trimOpt === 'none' ? Number.MAX_SAFE_INTEGER : trimOpt;
+  const trim = trimOpt === undefined ? OUTPUT_PREVIEW_CHARS : trimOpt === 'none' ? Infinity : trimOpt;
+
+  const renderer = new LogRenderer({
+    cwd: job.cwd ?? cwd,
+    startedAt: Date.parse(job.createdAt ?? '') || undefined,
+    trim,
+    explicitTrim: trimOpt !== undefined,
+    width: termCols(),
+  });
 
   if (!options.json) {
-    process.stdout.write(
-      `${outStyle.dim(`[coder] task ${job.id} ${job.status} — watching (Ctrl-C to stop)`)}\n`,
-    );
-    const header = [
-      `${outStyle.dim('agent'.padEnd(8))} ${formatAgentSpec(job)}`,
-      ...jobOptionLines(job, outStyle),
+    // Header, prompt, transcript: three blocks, blank-line separated, so the
+    // stream doesn't read as a continuation of the cwd line.
+    const head = [
+      ...taskHeaderLines(job, { status: job.status }),
+      ...(ACTIVE_STATUSES.includes(job.status) ? [outStyle.dim('watching — Ctrl-C to stop')] : []),
+      ...(job.prompt ? promptBlock(job.prompt, outStyle, { truncate: false }) : []),
+      '',
     ];
-    process.stdout.write(`${header.join('\n')}\n`);
-    if (job.prompt) {
-      process.stdout.write(`${promptBlock(job.prompt, outStyle, { truncate: false }).join('\n')}\n`);
-    }
+    process.stdout.write(`${head.join('\n')}\n`);
   }
+
+  // Latest token snapshot seen on the wire, so a task that is cancelled or
+  // killed before it writes a result still reports what it spent.
+  let liveTokens: TokenUsage | null = null;
+  // The last assistant message is held back one entry: if nothing follows it,
+  // it was the answer, and the answer belongs below the run summary rather
+  // than above it. Anything that does follow flushes it straight through.
+  let held: JobLogEntry | null = null;
+  const emit = (entry: JobLogEntry) => {
+    const lines = renderer.render(entry);
+    if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
+  };
   for await (const entry of streamTaskCore(cwd, job.id, { tail })) {
-    // Steers are user instructions, like the initial prompt: show them in full
-    // so a watcher can audit exactly what changed the active turn.
-    const entryTrim = entry.kind === 'steer' ? Number.MAX_SAFE_INTEGER : trim;
-    if (options.json) {
-      const out = entry.message ? { ...entry, message: trimStep(entry.message, entryTrim, { plain: true }) } : entry;
-      process.stdout.write(`${JSON.stringify(out)}\n`);
-    } else {
-      const message = entry.message ?? entry.kind;
-      if (message) {
-        process.stdout.write(`${outStyle.dim('[coder]')} ${trimStep(message, entryTrim)}\n`);
-      }
+    if (entry.kind === 'usage' && entry.tokens) {
+      liveTokens = entry.tokens as TokenUsage;
     }
+    if (options.json) {
+      // Steers are user instructions, like the initial prompt: never trimmed,
+      // so a watcher can audit exactly what changed the active turn.
+      const entryTrim = entry.kind === 'steer' ? Infinity : trim;
+      const out = entry.message
+        ? { ...entry, message: trimStep(entry.message, entryTrim, { plain: true }) }
+        : entry;
+      process.stdout.write(`${JSON.stringify(out)}\n`);
+      continue;
+    }
+    // Token snapshots are bookkeeping, not a reply — they must not decide that
+    // a held message was mid-conversation.
+    if (entry.kind === 'usage') continue;
+    if (held) {
+      emit(held);
+      held = null;
+    }
+    if (entry.kind === 'assistant') held = entry;
+    else emit(entry);
   }
   const current = reconcileJob(cwd, readJob(cwd, job.id) ?? job);
 
@@ -131,13 +162,21 @@ export async function commandWatch(argv: string[]) {
   } else {
     const done = current.status === 'completed';
     const fallback = done ? '(no final message)' : `(task ${current.status})`;
-    process.stdout.write(`\n${finalMessageLine(result, current.error, fallback)}\n`);
-    const tokensNote = result?.tokens
-      ? ` tokens=${formatTokens(result.tokens, result.model ?? current.model)}`
-      : '';
-    process.stderr.write(
-      `${outStyle.dim(`[coder] task=${job.id} status=${current.status}${tokensNote}`)}\n`,
-    );
+    // The run summary closes the transcript in the same shape the header
+    // opened it, and the answer goes last — what you came for shouldn't be
+    // buried above the bookkeeping.
+    const summary = taskSummaryLines(current, {
+      tokens: result?.tokens ?? liveTokens,
+      tokenModel: result?.model,
+      files: result?.touchedFiles?.map((file: string) => shortPath(job.cwd ?? cwd, file)),
+      statusChanged: current.status !== job.status,
+    });
+    if (summary.length) process.stderr.write(`\n${summary.join('\n')}\n`);
+    // The held entry and the recorded final message are the same answer;
+    // print it once, from the result when there is one.
+    const answer = finalMessageLine(result, current.error, fallback);
+    const streamed = held ? String(held.message ?? '') : '';
+    process.stdout.write(`\n${answer.trim() ? answer : streamed}\n`);
   }
   process.exit(current.status === 'completed' ? 0 : 1);
 }

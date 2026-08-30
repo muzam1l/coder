@@ -4,6 +4,19 @@
  * tailing (so pollers don't re-read a growing file from byte 0 every tick).
  */
 import fs from 'node:fs';
+import path from 'node:path';
+
+/**
+ * A path as the task views should show it: relative to the workspace (already
+ * named in the header), absolute only when it lies outside. Keeps every tool
+ * line from carrying the same long cwd prefix.
+ */
+export function shortPath(cwd: string, target: string): string {
+  if (!target) return '';
+  if (!path.isAbsolute(target)) return target;
+  const rel = path.relative(cwd, target);
+  return rel && !rel.startsWith('..') ? rel : target;
+}
 
 /** Parse a JSON file; null when missing, unreadable, or truncated mid-write. */
 export function readJsonFile<T>(file: string): T | null {

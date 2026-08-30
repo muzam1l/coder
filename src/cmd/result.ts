@@ -8,25 +8,25 @@ import { lastActivityAt, readJobLog, readTurnResults, resolveJobDir } from '../l
 import { waitForTaskAttention } from '../lib/wait.js';
 import { listPendingApprovals } from '../lib/approvals.js';
 import {
+  LogRenderer,
   STALL_MS,
   ageMs,
   finalMessageLine,
   formatAge,
   formatHints,
-  formatTokens,
   outStyle,
-  paintStatus,
   printJson,
   rejectExtraArgs,
   requireJob,
   resolveCwd,
-  formatAgentSpec,
-  jobOptionLines,
   promptBlock,
   surfaceApproval,
+  taskHeaderLines,
+  termCols,
   trimStep,
 } from '../lib/ui.js';
-import { ACTIVE_STATUSES } from '../lib/types.js';
+import { shortPath } from '../lib/fsx.js';
+import { ACTIVE_STATUSES, type TokenUsage } from '../lib/types.js';
 
 // The one inspect command: status + final answer. While a task runs it shows the
 // status (result pending); once finished it shows the answer. --wait blocks until
@@ -103,38 +103,25 @@ export async function commandResult(argv: string[]) {
   }
 
   const s = outStyle;
-  // Timing next to the status: when it started, and — once finished — when it
-  // ended and how long it ran.
-  const startedMs = job.createdAt ? ageMs(job.createdAt) : null;
-  const endMs = !running && job.completedAt ? ageMs(job.completedAt) : null;
-  const tookMs =
-    job.createdAt && job.completedAt
-      ? Date.parse(job.completedAt) - Date.parse(job.createdAt)
-      : null;
-  const timeNote = running
-    ? startedMs !== null
-      ? `started ${formatAge(startedMs)} ago`
-      : ''
-    : [
-        endMs !== null ? `finished ${formatAge(endMs)} ago` : '',
-        tookMs !== null && tookMs >= 0 ? `took ${formatAge(tookMs)}` : '',
-      ]
-        .filter(Boolean)
-        .join(' · ');
-  const lines = [
-    `${s.dim('task')}     ${s.cyan(job.id)}`,
-    ...(job.name ? [`${s.dim('name')}     ${job.name}`] : []),
-    `${s.dim('status')}   ${paintStatus(status)}${timeNote ? ` ${s.dim(`(${timeNote})`)}` : ''}`,
-    `${s.dim('agent')}    ${formatAgentSpec(job)}`,
-    ...jobOptionLines(job, s),
-    ...(result?.tokens
-      ? [`${s.dim('tokens')}   ${formatTokens(result.tokens, result.model ?? job.model)}`]
-      : []),
-  ];
+  // A task still in flight has no result to quote tokens from; its latest
+  // usage snapshot on the progress log is the running count.
+  const liveTokens = running
+    ? ((readJobLog(cwd, job.id, 200)
+        .reverse()
+        .find(entry => entry.kind === 'usage')?.tokens as TokenUsage | undefined) ?? null)
+    : null;
+  const lines = taskHeaderLines(job, {
+    status,
+    tokens: result?.tokens ?? liveTokens,
+    tokenModel: result?.model,
+    files: result?.touchedFiles?.map((file: string) => shortPath(job.cwd ?? cwd, file)),
+    live: !result?.tokens && Boolean(liveTokens),
+    style: s,
+  });
   // The prompt gets its own block (not a header field) so longer task text
-  // stays readable.
+  // stays readable — but it closes the header, it doesn't stand apart from it.
   if (job.prompt) {
-    lines.push('', ...promptBlock(job.prompt, s));
+    lines.push(...promptBlock(job.prompt, s));
   }
   if (pending.length) {
     lines.push('', s.dim('pending approvals:'));
@@ -145,10 +132,22 @@ export async function commandResult(argv: string[]) {
   }
   if (steps.length) {
     lines.push('', s.dim('steps:'));
-    for (const entry of steps) {
-      const msg = entry.message ?? entry.kind;
-      if (msg) lines.push(`  ${s.dim(trimStep(msg))}`);
-    }
+    // Same transcript renderer `watch` streams through, so a recap and a live
+    // follow read identically.
+    const renderer = new LogRenderer({
+      cwd: job.cwd ?? cwd,
+      startedAt: Date.parse(job.createdAt ?? '') || undefined,
+      width: termCols(),
+      style: s,
+    });
+    // The answer is printed below in full; leaving its copy at the end of the
+    // transcript would just say everything twice.
+    const shown =
+      result?.finalMessage &&
+      String(steps.at(-1)?.message ?? '').trim() === String(result.finalMessage).trim()
+        ? steps.slice(0, -1)
+        : steps;
+    for (const entry of shown) lines.push(...renderer.render(entry));
   }
   lines.push('');
   if (options.turns && turns.length) {
@@ -186,8 +185,5 @@ export async function commandResult(argv: string[]) {
     lines.push('', formatHints(hints, s));
   }
   process.stdout.write(`${lines.join('\n')}\n`);
-  if (result?.touchedFiles?.length) {
-    process.stderr.write(`[coder] touched files: ${result.touchedFiles.join(', ')}\n`);
-  }
   return exit();
 }

@@ -63,11 +63,13 @@ const results = await Promise.all(
 );
 ```
 
-Follow a task live:
+Follow a task live. Every event carries a `kind` — `assistant`, `reasoning`,
+`tool`, `tool-result`, `usage`, `status`, `steer`, `error` — plus the fields
+that kind implies (`tool`, `exitCode`, `durationMs`, `tokens`):
 
 ```ts
 for await (const event of task.stream(taskId)) {
-  console.log(event.kind, event.text);
+  if (event.kind === 'assistant') console.log(event.message);
 }
 ```
 

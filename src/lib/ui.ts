@@ -6,6 +6,8 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { findJob } from './state.js';
+import type { JobLogEntry } from './state.js';
+import { ACTIVE_STATUSES } from './types.js';
 import type { Job, Style, TokenUsage } from './types.js';
 
 /** Parsed CLI options. Values are untyped: flags carry strings or booleans. */
@@ -103,6 +105,16 @@ export function formatAge(ms: number): string {
   return `${Math.floor(m / 60)}h${m % 60}m`;
 }
 
+// Elapsed time as a fixed-width gutter stamp: 0:04, 12:05, 1:02:33.
+export function formatElapsed(ms: number): string {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const s = total % 60;
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return h ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
 // Compact token count: 950, 12.3k, 1.2M.
 export function formatTokenCount(n: number): string {
   if (n < 1000) return String(n);
@@ -119,6 +131,12 @@ export function formatTokens(tokens: TokenUsage, model?: string | null): string 
     `out ${formatTokenCount(tokens.output)}`,
   ];
   return `${formatTokenCount(tokens.total)} (${parts.join(' · ')}) on ${model || 'default model'}`;
+}
+
+// Token usage while a turn is still running: context in flight plus what the
+// model has written so far. Short enough to sit on a status line.
+export function formatTokensCompact(tokens: TokenUsage): string {
+  return `ctx ${formatTokenCount(tokens.input + tokens.cachedInput)} · out ${formatTokenCount(tokens.output)}`;
 }
 
 // How much of the task prompt the text views show (full prompt is in --json).
@@ -190,6 +208,115 @@ export function jobOptionLines(
   return opts.map(([k, v]) => `${style.dim(k.padEnd(8))} ${v}`);
 }
 
+/**
+ * When a task started and — once it's over — when it ended and how long it
+ * ran. The wall-clock answer to "is this worth waiting for", shown next to the
+ * status by every view that has a job in hand.
+ */
+export function taskTimeNote(
+  job: { createdAt?: string; completedAt?: string },
+  running: boolean,
+): string {
+  if (running) {
+    return job.createdAt ? `started ${formatAge(ageMs(job.createdAt))} ago` : '';
+  }
+  const took =
+    job.createdAt && job.completedAt
+      ? Date.parse(job.completedAt) - Date.parse(job.createdAt)
+      : null;
+  return [
+    job.completedAt ? `finished ${formatAge(ageMs(job.completedAt))} ago` : '',
+    took !== null && took >= 0 ? `took ${formatAge(took)}` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
+
+/**
+ * The identity block every task view opens with: what ran, how it was
+ * dispatched, how long it has been going, and what it has spent. One
+ * definition so `result` and `watch` can never drift apart.
+ */
+export function taskHeaderLines(
+  job: Job,
+  {
+    status,
+    tokens,
+    tokenModel,
+    files,
+    live = false,
+    style = outStyle,
+  }: {
+    status: string;
+    tokens?: TokenUsage | null;
+    tokenModel?: string | null;
+    /** Files the task touched, listed once it has them. */
+    files?: string[] | null;
+    /** Tokens are a running total from a turn still in flight, not a receipt. */
+    live?: boolean;
+    style?: Style;
+  },
+): string[] {
+  const running = ACTIVE_STATUSES.includes(job.status) || status === 'waiting-approval';
+  const note = taskTimeNote(job, running);
+  const label = (text: string) => style.dim(text.padEnd(8));
+  return [
+    `${label('task')} ${style.cyan(job.id)}`,
+    ...(job.name ? [`${label('name')} ${job.name}`] : []),
+    `${label('status')} ${paintStatus(status)}${note ? ` ${style.dim(`(${note})`)}` : ''}`,
+    `${label('agent')} ${formatAgentSpec(job)}`,
+    ...jobOptionLines(job, style),
+    ...(tokens
+      ? [
+          `${label('tokens')} ${
+            live ? formatTokensCompact(tokens) : formatTokens(tokens, tokenModel ?? job.model)
+          }${live ? style.dim(' (so far)') : ''}`,
+        ]
+      : []),
+    ...(files?.length ? [`${label('files')} ${files.join(', ')}`] : []),
+  ];
+}
+
+/**
+ * The closing counterpart to taskHeaderLines: what the header couldn't know
+ * yet — how it ended, what it cost, what it touched. Deliberately not a second
+ * copy of the header: identity is stated once, at the top.
+ */
+export function taskSummaryLines(
+  job: Job,
+  {
+    tokens,
+    tokenModel,
+    files,
+    /** The status changed while we watched, so it is news worth restating. */
+    statusChanged = true,
+    style = outStyle,
+  }: {
+    tokens?: TokenUsage | null;
+    tokenModel?: string | null;
+    files?: string[] | null;
+    statusChanged?: boolean;
+    style?: Style;
+  },
+): string[] {
+  const label = (text: string) => style.dim(text.padEnd(8));
+  const took =
+    job.createdAt && job.completedAt
+      ? Date.parse(job.completedAt) - Date.parse(job.createdAt)
+      : null;
+  return [
+    ...(statusChanged
+      ? [
+          `${label('status')} ${paintStatus(job.status)}${
+            took !== null && took >= 0 ? ` ${style.dim(`(took ${formatAge(took)})`)}` : ''
+          }`,
+        ]
+      : []),
+    ...(tokens ? [`${label('tokens')} ${formatTokens(tokens, tokenModel ?? job.model)}`] : []),
+    ...(files?.length ? [`${label('files')} ${files.join(', ')}`] : []),
+  ];
+}
+
 // How much of a single progress-log step the text views show (full entries are
 // in --json / the job log).
 export const STEP_PREVIEW_CHARS = 300;
@@ -204,6 +331,237 @@ export function trimStep(
   if (message.length <= limit) return message;
   const marker = `<${message.length - limit} more chars>`;
   return `${message.slice(0, limit)} ${plain ? marker : style.dim(marker)}`;
+}
+
+// Display caps for a tool's output. Assistant prose, steers and errors are
+// never capped — they're the point of the transcript — so only command output
+// and thinking answer to these.
+export const OUTPUT_PREVIEW_CHARS = 500;
+const OUTPUT_PREVIEW_LINES = 6;
+
+// Left gutter: elapsed-since-dispatch stamp, then a one-column kind glyph.
+const GUTTER_WIDTH = 5;
+const BODY_INDENT = ' '.repeat(GUTTER_WIDTH + 3);
+
+const KIND_GLYPHS: Record<string, string> = {
+  assistant: '●',
+  reasoning: '✻',
+  tool: '→',
+  'tool-result': ' ',
+  usage: '·',
+  status: '·',
+  info: '·',
+  error: '✘',
+  steer: '⚑',
+};
+
+function isApproval(kind: string): boolean {
+  return kind.includes('approval') || kind === 'sidecar-decision';
+}
+
+// The workspace is named once in the header; repeating it on every tool line
+// buys nothing and costs most of the terminal width.
+function stripCwd(text: string, cwd?: string): string {
+  if (!cwd) return text;
+  // A path under the workspace loses the prefix; the workspace itself becomes
+  // the dot it already is from the task's point of view.
+  return text.split(`${cwd}/`).join('').split(cwd).join('.');
+}
+
+// Approval and sidecar entries carry structured fields but no message. Compose
+// the line from what they do have, leading with the verdict. `subject` is the
+// tool line the approval is about, when it is already on screen — no point
+// repeating a command that sits one row above.
+function describeApproval(entry: JobLogEntry, subject: string): string {
+  const label = entry.kind === 'sidecar-decision' ? 'sidecar' : 'approval';
+  const decision = String(entry.decision ?? '');
+  const summaryText = entry.summary ? String(entry.summary) : '';
+  // Summaries read "run command: <cmd>" / "Edit: <path>"; the part after the
+  // colon is what the tool line already showed.
+  const target = summaryText.slice(summaryText.indexOf(': ') + 2);
+  const shown = summaryText && target && subject.includes(target) ? '' : summaryText;
+  const method = shown ? '' : String(entry.method ?? '');
+  const reason = entry.reason ? ` — ${String(entry.reason)}` : '';
+  return `${[label, decision, method].filter(Boolean).join(' ')}${shown ? ` · ${shown}` : ''}${reason}`;
+}
+
+// Cap text by characters and (unless the caller asked for a specific budget)
+// by lines, noting in both cases how much was withheld. Markers are a shade
+// brighter than the output they stand in for, so they can't be misread as it.
+function capBody(text: string, chars: number, lines: number, style: Style): string {
+  let out = text;
+  if (out.length > chars) {
+    out = `${out.slice(0, chars)} ${style.light(`<${text.length - chars} more chars>`)}`;
+  }
+  const split = out.split('\n');
+  if (split.length > lines) {
+    out = `${split.slice(0, lines).join('\n')}\n${style.light(`… +${split.length - lines} more lines`)}`;
+  }
+  return out;
+}
+
+// Shade a block one line at a time: wrapping a body that already contains a
+// styled marker would let the marker's reset end the shading early.
+function dimBlock(text: string, style: Style): string {
+  return text
+    .split('\n')
+    .map(line => (line.includes('\x1b') ? line : style.dim(line)))
+    .join('\n');
+}
+
+export interface LogRenderOptions {
+  /** Workspace root, stripped from paths in rendered text. */
+  cwd?: string;
+  /** Task dispatch time, for the elapsed gutter. Omit to render a blank gutter. */
+  startedAt?: number;
+  /** Char budget for tool output and reasoning; Infinity renders everything. */
+  trim?: number;
+  /** The user named a budget via --trim: honour it and drop the line cap. */
+  explicitTrim?: boolean;
+  /** Terminal columns, for clipping the one-line kinds. */
+  width?: number;
+  style?: Style;
+}
+
+/**
+ * Renders progress-log entries as a readable transcript: an elapsed gutter, a
+ * glyph per kind, assistant prose at full brightness with everything else
+ * dimmed behind it, tool output tucked under the call that produced it, and a
+ * blank line wherever the agent changes register (thinking -> acting ->
+ * answering). Stateful — it needs the previous entry to know where the breaks
+ * go — so callers keep one instance per stream.
+ */
+export class LogRenderer {
+  private prevKind: string | null = null;
+  private lastAssistant = '';
+  private lastTool: string | null = null;
+  private lastToolText = '';
+  private lastUsageTotal = 0;
+  private entryAt: number | null = null;
+  private readonly style: Style;
+
+  constructor(private readonly opts: LogRenderOptions = {}) {
+    this.style = opts.style ?? outStyle;
+  }
+
+  /** The most recent assistant message rendered — the final answer, usually. */
+  get lastAssistantMessage(): string {
+    return this.lastAssistant;
+  }
+
+  render(entry: JobLogEntry): string[] {
+    const s = this.style;
+    const kind = String(entry.kind ?? 'status');
+    const at = Date.parse(String(entry.at ?? ''));
+    this.entryAt = Number.isFinite(at) ? at : null;
+    const trim = this.opts.trim ?? OUTPUT_PREVIEW_CHARS;
+    const lineCap = this.opts.explicitTrim || trim === Infinity ? Infinity : OUTPUT_PREVIEW_LINES;
+
+    // Token snapshots arrive far too often to print one each; the opening
+    // count seeds the meter silently and only real growth earns a line.
+    if (kind === 'usage') {
+      const tokens = entry.tokens as TokenUsage | undefined;
+      if (!tokens) return [];
+      const seeded = this.lastUsageTotal > 0;
+      const grown = tokens.total - this.lastUsageTotal;
+      if (!seeded || grown < Math.max(20_000, this.lastUsageTotal * 0.2)) {
+        this.lastUsageTotal = Math.max(this.lastUsageTotal, tokens.total);
+        return [];
+      }
+      this.lastUsageTotal = tokens.total;
+      return this.compose(kind, s.dim(formatTokensCompact(tokens)), false);
+    }
+
+    const raw = entry.message
+      ? String(entry.message)
+      : isApproval(kind)
+        ? describeApproval(entry, this.lastToolText)
+        : String(entry.kind ?? '');
+    if (!raw && !(kind === 'tool-result' && (entry.exitCode != null || entry.isError))) return [];
+    const text = stripCwd(raw, this.opts.cwd);
+
+    if (kind === 'assistant') {
+      this.lastAssistant = text;
+      return this.compose(kind, text, true);
+    }
+    if (kind === 'steer') {
+      return this.compose(kind, s.yellow(text), true);
+    }
+    if (kind === 'error') {
+      return this.compose(kind, s.red(text), true);
+    }
+    if (kind === 'reasoning') {
+      // A one-line preview by default: enough to see where the agent's head is
+      // without burying the work. --trim opens it up.
+      const seconds = typeof entry.durationMs === 'number' ? Math.round(entry.durationMs / 1000) : 0;
+      const stamp = seconds >= 1 ? s.dim(`thought ${formatAge(seconds * 1000)} · `) : '';
+      const body =
+        lineCap === Infinity
+          ? capBody(text, trim, Infinity, s)
+          : this.clip(text.split('\n')[0] ?? '');
+      return this.compose(kind, `${stamp}${dimBlock(body, s)}`, false);
+    }
+    if (kind === 'tool') {
+      this.lastTool = entry.tool ? String(entry.tool) : null;
+      this.lastToolText = text;
+      return this.compose(kind, s.light(this.clip(text.replace(/\s*\n\s*/g, ' '))), false);
+    }
+    if (kind === 'tool-result') {
+      const exit = typeof entry.exitCode === 'number' ? entry.exitCode : null;
+      const failed = (exit !== null && exit !== 0) || entry.isError === true;
+      const ms = typeof entry.durationMs === 'number' ? entry.durationMs : 0;
+      // Calls can overlap, so output does not always land under the call that
+      // asked for it; name the tool whenever it isn't the one just above.
+      const tool = entry.tool ? String(entry.tool) : null;
+      const notes = [
+        tool && tool !== this.lastTool ? s.dim(`from ${tool}`) : '',
+        failed ? s.red(exit !== null ? `exit ${exit}` : 'failed') : '',
+        // Sub-second calls are the norm; only a wait worth noticing is news.
+        ms >= 3000 ? s.dim(formatAge(ms)) : '',
+      ].filter(Boolean);
+      const body = capBody(text, trim, lineCap, s);
+      const lines = [...(notes.length ? [notes.join(s.dim(' · '))] : []), ...(body ? [dimBlock(body, s)] : [])];
+      return this.compose(kind, lines.join('\n'), false);
+    }
+    return this.compose(kind, s.dim(this.clip(text)), false);
+  }
+
+  // A blank line wherever the agent changes register; tool output stays welded
+  // to the call above it.
+  private spaced(kind: string): boolean {
+    if (this.prevKind === null) return false;
+    if (kind === 'assistant' || kind === 'error' || kind === 'steer') return true;
+    if (kind === 'reasoning') return this.prevKind !== 'reasoning';
+    if (kind === 'tool') return this.prevKind === 'assistant' || this.prevKind === 'reasoning';
+    return false;
+  }
+
+  private clip(line: string): string {
+    const width = this.opts.width;
+    return width && visibleWidth(line) > width - 1 ? clipAnsi(line, width - 1) : line;
+  }
+
+  private compose(kind: string, body: string, wrap: boolean): string[] {
+    const gap = this.spaced(kind) ? [''] : [];
+    this.prevKind = kind;
+    const glyph = KIND_GLYPHS[kind] ?? (isApproval(kind) ? '⚑' : '·');
+    const [first = '', ...rest] = body.split('\n');
+    return [
+      ...gap,
+      `${this.gutter(kind)}${this.style.dim(glyph)} ${first}`,
+      // Prose is left to the terminal to wrap; everything else is already
+      // clipped, so indenting its continuation lines keeps the column true.
+      ...rest.map(line => (wrap ? line : `${BODY_INDENT}${line}`)),
+    ];
+  }
+
+  private gutter(kind: string): string {
+    const blank = ' '.repeat(GUTTER_WIDTH + 1);
+    // Output belongs to the call above it — a second stamp would only compete.
+    if (kind === 'tool-result') return blank;
+    if (!this.opts.startedAt || this.entryAt === null) return blank;
+    return `${this.style.dim(formatElapsed(this.entryAt - this.opts.startedAt).padStart(GUTTER_WIDTH))} `;
+  }
 }
 
 // A running/queued task idle this long with no pending approval is flagged as
