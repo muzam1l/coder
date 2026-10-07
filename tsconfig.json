@@ -1,8 +1,8 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "module": "NodeNext",
-    "moduleResolution": "NodeNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
     "rootDir": "src",
     "strict": true,
     "skipLibCheck": true,
@@ -11,9 +11,19 @@
     "types": [
       "node"
     ],
-    "noEmit": true
+    "noEmit": true,
+    "baseUrl": ".",
+    "paths": {
+      "@wular/coder/flow": [
+        "src/flow/index.ts"
+      ]
+    }
   },
   "include": [
     "src/**/*.ts"
+  ],
+  "exclude": [
+    "src/server/deploy/**",
+    "src/server/dash/**"
   ]
 }

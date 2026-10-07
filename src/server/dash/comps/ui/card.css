@@ -1,0 +1,93 @@
+.bar-r {
+  display: flex;
+  align-items: center;
+  margin-block: -2px;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.card.accent {
+  border-color: var(--warn);
+}
+.card.danger {
+  border-color: var(--bad);
+}
+
+/* empty states */
+.empty {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 32px 16px;
+  border: 1px dashed var(--line2);
+  text-align: center;
+  color: var(--muted);
+}
+.empty b {
+  color: var(--fg);
+  font-weight: 500;
+}
+.card .empty {
+  border: 0;
+}
+.loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  flex: 1 0 auto;
+  min-height: var(--h, 240px);
+  color: var(--dim);
+  font-size: 12px;
+}
+.loading.inline {
+  display: inline-flex;
+  min-height: 0;
+}
+.card:has(> .loading:not([style])) {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+.loading > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  animation: loader-in 0s 60ms both;
+}
+.loading .spin {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.loading .dots {
+  display: inline-flex;
+  gap: 3px;
+}
+.loading .dots > b {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: dots 1.2s ease-in-out infinite;
+}
+.loading .dots > b:nth-child(2) {
+  animation-delay: 0.2s;
+}
+.loading .dots > b:nth-child(3) {
+  animation-delay: 0.4s;
+}
+@keyframes dots {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 1;
+  }
+}

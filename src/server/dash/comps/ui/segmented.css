@@ -1,0 +1,44 @@
+.seg-btns {
+  display: flex;
+  border: 1px solid var(--line2);
+}
+.seg-btns > a,
+.seg-btns > button,
+.seg-btns .menu > button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-left: 1px solid var(--line2);
+  background: var(--panel);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  cursor: pointer;
+}
+.seg-btns > button {
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  text-transform: uppercase;
+}
+.seg-btns > :first-child {
+  border-left: 0;
+}
+.seg-btns > a:hover,
+.seg-btns > button:hover,
+.seg-btns .menu > button:hover {
+  color: var(--fg);
+}
+.seg-btns [aria-current],
+.seg-btns [aria-checked='true'],
+.seg-btns .on > button {
+  background: var(--accbg);
+  color: var(--acc);
+}
+.seg-btns > button:disabled {
+  opacity: 0.45;
+  color: var(--muted);
+  cursor: not-allowed;
+}

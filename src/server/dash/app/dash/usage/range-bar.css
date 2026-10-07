@@ -1,0 +1,13 @@
+/* the range presets, a custom span and the label, on one line where they fit */
+.range-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.date-pop:popover-open {
+  display: grid;
+  gap: 12px;
+  min-width: 240px;
+  padding: 14px;
+}

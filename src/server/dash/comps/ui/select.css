@@ -1,0 +1,103 @@
+/* select */
+.select {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+}
+.field .select {
+  display: flex;
+}
+.select > button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 10px 7px 12px;
+  border: 1px solid var(--line2);
+  background: var(--field);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.select > button .grow {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.select > button .ic {
+  color: var(--dim);
+  transition: transform 0.15s;
+}
+.select > button[aria-expanded="true"] .ic {
+  transform: rotate(180deg);
+}
+.select > button:focus-visible,
+.select > button[aria-expanded="true"] {
+  outline: none;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--accbg);
+}
+.select > button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.select-pop {
+  min-width: 0;
+  max-width: min(440px, calc(100vw - 16px));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line2) transparent;
+}
+.select-pop .pop-item {
+  white-space: nowrap;
+}
+.select-pop .pop-item:hover {
+  background: none;
+}
+.select-pop .pop-item.on {
+  background: var(--wash2);
+}
+.select-pop .pop-item > .ic {
+  visibility: hidden;
+}
+.select-pop .pop-item[aria-selected="true"] > .ic {
+  visibility: visible;
+  color: var(--acc);
+}
+.select > button:disabled {
+  opacity: 0.65;
+  cursor: default;
+}
+
+/* a path under an option: one line, clipped from the start so the folder name stays */
+.select-pop .pop-item .pop-path {
+  display: block;
+  overflow: hidden;
+  direction: rtl;
+  text-align: left;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  color: var(--muted);
+}
+.select-pop .pop-item .grow {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* the action row leads with its icon and never shows a check */
+.select-pop .pop-item.action {
+  margin-top: 4px;
+  color: var(--muted);
+}
+.select-pop .pop-item.action > .ic {
+  visibility: visible;
+  width: 14px;
+  height: 14px;
+}
+.select-pop .pop-item.action.on {
+  color: var(--fg);
+}

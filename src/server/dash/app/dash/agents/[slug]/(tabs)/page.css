@@ -1,0 +1,21 @@
+.facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px 20px;
+  margin: 0;
+}
+.facts dt {
+  font-size: 10px;
+  color: var(--muted);
+}
+.facts dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+.versions li {
+  display: flex;
+  align-items: first baseline;
+  gap: 14px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}

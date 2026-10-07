@@ -1,0 +1,12 @@
+.tail {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 48px;
+  padding: 0 14px;
+  color: var(--dim);
+  font-size: 11.5px;
+}
+.tail.err {
+  color: var(--bad);
+}

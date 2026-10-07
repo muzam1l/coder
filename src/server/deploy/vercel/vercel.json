@@ -1,0 +1,7 @@
+{
+  "version": 2,
+  "fluid": true,
+  "bunVersion": "1.x",
+  "functions": { "api/*.ts": { "maxDuration": 300 } },
+  "rewrites": [{ "source": "/(.*)", "destination": "/api/[...path]" }]
+}

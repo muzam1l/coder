@@ -1,0 +1,81 @@
+/* tabs that do not fit scroll sideways; the line is a shadow so the scroll box never clips the current tab's underline */
+.tabs {
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+  box-shadow: inset 0 -1px var(--line2);
+}
+/* page tabs are one 40px row that sticks under the top bar and the page head */
+.page .tabs:not(.vertical) {
+  height: 40px;
+  margin-top: -8px;
+  position: sticky;
+  top: calc(56px + var(--head, 0px));
+  z-index: 9;
+  background: var(--bg);
+}
+.tabs a,
+.tabs > button {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tabs a:hover,
+.tabs > button:hover {
+  color: var(--fg);
+}
+.tabs:focus {
+  outline: none;
+}
+.tabs a:focus-visible,
+.tabs > button:focus-visible {
+  outline-offset: -2px;
+}
+.tabs a[aria-current],
+.tabs a[data-pending],
+.tabs > button[aria-current] {
+  color: var(--fg);
+  border-bottom-color: var(--fg);
+}
+/* while another tab loads, only that one is underlined */
+.tabs:has(a[data-pending]) a[aria-current]:not([data-pending]) {
+  color: var(--muted);
+  border-bottom-color: transparent;
+}
+.tabs .count {
+  color: var(--dim);
+}
+/* tabs cut at the edge fade out there until scrolled to the end */
+@property --tabs-fade {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@keyframes tabs-fade {
+  from {
+    --tabs-fade: 40px;
+  }
+  to {
+    --tabs-fade: 0px;
+  }
+}
+.tabs {
+  mask-image: linear-gradient(to left, transparent, #000 var(--tabs-fade));
+  animation: tabs-fade linear both;
+  animation-timeline: scroll(self inline);
+}
+/* Loading tabs keep their row until the page brings them with their counts. */
+.tabs[aria-hidden] > * {
+  visibility: hidden;
+}

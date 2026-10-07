@@ -1,0 +1,114 @@
+.checks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+
+/* vertical section tabs */
+.vsettings {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+.tabs.vertical {
+  flex-direction: column;
+  gap: 2px;
+  padding: 16px 12px;
+  box-shadow: none;
+  border-right: 1px solid var(--line);
+}
+/* section tabs stay in view beside a long panel */
+.page .tabs.vertical {
+  top: var(--stuck);
+  align-self: start;
+  height: auto;
+  overflow: visible;
+  background: none;
+}
+.tabs.vertical .tabs-label {
+  padding: 12px 10px 6px;
+  font-size: 10px;
+  color: var(--dim);
+}
+.tabs-label:first-child {
+  padding-top: 0;
+}
+.tabs.vertical > button {
+  height: 34px;
+  padding: 0 10px;
+  margin: 0;
+  border-bottom: 0;
+  border-left: 2px solid transparent;
+  text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 13px;
+}
+.tabs.vertical > button:hover {
+  background: var(--wash);
+}
+.tabs.vertical > button[aria-current] {
+  background: var(--wash2);
+  border-left-color: var(--deep);
+}
+.vsearch {
+  position: absolute;
+  top: 16px;
+  right: 24px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.tabs.vertical > button.miss {
+  opacity: 0.4;
+}
+.vbody {
+  position: relative;
+  display: grid;
+  align-content: start;
+  gap: 18px;
+  padding: 24px;
+  min-width: 0;
+}
+.vpanel {
+  display: grid;
+  gap: 16px;
+}
+.vpanel h2 {
+  font-size: 16px;
+  font-weight: 700;
+}
+.save {
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 760px) {
+  .vsettings {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .page .tabs.vertical {
+    position: static;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 8px;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .tabs.vertical .tabs-label {
+    display: none;
+  }
+  .tabs.vertical > button {
+    flex: none;
+    border-left: 0;
+    border-bottom: 2px solid transparent;
+  }
+  .tabs.vertical > button[aria-current] {
+    border-bottom-color: var(--deep);
+  }
+  .vbody {
+    padding: 18px 16px;
+  }
+  .vsearch {
+    position: static;
+  }
+}

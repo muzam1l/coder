@@ -1,0 +1,32 @@
+.collapse {
+  position: relative;
+}
+/* room under the toggle so it never sits on the container edge */
+.collapse:not(.open) {
+  padding-bottom: 6px;
+}
+/* room under the last line for the toggle, so it never covers text */
+.collapse-box {
+  box-sizing: content-box;
+  max-height: calc(var(--lines) * 1lh + 44px);
+  overflow: hidden;
+}
+.collapse.open > .collapse-box {
+  max-height: none;
+}
+.collapse.long:not(.open) > .collapse-box {
+  mask-image: linear-gradient(#000 calc(100% - 52px), transparent calc(100% - 36px));
+}
+.collapse > .btn.more-toggle {
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  bottom: 6px;
+  translate: -50% 0;
+}
+.collapse.open > .btn.more-toggle {
+  position: static;
+  display: flex;
+  margin: 0 auto 12px;
+  translate: none;
+}

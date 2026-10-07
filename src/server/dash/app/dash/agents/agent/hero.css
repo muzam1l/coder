@@ -1,0 +1,40 @@
+/* agent hero and tabs */
+.hero {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.hero > .grow {
+  flex: 1 1 280px;
+}
+.hero-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 64px;
+  height: 64px;
+  background: var(--blue);
+  color: #fff;
+  font-size: 26px;
+  font-weight: 700;
+}
+
+@media (max-width: 760px) {
+  .hero {
+    gap: 14px;
+  }
+  .hero-mark {
+    width: 48px;
+    height: 48px;
+    font-size: 20px;
+  }
+  /* the description keeps two lines before and after it loads, so nothing under it moves */
+  .hero .lead {
+    display: -webkit-box;
+    min-height: 2lh;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+  }
+}

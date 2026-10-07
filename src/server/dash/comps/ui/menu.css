@@ -1,0 +1,178 @@
+/* menus: a button and its popover in the top layer, at the button where anchors work and centred elsewhere */
+.pop,
+.more-list {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  padding: 6px;
+  white-space: normal;
+  max-height: calc(100vh - 24px);
+  overflow-y: auto;
+  border: 1px solid var(--line2);
+  background: var(--tile);
+  color: inherit;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+:where(.menu, .more) > button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+}
+.menu > .pop,
+.more > .more-list {
+  inset: 0;
+  margin: auto;
+}
+@supports (anchor-scope: --menu) {
+  .menu,
+  .more {
+    anchor-scope: --menu;
+  }
+  :where(.menu, .more) > button {
+    anchor-name: --menu;
+  }
+  .menu > .pop,
+  .more > .more-list {
+    position-anchor: --menu;
+    position-try-fallbacks: flip-block;
+    inset: anchor(bottom) auto auto anchor(left);
+    margin: 8px 0 0;
+  }
+  .menu.right > .pop,
+  .more > .more-list {
+    inset: anchor(bottom) anchor(right) auto auto;
+  }
+  .menu.up > .pop {
+    inset: auto anchor(right) anchor(top) anchor(left);
+    margin: 0 0 8px;
+  }
+}
+.pop {
+  z-index: 40;
+  min-width: 180px;
+}
+/* lists with sections or descriptions need the room */
+.pop:has(.pop-label, .pop-item.rich, .pop-row) {
+  min-width: 260px;
+}
+.menu.up > .pop {
+  min-width: 0;
+}
+.pop.wide {
+  width: min(320px, calc(100vw - 32px));
+}
+.pop hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 6px 0;
+}
+.pop-label {
+  padding: 8px 10px 4px;
+  font-size: 10px;
+  color: var(--dim);
+  border-top: 1px solid var(--line);
+}
+.pop-head + .pop-label,
+.pop .pop-label:first-child {
+  border-top: 0;
+}
+.pop-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+.pop-item:hover {
+  background: var(--wash);
+}
+.pop-item.danger:hover {
+  background: var(--badbg);
+  color: var(--bad);
+}
+.pop-item:disabled {
+  cursor: default;
+}
+.pop-item:disabled:hover {
+  background: none;
+}
+.pop-item small {
+  display: block;
+}
+.pop-item.rich {
+  align-items: flex-start;
+}
+.pop-item.rich .ic {
+  margin-top: 2px;
+}
+.pop-item[role="menuitemradio"] > .ic:last-child {
+  visibility: hidden;
+}
+.pop-item[role="menuitemradio"][aria-checked="true"] > .ic:last-child {
+  visibility: visible;
+  color: var(--acc);
+}
+.pop form {
+  margin: 0;
+}
+.pop-note {
+  padding: 0 10px 8px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+
+/* "+n more" lists */
+.more {
+  flex: none;
+}
+.more > button {
+  padding: 0 7px;
+  border: 1px solid var(--line2);
+  color: var(--fg);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.more:hover > button,
+.more:has(:popover-open) > button {
+  border-color: var(--acc);
+  color: var(--acc);
+}
+.more-list {
+  --max: 220px;
+  z-index: 45;
+  min-width: 220px;
+}
+.more-list::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: -8px;
+  height: 8px;
+}
+.more-list:popover-open {
+  display: grid;
+  gap: 4px;
+}
+
+@media (max-width: 760px) {
+  .pop.wide {
+    min-width: min(320px, calc(100vw - 32px));
+  }
+}
+
+/* a trailing link in any menu or select, like "Add models" */
+.pop .add-models {
+  margin-top: 4px;
+  color: var(--muted);
+}
+.pop .add-models .ic {
+  width: 14px;
+  height: 14px;
+}

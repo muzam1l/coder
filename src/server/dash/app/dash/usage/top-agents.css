@@ -1,0 +1,40 @@
+.usage td:first-child {
+  width: 40%;
+}
+.unlinked {
+  font-weight: 500;
+  color: var(--muted);
+}
+.unlinked.gone {
+  color: var(--dim);
+}
+.bar-in {
+  display: block;
+  height: 3px;
+  margin-top: 8px;
+  width: var(--w);
+  background: var(--acc);
+  opacity: 0.6;
+}
+.bar-in.top {
+  opacity: 1;
+  background: var(--c, var(--acc));
+}
+
+@media (max-width: 760px) {
+  .usage.stacked tr {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .usage td.num {
+    display: grid;
+    text-align: left;
+    font-size: 12px;
+  }
+  .usage td.num::before {
+    content: attr(data-label);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+}

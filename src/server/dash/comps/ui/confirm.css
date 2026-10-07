@@ -1,0 +1,36 @@
+dialog.confirm {
+  width: min(420px, calc(100vw - 32px));
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line2);
+  background: var(--tile);
+  color: inherit;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+dialog.confirm::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+dialog.confirm form {
+  display: grid;
+  gap: 8px;
+  padding: 20px;
+}
+dialog.confirm h2 {
+  font-size: 15px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+dialog.confirm p {
+  color: var(--muted);
+}
+dialog.confirm .actions {
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+.btn.destructive {
+  background: var(--bad);
+  border-color: var(--bad);
+  color: var(--bg);
+}

@@ -2,7 +2,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 
-import type { JournalEntry } from './types.js';
+import type { JournalEntry } from './types';
 
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== 'object') {
@@ -17,8 +17,18 @@ function stableStringify(value: unknown): string {
     .join(',')}}`;
 }
 
+/** A fingerprint payload without its unset keys, so a new option leaves old fingerprints alone. */
+export function defined<T extends Record<string, unknown>>(payload: T): Partial<T> {
+  return Object.fromEntries(
+    Object.entries(payload).filter(([, v]) => v !== undefined),
+  ) as Partial<T>;
+}
+
 export function fingerprint(kind: string, payload: unknown): string {
-  return crypto.createHash('sha256').update(`${kind}\0${stableStringify(payload)}`).digest('hex');
+  return crypto
+    .createHash('sha256')
+    .update(`${kind}\0${stableStringify(payload)}`)
+    .digest('hex');
 }
 
 export function readJournal(file: string): JournalEntry[] {
@@ -63,9 +73,9 @@ export class Journal {
     fs.appendFileSync(this.file, `${JSON.stringify(entry)}\n`, 'utf8');
   }
 
-  /** Recorded result for this fingerprint, or null to run live. */
-  replay(fp: string): JournalEntry | null {
-    const hit = this.recorded.find(e => !e.consumed && e.fingerprint === fp);
+  /** Recorded result for one of these fingerprints, or null to run live. */
+  replay(...fps: string[]): JournalEntry | null {
+    const hit = this.recorded.find(e => !e.consumed && fps.includes(e.fingerprint));
     if (!hit) {
       return null;
     }

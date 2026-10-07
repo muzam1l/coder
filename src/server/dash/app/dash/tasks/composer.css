@@ -1,0 +1,316 @@
+/* composer: the prompt grows to about 8 lines; the controls keep their own row under it */
+.composer {
+  display: flex;
+  flex-wrap: wrap;
+  padding: 5px 5px 5px 8px;
+  border: 1px solid var(--line2);
+  background: var(--field);
+}
+.composer:has(textarea:focus) {
+  border-color: var(--acc);
+}
+.composer textarea {
+  flex: 1 1 100%;
+  width: auto;
+  field-sizing: content;
+  min-height: 22px;
+  max-height: 8lh;
+  margin: 6px 0;
+  padding: 0 4px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  resize: none;
+}
+.composer textarea:focus {
+  box-shadow: none;
+}
+.composer-line {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  width: 100%;
+  height: 30px;
+  min-width: 0;
+}
+.composer-line .select {
+  flex: 0 1 auto;
+  max-width: 220px;
+}
+.composer-line .select > button,
+.composer-line .quiet {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  background: none;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.composer-line .select > button:hover,
+.composer-line .quiet:hover {
+  background: var(--wash);
+}
+.composer-line .send {
+  flex: none;
+  margin-left: 4px;
+}
+.composer-line .send[aria-busy="true"] .ic {
+  visibility: hidden;
+}
+.composer > .flash {
+  flex-basis: 100%;
+  margin: 0 4px 2px;
+}
+
+/* run options: one menu, every setting a pick away */
+.composer-settings:popover-open {
+  display: block;
+  width: min(320px, calc(100vw - 32px));
+  overflow-y: auto;
+  padding: 6px;
+}
+.composer-settings > .pop-label:not(:first-child) {
+  margin-top: 10px;
+}
+.composer-settings .pop-item {
+  width: 100%;
+  min-height: 30px;
+  font-size: 12px;
+}
+.composer-settings .pop-group {
+  margin: 6px 10px 2px;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.composer-settings .select {
+  margin: 2px 6px 4px;
+}
+.set-label {
+  font-size: 11px;
+  color: var(--muted);
+}
+.composer-settings .select > button {
+  min-height: 30px;
+  padding: 4px 8px 4px 10px;
+  font-size: 12px;
+}
+.model-pick input[aria-expanded="true"] {
+  cursor: text;
+}
+.model-pick input[aria-expanded="true"]::placeholder {
+  color: var(--dim);
+}
+.model-pick > .ic {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--dim);
+  pointer-events: none;
+}
+.model-list {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 1;
+  max-height: 260px;
+  overflow-y: auto;
+  padding: 4px;
+  border: 1px solid var(--line2);
+  background: var(--tile);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  scrollbar-width: thin;
+}
+.model-list .pop-item > .ic {
+  visibility: hidden;
+}
+.model-list .pop-item[aria-selected="true"] > .ic {
+  visibility: visible;
+  color: var(--acc);
+}
+
+/* rows of the model list and the slash menu */
+.model-list .pop-item,
+.composer-slash .pop-item {
+  gap: 10px;
+  padding: 6px 10px;
+}
+.model-list .pop-item:hover,
+.composer-slash .pop-item:hover {
+  background: none;
+}
+.model-list .pop-item.on,
+.composer-slash .pop-item.on {
+  background: var(--wash2);
+}
+.model-list small,
+.composer-slash small {
+  font-size: 11px;
+  color: var(--dim);
+  white-space: nowrap;
+}
+.composer-slash {
+  max-height: min(360px, 50vh);
+  overflow-y: auto;
+}
+.composer-slash .grow {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.composer-slash > .loading {
+  padding: 6px 10px;
+}
+
+/* one-line notices beside the composer and in the list */
+.notice.slim {
+  flex-wrap: nowrap;
+  gap: 10px;
+  padding: 8px 8px 8px 14px;
+  font-size: 12px;
+}
+.notice.slim .grow {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card > .notice.slim {
+  margin: 12px 16px 0;
+}
+
+/* the composer in a dialog */
+dialog.compose-dialog {
+  width: min(760px, calc(100vw - 32px));
+  margin: 14vh auto auto;
+  padding: 0;
+  border: 1px solid var(--line2);
+  background: var(--tile);
+  color: inherit;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+dialog.compose-dialog::backdrop {
+  background: light-dark(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.72));
+}
+.compose-dialog > header {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 6px 0 16px;
+}
+.compose-dialog h2 {
+  font-size: 15px;
+  font-weight: 700;
+}
+.compose-dialog > header .icon-btn {
+  align-self: center;
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+}
+.compose-dialog .composer,
+.compose-dialog > .loading,
+.compose-dialog > .flash,
+.compose-dialog > .notice {
+  margin: 10px 16px 16px;
+}
+
+@media (max-width: 760px) {
+  .composer-settings:popover-open {
+    right: 16px !important;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+  }
+  .notice.slim .grow {
+    white-space: normal;
+  }
+  .composer-settings .set-label:not(:first-child) {
+    margin-top: 6px;
+  }
+}
+
+/* a model row: the pick, its effort hint, and a chevron that opens the efforts under it */
+.pop-row {
+  display: flex;
+  align-items: center;
+}
+.pop-row > .pop-item {
+  flex: 1 1 auto;
+}
+.pop-row > .pop-item small {
+  margin-right: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.pop-chev {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  align-self: stretch;
+  aspect-ratio: 1;
+  width: auto;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+}
+.pop-chev:focus-visible {
+  outline-offset: -2px;
+}
+.pop-chev:hover,
+.pop-chev[aria-expanded="true"] {
+  color: var(--fg);
+  background: var(--wash);
+}
+.pop-chev .ic {
+  width: 14px;
+  height: 14px;
+  transition: rotate 0.15s;
+}
+.pop-chev[aria-expanded="true"] .ic {
+  rotate: 90deg;
+}
+.pop-sub {
+  padding-left: 32px;
+}
+/* local server: the folder select, or a path box in its place */
+.composer-line .folder {
+  display: contents;
+}
+.composer-line input.folder-path {
+  flex: 0 1 260px;
+  min-width: 0;
+  min-height: 0;
+  height: 28px;
+  padding: 3px 8px;
+  border: 1px solid transparent;
+  background: none;
+  font-size: 11.5px;
+}
+.composer-line input.folder-path:focus {
+  border-color: var(--line2);
+  box-shadow: none;
+}
+.composer-line .folder-busy {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.composer > .folder-hint {
+  flex: 1 1 100%;
+  padding: 0 8px 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.composer > .flash {
+  flex: 1 1 100%;
+  padding: 2px 8px 4px;
+}

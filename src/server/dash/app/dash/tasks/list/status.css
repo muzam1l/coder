@@ -1,0 +1,50 @@
+.st {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 2px 8px;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  white-space: nowrap;
+  color: var(--muted);
+  background: var(--wash);
+}
+.st i {
+  align-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.st.running {
+  color: var(--acc);
+  background: var(--accbg);
+}
+.st.running i {
+  width: 9px;
+  height: 9px;
+  background: none;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: spin 1s linear infinite;
+}
+.st.waiting {
+  color: var(--warn);
+  background: var(--warnbg);
+}
+.st.completed {
+  color: var(--ok);
+  background: var(--okbg);
+}
+.st.failed {
+  color: var(--bad);
+  background: var(--badbg);
+}
+.st.queued i,
+.st.cancelled i {
+  background: none;
+  border: 1.5px solid currentColor;
+}
+.stats .st {
+  justify-self: start;
+}

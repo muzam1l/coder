@@ -1,0 +1,29 @@
+.md {
+  overflow-wrap: anywhere;
+}
+.md :where(h3, h4, h5, h6) {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+}
+.md h3 {
+  font-size: 14px;
+}
+.md ul {
+  padding-left: 20px;
+  list-style: disc;
+}
+.md ol {
+  padding-left: 20px;
+  list-style: decimal;
+}
+.md pre {
+  margin: 0;
+  padding: 8px 12px;
+  overflow-x: auto;
+  background: var(--wash);
+}
+.md pre code {
+  padding: 0;
+  background: none;
+}

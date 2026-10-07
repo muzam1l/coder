@@ -1,0 +1,24 @@
+{
+  "name": "Coder",
+  "description": "Answers engineering questions, reviews pull requests, and makes requested changes.",
+  "permissions": "workspace-write",
+  "integrations": {
+    "github": {
+      "triggers": {
+        "pull_request": {
+          "flow": "review",
+          "permissions": "read-only"
+        },
+        "mention": true
+      },
+      "tools": "write"
+    },
+    "slack": {
+      "triggers": {
+        "mention": true,
+        "message": true
+      },
+      "tools": "comment"
+    }
+  }
+}

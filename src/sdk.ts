@@ -2,27 +2,22 @@
 import path from 'node:path';
 import process from 'node:process';
 
+import { agents } from './agent';
+import { sessions } from './client/auth/sign-in';
+import type { Session } from './client/auth/session';
+import { addCredential, loginCredential, connect, type ServerOptions } from './core/remote';
 import {
-  archiveJob,
-  deleteJob,
-  findJob,
-  resolveJobDir,
-  type JobLogEntry,
-} from './lib/state.js';
-import { answerApproval, listPendingApprovals } from './lib/approvals.js';
-import {
-  CoderError,
-  dispatchTask,
-  readTask,
-  waitTask,
-  type TaskResult,
-} from './lib/dispatch.js';
-import { collectJobs, type ListOptions } from './cmd/jobs.js';
-import { stopTaskCore } from './cmd/stop.js';
-import { deleteSessionFor } from './cmd/delete.js';
-import { steerTaskCore, type SteerOutcome } from './cmd/steer.js';
-import { askTaskCore } from './cmd/ask.js';
-import { streamTaskCore } from './cmd/watch.js';
+  configGet,
+  configSet,
+  mcpAdd,
+  mcpAddJson,
+  mcpList,
+  mcpRemove,
+  type McpAddOptions,
+} from './core/config';
+import { CoderError, type TaskResult } from './core/dispatch';
+import { docsCore } from './core/docs';
+import { setupHostCore, upgradeCore } from './core/hosts';
 import {
   modelAddCore,
   modelAliasCore,
@@ -32,171 +27,35 @@ import {
   modelUnaliasCore,
   modelUpdateCore,
   type ModelWriteOptions,
-} from './cmd/model.js';
-import { configGet, configSet } from './cmd/config.js';
-import { setupHostCore } from './cmd/setup-host.js';
-import { upgradeCore } from './cmd/upgrade.js';
-import { docsCore } from './cmd/docs.js';
-import { flowSdk as flow } from './flow/index.js';
-import type { FlowEvent, FlowStep } from './flow/types.js';
-import type { Approval, Job, TurnResult } from './lib/types.js';
+} from './core/models';
+import type { TaskLogEntry } from './core/state';
+import { tasks, type TaskRunOptions } from './core/task';
+import type { SteerOutcome } from './core/task/actions';
+import type { Approval, Task, TurnResult } from './core/types';
+import type { ReviewArgs, ReviewResult } from './flow/builtin/review';
+import { flowSdk as flow } from './flow';
+import { runFlowByName } from './flow/executor';
+import type { FlowEvent, FlowStep } from './flow/types';
+import {
+  listRunners,
+  addRunner,
+  pairRunner,
+  updateRunner,
+  testRunner,
+  removeRunner,
+} from './runner';
+import { serveRunner } from './runner/serve';
+import { serverAppLink } from './server/agents/apps';
+import { migrate, rotateKey } from './server/maintenance';
+import { ACTIONS_WORKFLOW_YAML } from './server/runners/github-actions';
+import { serve, serverHandler } from './server/serve';
 
 function resolveCwd(cwd?: string): string {
   return cwd ? path.resolve(cwd) : process.cwd();
 }
 
-function mustFindJob(cwd: string, reference?: string): Job {
-  const job = findJob(cwd, reference);
-  if (!job) {
-    throw new Error(
-      reference ? `No task found for "${reference}".` : 'No tasks found for this workspace.',
-    );
-  }
-  return job;
-}
-
-// ---------------------------------------------------------------------------
-// task
-// ---------------------------------------------------------------------------
-
-export interface TaskRunOptions {
-  agent?: string;
-  model?: string;
-  effort?: string;
-  permissions?: string;
-  name?: string;
-  system?: string;
-  resume?: string;
-  cwd?: string;
-}
-
 /** Run and control coder tasks. Mirrors `coder task`. */
-export const task = {
-  /** Dispatch a task to the agent chain; returns as soon as it is live. */
-  async run(prompt: string, opts: TaskRunOptions = {}): Promise<{ taskId: string }> {
-    const { taskId } = await dispatchTask({
-      prompt,
-      cwd: resolveCwd(opts.cwd),
-      agent: opts.agent,
-      model: opts.model,
-      effort: opts.effort,
-      permissions: opts.permissions,
-      name: opts.name,
-      system: opts.system,
-      resume: opts.resume,
-    });
-    return { taskId };
-  },
-
-  /**
-   * A task's result. With `wait`, blocks until the task is terminal (a pending
-   * approval throws a CoderError with code 'approval-pending'). `tail` fills
-   * `steps` with the last n steps (default 0: []). Omit the id for the
-   * most recent task.
-   */
-  async result(
-    id?: string,
-    opts: { wait?: boolean; tail?: number | 'all'; cwd?: string } = {},
-  ): Promise<TaskResult> {
-    const cwd = resolveCwd(opts.cwd);
-    const taskId = id ?? mustFindJob(cwd).id;
-    return opts.wait
-      ? waitTask(cwd, taskId, { tail: opts.tail })
-      : readTask(cwd, taskId, { tail: opts.tail });
-  },
-
-  /** Recent tasks (mirrors `coder list` / `coder task list`). */
-  list(opts: ListOptions & { cwd?: string } = {}): Job[] {
-    return collectJobs(resolveCwd(opts.cwd), opts).jobs;
-  },
-
-  /** Steer a follow-up into a task (live, queued, or resumed on its thread). */
-  async steer(
-    id: string,
-    text: string,
-    opts: { model?: string; effort?: string; permissions?: string; cwd?: string } = {},
-  ): Promise<{ taskId: string; steered: SteerOutcome }> {
-    const cwd = resolveCwd(opts.cwd);
-    return steerTaskCore(cwd, mustFindJob(cwd, id), text, {
-      model: opts.model,
-      effort: opts.effort,
-      permissions: opts.permissions,
-    });
-  },
-
-  /** Ask about a task via a read-only sidecar; its thread is never touched. */
-  async ask(
-    id: string,
-    question: string,
-    opts: { model?: string; effort?: string; cwd?: string } = {},
-  ): Promise<{ taskId: string; answer: string | null }> {
-    const cwd = resolveCwd(opts.cwd);
-    const job = mustFindJob(cwd, id);
-    const result = await askTaskCore(cwd, job, question, { model: opts.model, effort: opts.effort });
-    return { taskId: job.id, answer: result.finalMessage || null };
-  },
-
-  /** Stop a running task. */
-  async stop(
-    id: string,
-    opts: { cwd?: string } = {},
-  ): Promise<{ taskId: string; status: 'cancelled'; interrupt: string }> {
-    const cwd = resolveCwd(opts.cwd);
-    return stopTaskCore(cwd, mustFindJob(cwd, id));
-  },
-
-  /** Archive a task (hide it from the default list). */
-  archive(id: string, opts: { cwd?: string } = {}): { taskId: string; archived: true } {
-    const cwd = resolveCwd(opts.cwd);
-    archiveJob(cwd, mustFindJob(cwd, id));
-    return { taskId: id, archived: true };
-  },
-
-  /** Delete a task and its engine session from disk. */
-  delete(id: string, opts: { cwd?: string } = {}): { taskId: string; deleted: boolean } {
-    const cwd = resolveCwd(opts.cwd);
-    const job = mustFindJob(cwd, id);
-    if (job.status === 'running') {
-      throw new Error(`Task ${job.id} is still running.`);
-    }
-    deleteSessionFor(job);
-    const deleted = deleteJob(cwd, job.id);
-    return { taskId: job.id, deleted };
-  },
-
-  /** Answer a pending approval (accept, or `deny`). */
-  approve(
-    id: string,
-    approvalId: string,
-    opts: { deny?: boolean; cwd?: string } = {},
-  ): { taskId: string; approvalId: string; decision: 'accept' | 'decline' } {
-    const cwd = resolveCwd(opts.cwd);
-    const job = mustFindJob(cwd, id);
-    const decision = opts.deny ? 'decline' : 'accept';
-    answerApproval(resolveJobDir(cwd, job.id), approvalId, decision);
-    return { taskId: job.id, approvalId, decision };
-  },
-
-  /** Pending approvals for a task (omit the id for the most recent task). */
-  approvals(id?: string, opts: { cwd?: string } = {}): Approval[] {
-    const cwd = resolveCwd(opts.cwd);
-    const job = id ? mustFindJob(cwd, id) : mustFindJob(cwd);
-    return listPendingApprovals(resolveJobDir(cwd, job.id));
-  },
-
-  /** Follow a task live: an async iterable of progress log entries. `tail` replays only the last n steps (default 1). */
-  stream(
-    id?: string,
-    opts: { tail?: number | 'all'; cwd?: string } = {},
-  ): AsyncGenerator<JobLogEntry> {
-    const cwd = resolveCwd(opts.cwd);
-    return streamTaskCore(cwd, id ?? mustFindJob(cwd).id, { tail: opts.tail });
-  },
-};
-
-// ---------------------------------------------------------------------------
-// model
-// ---------------------------------------------------------------------------
+export const task = tasks;
 
 /** Manage models: custom endpoints, engine aliases, disable toggles. Mirrors `coder model`. */
 export const model = {
@@ -211,7 +70,7 @@ export const model = {
     modelRemoveCore(resolveCwd(opts.cwd), name, opts),
   /** Every dispatchable model: built-ins, aliases, custom endpoints. */
   list: (opts: { cwd?: string } = {}) => modelListData(resolveCwd(opts.cwd)),
-  /** Alias a name to an engine spec, e.g. alias('fast', 'codex:spark'). */
+  /** Alias a name to an engine spec, e.g. alias('fast', 'codex:luna'). */
   alias: (name: string, spec: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
     modelAliasCore(resolveCwd(opts.cwd), name, spec, opts),
   /** Remove a user-defined alias. */
@@ -225,58 +84,148 @@ export const model = {
     modelToggleCore(resolveCwd(opts.cwd), name, false, opts),
 };
 
-// ---------------------------------------------------------------------------
-// config
-// ---------------------------------------------------------------------------
-
 /** Read and write coder configuration. Mirrors `coder config`. */
 export const config = {
   /** A config value by dotted key (or the whole effective config). */
   get: (key?: string, opts: { cwd?: string } = {}) => configGet(resolveCwd(opts.cwd), key),
   /** Set a config value; `workspace` targets the repo file instead of the user file. */
-  set: (
-    key: string,
-    value: unknown,
-    opts: { workspace?: boolean; cwd?: string } = {},
-  ) => configSet(resolveCwd(opts.cwd), key, value, opts),
+  set: (key: string, value: unknown, opts: { workspace?: boolean; cwd?: string } = {}) =>
+    configSet(resolveCwd(opts.cwd), key, value, opts),
 };
 
-// ---------------------------------------------------------------------------
-// host
-// ---------------------------------------------------------------------------
+/** Configure MCP servers in `.coder/config.json`, or the user file with `user`. Mirrors `coder mcp`. */
+export const mcp = {
+  /** Save a stdio (`command`) or remote (`url`) server; `env`, `header` and `tools` are comma lists. */
+  add: (name: string, opts: McpAddOptions & { cwd?: string }) =>
+    mcpAdd(resolveCwd(opts.cwd), name, opts),
+  /** Save an entry from any `.mcp.json`, as an object or JSON text. */
+  addJson: (
+    name: string,
+    entry: string | Record<string, unknown>,
+    opts: { user?: boolean; cwd?: string } = {},
+  ) => mcpAddJson(resolveCwd(opts.cwd), name, entry, opts),
+  /** The configured servers by name. */
+  list: (opts: { cwd?: string } = {}) => mcpList(resolveCwd(opts.cwd)),
+  /** Remove a server. */
+  remove: (name: string, opts: { user?: boolean; cwd?: string } = {}) =>
+    mcpRemove(resolveCwd(opts.cwd), name, opts),
+};
 
 /** Probe engines, seed the chain, install requested host plugins. */
-export function setupHost(
-  hosts: string[] = [],
-  opts: { cwd?: string } = {},
-) {
-  return setupHostCore(resolveCwd(opts.cwd), {
-    claude: hosts.includes('claude'),
-    codex: hosts.includes('codex'),
-    agents: hosts.includes('agents'),
-  });
+export function setupHost(hosts: string[] = [], opts: { cwd?: string } = {}) {
+  return setupHostCore(resolveCwd(opts.cwd), { hosts });
 }
 
 /** Update the CLI and/or host plugin installs; returns what moved. */
-export function upgrade(
-  opts: { cliOnly?: boolean; pluginsOnly?: boolean } = {},
-) {
+export function upgrade(opts: { cliOnly?: boolean; pluginsOnly?: boolean } = {}) {
   return upgradeCore(opts);
 }
 
-/** List bundled docs, or return one topic's raw markdown. */
-export function docs(topic?: string) {
-  return docsCore(topic);
+/** List bundled docs, or return one topic's raw markdown; `claude` picks the Claude Code flavor of the skill. */
+export function docs(topic?: string, opts: { claude?: boolean } = {}) {
+  return docsCore(topic, opts);
 }
 
-// ---------------------------------------------------------------------------
-// exports
-// ---------------------------------------------------------------------------
-
-export {
-  CoderError,
+/** Run the built-in read-only code-review flow. */
+export const review = {
+  async run(options: ReviewArgs = {}): Promise<ReviewResult & { runId: string }> {
+    const run = await runFlowByName('review', { cwd: options.cwd, args: options });
+    return { ...(run.result as ReviewResult), runId: run.runId };
+  },
 };
-export type { Approval, FlowEvent, FlowStep, Job, JobLogEntry, TaskResult, TurnResult, SteerOutcome };
+
+/** Sign in and manage saved sessions. Mirrors `coder auth`. */
+export const auth = sessions;
+
+/** Run and host a Coder server. Mirrors `coder server`. */
+export const server = {
+  serve,
+  migrate,
+  rotateKey,
+  /** The GitHub Actions workflow the `github-actions` runner dispatches. */
+  workflow: () => ACTIONS_WORKFLOW_YAML,
+  app: {
+    /** A link, valid 10 minutes, to the page that creates the built-in agent's public app on a platform. */
+    create: serverAppLink,
+  },
+  handler: serverHandler,
+};
+
+/** Engine credentials on a Coder server. Mirrors `coder credentials`. */
+export const credentials = {
+  list: (options: ServerOptions = {}) => connect(options).credentials.list(),
+  add: addCredential,
+  remove: (label: string, options: ServerOptions & { workspace?: boolean } = {}) =>
+    connect(options).credentials.remove(label, options),
+  default: (label: string, options: ServerOptions & { workspace?: boolean } = {}) =>
+    connect(options).credentials.setDefault(label, options),
+  login: loginCredential,
+};
+
+export const folders = {
+  list: (options: ServerOptions = {}) => connect(options).folders.list(),
+  check: (path: string, options: ServerOptions = {}) => connect(options).folders.check(path),
+};
+
+/** Your own runners for a Coder server. Mirrors `coder runner`. */
+export const runner = {
+  list: listRunners,
+  add: addRunner,
+  pair: pairRunner,
+  update: updateRunner,
+  default: (id: string, options: ServerOptions = {}) =>
+    updateRunner(id, { default: true }, options),
+  test: testRunner,
+  rename: (id: string, name: string, options: ServerOptions = {}) =>
+    updateRunner(id, { name }, options),
+  remove: removeRunner,
+  serve: serveRunner,
+};
+
+/** Manage and run agents. Each function mirrors one `coder agent` command. */
+export const agent = agents;
+
+export { CoderError };
+export type {
+  Approval,
+  ServerOptions,
+  TaskRunOptions,
+  FlowEvent,
+  FlowStep,
+  Task,
+  TaskLogEntry,
+  TaskResult,
+  TurnResult,
+  SteerOutcome,
+};
+export type { ReviewResult, ReviewArgs };
+export type { Session };
+export type { LocalFolder, LocalFolders } from './client/types';
+export type {
+  RunnerKind,
+  RunnerSpec,
+  RunnerRow,
+  RunnerPairing,
+  RunnerInput,
+  RunnerUpdate,
+  RunnerTest,
+} from './client/types';
 
 export { flow };
-export default { task, flow, model, config, setupHost, upgrade, docs };
+export default {
+  task,
+  flow,
+  model,
+  config,
+  mcp,
+  setupHost,
+  upgrade,
+  docs,
+  review,
+  auth,
+  agent,
+  credentials,
+  folders,
+  runner,
+  server,
+};

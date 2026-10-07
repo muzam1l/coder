@@ -1,0 +1,72 @@
+/* agents */
+.agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 16px;
+}
+.agent-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  height: 100%;
+  padding: 18px;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+}
+.agent-card::before {
+  content: "";
+  position: absolute;
+  left: -1px;
+  right: -1px;
+  top: -1px;
+  height: 2px;
+  background: var(--line2);
+  transition: background 0.15s;
+}
+.agent-card:hover {
+  background: var(--tile);
+}
+.agent-card:hover::before {
+  background: var(--deep);
+}
+.bc-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.bc-head h3 {
+  font-size: 14px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+.agent-card .pills a {
+  position: relative;
+  z-index: 1;
+}
+.mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 36px;
+  height: 36px;
+  background: var(--blue);
+  color: #fff;
+  font-weight: 700;
+}
+.lead-clamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  flex: 1;
+  overflow: hidden;
+  color: var(--muted);
+}
+.pfs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  min-width: 0;
+  font-size: 12px;
+}

@@ -1,0 +1,43 @@
+.registry {
+  display: grid;
+  gap: 8px;
+  padding: 16px 16px 0;
+}
+/* one height for searching, results, none and errors, so the form under it stays put */
+.registry-results {
+  height: 170px;
+  border: 1px solid var(--line2);
+  background: var(--field);
+}
+.registry-results .pop-item b {
+  font-weight: 500;
+}
+.registry-results .badge {
+  margin-left: 6px;
+}
+.registry-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.registry-note.err {
+  color: var(--bad);
+}
+.skel {
+  padding: 8px 10px;
+  animation: loader-in 0s 150ms both;
+}
+.skel i {
+  display: block;
+  width: 35%;
+  height: 10px;
+  margin: 3px 0;
+  background: var(--wash2);
+}
+.skel i + i {
+  width: 70%;
+  background: var(--wash);
+}

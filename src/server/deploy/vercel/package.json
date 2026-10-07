@@ -1,0 +1,10 @@
+{
+  "name": "coder-vercel",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@vercel/functions": "latest",
+    "@vercel/sandbox": "latest",
+    "@wular/coder": "latest"
+  }
+}

@@ -1,146 +1,42 @@
-import fs from 'node:fs';
+/** `coder setup-host [claude|agents|codex]`: probe engines, seed the chain, install host plugins. */
 import process from 'node:process';
-import { fileURLToPath } from 'node:url';
 
-import * as z from 'zod/mini';
+import { setupHostCore, type PluginResult, type SetupHostReport } from '../core/hosts';
+import type { Engine } from '../core/types';
+import { bad, good, outStyle } from '../tui/output';
+import { baseOptions, flag } from '../utils/args';
+import { command } from '../cli';
 
-import { baseOptions, flag, parseArgs } from '../lib/args.js';
-import { getCodexAuthStatus, getCodexAvailability } from '../lib/codex-core.js';
-import { getClaudeAuthStatus, getClaudeAvailability } from '../lib/claude-core.js';
-import {
-  DEFAULT_CONFIG,
-  loadConfig,
-  resolveUserConfigFile,
-  writeUserConfig,
-} from '../lib/config.js';
-import { resolveMarketplaceDir } from '../lib/runtime.js';
-import {
-  ensureCodexUpToDate,
-  installAgentsSkill,
-  installClaudePlugin,
-  type PluginResult,
-} from '../lib/plugins.js';
-import { bad, fail, good, outStyle, printJson, resolveCwd } from '../lib/ui.js';
-import type { Agent, CoderConfig } from '../lib/types.js';
+// Hosts are named positionally; the --claude/--codex/--agents flags stay as silent aliases.
+export const commandSetupHost = command({
+  name: 'setup-host',
+  help: {
+    usage: 'coder setup-host [claude] [codex] [agents] [--json]',
+    summary:
+      'Set up coder in your host: check engines and auth, seed the config, and\ninstall the host plugin/skill for the named host(s). Claude Code gets its\nmarketplace plugin; "agents" installs a skill into ~/.agents/skills for\nevery host that reads the Agent Skills standard dir (Codex, Pi, OpenCode,\n...). "codex" is an alias for agents. With no host, checks and seeds.',
+    examples: [
+      ['coder setup-host claude', 'install the Claude Code plugin'],
+      [
+        'coder setup-host agents',
+        'install the skill into ~/.agents/skills (Codex, Pi, OpenCode, ...)',
+      ],
+    ],
+  },
+  options: { ...baseOptions, codex: flag, claude: flag, agents: flag },
+  args: Number.POSITIVE_INFINITY,
+  run: ({ options, args, cwd }) =>
+    setupHostCore(cwd, { ...options, hosts: args }, () => options.json || printSetupHostHeader()),
+  print: printSetupHost,
+});
 
-export interface SetupHostReport {
-  codex: { available: boolean; detail: string; auth: string; loggedIn: boolean };
-  codexUpdate?: ReturnType<typeof ensureCodexUpToDate>;
-  claude: { available: boolean; detail: string; auth: string; loggedIn: boolean };
-  configFile: string;
-  runtime: string;
-  claudePlugin?: PluginResult;
-  agentsSkill?: PluginResult;
-  config: CoderConfig;
-  ready: boolean;
+// Printed before probing, which spawns other CLIs and can take seconds.
+function printSetupHostHeader(): void {
+  process.stdout.write(`${outStyle.bold('Coder host setup')}\n\n`);
 }
 
-// Print-free core: probe engines, seed the chain, install requested host plugins.
-// It performs the real side effects (installs, chain seeding) - just no output.
-export async function setupHostCore(
-  cwd: string,
-  opts: { claude?: boolean; codex?: boolean; agents?: boolean } = {},
-): Promise<SetupHostReport> {
-  let availability = getCodexAvailability(cwd);
-  const codexUpdate = ensureCodexUpToDate(availability);
-  if (codexUpdate?.updated) {
-    // Re-read so the rest of setup reflects the freshly-installed codex.
-    availability = getCodexAvailability(cwd);
-  }
-  const auth = availability.available
-    ? await getCodexAuthStatus(cwd)
-    : { loggedIn: false, detail: availability.detail };
-  const claude = getClaudeAvailability();
-  const claudeAuth = claude.available
-    ? getClaudeAuthStatus()
-    : { loggedIn: false, detail: claude.detail };
-
-  const configFile = resolveUserConfigFile();
-  if (!fs.existsSync(configFile)) {
-    // Seed the chain from what's installed; codex-first when neither is present.
-    const chain: Agent[] = availability.available
-      ? ['codex', 'claude']
-      : claude.available
-        ? ['claude', 'codex']
-        : ['codex', 'claude'];
-    writeUserConfig({ ...DEFAULT_CONFIG, chain });
-  }
-
-  const marketplaceDir = resolveMarketplaceDir();
-  const claudePlugin = opts.claude ? installClaudePlugin(marketplaceDir) : null;
-  // Codex, Pi, OpenCode and other Agent Skills hosts read ~/.agents/skills.
-  const agentsPlugin = opts.agents || opts.codex ? installAgentsSkill(marketplaceDir) : null;
-
-  const config = loadConfig(cwd);
-  // Ready as long as one engine is usable: installed AND logged in.
-  const ready =
-    (availability.available && auth.loggedIn) || (claude.available && claudeAuth.loggedIn);
-
-  return {
-    codex: {
-      available: availability.available,
-      detail: availability.detail,
-      auth: auth.detail,
-      loggedIn: auth.loggedIn,
-    },
-    ...(codexUpdate ? { codexUpdate } : {}),
-    claude: {
-      available: claude.available,
-      detail: claude.detail,
-      auth: claudeAuth.detail,
-      loggedIn: claudeAuth.loggedIn,
-    },
-    configFile,
-    runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
-    ...(claudePlugin ? { claudePlugin } : {}),
-    ...(agentsPlugin ? { agentsSkill: agentsPlugin } : {}),
-    config,
-    ready,
-  };
-}
-
-export async function commandSetupHost(argv: string[]) {
-  const { options, positionals } = parseArgs(
-    argv,
-    z.object({ ...baseOptions, codex: flag, claude: flag, agents: flag }),
-  );
-  const cwd = resolveCwd(options);
-  // Hosts are named positionally (`coder setup-host claude`); the old
-  // --claude/--codex flags keep working as silent aliases.
-  // Hosts are claude and agents (the ~/.agents/skills install covering every
-  // host that reads the Agent Skills standard dir - codex included). "codex"
-  // stays accepted as an alias for agents.
-  const knownHosts = ['claude', 'codex', 'agents'] as const;
-  for (const host of positionals) {
-    if (!knownHosts.includes(host as (typeof knownHosts)[number])) {
-      fail(`Unknown host "${host}". Use claude, codex, or agents.`, {
-        hint: 'Codex, Pi, OpenCode, and other Agent Skills hosts: coder setup-host agents',
-      });
-    }
-    options[host as (typeof knownHosts)[number]] = true;
-  }
-
+function printSetupHost(report: SetupHostReport): void {
   const head = outStyle.bold;
   const gray = outStyle.dim;
-
-  // Print the header before any probing: everything below spawns other CLIs
-  // (codex/claude versions, auth via the codex app-server) and can take
-  // seconds - early output shows the command is alive.
-  if (!options.json) {
-    process.stdout.write(`${head('Coder host setup')}\n\n`);
-  }
-
-  const report = await setupHostCore(cwd, {
-    claude: options.claude,
-    codex: options.codex,
-    agents: options.agents,
-  });
-
-  if (options.json) {
-    printJson(report);
-    return;
-  }
-
   const { codex, claude, codexUpdate, config, configFile, claudePlugin, agentsSkill, ready } =
     report;
   const lines: string[] = [];
@@ -163,20 +59,20 @@ export async function commandSetupHost(argv: string[]) {
   );
   if (codexUpdate?.updated) {
     lines.push(
-      good(`codex   ${gray(`updated ${codexUpdate.from} -> ${codex.detail} (GPT-5.6 support)`)}`),
+      good(`codex   ${gray(`updated ${codexUpdate.from} -> ${codex.detail} (GPT-6 support)`)}`),
     );
   } else if (codexUpdate) {
     lines.push(bad(`codex   ${codexUpdate.note}`));
   }
   lines.push('');
 
-  const agentSummary = (agent: Agent) => {
-    const entry = config.agents?.[agent] ?? {};
+  const engineSummary = (engine: Engine) => {
+    const entry = config.engines?.[engine] ?? {};
     return [entry.model, entry.effort, entry.permissions].filter(Boolean).join('/');
   };
   lines.push(
     head('Config'),
-    `  chain: ${(config.chain ?? []).join(' -> ')}   codex: ${agentSummary('codex')}   claude: ${agentSummary('claude')}`,
+    `  chain: ${(config.chain ?? []).join(' -> ')}   codex: ${engineSummary('codex')}   claude: ${engineSummary('claude')}`,
     `  ${gray(configFile)} ${gray('(coder config set <key> <value> to change)')}`,
     '',
   );

@@ -1,0 +1,153 @@
+.runner-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+/* the icon shifts the inline-flex baseline, so this row centers its badges instead */
+.row-title:has(> b.runner-name) {
+  align-items: center;
+}
+.runner-name > .ic {
+  color: var(--muted);
+}
+.runner-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.runner-status .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dim);
+}
+.runner-status.ok .dot {
+  background: var(--ok);
+}
+.runner-status.bad {
+  color: var(--bad);
+}
+.runner-status.bad .dot {
+  background: var(--bad);
+}
+.runner-rename {
+  height: 22px;
+  padding: 0 6px;
+  font-weight: 600;
+}
+.runner-add {
+  display: grid;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+.runner-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.runner-pick > input {
+  flex: 1 1 180px;
+}
+.runner-pick .pop-item:disabled {
+  opacity: 0.5;
+}
+.runner-pair {
+  display: grid;
+  gap: 10px;
+}
+.runner-cmd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.runner-cmd > code {
+  flex: 1;
+  padding: 8px 10px;
+  background: var(--wash2);
+  font: 12px/1.5 var(--mono);
+  overflow-wrap: anywhere;
+}
+.runner-wait {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.runner-wait > .loading {
+  justify-content: flex-start;
+}
+.runner-pair code {
+  font-size: 12px;
+}
+.runner-step {
+  display: grid;
+  gap: 8px;
+}
+.runner-step > p,
+.runner-step > summary {
+  margin: 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+.runner-step > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  cursor: pointer;
+  list-style: none;
+}
+.runner-step > summary::-webkit-details-marker {
+  display: none;
+}
+.runner-step > summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border: solid currentColor;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(-45deg);
+  transition: transform 0.15s;
+}
+.runner-step[open] > summary::before {
+  transform: rotate(45deg);
+}
+.runner-step > summary:hover {
+  color: var(--fg);
+}
+
+@media (max-width: 760px) {
+  .runner-pick > * {
+    flex: 1 1 100%;
+  }
+}
+.runner-help {
+  flex: 1 1 100%;
+  margin: 0;
+}
+.runner-pick > .add-grid {
+  flex: 1 1 100%;
+}
+.runner-foot {
+  display: flex;
+  flex: 1 1 100%;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 6px;
+}
+.runner-pick .add-grid > .field {
+  flex: 1 1 200px;
+}
+.runner-pick .field > span:first-child {
+  display: grid;
+  gap: 2px;
+}
+.runner-pick .field small {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

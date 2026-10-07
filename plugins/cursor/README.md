@@ -48,7 +48,7 @@ Or make it the default in AGENTS.md/CLAUDE.md:
 
 > Always use Coder for all implementation and system exploring tasks.
 
-Recommended setup: Claude Code as host (fable low/medium) and Codex (terra) as engine - best for performance and cost distribution.
+Recommended setup: Claude Code as host (fable low/medium) and Codex (sol) as engine - best for performance and cost distribution.
 
 ## Configuration
 
@@ -57,8 +57,8 @@ Machine defaults live in `~/.coder/config.json`; a `coder.config.json` in a repo
 ```json
 {
   "chain": ["codex", "claude"],
-  "agents": {
-    "codex": { "model": "terra", "effort": "high", "permissions": "auto" },
+  "engines": {
+    "codex": { "model": "sol", "effort": "high", "permissions": "auto" },
     "claude": { "model": "opus", "effort": "medium", "permissions": "auto" }
   },
   "models": {
@@ -81,11 +81,11 @@ You rarely need these - the host agent drives tasks itself - but everything is s
 
 ```bash
 coder run "<text>"                     # dispatch a task (--wait to block for the answer)
-coder list                             # list recent tasks (running + just stopped)
+coder list                             # list recent tasks (by default running + just stopped)
 coder result [task-id]                 # status + final answer (--wait blocks until done)
 coder task steer <task-id> "<text>"    # continue a task with new instructions
 coder task stop <task-id>              # interrupt it
-coder task watch [task-id]            # watch the live progress log
+coder task watch [task-id]            # stream the live transcript
 coder task approve <task-id> <appr-id> # answer an escalated permission (--deny)
 ```
 

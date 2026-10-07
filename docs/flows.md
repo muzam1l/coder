@@ -42,9 +42,7 @@ A flow is an ordinary TypeScript module: import the primitives, use top-level `a
 // .coder/flows/verify-wave.ts
 import { task, pipeline, args } from '@wular/coder/flow';
 
-export default await pipeline(args.clusters as string[], c =>
-  task(`Verify cluster ${c}.`),
-);
+export default await pipeline(args.clusters as string[], c => task(`Verify cluster ${c}.`));
 ```
 
 ## The primitives
@@ -55,23 +53,20 @@ Dispatch one coder task and await its result.
 
 ```ts
 const r = await task('Explain the auth module', {
-  model: 'terra',
+  model: 'sol',
   permissions: 'read-only',
 });
 r.output; // final message text
 ```
 
-Options are the same as the `coder run` flags (`agent`, `model`, `effort`, `permissions`, `name`, `system`, `resume`, `cwd` - see `coder run --help`), plus one of its own:
+Options are the same as the `coder run` flags (`engine`, `model`, `effort`, `permissions`, `name`, `system`, `resume`, `cwd`, and `addDirs` for `--add-dir` - see `coder run --help`), plus one of its own:
 
-- `returns` - a zod schema for structured output instead of prose. The runtime injects the format instructions, validates the reply (one corrective retry on mismatch), and the parsed value lands on `r.data`:
+- `returns` - a zod schema for structured output instead of prose. The runtime passes the schema natively, validates the reply (one corrective retry on mismatch), and the parsed value lands on `r.data`:
 
 ```ts
-const r = await task(
-  'List every file that imports the legacy cache API.',
-  {
-    returns: z.object({ files: z.array(z.string()) }),
-  },
-);
+const r = await task('List every file that imports the legacy cache API.', {
+  returns: z.object({ files: z.array(z.string()) }),
+});
 
 r.data.files; // string[], validated
 ```
@@ -117,9 +112,7 @@ Prefer `pipeline` for anything multi-stage: fast items never wait for slow ones.
 Use `Promise.all` for plain parallel batches:
 
 ```ts
-const findings = await Promise.all(
-  areas.map(area => task(`Audit ${area}.`)),
-);
+const findings = await Promise.all(areas.map(area => task(`Audit ${area}.`)));
 ```
 
 ### `args`
@@ -201,6 +194,18 @@ The one rule this buys: **a flow must produce the same prompts on every run**. D
 2. `~/.coder/flows/` - global flows, available in every workspace.
 
 An explicit path (`coder flow run ./scratch/one-off.ts`) bypasses discovery entirely. `coder flow discover` shows every flow discoverable from where you stand.
+
+### Built-in flows
+
+Coder ships a few flows of its own; they resolve after the directories above, so a repo flow of the same name overrides them. `coder flow discover` lists them with scope `builtin`.
+
+- `review`: the `coder review` code review. Args: `pr` (number or GitHub URL), `post` (comment on the PR), `base`/`head`/`since` (as the CLI flags), `engine`/`model`/`effort`. Returns `{ findings, summary }`. `coder flow run review --args '{"pr":42,"post":true}'`
+
+### Flows run by an agent
+
+An [agent](agents/index.md) runs a flow like any script: `coder flow run <name>` from its shell, inside its sandbox. It can run any flow, including one it writes during the task.
+
+The tasks a flow starts can't exceed the agent's `permissions` (`read-only` < `workspace-write` < `auto`). A task without permissions inherits the agent's, and one asking for more fails before it starts. Platform actions, like the `review` flow's comments, run outside the sandbox, so no token enters it.
 
 ## CLI
 

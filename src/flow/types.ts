@@ -1,5 +1,5 @@
 /** Internal flow-runtime types. See docs/flows.md for the contract. */
-import type { TokenUsage } from '../lib/types.js';
+import type { TokenUsage } from '../core/types';
 
 /** Anything with zod's parse shape; the flow runtime never imports zod itself. */
 export interface FlowSchema<T> {
@@ -23,7 +23,7 @@ export interface GateResult {
 
 /** Options shared with `coder run`, plus `returns`. */
 export interface FlowTaskOptions<T = unknown> {
-  agent?: string;
+  engine?: string;
   model?: string;
   effort?: string;
   permissions?: string;
@@ -31,6 +31,7 @@ export interface FlowTaskOptions<T = unknown> {
   system?: string;
   resume?: string;
   cwd?: string;
+  addDirs?: string[];
   returns?: FlowSchema<T>;
 }
 
@@ -42,7 +43,14 @@ export type FlowRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'sto
  * and follow them.
  */
 export type FlowEvent =
-  | { kind: 'task-start'; taskId: string; name?: string; prompt: string; agent?: string; depth?: number }
+  | {
+      kind: 'task-start';
+      taskId: string;
+      name?: string;
+      prompt: string;
+      engine?: string;
+      depth?: number;
+    }
   | { kind: 'task-end'; taskId: string; status: string; tokens: TokenUsage | null }
   | { kind: 'gate-start'; gateId: string; cmd: string; depth?: number }
   | { kind: 'gate'; gateId?: string; cmd: string; ok: boolean; code: number; depth?: number }
@@ -95,5 +103,6 @@ export interface FlowStep {
 export interface DiscoveredFlow {
   name: string;
   path: string;
-  scope: 'workspace' | 'global';
+  /** `builtin` flows ship with coder; their `path` is `builtin:<name>`. */
+  scope: 'workspace' | 'global' | 'builtin';
 }

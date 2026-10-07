@@ -1,0 +1,49 @@
+@media (max-width: 760px) {
+  main {
+    padding: 16px 16px 64px;
+  }
+  h1 {
+    font-size: 22px;
+  }
+  .head .actions,
+  .hero .actions {
+    width: 100%;
+  }
+  .head {
+    row-gap: 12px;
+  }
+  .head .actions {
+    gap: 4px;
+  }
+  .head .actions > .btn {
+    padding-inline: 10px;
+  }
+  .head .lead {
+    white-space: normal;
+  }
+  .fields,
+  .fields.three,
+  .agent-form,
+  .import,
+  .cred-new.split {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .stacked thead {
+    display: none;
+  }
+  .stacked tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .stacked td {
+    padding: 0;
+    border: 0;
+  }
+  .stacked td:first-child {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+}

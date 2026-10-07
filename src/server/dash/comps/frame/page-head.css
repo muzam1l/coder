@@ -1,0 +1,83 @@
+.page.narrow {
+  max-width: 760px;
+}
+.meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.page .head,
+.page .hero {
+  position: sticky;
+  top: 56px;
+  z-index: 10;
+  margin-inline: -40px;
+  padding: 0 40px 6px;
+  background: var(--bg);
+  /* compacting on stick must not drive scroll anchoring, or the page snaps back up */
+  overflow-anchor: none;
+}
+/* what sticks above the page: the top bar, the page head (its height set by Sentinel) and tabs */
+.page {
+  --stuck: calc(56px + var(--head, 0px) + var(--tabs, 0px));
+}
+.page:has(.tabs:not(.vertical)) {
+  --tabs: 40px;
+}
+.page * {
+  scroll-margin-top: calc(var(--stuck) + 16px);
+}
+.back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.stuck .back {
+  display: none;
+}
+.back:hover {
+  color: var(--fg);
+}
+.back .ic {
+  width: 14px;
+  height: 14px;
+}
+.title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-width: 0;
+}
+.title-row h1 {
+  min-width: 0;
+}
+.head .title-row {
+  flex-wrap: nowrap;
+}
+.head .title-row h1 {
+  flex: 0 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.head .title-row .meta {
+  flex: none;
+}
+@media (max-width: 760px) {
+  .page .head,
+  .page .hero {
+    margin-inline: -16px;
+    padding-inline: 16px;
+  }
+  .head .title-row {
+    flex-wrap: wrap;
+  }
+}
+.head .meta:empty {
+  min-height: 20px;
+}

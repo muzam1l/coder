@@ -1,0 +1,98 @@
+/* phones: a row's title and actions share the first line; badges, picks and details take the full width under them */
+@media (max-width: 760px) {
+  .settings tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 8px 12px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .settings tr:last-child {
+    border-bottom: 0;
+  }
+  .settings td {
+    padding: 0;
+    border: 0;
+  }
+  .settings td:first-child,
+  .settings .row-title {
+    display: contents;
+  }
+  .settings .row-title > :not(b),
+  .settings .sub {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+  .settings td.acts {
+    grid-row: 1;
+    grid-column: 2;
+  }
+}
+
+/* settings lists */
+.add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+.acts dialog {
+  text-align: left;
+  white-space: normal;
+}
+.add-kind {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  font-size: 12.5px;
+}
+.add-grid + .add-grid {
+  margin-top: 12px;
+}
+/* room for the longest option, so a pick never shifts the row */
+/* Advanced and the button share a row; an open Advanced takes the row and the button drops under it */
+.add-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 12px;
+  margin-top: 12px;
+}
+.add-foot > .add-more {
+  flex: 1 1 auto;
+}
+.add-foot > .add-more[open] {
+  flex-basis: 100%;
+}
+.add-foot > .btn {
+  margin-left: auto;
+}
+.add-form .select:has([aria-label="Engine"]) {
+  min-width: 190px;
+}
+.add-form .select:has([aria-label="Provider"]) {
+  min-width: 200px;
+}
+.add-form .select:has([aria-label="Scope"]) {
+  min-width: 150px;
+}
+.add-more > summary {
+  width: max-content;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.add-more > .add-grid {
+  margin-top: 12px;
+}
+/* a long name or URL wraps, so the row's actions stay on screen at phone width */
+.settings .row-title {
+  flex-wrap: wrap;
+  overflow-wrap: anywhere;
+}
+.settings .sub {
+  overflow-wrap: anywhere;
+}

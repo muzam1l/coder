@@ -1,0 +1,60 @@
+/* sign-in and other server pages */
+.auth {
+  display: grid;
+  min-height: 100vh;
+}
+.auth-side {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 28px;
+  padding: 40px 24px 72px;
+}
+.auth-frame {
+  width: 100%;
+  max-width: 440px;
+}
+.auth-frame .bar {
+  min-height: 32px;
+  font-size: 10px;
+}
+.auth-frame .brand {
+  font-size: 12px;
+}
+.tag {
+  margin-left: auto;
+  padding: 1px 8px;
+  background: var(--deep);
+  color: #fff;
+}
+.auth-body {
+  display: grid;
+  gap: 14px;
+  padding: 28px 24px 26px;
+}
+.auth-body h1 {
+  font-size: 22px;
+}
+.auth-body .lead {
+  margin: 0 0 6px;
+}
+.auth-body form {
+  display: grid;
+  gap: 14px;
+}
+.auth-links {
+  position: absolute;
+  bottom: 24px;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  font-size: 9px;
+  color: var(--muted);
+}
+.auth-links a:hover {
+  color: var(--fg);
+}

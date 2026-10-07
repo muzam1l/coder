@@ -1,0 +1,26 @@
+.btn .logo {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.provider-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.provider-grid > .provider:only-child {
+  grid-column: 1 / -1;
+}
+.provider {
+  justify-content: center;
+  gap: 10px;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  font-size: 13px;
+  font-weight: 500;
+}
+@media (max-width: 420px) {
+  .provider-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "extends": "@wular/pnext/config/ts/react.json",
+  "compilerOptions": {
+    "paths": {
+      "@/*": ["./*"],
+      "@coder/*": ["../../*"]
+    }
+  },
+  "include": ["**/*.ts", "**/*.tsx", "pnext-env.d.ts", "../../../dist/dash/types/**/*.ts"]
+}

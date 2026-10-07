@@ -1,0 +1,87 @@
+.tab-lead {
+  color: var(--muted);
+  max-width: 72ch;
+}
+.more-list .inst {
+  padding: 4px 6px;
+}
+.plat td:first-child b {
+  margin-right: 8px;
+}
+.plat .where {
+  min-width: 150px;
+}
+.inst {
+  display: block;
+}
+.inst + .inst {
+  margin-top: 8px;
+}
+.where .more {
+  display: inline-block;
+  margin-top: 8px;
+}
+.plat .acts {
+  width: 1%;
+  white-space: nowrap;
+}
+.plat .acts > .badge {
+  margin-right: 10px;
+}
+.plat .acts .btn {
+  min-width: 92px;
+  justify-content: center;
+}
+.plat .acts .menu {
+  display: inline-block;
+  margin-left: 4px;
+}
+.plat .acts .pop {
+  text-align: left;
+  white-space: normal;
+}
+
+@media (max-width: 1180px) {
+  .stacked.early thead {
+    display: none;
+  }
+  .stacked.early tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .stacked.early td {
+    padding: 0;
+    border: 0;
+    min-width: 0;
+  }
+  .stacked.early td:first-child {
+    grid-column: 1 / -1;
+  }
+  .plat.early td:first-child {
+    grid-row: 1;
+    grid-column: 1;
+  }
+  /* a long platform name wraps instead of running under the actions */
+  .plat.early td:first-child .pf {
+    white-space: normal;
+  }
+  .plat.early .acts {
+    grid-row: 1;
+    grid-column: 2;
+    width: auto;
+  }
+  .plat.early td:nth-child(2) {
+    grid-column: 1;
+  }
+  .plat.early td:nth-child(3) {
+    grid-column: 2;
+    justify-self: end;
+  }
+  .plat.early td:nth-child(4),
+  .plat.early .where {
+    grid-column: 1 / -1;
+  }
+}

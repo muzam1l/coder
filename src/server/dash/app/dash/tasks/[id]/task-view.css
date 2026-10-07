@@ -1,0 +1,407 @@
+/* task head: the id line under the title */
+.head .lead:has(.task-id) {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.head.stuck .lead:has(.task-id) {
+  display: none;
+}
+.task-id {
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.head .copy {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  margin-left: -8px;
+  padding: 2px;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+}
+.head .copy:hover {
+  color: var(--fg);
+}
+.head .copy .ic {
+  width: 13px;
+  height: 13px;
+}
+/* phones: the actions sit on the back link's row, the title gets the full width under it */
+@media (max-width: 760px) {
+  .head:has(.task-id) .back {
+    height: 34px;
+  }
+  .head:has(.task-id) .title-row > h1 {
+    flex-basis: 100%;
+  }
+  .head:has(.task-id) .actions {
+    position: absolute;
+    top: 0;
+    right: 16px;
+    width: auto;
+    flex-wrap: nowrap;
+  }
+  .head.stuck:has(.task-id) .actions {
+    position: static;
+  }
+  .head.stuck:has(.task-id) .actions > .menu {
+    display: inline;
+  }
+  .head.stuck:has(.task-id) .title-row > h1 {
+    flex-basis: auto;
+  }
+  .head.stuck:has(.task-id) .meta {
+    display: none;
+  }
+}
+.agent-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: underline dotted;
+  text-underline-offset: 3px;
+}
+.agent-link .ic {
+  width: 12px;
+  height: 12px;
+}
+.turn.answer {
+  border-left-color: var(--line2);
+}
+.agent-link:hover {
+  color: var(--fg);
+}
+
+/* logs */
+.logs {
+  margin: 0;
+  padding: 16px;
+  max-height: 420px;
+  overflow: auto;
+  font: 12.5px/1.8 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--tile);
+}
+
+pre.json {
+  margin: 0;
+  overflow-x: auto;
+}
+
+/* task conversation */
+.convo {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 16px;
+}
+.turn {
+  min-width: 0;
+  padding: 12px 16px;
+  border-left: 2px solid var(--acc);
+  background: var(--tile);
+}
+.turn .who {
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--dim);
+}
+.body.waiting {
+  display: flex;
+  justify-content: center;
+  padding-block: 40px;
+}
+.body.waiting > .loading {
+  flex: 0 1 auto;
+}
+.turn .collapse.open > .btn.more-toggle {
+  margin: 8px auto 0;
+}
+
+/* activity: one line per event, long ones open in place */
+.act-list {
+  position: relative;
+}
+.act-slot {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+}
+.act {
+  display: grid;
+  grid-template-columns: 76px 16px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 3px 8px;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: none;
+  font: 12.5px/1.7 var(--mono);
+  text-align: left;
+}
+.act-slot:has(> .sep) {
+  padding-top: 8px;
+}
+button.act {
+  grid-template-columns: 76px 16px minmax(0, 1fr) 14px;
+  cursor: pointer;
+}
+.act .act-chev {
+  visibility: hidden;
+}
+button.act:hover .act-chev,
+.act.open .act-chev {
+  visibility: visible;
+}
+.act.open .act-chev {
+  rotate: 180deg;
+}
+button.act:hover {
+  background: var(--wash);
+}
+.act time {
+  color: var(--dim);
+  font-size: 11px;
+}
+.act .ic {
+  width: 13px;
+  height: 13px;
+  align-self: start;
+  margin-top: 4px;
+  color: var(--dim);
+}
+.act-text {
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+}
+.act-title,
+.act-detail {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.act-title {
+  flex: 0 1 auto;
+}
+.act-detail {
+  flex: 1 1 0;
+  color: var(--dim);
+}
+.act.open .act-text {
+  display: grid;
+  gap: 2px;
+}
+.act.open :is(.act-title, .act-detail) {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.act.muted .act-title,
+.act.usage .act-title {
+  color: var(--muted);
+}
+.act.assistant .act-title {
+  color: var(--fg);
+  font-size: 13px;
+}
+.act.assistant .ic {
+  color: var(--acc);
+}
+.act.approval {
+  border-left-color: var(--acc);
+  background: var(--accbg);
+}
+.act.approval .ic {
+  color: var(--acc);
+}
+.act.warning :is(.act-title, .ic) {
+  color: var(--warn);
+}
+.act.error :is(.act-title, .ic) {
+  color: var(--bad);
+}
+.act-empty {
+  padding: 24px 0;
+  text-align: center;
+}
+.jump {
+  position: sticky;
+  bottom: calc(var(--reply, 72px) + 8px);
+  z-index: 11;
+  display: block;
+  width: max-content;
+  margin: 0 auto;
+  padding: 6px 14px;
+  border: 1px solid var(--line2);
+  border-radius: 999px;
+  background: var(--tile);
+  color: var(--fg);
+  font-size: 12px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  cursor: pointer;
+}
+
+.no-reply {
+  margin-top: 16px;
+  font-size: 12px;
+}
+
+/* the reply box stays at the bottom of the window */
+main:has(form.reply) {
+  padding-bottom: 0;
+}
+form.reply {
+  position: sticky;
+  bottom: 0;
+  z-index: 10;
+  display: grid;
+  gap: 6px;
+  margin-top: auto;
+  padding: 12px 0 16px;
+  background: var(--bg);
+}
+.reply-box {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--line2);
+  background: var(--field);
+}
+.reply-box:focus-within {
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--accbg);
+}
+.reply-box textarea {
+  flex: 1;
+  field-sizing: content;
+  min-height: 28px;
+  max-height: 6lh;
+  padding: 2px 6px;
+  border: 0;
+  background: none;
+  resize: none;
+  box-shadow: none;
+}
+.reply-box textarea:focus {
+  box-shadow: none;
+}
+.reply-box textarea::placeholder {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.reply-box .mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 8px;
+  background: var(--wash2);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.2em;
+}
+.reply-box .mode .ic {
+  width: 12px;
+  height: 12px;
+}
+
+/* the agent's own words stand out; tool traffic recedes until opened */
+.act:is(.tool, .tool-result, .status, .line, .reasoning, .usage) .act-title {
+  color: var(--muted);
+}
+.act.open .act-title {
+  color: var(--fg);
+}
+
+/* review findings: a colored edge per severity, then place, claim and the failure it causes */
+.findings {
+  display: grid;
+  gap: 24px;
+  margin: 0;
+  padding: 12px 16px;
+  list-style: none;
+}
+.finding {
+  min-width: 0;
+  padding-left: 12px;
+  border-left: 2px solid var(--dim);
+  --sev: var(--dim);
+}
+.finding.critical {
+  --sev: var(--bad);
+}
+.finding.major {
+  --sev: var(--warn);
+}
+.finding.minor {
+  --sev: var(--acc);
+}
+.finding {
+  border-left-color: var(--sev);
+}
+.finding p {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.finding-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  font-size: 12px;
+}
+.finding-head .sev {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sev);
+}
+.finding-head .loc {
+  color: var(--muted);
+}
+.finding-head .cat {
+  margin-left: auto;
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.finding-sum {
+  margin-top: 4px;
+  font-weight: 500;
+}
+.finding-why {
+  margin-top: 2px;
+  font-size: 12.5px;
+}
+
+/* a question and its answer share one block */
+.turn.qa > .answer {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line2);
+}
+
+/* the task's own prompt reads as the brief; later asks and steers keep the accent edge */
+.turn.prompt {
+  border-left-color: var(--fg);
+}
+.turn.prompt .prose {
+  font-size: 13.5px;
+}
+
+/* the toggle sits as close to the card edge as it does on the agent page */
+.turn .collapse:not(.open) {
+  margin-bottom: -12px;
+}

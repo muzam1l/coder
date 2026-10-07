@@ -1,0 +1,72 @@
+/* task toasts: a fixed stack at the bottom right, newest on top */
+.toasts {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 8px;
+  width: min(340px, calc(100vw - 32px));
+  pointer-events: none;
+}
+.toast {
+  position: relative;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--line2);
+  background: var(--tile);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  pointer-events: auto;
+  cursor: pointer;
+  animation: toast-in 0.15s ease-out;
+}
+.toast:hover {
+  background: linear-gradient(var(--wash), var(--wash)), var(--tile);
+}
+.toast:has(.cover:focus-visible) {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
+.toast-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+}
+.toast-head .cover {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--fg);
+  text-decoration: none;
+  outline: none;
+}
+.toast-line {
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+}
+.toast.err .toast-head .cover {
+  color: var(--bad);
+}
+.toast.err .toast-line {
+  white-space: normal;
+}
+@keyframes toast-in {
+  from {
+    opacity: 0;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast {
+    animation: none;
+  }
+}

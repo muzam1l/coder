@@ -1,0 +1,58 @@
+.sentinel {
+  display: block;
+  height: 0;
+  margin-bottom: -20px;
+}
+.page .head.stuck,
+.page .hero.stuck {
+  padding-top: 10px;
+}
+.stuck {
+  border-bottom: 1px solid var(--line2);
+  align-items: center;
+  flex-wrap: nowrap;
+}
+.stuck h1 {
+  font-size: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stuck .lead {
+  display: none;
+}
+.stuck .title-row {
+  flex-wrap: nowrap;
+}
+.stuck .meta {
+  flex-wrap: nowrap;
+  overflow: hidden;
+}
+.stuck > div:first-child,
+.stuck > .grow {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.stuck .actions {
+  flex: none;
+  flex-wrap: nowrap;
+  width: auto;
+  justify-content: flex-end;
+}
+.stuck .hero-mark {
+  width: 28px;
+  height: 28px;
+  font-size: 13px;
+}
+.stuck.hero {
+  gap: 12px;
+}
+.hero.stuck .title-row .badge {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .stuck .actions > :not(.flash, dialog) ~ :not(.flash, dialog) {
+    display: none;
+  }
+}

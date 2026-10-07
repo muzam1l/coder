@@ -1,0 +1,263 @@
+.fixed {
+  padding: 7px 0;
+  color: var(--muted);
+}
+
+/* the agent form: a head with its actions, a start row, then one page of parts beside a live preview */
+.agent-new {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.agent-new .btn[aria-pressed="true"] {
+  border-color: var(--deep);
+  background: var(--accbg);
+}
+.templates {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.tile {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--line2);
+  background: var(--tile);
+  text-align: left;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+.tile[aria-checked="true"] {
+  border-color: var(--deep);
+  box-shadow: inset 3px 0 0 var(--deep);
+}
+.tile b,
+.tile small {
+  display: block;
+}
+.tile small {
+  color: var(--muted);
+  font-size: 11.5px;
+  margin-top: 2px;
+}
+.agent-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  align-items: start;
+  gap: 24px;
+}
+.agent-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  min-width: 0;
+}
+.form-part {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  padding: 16px 18px;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+}
+.form-part h2 {
+  font-size: 15px;
+  font-weight: 700;
+}
+.form-part h2 + .muted,
+.part-head + .muted {
+  margin-top: -6px;
+}
+.part-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.part-head .search {
+  flex: 0 1 240px;
+  min-width: 0;
+}
+.md-preview {
+  min-height: 232px;
+  max-height: 240px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line2);
+  background: var(--field);
+}
+
+/* where it listens: one row per platform, its triggers as chips once on */
+.listen {
+  border: 1px solid var(--line2);
+}
+.listen > li + li {
+  border-top: 1px solid var(--line2);
+}
+.listen-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  cursor: pointer;
+}
+.listen-row b,
+.listen-row small {
+  display: block;
+}
+.listen-row small {
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pf-mark {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  background: var(--wash2);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+.listen li.on .pf-mark {
+  background: var(--wash2);
+}
+.listen input.switch {
+  appearance: none;
+  position: relative;
+  width: 30px;
+  height: 18px;
+  border: 1px solid var(--line2);
+  background: var(--wash2);
+}
+.listen input.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: var(--muted);
+  transition: transform 0.15s;
+}
+.listen input.switch:checked {
+  border-color: var(--deep);
+  background: var(--deep);
+}
+.listen input.switch:checked::after {
+  transform: translateX(12px);
+  background: #fff;
+}
+.listen input.switch:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
+}
+.triggers {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 12px 52px;
+}
+.triggers .chips {
+  gap: 6px;
+}
+.match {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.match span {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.listen .match input.mono {
+  min-width: 0;
+  min-height: 30px;
+  padding: 4px 8px;
+}
+.listen-none {
+  padding: 12px;
+}
+
+/* run settings: one line of resolved values until opened */
+.run:not([open]) {
+  gap: 0;
+}
+.run-body {
+  display: grid;
+  gap: 14px;
+}
+.run > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  list-style: none;
+  cursor: pointer;
+}
+.run > summary::-webkit-details-marker {
+  display: none;
+}
+.run > summary .grow {
+  font-size: 12px;
+}
+.run > summary .ic {
+  align-self: center;
+  width: 14px;
+  height: 14px;
+  color: var(--muted);
+  transform: rotate(-90deg);
+  transition: transform 0.15s;
+}
+.run[open] > summary .ic {
+  transform: none;
+}
+
+.agent-side {
+  position: sticky;
+  top: calc(var(--stuck) + 16px);
+  display: grid;
+  gap: 10px;
+}
+.side-label {
+  font-size: 10.5px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.agent-card.preview {
+  height: auto;
+  min-height: 160px;
+}
+.agent-card.preview::before {
+  background: var(--deep);
+}
+.summary {
+  color: var(--muted);
+}
+
+@media (max-width: 760px) {
+  .templates,
+  .agent-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .agent-side {
+    position: static;
+  }
+  .triggers {
+    padding-left: 12px;
+  }
+  .run-body .seg-btns > button {
+    padding: 0 8px;
+  }
+  .page .agent-new .stuck .actions > :not(:last-child, [role="alert"]) {
+    display: none;
+  }
+  .page .agent-new .stuck .actions > :last-child {
+    display: inline-flex;
+  }
+}

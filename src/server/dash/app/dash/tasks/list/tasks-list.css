@@ -1,0 +1,85 @@
+.tasks {
+  table-layout: fixed;
+  min-width: 720px;
+}
+.tasks th:nth-child(2) {
+  width: 160px;
+}
+.tasks th:nth-child(3) {
+  width: 140px;
+}
+.tasks th:nth-child(4) {
+  width: 130px;
+}
+.tasks th:nth-child(5) {
+  width: 150px;
+}
+.tasks td {
+  padding-block: 9px;
+  vertical-align: middle;
+}
+.tasks .cover {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.tasks td:first-child .sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tasks td:first-child .sub {
+  margin-top: 1px;
+}
+
+@media (max-width: 760px) {
+  .tasks {
+    min-width: 0;
+  }
+  .tasks td:nth-child(3) {
+    display: flex;
+    align-items: center;
+    justify-self: end;
+  }
+  .tasks td.when,
+  .tasks td.num {
+    font-size: 11.5px;
+  }
+  .tasks td.num {
+    justify-self: end;
+    color: var(--muted);
+  }
+}
+.source {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.source .ic {
+  color: var(--dim);
+}
+
+/* a row's menu waits at its right edge, above the cover link, and shows on hover, focus or while open */
+.tasks th.num,
+.tasks td.num {
+  padding-right: 64px;
+}
+.tasks td.num {
+  position: relative;
+}
+.row-acts {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  z-index: 1;
+  translate: 0 -50%;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.tasks tr:is(:hover, :focus-within) .row-acts,
+.row-acts:has(.pop:popover-open) {
+  opacity: 1;
+}

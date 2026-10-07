@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.3.18",
+  "version": "0.4.0",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "main": "./dist/sdk.js",
@@ -19,21 +19,32 @@
     "coder": "bin/coder.mjs"
   },
   "scripts": {
-    "build": "tsdown && bunx prettier --write 'dist/**/*.d.ts' --log-level warn",
-    "dev": "bun run build --watch",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "validate-plugin:cursor": "node scripts/validate-template.mjs",
+    "build": "bun scripts/build.ts",
+    "build:dash": "bun scripts/build.ts dash",
+    "dev:dash": "pnext dev src/server/dash",
+    "dev": "tsdown --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit && pnext typegen src/server/dash && tsc -p src/server/dash/tsconfig.json --noEmit",
+    "validate-plugin:cursor": "node scripts/validate-cursor-plugin.mjs",
     "version-bump:patch": "node scripts/bump.mjs patch",
     "version-bump:minor": "node scripts/bump.mjs minor",
-    "version-bump:major": "node scripts/bump.mjs major"
+    "version-bump:major": "node scripts/bump.mjs major",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\" \"scripts/**/*.ts\" \"*.md\" \"docs/**/*.md\""
   },
   "files": [
     "bin",
     "dist",
+    "src/server/dash",
+    "!src/server/dash/serve.ts",
+    "src/server/auth/sign-in.ts",
+    "src/client/index.ts",
+    "src/client/types.ts",
+    "src/core/errors.ts",
+    "src/core/task/log-view.ts",
     "plugins",
     ".claude-plugin",
     "README.md",
-    "docs"
+    "docs",
+    "migrations"
   ],
   "publishConfig": {
     "access": "public"
@@ -42,10 +53,29 @@
     "node": ">=18"
   },
   "dependencies": {
+    "@chat-adapter/github": "4.41.1",
+    "@chat-adapter/gmail": "4.41.1",
+    "@chat-adapter/linear": "4.41.1",
+    "@chat-adapter/slack": "4.41.1",
+    "@chat-adapter/teams": "4.41.1",
+    "@octokit/auth-app": "8.3.1",
+    "@tanstack/virtual-core": "3.17.1",
+    "@wular/pnext": "0.1.5",
+    "chat": "4.41.1",
+    "drizzle-orm": "0.45.2",
+    "jose": "6.2.12",
+    "openid-client": "6.8.8",
+    "postgres": "3.4.9",
+    "preact": "10.29.2",
+    "preact-render-to-string": "6.7.0",
+    "simple-icons": "15.0.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
     "@types/node": "^26.1.2",
+    "drizzle-kit": "0.31.10",
+    "prettier": "^3.6.2",
     "tsdown": "^0.22.13",
     "typescript": "^5.9.3"
   }

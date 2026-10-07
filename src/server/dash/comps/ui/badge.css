@@ -1,0 +1,64 @@
+/* badges and task states */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 1px 7px;
+  border: 1px solid var(--line2);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.badge.acc {
+  border-color: transparent;
+  background: var(--accbg);
+  color: var(--acc);
+}
+.badge.ok {
+  border-color: transparent;
+  background: var(--okbg);
+  color: var(--ok);
+}
+.badge.warn {
+  border-color: transparent;
+  background: var(--warnbg);
+  color: var(--warn);
+}
+.badge.solid {
+  border-color: var(--fg);
+  background: var(--fg);
+  color: var(--bg);
+}
+a.badge:hover,
+button.badge:hover {
+  border-color: var(--acc);
+}
+button.badge {
+  cursor: pointer;
+}
+.chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.chip {
+  line-height: 18px;
+  padding: 0 6px;
+  border: 1px solid var(--line2);
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.id {
+  font-size: 11.5px;
+  color: var(--dim);
+}
+button.chip {
+  background: none;
+  cursor: pointer;
+}
+button.chip:hover,
+button.chip[aria-pressed="true"] {
+  border-color: var(--acc);
+  color: var(--acc);
+}

@@ -1,0 +1,48 @@
+.form-actions.end {
+  justify-content: flex-end;
+}
+.import {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  gap: 20px;
+}
+.import-repos,
+.import-preview,
+.import-agents {
+  display: grid;
+  gap: 12px;
+}
+.import-preview {
+  min-height: 240px;
+  padding: 20px;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+}
+.import-preview h3 {
+  font-size: 14px;
+  font-weight: 700;
+}
+.repo-list {
+  --max: 420px;
+  min-height: 240px;
+  border: 1px solid var(--line2);
+  background: var(--panel);
+}
+.repo-list .pop-item .ic {
+  color: var(--dim);
+}
+.repo-list .pop-item[aria-pressed="true"] {
+  background: var(--accbg);
+  box-shadow: inset 2px 0 0 var(--acc);
+}
+.picks-list {
+  display: grid;
+  gap: 12px;
+}
+.picks-list b {
+  font-weight: 500;
+}
+.picks-list .badge {
+  margin-left: 6px;
+}

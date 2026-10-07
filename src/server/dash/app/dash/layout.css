@@ -1,0 +1,265 @@
+/* app shell */
+.app {
+  --side: 232px;
+  display: grid;
+  grid-template-columns: var(--side) minmax(0, 1fr);
+  grid-template-rows: 56px 1fr;
+  min-height: 100vh;
+}
+.top {
+  grid-column: 1 / -1;
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 16px 0 20px;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line2);
+}
+.top-l,
+.top-r {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.lockup {
+  display: grid;
+}
+.lockup small {
+  font-weight: 400;
+  font-size: 8px;
+  line-height: 8px;
+  letter-spacing: 0.3em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.side {
+  position: sticky;
+  top: 56px;
+  z-index: 5;
+  height: calc(100vh - 56px);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding: 16px 12px;
+  border-right: 1px solid var(--line);
+}
+.side nav {
+  display: grid;
+  gap: 2px;
+}
+.side nav a {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 36px;
+  padding: 0 12px;
+  color: var(--muted);
+  border-left: 2px solid transparent;
+}
+.side nav a:hover {
+  color: var(--fg);
+  background: var(--wash);
+}
+.side nav a[aria-current] {
+  color: var(--fg);
+  background: var(--wash2);
+  border-left-color: var(--deep);
+}
+.side nav .n {
+  margin-left: auto;
+  background: var(--accbg);
+  color: var(--acc);
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--warn);
+}
+.dot.ok {
+  background: var(--ok);
+  box-shadow: 0 0 0 3px var(--okbg);
+}
+.server > button {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.server > button:hover {
+  background: var(--wash);
+}
+.server > button .grow {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.server .ic {
+  color: var(--dim);
+  width: 14px;
+}
+.server .pop {
+  width: max-content;
+  max-width: calc(100vw - 32px);
+}
+.server .kv dd {
+  white-space: nowrap;
+}
+.pop-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px 12px;
+  min-width: 0;
+}
+.pop-head b,
+.pop-head small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pop-head small,
+.pop-item small {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.org,
+.avatar {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  background: var(--wash2);
+  font-weight: 700;
+  font-size: 12px;
+}
+.avatar {
+  width: 32px;
+  height: 32px;
+}
+.avatar-btn {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  background: var(--fg);
+  color: var(--bg);
+  font-weight: 700;
+  cursor: pointer;
+}
+.kv {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 8px 20px;
+  margin: 0;
+}
+.kv dt {
+  color: var(--muted);
+}
+.kv dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.pop .kv {
+  padding: 6px 10px 10px;
+  font-size: 12px;
+}
+.theme .ic.sun,
+.theme .ic.moon,
+.theme .ic.sys {
+  display: none;
+}
+:root[data-theme="light"] .theme .ic.sun,
+:root[data-theme="dark"] .theme .ic.moon,
+:root:not([data-theme]) .theme .ic.sys {
+  display: block;
+}
+/* the admin token form covers the dashboard it opens */
+.app > .auth {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  overflow: auto;
+  background: var(--bg);
+}
+
+@media (max-width: 760px) {
+  .app {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .top {
+    padding: 0 10px;
+  }
+  .side {
+    position: fixed;
+    top: 56px;
+    left: 0;
+    bottom: 0;
+    height: auto;
+    width: min(280px, 84vw);
+    z-index: 30;
+    background: var(--bg);
+    border-right: 1px solid var(--line2);
+    transform: translateX(-100%);
+    transition: transform 0.2s;
+  }
+}
+
+/* collapsed sidebar: icons only, the server pill becomes its dot */
+/* the collapser sits at the sidebar's foot, above the server pill */
+.side-foot {
+  display: grid;
+  gap: 8px;
+}
+.side-toggle {
+  justify-self: end;
+  color: var(--dim);
+}
+.side-min .side-toggle {
+  justify-self: center;
+}
+.app.side-min {
+  --side: 60px;
+}
+.side-min .top .lockup {
+  display: none;
+}
+.side-min .side {
+  padding-inline: 10px;
+}
+.side-min .side nav a {
+  justify-content: center;
+  gap: 0;
+  padding: 0;
+  font-size: 0;
+}
+.side-min .side nav .n {
+  display: none;
+}
+.side-min .server > button {
+  justify-content: center;
+  padding: 10px 0;
+}
+.side-min .server > button :is(.grow, .ic) {
+  display: none;
+}
+@media (max-width: 760px) {
+  .side-toggle {
+    display: none;
+  }
+  .app.side-min {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
