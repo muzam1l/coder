@@ -144,6 +144,34 @@ function buildCli(root: string): number {
   }
 }
 
+const NODE_MODULE = /"(file:\/\/)?(\/[^"]*?\/node_modules\/(?:\.bun\/[^/"]+\/node_modules\/)?)((?:@[^/"]+\/)?[^/"]+)(\/[^"]*)?"/g;
+const PNEXT_ROOT =
+  'import { createRequire as __coderRequire } from "node:module";\n' +
+  'const __pnextRoot = __coderRequire(import.meta.url).resolve("@wular/pnext").replace(/\\/src\\/index\\.ts$/, "");\n';
+
+/** pnext bakes this machine's node_modules paths into the server bundle (until pnext 0.1.6): packages become bare specifiers, pnext's own files resolve from its install. */
+export function portableServer(dir: string): string[] {
+  const left: string[] = [];
+  for (const file of files(dir).filter(name => name.endsWith('.js'))) {
+    const full = path.join(dir, file);
+    const source = readFileSync(full, 'utf8');
+    let pnext = false;
+    const next = source.replace(NODE_MODULE, (match, url: string, base: string, name: string, rest = '') => {
+      if (name === '@wular/pnext') {
+        pnext = true;
+        return `(${url ? '"file://" + ' : ''}__pnextRoot + ${JSON.stringify(rest)})`;
+      }
+      if (url) return match;
+      const main = JSON.parse(readFileSync(path.join(base, name, 'package.json'), 'utf8')).main ?? 'index.js';
+      return JSON.stringify(path.posix.normalize(`/${main}`) === rest ? name : name + rest);
+    });
+    const out = pnext ? PNEXT_ROOT + next : next;
+    if (out !== source) writeFileSync(full, out);
+    if (/"(file:\/\/)?\/[^"]*\/node_modules\//.test(out)) left.push(file);
+  }
+  return left;
+}
+
 function buildDash(root: string): number {
   const local = path.join(root, 'node_modules/.bin/pnext');
   // A copy of the package whose relative outDir lands in the stage.
@@ -161,8 +189,14 @@ function buildDash(root: string): number {
         'build',
         path.join(copy, 'src/server/dash'),
       ]);
-      if (built === 0) renameSync(path.join(copy, 'dist/dash'), stage);
-      return built;
+      if (built !== 0) return built;
+      const left = portableServer(path.join(copy, 'dist/dash/server'));
+      if (left.length) {
+        console.error(`Machine paths left in the dashboard server: ${left.join(', ')}`);
+        return 1;
+      }
+      renameSync(path.join(copy, 'dist/dash'), stage);
+      return 0;
     } finally {
       rmSync(copy, { recursive: true, force: true });
     }
