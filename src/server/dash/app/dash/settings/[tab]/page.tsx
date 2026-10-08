@@ -5,7 +5,7 @@ import './credentials-list.css';
 import './list.css';
 import { dynamic } from '@wular/pnext/dynamic';
 import { notFound } from '@wular/pnext/navigation';
-import { DEFAULT_CONFIG } from '@coder/core/config';
+import { DEFAULT_CONFIG } from '@coder/core/defaults';
 
 import { load } from '@/api/load';
 import { Settle, Stream } from '@/comps/frame/stream';

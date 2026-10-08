@@ -40,7 +40,7 @@
 .side {
   position: sticky;
   top: 56px;
-  z-index: 5;
+  z-index: 12;
   height: calc(100vh - 56px);
   display: flex;
   flex-direction: column;
@@ -247,6 +247,63 @@
 }
 .side-min .side nav .n {
   display: none;
+}
+/* collapsed icons and the sidebar toggle name themselves on hover and keyboard focus */
+.side-min .side [data-tip],
+.side-toggle {
+  position: relative;
+}
+.side-min .side [data-tip]::after,
+.side-toggle::after {
+  content: attr(data-tip) / '';
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 12px);
+  z-index: 30;
+  padding: 6px 10px;
+  border: 1px solid var(--line2);
+  background: var(--tile);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  color: var(--fg);
+  font-size: 12px;
+  letter-spacing: normal;
+  white-space: nowrap;
+  transform: translateY(-50%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+/* a small arrow on the tooltip's edge, pointing back at the icon */
+.side-min .side [data-tip]::before,
+.side-toggle::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: calc(100% + 8px);
+  z-index: 31;
+  width: 8px;
+  height: 8px;
+  border-bottom: 1px solid var(--line2);
+  border-left: 1px solid var(--line2);
+  background: var(--tile);
+  transform: translateY(-50%) rotate(45deg);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.side-min .side [data-tip]:is(:hover, :focus-visible)::before,
+.side-min .side [data-tip]:is(:hover, :focus-visible)::after,
+.side-toggle:is(:hover, :focus-visible)::before,
+.side-toggle:is(:hover, :focus-visible)::after {
+  opacity: 1;
+}
+.side-toggle:is(:hover, :focus-visible)::before,
+.side-toggle:is(:hover, :focus-visible)::after {
+  transition-delay: 0.7s;
+}
+.side-min .menu:has(:popover-open) > [data-tip]::before,
+.side-min .menu:has(:popover-open) > [data-tip]::after {
+  opacity: 0;
 }
 .side-min .server > button {
   justify-content: center;

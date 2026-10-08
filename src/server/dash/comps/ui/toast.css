@@ -15,8 +15,9 @@
 .toast {
   position: relative;
   display: grid;
-  gap: 4px;
-  padding: 10px 12px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 14px 16px;
   border: 1px solid var(--line2);
   background: var(--tile);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);

@@ -21,7 +21,7 @@ export function SideToggle({ collapsed: initial }: { collapsed: boolean }) {
       type="button"
       class="icon-btn side-toggle"
       aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+      data-tip={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
       onClick={toggle}
     >
       <Icon d={collapsed ? iRight : iLeft} />

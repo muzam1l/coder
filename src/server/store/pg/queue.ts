@@ -12,6 +12,7 @@ import {
   inArray,
   isNotNull,
   isNull,
+  not,
   or,
   sql,
   type SQL,
@@ -29,6 +30,7 @@ import {
   type TaskMetrics,
   type TaskFilter,
   type TaskListOptions,
+  type ListCursor,
   type TaskQueue,
   type Outcome,
   type InboxEntry,
@@ -554,16 +556,20 @@ export class DrizzleQueue implements TaskQueue {
     const query = this.db
       .select(columns)
       .from(task)
-      .where(
-        and(
-          this.filter(organizationId, opts),
-          before
-            ? sql`(${task.createdAt}, ${task.publicId}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.id})`
-            : undefined,
-        ),
-      )
-      .orderBy(desc(task.createdAt), desc(task.publicId));
+      .where(and(this.filter(organizationId, opts), before ? this.after(before) : undefined))
+      .orderBy(
+        desc(inArray(task.status, ACTIVE_STATES)),
+        desc(task.createdAt),
+        desc(task.publicId),
+      );
     return opts.limit === undefined ? query : query.limit(opts.limit);
+  }
+
+  /** Rows after the cursor in list order: active first, then newest. */
+  private after(before: ListCursor) {
+    const older = sql`(${task.createdAt}, ${task.publicId}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.id})`;
+    const active = inArray(task.status, ACTIVE_STATES);
+    return before.active ? or(not(active), and(active, older)) : and(not(active), older);
   }
 
   private record(row: Record<string, unknown>, summary?: boolean): TaskStatus {
@@ -628,7 +634,11 @@ export class DrizzleQueue implements TaskQueue {
         .select({ ...fields, all: totals.all, active: totals.active, waiting: totals.waiting })
         .from(totals)
         .leftJoin(page, sql`true`)
-        .orderBy(desc(page.createdAt), desc(page.publicId)),
+        .orderBy(
+          desc(inArray(fields.status!, ACTIVE_STATES)),
+          desc(page.createdAt),
+          desc(page.publicId),
+        ),
     );
     const { all = 0, active = 0, waiting = 0 } = records[0] ?? {};
     return {

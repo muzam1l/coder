@@ -38,8 +38,8 @@ export interface TaskFilter {
 
 export interface TaskListOptions extends TaskFilter {
   limit?: number;
-  /** Keyset cursor: only tasks older than this one, in list order. */
-  before?: { createdAt: number; id: string };
+  /** Keyset cursor: only tasks after this one, in list order. */
+  before?: ListCursor;
   summary?: boolean;
 }
 
@@ -73,9 +73,31 @@ export function matchesTask(status: TaskStatus, filter: TaskFilter): boolean {
   );
 }
 
-/** Newest first, ties broken by id, so a keyset cursor is stable under inserts. */
-export const newestFirst = (a: TaskStatus, b: TaskStatus) =>
-  b.createdAt - a.createdAt || (b.task.id < a.task.id ? -1 : b.task.id > a.task.id ? 1 : 0);
+const activeRank = (row: Pick<TaskStatus, 'status'>) =>
+  ACTIVE_STATES.includes(row.status) ? 0 : 1;
+
+/** Active tasks first, then newest first, ties broken by id, so a keyset cursor is stable under inserts. */
+export const listOrder = (a: TaskStatus, b: TaskStatus) =>
+  activeRank(a) - activeRank(b) ||
+  b.createdAt - a.createdAt ||
+  (b.task.id < a.task.id ? -1 : b.task.id > a.task.id ? 1 : 0);
+
+export type ListCursor = { active: boolean; createdAt: number; id: string };
+
+export const listCursor = (row: TaskStatus): ListCursor => ({
+  active: ACTIVE_STATES.includes(row.status),
+  createdAt: row.createdAt,
+  id: row.task.id,
+});
+
+/** Whether a row comes after the cursor in list order. */
+export const afterCursor = (row: TaskStatus, before?: ListCursor) =>
+  !before ||
+  listOrder(row, {
+    status: before.active ? 'running' : 'completed',
+    createdAt: before.createdAt,
+    task: { id: before.id },
+  } as TaskStatus) > 0;
 
 export interface TaskFence {
   generation?: number;
@@ -736,13 +758,8 @@ export class StoreQueue implements TaskQueue {
     return (await this.store.list('task'))
       .map(row => row.value)
       .filter(status => matchesTask(status, opts))
-      .filter(
-        status =>
-          !before ||
-          status.createdAt < before.createdAt ||
-          (status.createdAt === before.createdAt && status.task.id < before.id),
-      )
-      .sort(newestFirst)
+      .filter(status => afterCursor(status, before))
+      .sort(listOrder)
       .slice(0, opts.limit);
   }
 

@@ -27,7 +27,10 @@ import {
   addInbox,
   deleteTask,
   matchesTask,
-  newestFirst,
+  listOrder,
+  afterCursor,
+  listCursor,
+  type ListCursor,
   pushInbox,
   type TaskFilter,
 } from './queue';
@@ -595,18 +598,13 @@ export async function listTasks(
 
     const rows = [...local.values()]
       .filter(row => matchesTask(row, { ...filter, ...states }))
-      .sort(newestFirst);
+      .sort(listOrder);
     const limit = pageLimit(url, paged(url) ? undefined : 20);
     if (!paged(url)) return json(shape(rows.slice(0, limit)));
 
-    const before = decodeCursor<[number, string]>(url);
-    const items = before
-      ? rows.filter(
-          row =>
-            newestFirst(row, { createdAt: before[0], task: { id: before[1] } } as TaskStatus) > 0,
-        )
-      : rows;
-    const result = page(items.slice(0, limit + 1), limit, last => [last.createdAt, last.task.id]);
+    const before = decodeCursor<ListCursor>(url);
+    const items = rows.filter(row => afterCursor(row, before));
+    const result = page(items.slice(0, limit + 1), limit, listCursor);
 
     return json({
       ...result,
@@ -635,7 +633,7 @@ export async function listTasks(
   }
 
   const limit = pageLimit(url);
-  const before = decodeCursor<[number, string]>(url);
+  const before = decodeCursor<ListCursor>(url);
   const together =
     url.searchParams.get('counts') === '1' && !status && !before && ctx.queue.listWithCounts
       ? await ctx.queue.listWithCounts(ctx.organizationId, {
@@ -651,7 +649,7 @@ export async function listTasks(
           ...filter,
           ...states,
           summary: url.searchParams.get('summary') === '1',
-          ...(before ? { before: { createdAt: before[0], id: before[1] } } : {}),
+          ...(before ? { before } : {}),
           limit: limit + 1,
         }),
     together
@@ -660,7 +658,7 @@ export async function listTasks(
         ? ctx.queue.counts(ctx.organizationId, { ...filter, ...states })
         : undefined,
   ]);
-  const result = page(rows, limit, last => [last.createdAt, last.task.id]);
+  const result = page(rows, limit, listCursor);
 
   return json({ ...result, items: shape(result.items), ...(counts ? { counts } : {}) });
 }

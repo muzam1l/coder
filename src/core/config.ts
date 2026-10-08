@@ -8,36 +8,16 @@ import path from 'node:path';
 
 import * as z from 'zod/mini';
 
+import { DEFAULT_CONFIG } from './defaults';
 import { coderHome, resolveWorkspaceRoot } from './state';
+
+export { DEFAULT_CONFIG };
 
 export interface PermissionMode {
   sandbox: 'read-only' | 'workspace-write';
   approvalPolicy: 'never' | 'on-request' | 'on-failure' | 'untrusted';
   approvalMode: 'auto' | null;
 }
-
-export const DEFAULT_CONFIG: CoderConfig = {
-  // Agents are tried in order; the next one is the fallback when the previous
-  // fails to start (missing binary, auth, quota, rate limit).
-  chain: ['codex', 'claude'],
-  engines: {
-    codex: {
-      model: 'gpt-6.1-sol',
-      effort: 'high',
-      permissions: 'auto',
-    },
-    claude: {
-      model: 'opus',
-      effort: 'medium',
-      permissions: 'auto',
-    },
-  },
-  models: {},
-  approvals: {
-    escalationTimeoutMs: 120_000,
-    allowedNetworkHosts: [],
-  },
-};
 
 // Model aliases per engine. Values map alias -> concrete identifier.
 export const CODEX_MODELS: Record<string, string> = {

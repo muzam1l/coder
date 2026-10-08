@@ -13,6 +13,7 @@ export function Menu({
   summary,
   summaryClass,
   label,
+  tip,
   align = 'right',
   wide,
   class: cls,
@@ -21,6 +22,8 @@ export function Menu({
   summary: ComponentChildren;
   summaryClass?: string;
   label?: string;
+  /** A styled tooltip in place of the native title, where the layout shows one. */
+  tip?: string;
   align?: 'right' | 'up' | 'left';
   wide?: boolean;
   class?: string;
@@ -34,7 +37,8 @@ export function Menu({
         type="button"
         class={summaryClass}
         aria-label={label}
-        title={label}
+        title={tip ? undefined : label}
+        data-tip={tip}
       >
         {summary}
       </button>

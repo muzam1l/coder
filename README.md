@@ -2,47 +2,48 @@
 
 # Coder
 
-**Delegate coding to supervised subagents of any model from your favorite harness.**
+**The runtime for agents, your rules, any model, everywhere.**
 
 </div>
 
+Coder turns any model into an agent you own. One runtime and one set of rules, with full control of every task, whether it runs in your local harness, from your own code, or always on in Coder Cloud.
+
 ## Why Coder
 
-- **Any harness, any model.** One runtime for Claude Code, Codex and more, dispatching to Codex, Claude, any OpenAI-compatible endpoint, or local models. Pick per task.
-- **Clean context.** Your conversation stays about intent and orchestration; implementation details live in the subagents.
-- **Fast dispatch.** Handoffs are instant, and light enough to spin up a large number of subagents at once.
-- **Fully controlled tasks.** Unified permissions across engines (_Read-only_, _Workspace-write_, _Auto_), live visibility into every task, and mid-run steering.
-- **Flows and SDK.** Orchestrate whole waves of tasks from a plain TypeScript file, or drive everything from your own code.
-- **Agents.** Customizable agents that answer on GitHub, Slack and other platforms, hosted or self-hosted, and run the same from your terminal. The built-in `coder` agent answers questions, reviews pull requests, and makes requested changes.
+- **Any harness, any model.** Claude Code, Codex or any other harness, running any model from your subscriptions, an API endpoint, or your own machine. Pick per task.
+- **Clean context.** Your conversation stays about intent. The work happens in subagents, and only the result comes back.
+- **Fast dispatch.** Handoffs are instant, and light enough to run many agents at once.
+- **Fully controlled.** One permission model across every engine, live visibility into every task, and steering mid-run.
+- **Always on.** Your agents run in the cloud, connected to GitHub, Slack and any other app, each task in its own workspace with only the access you grant.
+- **Your agents, your team.** Build agents with their own instructions, triggers and tools, and share them, with their credentials, across your workspace.
+- **Flows and SDK.** Orchestrate whole waves of tasks from one TypeScript file, or drive everything from your own code.
+- **Built-in review.** Review any diff with a read-only agent that checks every finding against your repo.
 
 ## Get started
 
-**1. Install into your host.**
+| I want to                                                                          | Start with                                      |
+| ---------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Hand tasks off from Claude Code, Codex or another harness                          | [In your local harness](#in-your-local-harness) |
+| Run my agents always on in the cloud, connected to GitHub, Slack and any other app | [Coder Cloud](#coder-cloud)                     |
+| Script tasks, reviews and flows from code                                          | [From code](#from-code)                         |
+| Run it on my own servers                                                           | [Self-host](#self-host)                         |
 
-**Claude Code** - from inside a session:
+## In your local harness
 
-```
-/plugin marketplace add muzam1l/coder
-/plugin install coder@coder-plugins
-/reload-plugins
-/coder:setup
-```
-
-Or from the shell:
+**Install.**
 
 ```bash
 npm install -g @wular/coder
-coder setup-host claude
 ```
 
-**Others** - Codex, Pi, OpenCode, and anything else that reads the Agent Skills standard dir (`~/.agents/skills`):
+**Add it to your host.**
 
-```bash
-npm install -g @wular/coder
-coder setup-host agents
-```
+| Host                                                           | Install                                                                                                                                                    |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claude Code                                                    | `coder setup-host claude`<br>or, inside Claude Code:<br>`/plugin marketplace add muzam1l/coder`<br>`/plugin install coder@coder-plugins`<br>`/coder:setup` |
+| Codex, Pi, OpenCode and any host that reads `~/.agents/skills` | `coder setup-host agents`                                                                                                                                  |
 
-**2. Connect at least one engine.** Either an engine CLI, logged in, to use that subscription:
+**Connect a model.** Coder uses the engines you're signed in to, or your own model ([Models](docs/models.md)).
 
 ```bash
 npm install -g @openai/codex && codex login
@@ -50,47 +51,66 @@ npm install -g @openai/codex && codex login
 npm install -g @anthropic-ai/claude-code && claude auth login
 ```
 
-Or a local/provider model of your own (see [Models](docs/models.md)). `coder setup-host` checks what's ready.
-
-**3. Ask your host to use it:**
+**Use it.** Ask your host:
 
 > Use Coder to explain the directory structure of the workspace.
 
-Or make it the default in AGENTS.md/CLAUDE.md:
+To make it the default, add this line to your project's `AGENTS.md` or `CLAUDE.md`:
 
-> Always use Coder for all implementation and system exploring tasks.
-
-Recommended setup: Claude Code as host (fable low/medium) and Codex (sol) as engine - best for performance and cost distribution.
-
-## Staying up to date
-
-```bash
-coder upgrade
+```md
+Always use Coder for implementation and exploration.
 ```
 
-Updates the CLI through whichever package manager installed it and refreshes the host plugins to match. See `coder upgrade --help` for narrowing flags. Set `CODER_NO_UPDATE_CHECK=1` to silence the update notice.
+Every task runs under the permissions you set and stays yours to watch, steer or stop. See them all in the browser:
 
-## Agents
+```bash
+coder dash
+```
 
-An agent is standing instructions plus its engine, tools and flows, and it works everywhere. In the cloud it answers events on GitHub, Slack and other platforms, like a pull request opening or a DM, on your own subscription or key, hosted or self-hosted. In your terminal, `coder task run --agent <id>` runs the same agent, and `coder dash` gives it a local dashboard. Install the built-in `coder` agent or write your own.
+> **Recommended setup:** Claude Code as the host (Fable, low or medium effort) and Codex (sol) as the engine, the best split of performance and cost.
 
-See [Agents](docs/agents/index.md) to install, define, and configure agents, [Dashboard](docs/dash.md) for a local UI over the CLI (`coder dash`), and [Self-hosting](docs/self-host.md) to run your own instance. The built-in `coder` agent works across GitHub and Slack and runs the [review flow](docs/review.md) for pull requests.
+[Models](docs/models.md) · [Configuration](docs/config.md) · [MCP](docs/mcp.md)
 
-## Flows
+## Coder Cloud
 
-For well-defined workflows, ask your host to write a flow. A Coder flow is a TypeScript file that fans out coders at scale with built-in support for deterministic verification gates, crash/resume handling, etc. Ask like:
+Your agents, always on at **[coder.wular.ai](https://coder.wular.ai)** or [on your own servers](#self-host). Connect GitHub, Slack or any other app, and they work right inside it.
+
+- **Your agents.** Instructions, triggers and tools, set in the dashboard or in `.coder/agents/` in your repo.
+- **Every app, one dashboard.** GitHub, Slack and the rest of the integration catalog.
+- **Scoped access.** Each task gets a fresh workspace and a platform token limited to that task.
+- **A built-in agent.** `coder` answers questions, reviews pull requests, and opens them for requested changes.
+
+[Dashboard](docs/dash.md) · [Agents](docs/agents/index.md)
+
+## From code
+
+Your host drives tasks itself, but everything is scriptable:
+
+```bash
+coder run "<text>"                     # dispatch a task (--wait to block for the answer)
+coder list                             # recent tasks (running + just stopped)
+coder result [task-id]                 # status + final answer (--wait blocks until done)
+coder task steer <task-id> "<text>"    # continue a task with new instructions
+coder task ask <task-id> "<question>"  # ask about a task without interrupting it
+coder task stop <task-id>              # interrupt it
+coder task watch [task-id]             # stream the live transcript
+coder review --pr 42 --post            # read-only review, posted inline
+```
+
+Any `[task-id]` defaults to the most recent task.
+
+For a repeatable workflow, ask your host to write a flow:
 
 > Create a Coder flow that fixes every failing test file: one task per file, gated on its tests passing.
 
-The harness authors the flow, you can review or tweak it, and it runs with live status and mid-run steering like any coder task. A generated flow looks like this:
+A flow is one TypeScript file that fans out tasks, with verification gates and resume after a crash:
 
 ```ts
-// .coder/flows/first.ts
+// .coder/flows/fix-tests.ts
 import { z } from 'zod';
 import { task, gate, pipeline } from '@wular/coder/flow';
 
 const failing = await task('Run `bun test` and list the failing test files.', {
-  name: 'Find failing tests',
   returns: z.object({ files: z.array(z.string()) }),
 });
 
@@ -101,37 +121,16 @@ export default await pipeline(
 );
 ```
 
-See [Flows](docs/flows.md), or the [SDK](docs/sdk.md) to drive everything from your own code.
+[CLI](docs/cli.md) · [Flows](docs/flows.md) · [Review](docs/review.md) · [SDK](docs/sdk.md)
 
-## Configuration
+## Self-host
 
-Machine defaults live in `~/.coder/config.json`; `.coder/config.json` in a repo overrides per project. See [Configuration](docs/config.md).
+Run all of Coder Cloud on your own infrastructure: one server, one Postgres database, and your tasks running wherever you choose, from Docker and Vercel Sandbox to GitHub Actions or a teammate's machine. Deploy it in one click on Vercel or anywhere Bun runs.
 
-## Advanced usage
+[Self-hosting](docs/self-host.md) · [Vercel template](src/server/deploy/vercel/README.md)
 
-You rarely need these - the host agent drives tasks itself - but everything is scriptable:
+## Docs
 
-```bash
-coder run "<text>"                     # dispatch a task (--wait to block for the answer)
-coder list                             # list recent tasks (by default running + just stopped)
-coder result [task-id]                 # status + final answer (--wait blocks until done)
-coder task steer <task-id> "<text>"    # continue a task with new instructions
-coder task ask <task-id> "<question>"  # ask about a task without interrupting it
-coder task stop <task-id>              # interrupt it
-coder task watch [task-id]             # stream the live transcript
-coder task approve <task-id> <appr-id> # answer an escalated permission (--deny)
+Everything else is at **[coder.wular.ai/docs](https://coder.wular.ai/docs)**.
 
-coder flow run <name|path> --wait      # run a flow (--dry-run to preview prompts)
-coder flow list                        # recent flow runs
-coder flow discover                    # flows runnable here (workspace + global)
-coder flow result [run-id]             # progress and result across the whole wave
-coder flow watch [run-id]              # watch the wave live (replay + follow)
-coder flow stop [run-id]               # stop a run and its tasks
-coder flow resume [run-id]             # continue a crashed or edited run
-
-coder docs [topic]                     # print bundled docs (flows, review, sdk, config, models)
-```
-
-Any `[task-id]` defaults to the most recent task.
-
-Full docs: `coder --help`.
+`coder --help` lists every command, and `coder docs [topic]` prints the bundled guides. `coder upgrade` keeps the CLI and host plugins current.

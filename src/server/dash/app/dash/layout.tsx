@@ -31,7 +31,6 @@ import { Drawer } from '@/comps/frame/drawer';
 import { SignOut } from '@/app/dash/account/sign-out';
 import { CurrentLink } from '@/comps/nav/current-link';
 import { SideToggle } from '@/comps/nav/side-toggle';
-import { TokenFromHash } from './token-from-hash';
 import type { To } from '@/comps/nav/to';
 import { Menu } from '@/comps/ui/menu';
 import { TaskToasts } from '@/comps/frame/task-toasts';
@@ -170,17 +169,19 @@ function ServerMenu({ me, host }: { me?: Me; host: string }) {
   const memory = !me?.user;
   const local = me?.mode === 'local';
   const url = me?.server?.url ?? `https://${host}`;
+  const name = local ? 'Local server' : memory ? 'Memory server' : 'Cloud server';
 
   return (
     <Menu
       class="server"
       align="up"
       label="Server"
+      tip={name}
       summary={
         <>
           <i class={memory && !local ? 'dot' : 'dot ok'} />
           <span class="grow" title={`${me?.server?.name ?? 'Coder'} · ${new URL(url).host}`}>
-            {local ? 'Local server' : memory ? 'Memory server' : 'Cloud server'}
+            {name}
           </span>
           <Icon d={iUpdown} />
         </>
@@ -212,6 +213,17 @@ async function ActiveCount({ count }: { count: Promise<TasksPage> }) {
   ) : null;
 }
 
+// `serve` opens /dash#token=…: the fragment never reaches the server, so the form posts it while the page loads, busy from first paint.
+const TOKEN_FROM_HASH = `(() => {
+  const token = /(?:^|&)token=([^&]+)/.exec(location.hash.slice(1))?.[1];
+  if (!token) return;
+  history.replaceState(null, '', location.pathname + location.search);
+  const form = document.getElementById('token-form');
+  form.elements.token.value = decodeURIComponent(token);
+  form.querySelector('button').setAttribute('aria-busy', 'true');
+  form.submit();
+})();`;
+
 function TokenPage({ request }: { request: Request }) {
   const url = new URL(request.url);
   const rejected = url.searchParams.get('token') === 'rejected';
@@ -238,7 +250,7 @@ function TokenPage({ request }: { request: Request }) {
           </p>
         ) : null}
       </form>
-      <TokenFromHash />
+      <script dangerouslySetInnerHTML={{ __html: TOKEN_FROM_HASH }} />
     </AuthPanel>
   );
 }
@@ -307,7 +319,7 @@ export default function DashLayout({
         <nav aria-label="Dashboard">
           {navFor(request.headers.get('x-coder-mode') === 'local').map(
             ({ within, label, icon, ...to }) => (
-              <CurrentLink key={within} {...to} within={within} title={label}>
+              <CurrentLink key={within} {...to} within={within} data-tip={label}>
                 <Icon d={icon} />
                 {label}
                 {label === 'Tasks' ? (
