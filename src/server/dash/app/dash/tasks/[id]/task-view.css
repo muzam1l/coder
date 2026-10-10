@@ -1,60 +1,52 @@
-/* task head: the id line under the title */
-.head .lead:has(.task-id) {
+/* task head: the facts line under the title */
+.head .lead:has(.fact) {
   display: flex;
   align-items: center;
-  gap: 12px;
-}
-.head.stuck .lead:has(.task-id) {
-  display: none;
-}
-.task-id {
+  gap: 16px;
   font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
-.head .copy {
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  margin-left: -8px;
-  padding: 2px;
-  border: 0;
-  background: none;
+.fact {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.fact .ic {
+  width: 12px;
+  height: 12px;
   color: var(--dim);
-  cursor: pointer;
 }
-.head .copy:hover {
-  color: var(--fg);
+.fact-dim {
+  color: var(--dim);
 }
-.head .copy .ic {
-  width: 13px;
-  height: 13px;
+.head.stuck .lead:has(.fact) {
+  display: none;
 }
 /* phones: the actions sit on the back link's row, the title gets the full width under it */
 @media (max-width: 760px) {
-  .head:has(.task-id) .back {
+  .head:has(.fact) .back {
     height: 34px;
   }
-  .head:has(.task-id) .title-row > h1 {
+  .head:has(.fact) .title-row > h1 {
     flex-basis: 100%;
   }
-  .head:has(.task-id) .actions {
+  .head:has(.fact) .actions {
     position: absolute;
     top: 0;
     right: 16px;
     width: auto;
     flex-wrap: nowrap;
   }
-  .head.stuck:has(.task-id) .actions {
+  .head.stuck:has(.fact) .actions {
     position: static;
   }
-  .head.stuck:has(.task-id) .actions > .menu {
+  .head.stuck:has(.fact) .actions > .menu {
     display: inline;
   }
-  .head.stuck:has(.task-id) .title-row > h1 {
+  .head.stuck:has(.fact) .title-row > h1 {
     flex-basis: auto;
   }
-  .head.stuck:has(.task-id) .meta {
+  .head.stuck:has(.fact) .meta {
     display: none;
   }
 }
@@ -196,6 +188,9 @@ button.act:hover {
   flex: 1 1 0;
   color: var(--dim);
 }
+.act-tool {
+  color: var(--fg);
+}
 .act.open .act-text {
   display: grid;
   gap: 2px;
@@ -227,6 +222,32 @@ button.act:hover {
 }
 .act.error :is(.act-title, .ic) {
   color: var(--bad);
+}
+.act.timed {
+  grid-template-columns: 76px 16px minmax(0, 1fr) auto 14px;
+}
+.act-state {
+  color: var(--dim);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.act-state.bad,
+.act-state.bad .ic {
+  color: var(--bad);
+}
+.act-state :is(.ic, .spin) {
+  display: inline-block;
+  width: 11px;
+  height: 11px;
+  margin: 0 6px 0 0;
+  vertical-align: -1px;
+}
+.act-state .spin {
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
 }
 .act-empty {
   padding: 24px 0;

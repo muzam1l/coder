@@ -148,7 +148,7 @@ function surfaceApproval(
     const hints = [
       `Approve: coder task approve ${taskId} ${approval.id}`,
       `Deny: coder task approve ${taskId} ${approval.id} --deny`,
-      `Then wait again: coder task result ${taskId} --wait`,
+      `Then wait again in its own background shell, one per task: coder task result ${taskId} --wait`,
       `Unanswered approvals auto-deny after ${timeoutSeconds} seconds.`,
     ];
     if (approval.networkHost) {

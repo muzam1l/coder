@@ -77,6 +77,8 @@ export interface Task {
   fallbacks?: Array<{ engine: Engine; detail: string; next: Engine }>;
   archived?: boolean;
   archivedAt?: string;
+  // Archived by the auto-archive sweep, which lists take up on their next read rather than as an event.
+  autoArchived?: boolean;
   // Dev hook (--simulate-approval): the worker raises one real pending approval
   // before running, to exercise the escalate -> --wait exit 4 -> approve loop.
   simulateApproval?: boolean;
@@ -92,6 +94,7 @@ export interface Task {
   repo?: string;
   // Extra MCP servers (and their allowed tools) the worker attaches to the turn.
   mcp?: McpServerSpec[];
+  nativeMcp?: boolean;
   // Absolute extra directories the task may reach beyond cwd (--add-dir).
   addDirs?: string[];
 }

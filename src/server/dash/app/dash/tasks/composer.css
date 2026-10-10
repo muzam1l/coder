@@ -216,6 +216,10 @@ dialog.compose-dialog::backdrop {
   height: 30px;
   margin-left: auto;
 }
+/* the dialog's prompt grows to 20 lines, short of the dialog's own scroll */
+.compose-dialog .composer textarea {
+  max-height: min(20lh, max(4lh, calc(86dvh - 180px)));
+}
 .compose-dialog .composer,
 .compose-dialog > .loading,
 .compose-dialog > .flash,

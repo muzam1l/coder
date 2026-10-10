@@ -178,12 +178,14 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
     const id = tokens.claims();
     if (!id) throw new Error('Wular Auth returned no ID token');
     const orgs = organizations(id.organizations);
+    const listed = (org: unknown) => orgs.find(candidate => candidate.id === org)?.id;
     return {
       sub: id.sub,
       name: typeof id.name === 'string' ? id.name : '',
       email: typeof id.email === 'string' ? id.email : '',
       orgs,
-      org: orgs.some(org => org.id === previous?.org) ? previous!.org : orgs[0]?.id,
+      // A choice made in Coder sticks; Wular's active organization comes next.
+      org: listed(previous?.org) ?? listed(id.org) ?? orgs[0]?.id,
       exp_at: epoch() + (tokens.expires_in ?? 600),
       at: epoch(),
       rt: tokens.refresh_token ?? previous?.rt,
@@ -191,9 +193,9 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
     };
   }
 
-  const refreshed = new Map<string, Promise<Claims | undefined>>();
-  /** New claims from the refresh grant; undefined when Wular refuses or cannot be reached. */
-  function refresh(claims: Claims): Promise<Claims | undefined> {
+  const refreshed = new Map<string, Promise<Claims | false | undefined>>();
+  /** New claims from the refresh grant; false when Wular rejects the token, undefined when it cannot answer. */
+  function refresh(claims: Claims): Promise<Claims | false | undefined> {
     const token = claims.rt;
     if (!token) return Promise.resolve(undefined);
     let found = refreshed.get(token);
@@ -201,9 +203,11 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
       found = configuration()
         .then(wular => oidc.refreshTokenGrant(wular, token))
         .then(tokens => fromTokens(tokens, claims))
-        .catch(() => {
+        .catch((error: unknown) => {
           refreshed.delete(token);
-          return undefined;
+          return error instanceof oidc.ResponseBodyError && error.error === 'invalid_grant'
+            ? false
+            : undefined;
         });
       refreshed.set(token, found);
       setTimeout(() => refreshed.delete(token), REFRESHED_TTL_MS).unref?.();
@@ -233,7 +237,11 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
     };
     if (fresh && epoch() - (payload.iat ?? 0) > PRIVILEGED_FRESHNESS_S)
       return { ...info, stale: true };
-    return withOrganization(headers, info);
+    return withOrganization(
+      headers,
+      info,
+      typeof payload.org === 'string' ? payload.org : undefined,
+    );
   }
 
   async function signIn(url: URL): Promise<Response> {
@@ -324,24 +332,25 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
       if (url.pathname === '/api/auth/sign-out' && req.method === 'POST') return signOut(req);
       return Promise.resolve(notFound());
     },
-    async session(headers, fresh = false) {
+    async session(headers, fresh = false, cookies = []) {
       const authorization = headers.get('authorization');
       if (authorization?.startsWith('Bearer '))
         return bearerSession(authorization.slice('Bearer '.length), headers, fresh);
       let claims = await open<Claims>(readSession(headers));
       if (!claims) return undefined;
-      let cookies: string[] | undefined;
       if (claims.exp_at <= epoch() || (fresh && epoch() - claims.at > PRIVILEGED_FRESHNESS_S)) {
-        claims = await refresh(claims);
-        if (!claims) return undefined;
-        cookies = await storeSession(headers, claims);
+        const next = await refresh(claims);
+        // A rejected refresh token is dead; clear it so later requests stop retrying it.
+        if (next === false) cookies.push(...clearSession(headers));
+        if (!next) return undefined;
+        claims = next;
+        cookies.push(...(await storeSession(headers, claims)));
       }
       return withOrganization(
         headers,
         {
           user: { id: claims.sub, name: claims.name, email: claims.email },
           organizations: claims.orgs,
-          ...(cookies ? { cookies } : {}),
         },
         claims.org,
       );

@@ -61,13 +61,15 @@ export function usePaged<T>({
   const sentinel = useRef<HTMLElement>(null);
   const live = useRef(state);
   live.current = state;
-  const loading = useRef<string | undefined>(undefined);
+  // The load in flight; each is its own object, so an answer to an older load for the same page never passes.
+  const loading = useRef<{ key: string } | undefined>(undefined);
   const failed = useRef<(() => void) | undefined>(undefined);
 
   const load = (cursor: string, forQuery: string, append: boolean) => {
     const key = `${forQuery}|${cursor}`;
-    if (loading.current === key) return;
-    loading.current = key;
+    if (loading.current?.key === key) return;
+    const request = { key };
+    loading.current = request;
     setError('');
     setBusy(true);
     const since = performance.now();
@@ -77,7 +79,7 @@ export function usePaged<T>({
     void fetchPage(cursor)
       .then(held(since))
       .then(page => {
-        if (loading.current !== key) return;
+        if (loading.current !== request) return;
         if (!append) firstPages.current.set(forQuery, { page, at: Date.now() });
         setError('');
         failed.current = undefined;
@@ -95,12 +97,12 @@ export function usePaged<T>({
         });
       })
       .catch(reason => {
-        if (loading.current !== key) return;
+        if (loading.current !== request) return;
         failed.current = () => load(cursor, forQuery, append);
         setError(reason instanceof Error ? reason.message : String(reason));
       })
       .finally(() => {
-        if (loading.current !== key) return;
+        if (loading.current !== request) return;
         loading.current = undefined;
         setBusy(false);
       });
@@ -118,6 +120,9 @@ export function usePaged<T>({
   useEffect(() => {
     if (seen.current === first) return;
     seen.current = first;
+    // A page still loading belongs to the rows this replaces.
+    loading.current = undefined;
+    setBusy(false);
     firstPages.current.set(initial, { page: first, at: Date.now() });
     setState(fromPage(initial, first));
   }, [first]);
@@ -182,3 +187,6 @@ export function readQuery(keys: string[]): Record<string, string> {
 
 /** Rows a list loads per page; more load as it scrolls. */
 export const LIST_PAGE = 20;
+
+/** Rows a filter's list shows; typing finds the rest. */
+export const FILTER_ROWS = 20;

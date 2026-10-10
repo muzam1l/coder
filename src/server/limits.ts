@@ -82,7 +82,14 @@ export async function admit(
 ): Promise<Response | Admitted> {
   const path = new URL(req.url).pathname;
   const rule = LIMITED.find(([matches]) => matches(path));
-  if (!rule) return {};
+  if (!rule) {
+    // A signed-out dashboard request starts sign-in, so it charges the auth bucket as /login does.
+    const signingIn =
+      (path === '/dash' || path.startsWith('/dash/')) &&
+      ctx.auth &&
+      !(await ctx.auth.session(req.headers));
+    return signingIn ? (rateLimit(ctx, undefined, ip, 'auth') ?? {}) : {};
+  }
 
   const scope = path.startsWith('/admin/') ? await authorize(req, ctx) : undefined;
   const principal =

@@ -213,6 +213,15 @@ async function ActiveCount({ count }: { count: Promise<TasksPage> }) {
   ) : null;
 }
 
+// Without a saved choice, mid-width screens start with the sidebar collapsed, before first paint.
+const SIDE_AUTO = `(() => {
+  const app = document.currentScript.parentElement;
+  const mid = matchMedia('(min-width: 761px) and (max-width: 1279px)');
+  const sync = () => /(?:^|; )side=/.test(document.cookie) || app.classList.toggle('side-min', mid.matches);
+  sync();
+  mid.addEventListener('change', sync);
+})()`;
+
 // `serve` opens /dash#token=…: the fragment never reaches the server, so the form posts it while the page loads, busy from first paint.
 const TOKEN_FROM_HASH = `(() => {
   const token = /(?:^|&)token=([^&]+)/.exec(location.hash.slice(1))?.[1];
@@ -296,10 +305,11 @@ export default function DashLayout({
   const { pathname, host } = new URL(request.url);
   const me = load(request).me();
   const active = load(request).tasks.list({ cursor: '', limit: 1, summary: true, counts: true });
-  const collapsed = /(?:^|; )side=min(?:;|$)/.test(request.headers.get('cookie') ?? '');
+  const side = /(?:^|; )side=(min|max)(?:;|$)/.exec(request.headers.get('cookie') ?? '')?.[1];
 
   return (
-    <div class={collapsed ? 'app side-min' : 'app'}>
+    <div class={side === 'min' ? 'app side-min' : 'app'}>
+      {side ? null : <script dangerouslySetInnerHTML={{ __html: SIDE_AUTO }} />}
       <header class="top">
         <div class="top-l">
           <Drawer />
@@ -332,7 +342,7 @@ export default function DashLayout({
           )}
         </nav>
         <div class="side-foot">
-          <SideToggle collapsed={collapsed} />
+          <SideToggle collapsed={side === 'min'} />
           <WithMe me={me}>{who => <ServerMenu me={who} host={host} />}</WithMe>
         </div>
       </aside>

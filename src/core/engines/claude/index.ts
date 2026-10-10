@@ -226,6 +226,7 @@ export interface ClaudeTurnOptions {
   readOnlyAllowedTools?: string[];
   /** Extra MCP servers (env already resolved) plus the tools the turn may call. */
   mcpServers?: McpServerSpec[];
+  nativeMcp?: boolean;
   /** Directory for the short-lived 0600 MCP config file. */
   taskRoot?: string;
   resumeSessionId?: string | null;
@@ -315,7 +316,10 @@ export function buildClaudeTurnArgs(
   );
   const mcpConfigFlags = Object.keys(mcpServers).length
     ? ['--mcp-config', mcpConfigPath ?? path.join(options.taskRoot ?? cwd, '.claude-mcp.json')]
-    : [];
+    : options.nativeMcp
+      ? []
+      : ['--mcp-config', '{"mcpServers":{}}'];
+  if (!options.nativeMcp) args.push('--strict-mcp-config', '--no-chrome');
 
   if (approvalServer) {
     // Prompt tool is only consulted in default mode (never auto/dontAsk):
@@ -365,9 +369,11 @@ export function buildClaudeTurnArgs(
     additionalDirectories,
     writableDirectories,
   );
-  if (turnSettings) {
-    args.push('--settings', turnSettings);
-  }
+  const settings = {
+    ...(turnSettings ? JSON.parse(turnSettings) : {}),
+    ...(!options.nativeMcp ? { disableClaudeAiConnectors: true } : {}),
+  };
+  if (Object.keys(settings).length) args.push('--settings', JSON.stringify(settings));
 
   return args;
 }
@@ -749,6 +755,7 @@ export async function runClaudeTurn(
             options.onProgress?.({
               kind: 'tool',
               tool: name,
+              ...(block.id ? { callId: String(block.id) } : {}),
               message: describeClaudeToolUse(name, block.input ?? {}, cwd),
               threadId: streamSessionId,
             });
@@ -783,14 +790,16 @@ export async function runClaudeTurn(
           if (block?.type === 'tool_result') {
             const text = toolResultText(block.content).trim();
             const failed = block.is_error === true;
-            if (!text && !failed) continue;
             const call = block.tool_use_id ? openCalls.get(String(block.tool_use_id)) : undefined;
             if (block.tool_use_id) openCalls.delete(String(block.tool_use_id));
+            // An empty result still closes its call.
+            if (!text && !failed && !call) continue;
             options.onProgress?.({
               kind: 'tool-result',
+              ...(block.tool_use_id ? { callId: String(block.tool_use_id) } : {}),
               ...(call ? { tool: call.name, durationMs: Date.now() - call.at } : {}),
               ...(failed ? { isError: true } : {}),
-              message: text || '(tool failed with no output)',
+              message: text || (failed ? '(tool failed with no output)' : ''),
               threadId: streamSessionId,
             });
           }

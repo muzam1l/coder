@@ -18,6 +18,7 @@ import {
   localTask,
   localTaskAction,
   localTasks,
+  sweepLocalQueue,
   startLocalTask,
 } from './local';
 import { scheduleKick } from './kick';
@@ -26,6 +27,7 @@ import {
   ACTIVE_STATES,
   addInbox,
   deleteTask,
+  StoreQueue,
   matchesTask,
   listOrder,
   afterCursor,
@@ -35,6 +37,7 @@ import {
   type TaskFilter,
 } from './queue';
 import { randomUUID } from 'node:crypto';
+import { queueRowWins } from '../../core/state';
 import { decryptSecret } from '../store/secrets';
 import { type AgentEvent, type TaskSource } from '../../agent/types';
 import { eventReplies } from '../chat';
@@ -148,7 +151,11 @@ export async function removeTask(
     const cwd = status?.task.cwd ?? ctx.local?.cwd;
     if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
 
-    return localTaskAction(req, cwd, taskId, undefined, ctx);
+    const response = await localTaskAction(req, cwd, taskId, undefined, ctx);
+    // A CLI task's delete reaches events streams, even once it was archived out of their scans.
+    if (response.ok && ctx.queue instanceof StoreQueue) ctx.queue.tombstone(taskId);
+
+    return response;
   }
   if (ctx.local && status.handle?.startsWith('cli:')) {
     const now = (ctx.now ?? Date.now)();
@@ -443,7 +450,12 @@ export async function archiveTask(
   }
 
   const now = (ctx.now ?? Date.now)();
-  await ctx.queue.patchTask(ctx.organizationId, taskId, { archivedAt: now }, now);
+  await ctx.queue.patchTask(
+    ctx.organizationId,
+    taskId,
+    { archivedAt: now, autoArchived: undefined },
+    now,
+  );
 
   return json({ ok: true });
 }
@@ -552,6 +564,15 @@ export async function adminCreate(
   }
 }
 
+/** A local server's tasks: the CLI's, with each queue row that is a newer execution (`queueRowWins`) in its job's place. */
+export function localRows(cwd: string, cli: TaskStatus[], queued: TaskStatus[]): TaskStatus[] {
+  const local = new Map(cli.map(row => [row.task.id, row]));
+  for (const row of queued)
+    if (queueRowWins(cwd, row, local.has(row.task.id))) local.set(row.task.id, row);
+
+  return [...local.values()];
+}
+
 export async function listTasks(
   req: Request,
   ctx: ServerContext,
@@ -587,16 +608,12 @@ export async function listTasks(
   const shape = (rows: TaskStatus[]) =>
     url.searchParams.get('summary') === '1' ? rows.map(summarizeTask) : rows.map(redactTask);
   if (ctx.local) {
-    const local = new Map(
-      localTasks(ctx.local.cwd, filter.archived!).map(row => [row.task.id, row]),
-    );
-    for (const row of await ctx.queue.list(ctx.organizationId))
-      local.set(
-        row.task.id,
-        row.status === 'queued' || row.status === 'waiting' ? row : (local.get(row.task.id) ?? row),
-      );
-
-    const rows = [...local.values()]
+    await sweepLocalQueue(ctx, ctx.local.cwd);
+    const rows = localRows(
+      ctx.local.cwd,
+      localTasks(ctx.local.cwd, filter.archived!),
+      await ctx.queue.list(ctx.organizationId),
+    )
       .filter(row => matchesTask(row, { ...filter, ...states }))
       .sort(listOrder);
     const limit = pageLimit(url, paged(url) ? undefined : 20);
@@ -620,6 +637,7 @@ export async function listTasks(
         : {}),
     });
   }
+  await ctx.queue.archiveStopped(ctx.organizationId, (ctx.now ?? Date.now)());
   if (!paged(url)) {
     const limit = pageLimit(url, 20);
     const rows = await ctx.queue.list(ctx.organizationId, {

@@ -1,5 +1,5 @@
 /** Internal flow-runtime types. See docs/flows.md for the contract. */
-import type { TokenUsage } from '../core/types';
+import type { McpServerSpec, TokenUsage } from '../core/types';
 
 /** Anything with zod's parse shape; the flow runtime never imports zod itself. */
 export interface FlowSchema<T> {
@@ -27,6 +27,7 @@ export interface FlowTaskOptions<T = unknown> {
   model?: string;
   effort?: string;
   permissions?: string;
+  mcp?: string | McpServerSpec[];
   name?: string;
   system?: string;
   resume?: string;

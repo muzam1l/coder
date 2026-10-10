@@ -7,6 +7,8 @@ import type { TaskLogLine, TaskStatus, Store, UsageRecord } from '../store/types
 import { scoped, type ServerContext } from '../context';
 import { taskRunner } from '../runners';
 import { pushLocalInbox } from './local';
+import { byListKey, listRank, type ListKey } from '../../core/defaults';
+import { archiveDue } from '../../core/state';
 
 export interface ClaimedTask {
   organizationId: string;
@@ -73,31 +75,20 @@ export function matchesTask(status: TaskStatus, filter: TaskFilter): boolean {
   );
 }
 
-const activeRank = (row: Pick<TaskStatus, 'status'>) =>
-  ACTIVE_STATES.includes(row.status) ? 0 : 1;
-
-/** Active tasks first, then newest first, ties broken by id, so a keyset cursor is stable under inserts. */
-export const listOrder = (a: TaskStatus, b: TaskStatus) =>
-  activeRank(a) - activeRank(b) ||
-  b.createdAt - a.createdAt ||
-  (b.task.id < a.task.id ? -1 : b.task.id > a.task.id ? 1 : 0);
-
-export type ListCursor = { active: boolean; createdAt: number; id: string };
+export type ListCursor = ListKey;
 
 export const listCursor = (row: TaskStatus): ListCursor => ({
-  active: ACTIVE_STATES.includes(row.status),
+  rank: listRank(row.status),
   createdAt: row.createdAt,
   id: row.task.id,
 });
 
+/** The CLI's list order, so a keyset cursor is stable under inserts. */
+export const listOrder = (a: TaskStatus, b: TaskStatus) => byListKey(listCursor(a), listCursor(b));
+
 /** Whether a row comes after the cursor in list order. */
 export const afterCursor = (row: TaskStatus, before?: ListCursor) =>
-  !before ||
-  listOrder(row, {
-    status: before.active ? 'running' : 'completed',
-    createdAt: before.createdAt,
-    task: { id: before.id },
-  } as TaskStatus) > 0;
+  !before || byListKey(listCursor(row), before) > 0;
 
 export interface TaskFence {
   generation?: number;
@@ -126,6 +117,7 @@ export type TaskPatch = Partial<
     | 'logSeq'
     | 'logBytes'
     | 'archivedAt'
+    | 'autoArchived'
     | 'approval'
   >
 > & { answer?: unknown };
@@ -208,6 +200,8 @@ export interface TaskQueue {
     now: number,
     fence?: TaskFence,
   ): Promise<boolean>;
+  /** The CLI's auto-archive sweep over tasks stopped longer than AUTO_ARCHIVE_MS, or only `ids`; silent, so updatedAt stays. */
+  archiveStopped(organizationId: string, now: number, ids?: string[]): Promise<void>;
   continueTask(
     organizationId: string,
     id: string,
@@ -258,6 +252,14 @@ export interface TaskQueue {
   cancelRequested(organizationId: string, id: string): Promise<boolean>;
   /** Newest first. */
   list(organizationId: string, opts?: TaskListOptions): Promise<TaskStatus[]>;
+  /** In one call, tasks of these organizations updated or deleted after `since`, and the named ones; a store queue returns every task. */
+  changes(
+    scopes: Array<{ organizationId: string; ids: string[] }>,
+    since: number,
+  ): Promise<{
+    rows: ClaimedTask[];
+    deleted: Array<{ organizationId: string; id: string; at: number }>;
+  }>;
   /** How many tasks match, and how many of those are active or waiting. */
   counts(organizationId: string, filter?: TaskFilter): Promise<TaskCounts>;
   listWithCounts?(
@@ -277,6 +279,9 @@ export interface TaskQueue {
 }
 
 /** Delete only the observed conversation, coordinated with the queue's writes. */
+/** A deleted task's tombstone outlives any events stream's resume window. */
+export const TOMBSTONE_MS = 10 * 60_000;
+
 export async function deleteTask(ctx: ServerContext, status: TaskStatus): Promise<boolean> {
   const id = status.task.id;
   const generation = status.generation ?? 0;
@@ -288,28 +293,41 @@ export async function deleteTask(ctx: ServerContext, status: TaskStatus): Promis
   };
   if (ctx.queue instanceof StoreQueue) return ctx.queue.deleteTask(ctx.organizationId, id, fence);
 
-  const [{ DrizzleStore }, { task }, { and, eq, isNull }] = await Promise.all([
-    import('../store/pg/store'),
-    import('../store/pg/schema'),
-    import('drizzle-orm'),
-  ]);
+  const [{ DrizzleStore }, { task, taskTombstone }, { and, eq, isNull, sql }, { rows }] =
+    await Promise.all([
+      import('../store/pg/store'),
+      import('../store/pg/schema'),
+      import('drizzle-orm'),
+      import('../store/pg/tables/shared'),
+    ]);
   if (!(ctx.store instanceof DrizzleStore))
     throw new Error('Task store does not support fenced deletion');
-  const [row] = await ctx.store.db
-    .delete(task)
-    .where(
-      and(
+  const now = (ctx.now ?? Date.now)();
+  // The delete and its tombstone commit together, so every server's streams see it.
+  const [row] = await rows<{ deleted: number }>(
+    ctx.store.db,
+    sql`with gone as (
+      delete from ${task}
+      where ${and(
         eq(task.organizationId, ctx.organizationId),
         eq(task.publicId, id),
         eq(task.generation, generation),
         eq(task.attempts, fence.attempts),
         fence.tokenHash === null ? isNull(task.tokenHash) : eq(task.tokenHash, fence.tokenHash),
         fence.handle === null ? isNull(task.handle) : eq(task.handle, fence.handle),
-      ),
+      )}
+      returning organization_id, public_id
+    ), marked as (
+      insert into ${taskTombstone} (organization_id, public_id, deleted_at)
+      select organization_id, public_id, ${new Date(now).toISOString()}::timestamptz from gone
+    ), pruned as (
+      delete from ${taskTombstone}
+      where deleted_at < ${new Date(now - TOMBSTONE_MS).toISOString()}::timestamptz
     )
-    .returning({ id: task.id });
+    select count(*)::int as deleted from gone`,
+  );
 
-  return Boolean(row);
+  return Boolean(row?.deleted);
 }
 
 export async function addInbox(
@@ -347,6 +365,8 @@ const DONE = new Set<TaskStatus['status']>(['completed', 'failed', 'cancelled'])
 /** Queue over a plain `Store` (memory, file): one process, so a promise chain is the lock. */
 export class StoreQueue implements TaskQueue {
   private lock: Promise<unknown> = Promise.resolve();
+  /** Deleted task ids and when, for events streams. */
+  private tombstones = new Map<string, number>();
 
   constructor(private readonly store: Store) {}
 
@@ -444,6 +464,7 @@ export class StoreQueue implements TaskQueue {
           await this.store.put('task', taskId, {
             ...target,
             inboxSeq: Math.max(target.inboxSeq ?? -1, entry.seq),
+            updatedAt: now,
           });
           await this.store.put('inbox', id, entry);
           await this.store.put('delivery', delivery.key, { at: now }, { ttlMs: delivery.ttlMs });
@@ -479,7 +500,7 @@ export class StoreQueue implements TaskQueue {
         at: now,
         pending: { inbox: { taskId: active.task.id, id, entry } },
       });
-      await this.store.put('task', active.task.id, { ...active, inboxSeq: seq });
+      await this.store.put('task', active.task.id, { ...active, inboxSeq: seq, updatedAt: now });
       await this.store.put('inbox', id, entry);
       await this.store.put('delivery', delivery.key, { at: now }, { ttlMs: delivery.ttlMs });
       return { steered: true };
@@ -566,6 +587,28 @@ export class StoreQueue implements TaskQueue {
     });
   }
 
+  async archiveStopped(_organizationId: string, now: number, ids?: string[]): Promise<void> {
+    const due = (status?: TaskStatus): status is TaskStatus =>
+      status !== undefined &&
+      DONE.has(status.status) &&
+      status.archivedAt === undefined &&
+      (!ids || ids.includes(status.task.id)) &&
+      archiveDue(status.finishedAt ?? status.updatedAt, now);
+
+    for (const { value } of await this.store.list('task'))
+      if (due(value))
+        await this.serial(async () => {
+          // Rechecked under the lock, so a task continued since the list read stays.
+          const current = await this.read(value.task.id);
+          if (due(current))
+            await this.store.put('task', current.task.id, {
+              ...current,
+              archivedAt: now,
+              autoArchived: true,
+            });
+        });
+  }
+
   patchTask(
     _organizationId: string,
     id: string,
@@ -592,6 +635,7 @@ export class StoreQueue implements TaskQueue {
       const current = await this.read(id);
       if (!current || !this.allowed(current, fence)) return false;
       await this.store.delete('task', id);
+      this.tombstone(id);
 
       return true;
     });
@@ -612,18 +656,22 @@ export class StoreQueue implements TaskQueue {
       const note = await this.store.get('note', noteKey(current.task));
 
       task.context = { ...context, ...(note ? { note } : {}) };
-      await this.store.put('task', id, {
-        task: { ...current.task, ...task },
-        status: 'queued',
-        attempts: 0,
-        logSeq: current.logSeq,
-        logBytes: current.logBytes,
-        archivedAt: current.archivedAt,
-        generation: (current.generation ?? 0) + 1,
-        inboxSeq: current.inboxSeq,
-        createdAt: current.createdAt,
-        updatedAt: now,
-      });
+      await this.store.put(
+        'task',
+        id,
+        {
+          task: { ...current.task, ...task },
+          status: 'queued',
+          attempts: 0,
+          logSeq: current.logSeq,
+          logBytes: current.logBytes,
+          generation: (current.generation ?? 0) + 1,
+          inboxSeq: current.inboxSeq,
+          createdAt: current.createdAt,
+          updatedAt: now,
+        },
+        { unarchive: true },
+      );
 
       return true;
     });
@@ -761,6 +809,26 @@ export class StoreQueue implements TaskQueue {
       .filter(status => afterCursor(status, before))
       .sort(listOrder)
       .slice(0, opts.limit);
+  }
+
+  /** A deleted task, for events streams. */
+  tombstone(id: string) {
+    this.tombstones.set(id, Date.now());
+  }
+
+  async changes(scopes: Array<{ organizationId: string }>, since: number) {
+    const organizationId = scopes[0]?.organizationId;
+    if (!organizationId) return { rows: [], deleted: [] };
+
+    for (const [id, at] of this.tombstones)
+      if (at < Date.now() - TOMBSTONE_MS) this.tombstones.delete(id);
+
+    return {
+      rows: (await this.store.list('task')).map(row => ({ organizationId, status: row.value })),
+      deleted: [...this.tombstones]
+        .filter(([, at]) => at > since)
+        .map(([id, at]) => ({ organizationId, id, at })),
+    };
   }
 
   async counts(_organizationId: string, filter: TaskFilter = {}): Promise<TaskCounts> {
@@ -907,6 +975,7 @@ export class StoreQueue implements TaskQueue {
         ...(answers.length ? { answer: [...(current.answer ?? []), ...answers] } : {}),
         ...(approved ? { status: 'running', approval: undefined } : {}),
         ...(cancelled ? { status: 'cancelled', finishedAt: Date.now() } : {}),
+        updatedAt: Date.now(),
       });
       for (const row of applied) await this.store.delete('inbox', row.id);
 
@@ -945,7 +1014,7 @@ export class StoreQueue implements TaskQueue {
       const seq = await this.nextSeq(id);
       const entry = { seq, generation, at: now, kind, value };
       await this.store.put('inbox', `${id}:${String(seq).padStart(8, '0')}`, entry);
-      await this.store.put('task', id, { ...current, inboxSeq: seq });
+      await this.store.put('task', id, { ...current, inboxSeq: seq, updatedAt: now });
       return entry;
     });
   }

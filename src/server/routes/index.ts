@@ -11,6 +11,7 @@ import { ServerLimits, admit, type Admitted } from '../limits';
 import { scheduleKick } from '../tasks/kick';
 import { scheduleInbox } from '../tasks/queue';
 import { routes } from './routes';
+import { LogWatcher, TaskWatcher } from '../tasks/stream';
 
 export async function serve(
   req: Request,
@@ -28,7 +29,7 @@ export const REQUEST_SCOPE_HEADER = 'x-coder-request-scope';
 
 export type RequestScope = {
   sessions: Map<string, Promise<SessionInfo | undefined>>;
-  /** Refreshed session cookies the response carries. */
+  /** Refreshed or cleared session cookies the response carries. */
   cookies: string[];
 };
 
@@ -46,10 +47,7 @@ function shareSessions(ctx: ServerContext, { sessions, cookies }: RequestScope):
         ]);
         let found = sessions.get(key);
         if (!found) {
-          found = auth.session(headers, fresh).then(info => {
-            if (info?.cookies) cookies.push(...info.cookies);
-            return info;
-          });
+          found = auth.session(headers, fresh, cookies);
           sessions.set(key, found);
         }
         return found;
@@ -86,6 +84,8 @@ export async function handleRequest(
   ctx.limits ??= new ServerLimits((ctx.now ?? Date.now)());
   ctx.limits.requests++;
   ctx.settings ??= {};
+  ctx.taskWatcher ??= new TaskWatcher();
+  ctx.logWatcher ??= new LogWatcher();
   ctx.dashboardHosts ??= new DashboardHosts();
   const work = () => request(req, ctx, options);
   return ctx.dbProfile ? ctx.dbProfile.request(options.inProcess === true, work) : work();

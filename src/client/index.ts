@@ -327,6 +327,12 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         headers: { accept: 'text/event-stream' },
         signal,
       }),
+    /** One stream of the named tasks' changes and every list change in the workspace; `last` resumes after an event id. */
+    events: (ids: string[], last?: string, signal?: AbortSignal): Promise<Response> =>
+      this.send(queryPath('/admin/events', { tasks: ids }), {
+        headers: { accept: 'text/event-stream', ...(last ? { 'last-event-id': last } : {}) },
+        signal,
+      }),
     cancel: (id: string): Promise<{ ok: true }> =>
       this.post(`/admin/tasks/${encodeURIComponent(id)}/cancel`),
     steer: (id: string, text: string) =>
@@ -552,7 +558,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
 /** Server-Sent Events from a response body, one `{ event, data }` per message. */
 export async function* serverEvents(
   body: ReadableStream<Uint8Array>,
-): AsyncGenerator<{ event: string; data: string }> {
+): AsyncGenerator<{ event: string; data: string; id?: string }> {
   const decoder = new TextDecoder();
   let buffer = '';
   for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
@@ -562,12 +568,14 @@ export async function* serverEvents(
       const block = buffer.slice(0, end);
       buffer = buffer.slice(end + 2);
       let event = 'message';
+      let id: string | undefined;
       const data: string[] = [];
       for (const line of block.split('\n')) {
         if (line.startsWith('event: ')) event = line.slice(7);
         else if (line.startsWith('data: ')) data.push(line.slice(6));
+        else if (line.startsWith('id: ')) id = line.slice(4);
       }
-      if (data.length) yield { event, data: data.join('\n') };
+      if (data.length || id) yield { event, data: data.join('\n'), ...(id ? { id } : {}) };
     }
   }
 }

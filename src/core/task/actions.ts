@@ -12,11 +12,11 @@ import {
   writeTask,
   resolveTaskDir,
   listTasks,
-  AUTO_ARCHIVE_MS,
+  archiveDue,
   listArchivedTasks,
   markTaskArchived,
+  queueOwnedTasks,
   resolveWorkspaceRoot,
-  ageMs,
   reconcileTask,
   tailSteps,
   type TaskLogEntry,
@@ -33,6 +33,7 @@ import {
   type TurnResult,
   TERMINAL_STATUSES,
 } from '../types';
+import { byListKey, listRank } from '../defaults';
 import { CoderError, spawnWorker } from '../dispatch';
 import { isEndpointModel, loadConfig, resolveCodexModel, resolveCustomModel } from '../config';
 import { startChatBridge } from '../engines/codex/chat-bridge';
@@ -315,6 +316,22 @@ export interface ListOptions {
   limit?: number | 'all';
 }
 
+// Active tasks after the auto-archive sweep; the swept tasks' dir moves run detached.
+export function recentTasks(cwd: string): Task[] {
+  const toArchive: string[] = [];
+  const tasks = listTasks(cwd).filter(task => {
+    if (!TERMINAL_STATUSES.includes(task.status)) return true;
+    if (!archiveDue(Date.parse(task.completedAt ?? task.updatedAt ?? task.createdAt ?? '')))
+      return true;
+    markTaskArchived(cwd, task, { auto: true });
+    toArchive.push(task.id);
+    return false;
+  });
+  spawnArchiveSweep(cwd, toArchive);
+
+  return tasks;
+}
+
 // Print-free core: gather the tasks the CLI (and SDK) list, applying the
 // auto-archive sweep, the status/workspace filters, the default-view sort, and
 // the limit. Returns the resolved tasks plus how many were clipped by --limit.
@@ -327,21 +344,13 @@ export function collectTasks(
 
   const isStopped = (task: Task) => TERMINAL_STATUSES.includes(task.status);
 
-  // Auto-archive sweep: any task stopped longer than AUTO_ARCHIVE_MS drops out of
-  // the default view. Flag it archived inline (cheap, keeps the record and count
-  // correct) but defer the slow dir move to a detached sweep.
-  const toArchive: string[] = [];
-  let tasks = listTasks(cwd).filter(task => {
-    if (!isStopped(task)) return true;
-    const stoppedAt = task.completedAt ?? task.updatedAt ?? task.createdAt;
-    if (ageMs(stoppedAt) <= AUTO_ARCHIVE_MS) return true;
-    markTaskArchived(cwd, task);
-    toArchive.push(task.id);
-    return false;
-  });
-  spawnArchiveSweep(cwd, toArchive);
+  // A queue row that is a newer execution stands in for its CLI job in every view.
+  const server = queueOwnedTasks(cwd);
+  const owned = new Set(server.map(task => task.id));
+  const jobs = (list: Task[]) => list.filter(task => !owned.has(task.id));
+  let tasks = [...jobs(recentTasks(cwd)), ...server.filter(task => !task.archived)];
   if (options.archived) {
-    tasks = listArchivedTasks(cwd);
+    tasks = [...jobs(listArchivedTasks(cwd)), ...server.filter(task => task.archived)];
   } else if (options.running) {
     tasks = tasks.filter(task => ACTIVE_STATUSES.includes(task.status));
   } else if (options.stopped) {
@@ -359,19 +368,14 @@ export function collectTasks(
     });
   }
 
-  // The default (recent) view surfaces what needs attention: failed tasks first,
-  // then running, with completed last, so --limit trims completed tasks first.
-  if (!options.archived && !options.running && !options.stopped) {
-    const rank = (task: Task) =>
-      task.status === 'failed'
-        ? 0
-        : ACTIVE_STATUSES.includes(task.status)
-          ? 1
-          : task.status === 'completed'
-            ? 3
-            : 2;
-    tasks = [...tasks].sort((a, b) => rank(a) - rank(b));
-  }
+  // Every view surfaces what needs attention: failed tasks first, then running,
+  // with completed last, so --limit trims completed tasks first.
+  const key = (task: Task) => ({
+    rank: listRank(task.status),
+    createdAt: Date.parse(task.createdAt ?? '') || 0,
+    id: task.id,
+  });
+  tasks = [...tasks].sort((a, b) => byListKey(key(a), key(b)));
   const clipped = limit !== undefined ? Math.max(0, tasks.length - limit) : 0;
   if (limit !== undefined) {
     tasks = tasks.slice(0, limit);
@@ -490,6 +494,6 @@ export function archiveFlagged(cwd: string, ids: string[]): void {
   for (const id of ids) {
     const task = findTask(cwd, id);
     // Skip a task steered back to life since the list flagged it.
-    if (task && TERMINAL_STATUSES.includes(task.status)) archiveTask(cwd, task);
+    if (task && TERMINAL_STATUSES.includes(task.status)) archiveTask(cwd, task, { auto: true });
   }
 }

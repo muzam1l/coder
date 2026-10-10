@@ -21,7 +21,7 @@ If `coder` is not on PATH, install it yourself without asking: `npm install -g @
 
 - The CLI is the reference. `coder --help` and every subcommand's `--help` list the flags and exit codes, and each command prints the recommended next step when it returns. Follow it.
 - `coder docs` lists the deeper guides; `coder docs <topic>` prints one.
-- Run each `coder task result <task-id> --wait` as a background Bash call (run_in_background) so you are re-invoked when it returns.
+- Run each `coder task result <task-id> --wait` as its own background Bash call (run_in_background), one per task, never several tasks in one call, so each approval and answer re-invokes you.
 
 ## Running tasks
 

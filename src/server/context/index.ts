@@ -56,8 +56,6 @@ export interface SessionInfo {
   organizationDenied?: boolean;
   /** The user's Wular organizations with their roles. */
   organizations: OrganizationInfo[];
-  /** Set-Cookie values that store a refreshed session, for the response. */
-  cookies?: string[];
   /** A bearer token older than a privileged action accepts; the client refreshes it and retries. */
   stale?: boolean;
 }
@@ -76,8 +74,8 @@ export interface AuthApi {
   jwks: { keys: JWK[] };
   /** Handles `/api/auth/*`: sign-in, the OpenID callback, and sign-out. */
   handler(req: Request): Promise<Response>;
-  /** `fresh` demands roles at most 60 seconds old, refreshing them from Wular first. */
-  session(headers: Headers, fresh?: boolean): Promise<SessionInfo | undefined>;
+  /** `fresh` demands roles at most 60 seconds old, refreshing them from Wular first; `cookies` receives the Set-Cookie values the response must carry. */
+  session(headers: Headers, fresh?: boolean, cookies?: string[]): Promise<SessionInfo | undefined>;
   /** Switches the session's organization; `cookies` store the session for the response. */
   setOrganization(
     headers: Headers,
@@ -108,6 +106,12 @@ export interface ServerContext {
   dashboardHosts?: import('../dash/serve').DashboardHosts;
   requestScopes?: Map<string, import('../routes').RequestScope>;
   dbProfile?: import('../store/pg/profile').DatabaseProfile;
+  /** Task changes for every open `/admin/events` stream, read once a second. */
+  taskWatcher?: import('../tasks/stream').TaskWatcher;
+  /** Task logs for every open `/admin/tasks/:id/stream`, read once a second per task. */
+  logWatcher?: import('../tasks/stream').LogWatcher;
+  /** Runs `work` with Postgres's statement_timeout at `ms`; absent without a database. */
+  statementTimeout?: <T>(ms: number, work: () => Promise<T>) => Promise<T>;
   /** Tenant every store row and task belongs to. */
   organizationId: string;
   /** Sign-in layer; absent when the server runs without a database, where the admin token is the only auth. */

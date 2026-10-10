@@ -17,6 +17,7 @@ import { sql } from 'drizzle-orm';
 import { runner as runnerTable } from '../store/pg/schema';
 import { createBackend } from '../store';
 import { recoverLocalTasks, stopLocalTasks, syncLocalUsage } from '../tasks/local';
+import { LogWatcher, TaskWatcher } from '../tasks/stream';
 import type { ServerContext, ServerConfig } from '.';
 
 interface ContextOptions {
@@ -147,6 +148,8 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
     const limits = new ServerLimits();
     const contexts = new Map<string, ServerContext>();
     const requestScopes = new Map<string, import('../routes').RequestScope>();
+    const taskWatcher = new TaskWatcher();
+    const logWatcher = new LogWatcher();
     const context = (organizationId: string): ServerContext => {
       const existing = contexts.get(organizationId);
       if (existing) return existing;
@@ -158,6 +161,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
               databaseHealth: async () => {
                 await backend.connection!.db.execute(sql`select 1`);
               },
+              statementTimeout: backend.connection.statementTimeout,
               healthRunners: async () => {
                 const [counts] = await backend
                   .connection!.db.select({
@@ -177,6 +181,8 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
         store,
         queue: backend.queue,
         requestScopes,
+        taskWatcher,
+        logWatcher,
         dashboardHosts,
         dbProfile: backend.connection?.profile,
         chatState: backend.chatState,
@@ -218,6 +224,8 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
       ...(mintedToken ? { mintedToken } : {}),
       sweep: backend.sweep,
       close: async () => {
+        taskWatcher.close();
+        logWatcher.close();
         if (usageStart) clearImmediate(usageStart);
         await defaultContext.local?.usageSync?.catch(() => undefined);
         await stopLocalTasks(defaultContext);

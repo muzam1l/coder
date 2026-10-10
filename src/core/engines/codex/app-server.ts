@@ -51,6 +51,7 @@ export interface ClientOptions {
   clientInfo?: Record<string, unknown>;
   capabilities?: Record<string, unknown>;
   networkAccess?: boolean;
+  nativeMcp?: boolean;
   brokerEndpoint?: string | null;
   disableBroker?: boolean;
   reuseExistingBroker?: boolean;
@@ -277,7 +278,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
 
   async initialize() {
     const networkAccess = this.options.networkAccess ?? false;
-    this.proc = spawn('codex', codexAppServerArgs(networkAccess), {
+    this.proc = spawn('codex', codexAppServerArgs(networkAccess, this.options.nativeMcp), {
       cwd: this.cwd,
       env: this.options.env ?? process.env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -369,13 +370,12 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
 }
 
 /** Fixed process arguments; thread-scoped config, including MCP secrets, travels over JSON-RPC. */
-export function codexAppServerArgs(networkAccess: boolean): string[] {
+export function codexAppServerArgs(networkAccess: boolean, nativeMcp = false): string[] {
   return [
     '-c',
     `sandbox_workspace_write.network_access=${networkAccess}`,
     'app-server',
-    '--disable',
-    'plugins',
+    ...(!nativeMcp ? ['--disable', 'plugins', '--disable', 'apps'] : []),
   ];
 }
 
@@ -443,7 +443,7 @@ export class CodexAppServerClient {
   static async connect(cwd: string, options: ClientOptions = {}) {
     const networkAccess = options.networkAccess ?? false;
     let brokerEndpoint = null;
-    if (!options.disableBroker) {
+    if (!options.disableBroker && !options.nativeMcp) {
       brokerEndpoint =
         options.brokerEndpoint ??
         options.env?.[BROKER_ENDPOINT_ENV] ??

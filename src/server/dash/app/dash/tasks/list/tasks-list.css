@@ -6,13 +6,13 @@
   width: 160px;
 }
 .tasks th:nth-child(3) {
-  width: 140px;
-}
-.tasks th:nth-child(4) {
   width: 130px;
 }
+.tasks th:nth-child(4) {
+  width: 100px;
+}
 .tasks th:nth-child(5) {
-  width: 150px;
+  width: 204px;
 }
 .tasks td {
   padding-block: 9px;
@@ -33,12 +33,25 @@
 .tasks td:first-child .sub {
   margin-top: 1px;
 }
+.tasks .sub .ic {
+  width: 12px;
+  height: 12px;
+  margin-right: 5px;
+  color: var(--dim);
+  vertical-align: -2px;
+}
 
 @media (max-width: 760px) {
   .tasks {
     min-width: 0;
   }
-  .tasks td:nth-child(3) {
+  .tasks td {
+    padding-block: 0;
+  }
+  .tasks td:is(.when, .num) {
+    order: 1;
+  }
+  .tasks td:last-child {
     display: flex;
     align-items: center;
     justify-self: end;
@@ -63,11 +76,11 @@
 }
 
 /* a row's menu waits at its right edge, above the cover link, and shows on hover, focus or while open */
-.tasks th.num,
-.tasks td.num {
+.tasks th:last-child,
+.tasks td:last-child {
   padding-right: 64px;
 }
-.tasks td.num {
+.tasks td:last-child {
   position: relative;
 }
 .row-acts {

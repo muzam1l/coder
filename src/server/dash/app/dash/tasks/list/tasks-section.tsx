@@ -2,11 +2,11 @@ import './tasks-list.css';
 import { dynamic } from '@wular/pnext/dynamic';
 
 import { zoneOf } from '@/utils/format';
-import { LIST_PAGE } from '@/utils/paged';
+import { FILTER_ROWS, LIST_PAGE } from '@/utils/paged';
 import { load } from '@/api/load';
 import { Settle } from '@/comps/frame/stream';
 import { LoadingCard, LoadingToolbar } from '@/comps/frame/loading-card';
-import { SOURCES, STATUSES, listFilters } from '@/app/dash/tasks/list/task';
+import { listFilters } from '@/app/dash/tasks/list/task';
 
 // Rows arrive rendered; paging and filters hydrate once the list is in view.
 const TasksList = dynamic(() => import('./tasks-list').then(m => m.TasksList), {
@@ -18,18 +18,14 @@ const TasksList = dynamic(() => import('./tasks-list').then(m => m.TasksList), {
 export function TasksLoading({ head, agent }: { head?: { title: string }; agent?: boolean }) {
   return (
     <>
-      <LoadingToolbar head={head} search="Search tasks" selects={[STATUSES[0]![1]]} more />
+      <LoadingToolbar head={head} search="Search tasks" more />
       <LoadingCard title="Tasks" label="Loading tasks" />
     </>
   );
 }
 
 /** The tasks the address bar's filters select; the page starts these loads before it renders. */
-export function loadTasks(
-  request: Request,
-  agent?: string,
-  agentChoices?: Promise<[string, string][]>,
-) {
+export function loadTasks(request: Request, agent?: string) {
   const params = new URL(request.url).searchParams;
   const filters = {
     q: params.get('q') ?? '',
@@ -47,16 +43,15 @@ export function loadTasks(
     agent: agent ?? filters.agent,
   });
   const catalog = load(request).integrations.list();
-  // The agent filter's choices; an agent's own tab has none.
+  // The agent filter's first rows, one past what it shows so it knows to offer typing; an agent's own tab has none.
   const agents = agent
     ? undefined
-    : (agentChoices ??
-      load(request)
-        .agents.list({ cursor: '', limit: 100 })
+    : load(request)
+        .agents.list({ cursor: '', limit: FILTER_ROWS + 1 })
         .then(
           page => page.items.map((row): [string, string] => [row.id, row.name]),
           () => [],
-        ));
+        );
   return { filters, first, catalog, agents, tz: zoneOf(request) };
 }
 
@@ -80,6 +75,7 @@ export function TasksSection({
             <TasksList
               first={page}
               platforms={integrations.map((entry): [string, string] => [entry.id, entry.name])}
+              brands={Object.fromEntries(integrations.map(entry => [entry.id, entry.brand]))}
               agents={ids}
               filters={filters}
               agent={agent}

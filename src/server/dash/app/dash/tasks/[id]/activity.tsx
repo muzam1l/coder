@@ -40,7 +40,7 @@ const ICONS: Record<TaskDisplayRow['kind'], string> = {
 
 /** Rows long enough to fold to one line. */
 const foldable = (row: TaskDisplayRow) =>
-  Boolean(row.detail) || row.title.length > 120 || row.title.includes('\n');
+  Boolean(row.detail || row.result?.detail) || row.title.length > 120 || row.title.includes('\n');
 
 const atEnd = () => innerHeight + scrollY >= document.documentElement.scrollHeight - 48;
 
@@ -65,15 +65,43 @@ function useWindowVirtualizer(count: number, list: { current: HTMLElement | null
   return virtual;
 }
 
+/** A call's or approval's outcome on the right: a spinner and the time so far, then ✓ or ✗ and how long it took. */
+function CallState({ row, running }: { row: TaskDisplayRow; running: boolean }) {
+  const [, tick] = useReducer((n: number) => n + 1, 0);
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => tick(0), 1000);
+    return () => clearInterval(timer);
+  }, [running]);
+  const result = row.result;
+  const took = running ? Math.max(0, Date.now() - row.at) : result?.durationMs;
+  const text = [
+    row.state,
+    result && !result.ok && result.exitCode !== undefined ? `exit ${result.exitCode}` : '',
+    took ? formatDuration(took) : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
+  return (
+    <span class={`act-state${result && !result.ok ? ' bad' : ''}`}>
+      {running ? <i class="spin" /> : result ? <Icon d={result.ok ? iCheck : iX} /> : null}
+      {text}
+    </span>
+  );
+}
+
 function Row({
   row,
   tz,
   open,
+  running,
   onToggle,
 }: {
   row: TaskDisplayRow;
   tz: string;
   open: boolean;
+  running: boolean;
   onToggle: () => void;
 }) {
   const title = useRef<HTMLSpanElement>(null);
@@ -83,6 +111,7 @@ function Row({
   }, [row.title]);
   const fold = open || clipped || foldable(row);
   const failed = row.tone === 'error';
+  const timed = row.kind === 'tool' || row.state !== undefined;
   const extra =
     row.kind === 'tool-result'
       ? [
@@ -100,7 +129,7 @@ function Row({
   return (
     <Tag
       type={fold ? 'button' : undefined}
-      class={`act ${row.kind}${row.tone ? ` ${row.tone}` : ''}${row.separated ? ' sep' : ''}${open ? ' open' : ''}`}
+      class={`act ${row.kind}${row.tone ? ` ${row.tone}` : ''}${row.separated ? ' sep' : ''}${timed ? ' timed' : ''}${open ? ' open' : ''}`}
       aria-expanded={fold ? open : undefined}
       onClick={fold ? onToggle : undefined}
     >
@@ -108,11 +137,20 @@ function Row({
       <Icon d={row.kind === 'tool-result' && failed ? iX : ICONS[row.kind]} />
       <span class="act-text">
         <span class="act-title" ref={title}>
-          {row.title}
+          {row.kind === 'tool' && row.tool && row.title.startsWith(`${row.tool} `) ? (
+            <>
+              <span class="act-tool">{row.tool}</span>
+              {row.title.slice(row.tool.length)}
+            </>
+          ) : (
+            row.title
+          )}
         </span>
         {extra ? <span class="act-detail">{extra}</span> : null}
-        {row.detail ? <span class="act-detail">{row.detail}</span> : null}
+        {row.detail && (open || !row.state) ? <span class="act-detail">{row.detail}</span> : null}
+        {open && row.result?.detail ? <span class="act-detail">{row.result.detail}</span> : null}
       </span>
+      {timed ? <CallState row={row} running={running} /> : null}
       {fold ? <Icon d={iDown} class="act-chev" /> : null}
     </Tag>
   );
@@ -132,6 +170,8 @@ export function Activity({
   const [open, setOpen] = useState<Set<number>>(new Set());
   const [follow, setFollow] = useState(live);
   const virtual = useWindowVirtualizer(rows.length, list);
+  // Calls the agent has moved on from without a result are not still running.
+  const settled = rows.findLastIndex(row => row.kind === 'assistant' || row.kind === 'reasoning');
 
   useEffect(() => {
     const onScroll = () => setFollow(atEnd());
@@ -173,6 +213,11 @@ export function Activity({
                 row={row}
                 tz={tz}
                 open={open.has(row.seq)}
+                running={
+                  live &&
+                  !row.result &&
+                  (row.state !== undefined || (row.kind === 'tool' && item.index > settled))
+                }
                 onToggle={() =>
                   setOpen(value => {
                     const next = new Set(value);

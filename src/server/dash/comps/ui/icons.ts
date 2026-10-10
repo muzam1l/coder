@@ -38,6 +38,8 @@ export const iSearch = 'M4 11a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M20 20l-3.5-3.5';
 export const iAlert =
   'm21.7 18-8-14a2 2 0 0 0-3.4 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.7-3M12 9v4M12 17h.01';
 export const iTerminal = 'm4 17 6-6-6-6M12 19h8';
+export const iFolder =
+  'M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.7-.9l-.8-1.2A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z';
 export const iClock = 'M12 7v5l3 2M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0';
 export const iPlug = 'M9 2v6M15 2v6M6 8h12v4a6 6 0 0 1-12 0ZM12 18v4';
 export const iCopy = 'M9 9h11v11H9ZM5 15H4V4h11v1';

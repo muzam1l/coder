@@ -1,7 +1,7 @@
 import type { ComponentChildren } from 'preact';
 import { dynamic } from '@wular/pnext/dynamic';
 
-import { iGit, iPencil } from '@/comps/ui/icons';
+import { iGit, iPencil, iPlus } from '@/comps/ui/icons';
 import { Link } from '@wular/pnext/link';
 import { load } from '@/api/load';
 import type { AgentRow, TasksPage } from '@coder/client/types';
@@ -56,6 +56,7 @@ function LoadingAgentHead({ back }: { back: ComponentChildren }) {
         back={back}
         actions={
           <button type="button" class="btn" disabled>
+            <Icon d={iPlus} />
             New task
           </button>
         }

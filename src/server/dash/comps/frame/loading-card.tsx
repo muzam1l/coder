@@ -27,8 +27,8 @@ export function LoadingToolbar({
   selects?: string[];
   /** A disabled more-filters button after the selects. */
   more?: boolean;
-  /** The primary button's label. */
-  action?: string;
+  /** The primary button. */
+  action?: { label: string; icon: string };
 }) {
   return (
     <Toolbar
@@ -36,7 +36,8 @@ export function LoadingToolbar({
       action={
         action ? (
           <button type="button" class="btn" disabled>
-            {action}
+            <Icon d={action.icon} />
+            {action.label}
           </button>
         ) : undefined
       }

@@ -374,6 +374,22 @@ export async function home(
   );
 }
 
+/** Starts Wular sign-in, returning to `back` afterwards. */
+export async function toSignIn(
+  req: Request,
+  ctx: ServerContext,
+  url: URL,
+  back: string | null,
+): Promise<Response> {
+  const signIn = `/api/auth/sign-in?return=${encodeURIComponent(safeReturnPath(back, url.origin))}`;
+  const publicUrl = ctx.config.publicUrl;
+  // The flow cookie belongs on PUBLIC_URL's host, where Wular sends the callback.
+  if (publicUrl && new URL(requestOrigin(req, url)).host !== new URL(publicUrl).host)
+    return redirect(new URL(signIn, publicUrl).href);
+
+  return ctx.auth!.handler(new Request(`${url.origin}${signIn}`));
+}
+
 export async function signIn(
   req: Request,
   ctx: ServerContext,
@@ -381,15 +397,8 @@ export async function signIn(
   url: URL,
 ): Promise<Response> {
   // Straight to Wular unless the visitor just signed out or a sign-in failed.
-  if (ctx.auth && !url.searchParams.has('signed_out') && !url.searchParams.has('error')) {
-    const signIn = `/api/auth/sign-in?return=${encodeURIComponent(safeReturnPath(url.searchParams.get('return'), url.origin))}`;
-    const publicUrl = ctx.config.publicUrl;
-    // The flow cookie belongs on PUBLIC_URL's host, where Wular sends the callback.
-    if (publicUrl && new URL(requestOrigin(req, url)).host !== new URL(publicUrl).host)
-      return redirect(new URL(signIn, publicUrl).href);
-
-    return ctx.auth.handler(new Request(`${url.origin}${signIn}`));
-  }
+  if (ctx.auth && !url.searchParams.has('signed_out') && !url.searchParams.has('error'))
+    return toSignIn(req, ctx, url, url.searchParams.get('return'));
 
   return (
     (await serveDash(dashRequest(req, ctx), undefined, ctx.dashboardHosts)) ??

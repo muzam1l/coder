@@ -241,6 +241,7 @@ function dispatchOptsFrom(opts: FlowTaskOptions, cwd: string, ctx?: RunContext) 
     engine: opts.engine,
     model: opts.model,
     effort: opts.effort,
+    mcp: opts.mcp,
     permissions: ctx?.ceiling
       ? capPermissions(opts.name, opts.permissions, ctx.ceiling)
       : opts.permissions,
@@ -455,6 +456,7 @@ export async function task<T = unknown>(
     agent: opts.engine,
     model: opts.model,
     effort: opts.effort,
+    ...(opts.mcp !== undefined ? { mcp: opts.mcp } : {}),
     permissions: opts.permissions,
     name: opts.name,
     system: opts.system,
@@ -464,7 +466,6 @@ export async function task<T = unknown>(
     returns: await returnsPart(opts.returns),
   };
   const fp = fingerprint('task', defined(part));
-  // Older journals hashed unset keys as null.
   const hit = ctx.journal.replay(fp, fingerprint('task', part));
   if (hit) return hit.result as FlowTaskResult<T>;
 

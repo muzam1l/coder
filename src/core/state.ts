@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { moveDirectory } from '../utils/fsx';
+import { moveDirectory, readJsonFile } from '../utils/fsx';
 import { archiveCodexSession } from './engines/codex/sessions';
 import { type Task, type TurnResult, ACTIVE_STATUSES, TERMINAL_STATUSES } from './types';
 import type { TaskLogEntry } from './task/log-view';
@@ -117,7 +117,11 @@ export function resolveTasksDir(cwd: string): string {
 
 // Stopped tasks (and flow runs) linger in the recent view this long, then move
 // to the archived view. Shared by `coder list` and `coder flow list`.
-export const AUTO_ARCHIVE_MS = 10 * 60_000;
+export const AUTO_ARCHIVE_MS = 30 * 60_000;
+
+/** Whether a task stopped at this time (ms) is past AUTO_ARCHIVE_MS. */
+export const archiveDue = (stoppedAt: number, now = Date.now()) =>
+  now - stoppedAt > AUTO_ARCHIVE_MS;
 
 // Archived tasks live in a separate bin, so the default list only ever scans
 // the (tiny) active bin instead of every task ever run.
@@ -148,19 +152,30 @@ export function resolveTaskDir(cwd: string, taskId: string): string {
 
 // Flag a task archived without moving its dir; the migration in listTasks/
 // listArchivedTasks tolerates the flag-without-move interim and finishes the move.
-export function markTaskArchived(cwd: string, task: Task): Task {
+// `auto` marks a sweep's archive, which keeps updatedAt; an explicit archive of a swept task clears the mark.
+export function markTaskArchived(cwd: string, task: Task, opts: { auto?: boolean } = {}): Task {
+  if (task.archived && (opts.auto || !task.autoArchived)) return task;
   return task.archived
-    ? task
-    : writeTask(cwd, task.id, { archived: true, archivedAt: new Date().toISOString() });
+    ? writeTask(cwd, task.id, { autoArchived: undefined })
+    : writeTask(
+        cwd,
+        task.id,
+        {
+          archived: true,
+          archivedAt: new Date().toISOString(),
+          ...(opts.auto ? { autoArchived: true } : {}),
+        },
+        { touch: !opts.auto },
+      );
 }
 
 // Active workers keep their files in place until they stop.
-export function archiveTask(cwd: string, task: Task): Task {
-  if (ACTIVE_STATUSES.includes(task.status)) return markTaskArchived(cwd, task);
+export function archiveTask(cwd: string, task: Task, opts: { auto?: boolean } = {}): Task {
+  if (ACTIVE_STATUSES.includes(task.status)) return markTaskArchived(cwd, task, opts);
   const from = resolveTaskDir(cwd, task.id);
   const to = path.join(resolveArchiveDir(cwd), task.id);
   if (from !== to) moveDirectory(from, to);
-  const next = markTaskArchived(cwd, task);
+  const next = markTaskArchived(cwd, task, opts);
   if (task.engine !== 'claude' && task.threadId) {
     void archiveCodexSession(cwd, task.threadId);
   }
@@ -179,7 +194,11 @@ export function unarchiveTask(cwd: string, task: Task): Task {
   const to = path.join(resolveTasksDir(cwd), task.id);
   if (from !== to) moveDirectory(from, to);
 
-  return writeTask(cwd, task.id, { archived: undefined, archivedAt: undefined });
+  return writeTask(cwd, task.id, {
+    archived: undefined,
+    archivedAt: undefined,
+    autoArchived: undefined,
+  });
 }
 
 export function generateTaskId(): string {
@@ -187,14 +206,24 @@ export function generateTaskId(): string {
   return `task-${Date.now().toString(36)}-${random}`;
 }
 
-export function writeTask(cwd: string, taskId: string, patch: Partial<Task>): Task {
+/** `touch: false` keeps updatedAt, for silent bookkeeping such as the auto-archive sweep. */
+export function writeTask(
+  cwd: string,
+  taskId: string,
+  patch: Partial<Task>,
+  opts: { touch?: boolean } = {},
+): Task {
   const taskDir = resolveTaskDir(cwd, taskId);
   fs.mkdirSync(taskDir, { recursive: true });
   const taskFile = path.join(taskDir, 'job.json');
   const existing: Task =
     loadTask(cwd, taskId) ??
     ({ id: taskId, createdAt: new Date().toISOString(), status: 'queued' } as Task);
-  const next: Task = { ...existing, ...patch, updatedAt: new Date().toISOString() };
+  const next: Task = {
+    ...existing,
+    ...patch,
+    updatedAt: opts.touch === false ? existing.updatedAt : new Date().toISOString(),
+  };
   fs.writeFileSync(taskFile, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
   return next;
 }
@@ -380,12 +409,84 @@ export function listTasks(cwd: string): Task[] {
   for (const stored of scanTasks(tasksDirs, new Set())) {
     const task = reconcileTask(cwd, stored, startMs);
     if (task.archived && !resumedAfterArchive(task)) {
-      archiveTask(cwd, task);
+      archiveTask(cwd, task, { auto: true });
     } else {
       tasks.push(task.archived ? unarchiveTask(cwd, task) : task);
     }
   }
   return tasks.sort(byRecency);
+}
+
+/** Whether a local server's queue row is a newer execution than its task's CLI job records: queued, a continuation whose CLI turn has not begun, or a task with no CLI job. The job is the truth for the execution it records. */
+export function queueRowWins(
+  cwd: string,
+  row: { task: { id: string }; status: string; generation?: number; startedAt?: number },
+  listed = false,
+): boolean {
+  if (row.status === 'queued') return true;
+  const generation = row.generation ?? 0;
+  if (listed && !generation) return false;
+  const job = loadTask(cwd, row.task.id);
+  if (!job) return true;
+  if (!generation) return false;
+
+  // A continuation's CLI turn stamps the job's resumedAt once it begins.
+  return row.startedAt === undefined || (Date.parse(job.resumedAt ?? '') || 0) < row.startedAt;
+}
+
+type ServerTaskRow = {
+  task: {
+    id: string;
+    name?: string;
+    prompt?: string;
+    source?: string;
+    agent?: string;
+    cwd?: string;
+  };
+  status: string;
+  generation?: number;
+  startedAt?: number;
+  error?: string;
+  createdAt: number;
+  finishedAt?: number;
+  updatedAt: number;
+  archivedAt?: number;
+};
+
+/** A local server's queue rows that are newer executions than their CLI jobs (`queueRowWins`), such as startup failures, archived once past AUTO_ARCHIVE_MS. */
+export function queueOwnedTasks(cwd: string): Task[] {
+  const rows =
+    readJsonFile<Record<string, { value: ServerTaskRow }>>(
+      path.join(resolveStateDir(cwd), 'runner', 'task.json'),
+    ) ?? {};
+  const iso = (ms?: number) => (ms === undefined ? undefined : new Date(ms).toISOString());
+
+  return Object.values(rows)
+    .map(({ value }) => value)
+    .filter(row => queueRowWins(cwd, row))
+    .map(row => {
+      const status = (row.status === 'waiting' ? 'running' : row.status) as Task['status'];
+      const archivedAt =
+        row.archivedAt ??
+        (TERMINAL_STATUSES.includes(status) && archiveDue(row.finishedAt ?? row.updatedAt)
+          ? (row.finishedAt ?? row.updatedAt)
+          : undefined);
+
+      return {
+        id: row.task.id,
+        status,
+        ...(row.task.name ? { name: row.task.name } : {}),
+        ...(row.task.prompt ? { prompt: row.task.prompt } : {}),
+        ...(row.task.cwd ? { cwd: row.task.cwd } : {}),
+        ...(row.task.agent ? { agentId: row.task.agent } : {}),
+        source: row.task.source ?? 'dashboard',
+        ...(row.error ? { error: row.error } : {}),
+        createdAt: iso(row.createdAt)!,
+        updatedAt: iso(row.updatedAt),
+        ...(row.finishedAt ? { completedAt: iso(row.finishedAt) } : {}),
+        ...(archivedAt === undefined ? {} : { archived: true, archivedAt: iso(archivedAt) }),
+      };
+    });
 }
 
 // Archived tasks. Scans the active bins too so in-place-archived legacy tasks
@@ -408,7 +509,7 @@ export function listArchivedTasks(cwd: string, opts?: { migrate?: boolean }): Ta
   for (const task of scanTasks(tasksDirs, seen)) {
     if (task.archived && !resumedAfterArchive(task)) {
       const current = reconcileTask(cwd, task, startMs);
-      archived.push(migrate ? archiveTask(cwd, current) : current);
+      archived.push(migrate ? archiveTask(cwd, current, { auto: true }) : current);
     }
   }
   return archived.sort(byRecency);

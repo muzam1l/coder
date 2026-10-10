@@ -19,17 +19,25 @@ const parts = (value: number, tz: string, options: Intl.DateTimeFormatOptions) =
   );
 
 // Built from parts, so every ICU version, on the server or in the browser, prints the same text.
-export function formatDate(value: number | undefined, tz: string) {
+/** `short` prints only the time today and leaves out this year. */
+export function formatDate(value: number | undefined, tz: string, short?: boolean) {
   if (!value) return 'Not available';
-  const p = parts(value, tz, {
+  const options: Intl.DateTimeFormatOptions = {
     month: 'short',
     day: 'numeric',
     year: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
-  });
-  return `${p.month} ${p.day}, ${p.year}, ${p.hour}:${p.minute} ${p.dayPeriod}`;
+  };
+  const p = parts(value, tz, options);
+  const time = `${p.hour}:${p.minute} ${p.dayPeriod}`;
+  if (!short) return `${p.month} ${p.day}, ${p.year}, ${time}`;
+
+  const now = parts(Date.now(), tz, options);
+  if (p.year !== now.year) return `${p.month} ${p.day}, ${p.year}, ${time}`;
+
+  return p.month === now.month && p.day === now.day ? time : `${p.month} ${p.day}, ${time}`;
 }
 
 /** The time of day as `formatDate` prints it, with seconds. */

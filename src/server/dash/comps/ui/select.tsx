@@ -135,8 +135,8 @@ export function Select({
       setPlace(
         `left:${Math.round(Math.min(box.left, innerWidth - menu.offsetWidth - 8))}px;min-width:${Math.round(box.width)}px;` +
           (up
-            ? `bottom:${Math.round(innerHeight - box.top + 4)}px;max-height:${Math.round(Math.min(480, box.top - 12))}px`
-            : `top:${Math.round(box.bottom + 4)}px;max-height:${Math.round(Math.min(480, below))}px`),
+            ? `bottom:${Math.round(innerHeight - box.top + 4)}px;max-height:${Math.round(Math.min(560, box.top - 12))}px`
+            : `top:${Math.round(box.bottom + 4)}px;max-height:${Math.round(Math.min(560, below))}px`),
       );
     };
     position();

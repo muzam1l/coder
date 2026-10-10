@@ -18,6 +18,9 @@ export interface TaskRow {
       text?: string;
       thread?: { number?: number };
     };
+    /** The agent's engine settings, and what this task ran with over them. */
+    definition?: { engine?: string; model?: string; effort?: string };
+    usage?: { engine?: string; model?: string; effort?: string };
   };
   status: TaskState;
   statusReason?: string;
@@ -144,6 +147,21 @@ export interface UsagePage {
   next?: string;
   summary: UsageAmount & { agents: number };
 }
+
+/** One task change on `/admin/events`; `result`, `error` and `answer` come, maybe null, for asked tasks only. */
+export type TaskEvent =
+  | (Pick<
+      TaskRow,
+      'status' | 'approval' | 'archivedAt' | 'createdAt' | 'startedAt' | 'finishedAt'
+    > & {
+      id: string;
+      agent: string;
+      result?: TaskRow['result'] | null;
+      error?: string | null;
+      answer?: unknown[] | null;
+      deleted?: never;
+    })
+  | { id: string; deleted: true };
 
 export interface TaskCounts {
   all: number;

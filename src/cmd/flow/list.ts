@@ -19,7 +19,7 @@ export const commandList = command({
   help: {
     usage: 'coder flow list [--archived] [--limit N] [--json]',
     summary:
-      'List recent flow runs, most recent first: running runs plus ones that ended\nwithin the last 10 minutes. Older runs auto-archive and move to --archived.',
+      'List recent flow runs, most recent first: running runs plus ones that ended\nwithin the last 30 minutes. Older runs auto-archive and move to --archived.',
     flags: [
       ['--archived', 'show archived runs (auto-archived or via flow archive)'],
       ['--limit <n|all>', 'show at most n runs (default all)'],

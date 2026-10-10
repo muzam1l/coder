@@ -1,4 +1,5 @@
 import type { TaskRow } from '@coder/client/types';
+import { byListKey, listRank } from '@coder/core/defaults';
 
 /** Task statuses a list filters by. */
 export const STATUSES: Array<[string, string]> = [
@@ -32,8 +33,35 @@ export const SOURCES: Array<[string, string]> = [
 export const sourceLabel = (value: string) =>
   (SOURCES.find(([key]) => key === value) ?? [value, value])[1];
 
-export const taskActive = (task: TaskRow) =>
+export const taskActive = (task: Pick<TaskRow, 'status'>) =>
   task.status === 'queued' || task.status === 'running' || task.status === 'waiting';
+
+const listKey = (row: TaskRow) => ({
+  rank: listRank(row.status),
+  createdAt: row.createdAt,
+  id: row.task.id,
+});
+
+/** The server's list order. */
+export const listOrder = (a: TaskRow, b: TaskRow) => byListKey(listKey(a), listKey(b));
+
+/** Rows refetched first pages added so far, the newest copy of each, in list order. */
+export function addRows(previous: TaskRow[], page: TaskRow[]): TaskRow[] {
+  const fetched = new Set(page.map(row => row.task.id));
+  return [...page, ...previous.filter(row => !fetched.has(row.task.id))].sort(listOrder);
+}
+
+/** The loaded rows with the added ones they lack, each at its latest, in list order. */
+export function withAdded(
+  rows: TaskRow[],
+  added: TaskRow[],
+  latest: Record<string, TaskRow> = {},
+): TaskRow[] {
+  const listed = new Set(rows.map(row => row.task.id));
+  return [...added.filter(row => !listed.has(row.task.id)), ...rows]
+    .map(row => latest[row.task.id] ?? row)
+    .sort(listOrder);
+}
 
 export const taskTitle = (task: TaskRow) =>
   task.task.name?.trim() ||

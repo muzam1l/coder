@@ -259,11 +259,6 @@ export function parseMcpServers(
             .split(',')
             .map(s => s.trim())
             .filter(Boolean);
-    if (text === 'all' && !names.length)
-      throw new CoderError(
-        'invalid-option',
-        'No MCP servers configured under `mcp` in .coder/config.json.',
-      );
     return names.map(name => {
       const entry = configured[name];
       if (!entry)
@@ -274,6 +269,23 @@ export function parseMcpServers(
     });
   }
   return parseMcpJson(text);
+}
+
+/** Native MCP is included only by an explicit `all` selection. */
+export function selectMcpServers(
+  value?: string | McpServerSpec[],
+  configured: Record<string, McpConfigEntry> = {},
+  declared: Record<string, McpConfigEntry> = {},
+): { mcp: McpServerSpec[]; nativeMcp: boolean } {
+  if (typeof value === 'string' && !value.trim()) value = undefined;
+
+  return {
+    mcp:
+      typeof value === 'string'
+        ? parseMcpServers(value, { ...configured, ...declared })
+        : (value ?? Object.entries(declared).map(([name, entry]) => ({ name, ...entry }))),
+    nativeMcp: typeof value === 'string' && value.trim() === 'all',
+  };
 }
 
 function parseMcpJson(json: string): McpServerSpec[] {
@@ -299,10 +311,11 @@ function parseMcpJson(json: string): McpServerSpec[] {
   return parsed.data;
 }
 
-/** Expand `${VAR}` and `${VAR:-default}` (the `.mcp.json` convention) in command, args, url, env, and headers. */
+/** Expand MCP variables; supplying cwd also binds stdio executable and file paths at authorization. */
 export function resolveMcpServers(
   servers: McpServerSpec[] | undefined,
   env: NodeJS.ProcessEnv = process.env,
+  cwd?: string,
 ): McpServerSpec[] {
   const expand = (value: string) =>
     value.replace(
@@ -311,14 +324,49 @@ export function resolveMcpServers(
     );
   const map = (record: Record<string, string>) =>
     Object.fromEntries(Object.entries(record).map(([k, v]) => [k, expand(v)]));
-  return (servers ?? []).map(server => ({
-    ...server,
-    ...(server.command ? { command: expand(server.command) } : {}),
-    ...(server.args ? { args: server.args.map(expand) } : {}),
-    ...(server.url ? { url: expand(server.url) } : {}),
-    ...(server.env ? { env: map(server.env) } : {}),
-    ...(server.headers ? { headers: map(server.headers) } : {}),
-  }));
+  return (servers ?? []).map(server => {
+    const resolved = {
+      ...server,
+      ...(server.command ? { command: expand(server.command) } : {}),
+      ...(server.args ? { args: server.args.map(expand) } : {}),
+      ...(server.url ? { url: expand(server.url) } : {}),
+      ...(server.env ? { env: map(server.env) } : {}),
+      ...(server.headers ? { headers: map(server.headers) } : {}),
+    };
+    if (!cwd || !resolved.command) return resolved;
+
+    const candidates = resolved.command.includes(path.sep)
+      ? [path.resolve(cwd, resolved.command)]
+      : (resolved.env?.PATH ?? env.PATH ?? '/usr/bin:/bin')
+          .split(path.delimiter)
+          .map(dir => path.resolve(cwd, dir, resolved.command!));
+    const executable = candidates.find(file => {
+      try {
+        fs.accessSync(file, fs.constants.X_OK);
+        return fs.statSync(file).isFile();
+      } catch {
+        return false;
+      }
+    });
+    if (!executable)
+      throw new CoderError(
+        'invalid-option',
+        `MCP server "${server.name}" command cannot be resolved.`,
+      );
+
+    resolved.command = fs.realpathSync(executable);
+    // Keep flags and package names intact; pin file arguments before a worker can change directories.
+    resolved.args = resolved.args?.map(arg => {
+      if (arg.startsWith('-') || path.isAbsolute(arg)) return arg;
+      const file = path.resolve(cwd, arg);
+      const exists = fs.existsSync(file) && fs.statSync(file).isFile();
+      if (!exists && !arg.startsWith('./') && !arg.startsWith('../')) return arg;
+
+      return exists ? fs.realpathSync(file) : file;
+    });
+
+    return resolved;
+  });
 }
 
 /** Resolve `--add-dir` paths against the task workspace; each must be an existing directory. */
@@ -364,7 +412,8 @@ export interface DispatchOptions {
   /** Repository an agent task's event came from. */
   repo?: string;
   /** Extra MCP servers the task's engine may call, with their tool allowlists. */
-  mcp?: McpServerSpec[];
+  mcp?: string | McpServerSpec[];
+  nativeMcp?: boolean;
   /** Extra directories the task may reach, resolved against cwd. */
   addDirs?: string[];
   /** Called with (engine, detail, next) when an engine falls through the chain. */
@@ -435,7 +484,7 @@ export function spawnWorker(cwd: string, taskId: string): void {
 async function attemptOnce(
   config: CoderConfig,
   resolved: ResolvedTaskOptions,
-  opts: DispatchOptions,
+  opts: DispatchOptions & { mcp?: McpServerSpec[] },
   taskExtras: {
     name?: string | null;
     resume?: string;
@@ -495,6 +544,7 @@ async function attemptOnce(
     ...(opts.author ? { author: opts.author } : {}),
     ...(opts.repo ? { repo: opts.repo } : {}),
     ...(opts.mcp?.length ? { mcp: opts.mcp } : {}),
+    nativeMcp: opts.nativeMcp ?? false,
     ...(addDirs.length ? { addDirs } : {}),
   });
 
@@ -621,6 +671,8 @@ export async function dispatchTask(
   opts = withResumeDefaults(opts);
   opts = { ...opts, addDirs: resolveAddDirs(opts.cwd, opts.addDirs) };
   const config = loadConfig(opts.cwd);
+  const mcp = selectMcpServers(opts.mcp, config.mcp);
+  const dispatchOpts = { ...opts, mcp: mcp.mcp, nativeMcp: opts.nativeMcp ?? mcp.nativeMcp };
 
   // First attempt uses the full request (model/effort/name/resume/simulate).
   // A chain fallback re-resolves fresh for the next engine, deliberately dropping
@@ -643,7 +695,7 @@ export async function dispatchTask(
       return await attemptOnce(
         config,
         resolved,
-        opts,
+        dispatchOpts,
         taskExtras,
         internal.waitForStartup !== false,
       );

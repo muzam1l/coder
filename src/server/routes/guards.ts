@@ -1,5 +1,5 @@
 import { redirect, json, forbidden, toLogin, notFound, decodeParam } from './http';
-import { pagesFallback } from '../dash/serve';
+import { pagesFallback, toSignIn } from '../dash/serve';
 import { registration } from '../settings/runners';
 import { authorizeTask } from '../tasks/callbacks';
 import { OPERATOR, type AppsContext } from '../agents/platform';
@@ -385,6 +385,7 @@ export async function dashboardAllowed(req: Request, ctx: ServerContext, params:
         url.origin + '/api/auth/sign-in?return=' + encodeURIComponent(url.pathname + url.search),
       ),
     );
+  if (ctx.auth && !session) return toSignIn(req, ctx, url, url.pathname + url.search);
   if (ctx.auth && !(await signedIn(req, ctx))?.session) return toLogin(url);
   return ctx;
 }

@@ -161,6 +161,7 @@ async function executeCodexTurn(
       ),
       approvalsReviewer: mode.approvalMode === 'auto' ? 'auto_review' : null,
       mcpServers: resolveMcpServers(task.mcp),
+      nativeMcp: task.nativeMcp ?? false,
       // Read-only: the mailbox is the one writable path; extra directories stay read-only.
       writableRoots: [
         ...(mode.sandbox === 'read-only' ? [] : (task.addDirs ?? [])),
@@ -226,6 +227,7 @@ async function executeClaudeTurn(
       additionalDirectories: task.addDirs,
       ...(mailbox ? { writableDirectories: [mailbox], env: { [MAILBOX_ENV]: mailbox } } : {}),
       mcpServers: resolveMcpServers(task.mcp),
+      nativeMcp: task.nativeMcp ?? false,
       taskRoot: taskDir,
       resumeSessionId: task.resumeThreadId ?? null,
       onHeartbeat: buildHeartbeat(cwd, task.id),

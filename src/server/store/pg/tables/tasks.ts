@@ -29,7 +29,7 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
       const rows = await (limit === undefined ? q : q.limit(limit));
       return rows.map(r => ({ id: r.publicId, value: taskRecord(r) }));
     },
-    put: async (id, value) => {
+    put: async (id, value, _expiresAt, opts = {}) => {
       const { task: j } = value;
       const row = {
         source: j.source,
@@ -84,7 +84,12 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
         .values({ organizationId: s.organizationId, publicId: id, ...row })
         .onConflictDoUpdate({
           target: [t.organizationId, t.publicId],
-          set: { ...row, archivedAt: sql`coalesce(${t.archivedAt}, ${row.archivedAt})` },
+          set: {
+            ...row,
+            archivedAt: opts.unarchive
+              ? row.archivedAt
+              : sql`coalesce(${t.archivedAt}, ${row.archivedAt})`,
+          },
         });
     },
     delete: async id => {

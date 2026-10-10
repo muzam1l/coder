@@ -312,18 +312,21 @@ export interface LogRenderOptions {
 export class LogRenderer {
   private separated = false;
   private entryAt: number | null = null;
+  private lastTool: string | undefined;
+  private lastCall = '';
+  private seq = 0;
+  private readonly view: LogView;
   private readonly style: Style;
 
   static async create(opts: LogRenderOptions = {}): Promise<LogRenderer> {
-    const presentation = await import('../../core/task/log-view');
-    return new LogRenderer(opts, new presentation.LogView(opts.cwd), presentation.isApproval);
+    return new LogRenderer(opts, await import('../../core/task/log-view'));
   }
 
   private constructor(
     private readonly opts: LogRenderOptions,
-    private readonly view: LogView,
-    private readonly isApproval: (kind: string) => boolean,
+    private readonly presentation: typeof import('../../core/task/log-view'),
   ) {
+    this.view = new presentation.LogView(opts.cwd, { keepAnsi: true });
     this.style = opts.style ?? outStyle;
   }
 
@@ -335,9 +338,10 @@ export class LogRenderer {
   render(entry: TaskLogEntry): string[] {
     const at = Date.parse(String(entry.at ?? ''));
     this.entryAt = Number.isFinite(at) ? at : null;
-    const [row] = this.view.reduce({ seq: 0, at, level: 'out', line: '', entry });
+    const seq = this.seq++;
+    const [row] = this.view.reduce({ seq, at, level: 'out', line: '', entry });
     if (!row) return [];
-    this.separated = row.separated;
+    this.separated = row.separated && row.seq === seq;
     const s = this.style;
     const kind = row.sourceKind;
     const text = row.title;
@@ -345,6 +349,18 @@ export class LogRenderer {
     const lineCap = this.opts.explicitTrim || trim === Infinity ? Infinity : OUTPUT_PREVIEW_LINES;
 
     if (row.kind === 'usage') return this.compose(kind, s.dim(text), false);
+    if (row.kind === 'approval' && row.state) {
+      // Later verdicts print under the approval as its state changes.
+      const strip = (value: unknown) =>
+        this.presentation.stripCwd(String(value ?? ''), this.opts.cwd);
+      const summary = strip(entry.summary);
+      const target = summary.slice(summary.indexOf(': ') + 2);
+      const shown = summary && !this.lastCall.includes(target) ? ` · ${summary}` : '';
+      const took =
+        row.result && row.result.durationMs >= 1000 ? ` · ${formatAge(row.result.durationMs)}` : '';
+      const head = row.seq === seq ? `${text} ${row.state}${shown}` : `${row.state}${took}`;
+      return this.compose(kind, this.approval(head, strip(entry.reason ?? entry.message)), false);
+    }
     if (row.kind === 'approval')
       return this.compose(kind, this.approval(text, row.detail ?? ''), false);
     if (row.kind === 'assistant') return this.compose(kind, text, true);
@@ -359,23 +375,33 @@ export class LogRenderer {
           : this.clip(`${stamp}${text.split('\n')[0] ?? ''}`, REASONING_ROWS, s.dim);
       return this.compose(kind, body, false);
     }
-    if (row.kind === 'tool')
+    if (row.kind === 'tool' && row.seq === seq) {
+      this.lastTool = row.tool;
+      this.lastCall = text;
       return this.compose(
         kind,
         this.clip(text.replace(/\s*\n\s*/g, ' '), TOOL_ROWS, s.light),
         false,
       );
-    if (row.kind === 'tool-result') {
+    }
+    if (row.kind === 'tool' || row.kind === 'tool-result') {
+      // The call is already on screen; print what it returned under it.
+      const result = row.result ?? {
+        ok: row.tone !== 'error',
+        exitCode: row.exitCode,
+        durationMs: row.durationMs ?? 0,
+        detail: text,
+      };
       const notes = [
-        row.tool ? s.dim(`from ${row.tool}`) : '',
-        row.tone === 'error'
-          ? s.red(row.exitCode !== undefined ? `exit ${row.exitCode}` : 'failed')
-          : '',
-        (row.durationMs ?? 0) >= 3000 ? s.dim(formatAge(row.durationMs!)) : '',
+        row.tool && row.tool !== this.lastTool ? s.dim(`from ${row.tool}`) : '',
+        result.ok
+          ? ''
+          : s.red(result.exitCode !== undefined ? `exit ${result.exitCode}` : 'failed'),
+        result.durationMs >= 3000 ? s.dim(formatAge(result.durationMs)) : '',
       ].filter(Boolean);
-      const body = capBody(text, trim, lineCap, s);
+      const body = capBody(result.detail, trim, lineCap, s);
       const lines = [...(notes.length ? [notes.join(s.dim(' · '))] : []), ...(body ? [body] : [])];
-      return this.compose(kind, lines.join('\n'), false);
+      return lines.length ? this.compose('tool-result', lines.join('\n'), false) : [];
     }
     return this.compose(kind, this.clip(text, STATUS_ROWS, s.dim), false);
   }
@@ -414,7 +440,7 @@ export class LogRenderer {
 
   private compose(kind: string, body: string, wrap: boolean): string[] {
     const gap = this.separated ? [''] : [];
-    const glyph = KIND_GLYPHS[kind] ?? (this.isApproval(kind) ? '⚑' : '·');
+    const glyph = KIND_GLYPHS[kind] ?? (this.presentation.isApproval(kind) ? '⚑' : '·');
     const [first = '', ...rest] = body.split('\n');
     return [
       ...gap,
@@ -597,7 +623,7 @@ async function printResult(
   // the transcript if it looks stalled).
   if (running && !opts.wait) {
     const hints = [
-      `Wait in a background shell; do not poll: coder task result ${task.id} --wait`,
+      `Wait in its own background shell, one per task; do not poll: coder task result ${task.id} --wait`,
       `Follow live: coder task watch ${task.id}`,
     ];
     if (inspection.stalled)
@@ -615,9 +641,9 @@ export const commandResult = command({
   help: {
     usage: 'coder task result [task-id] [--server [url]]',
     summary:
-      "Show a task's status and its final answer (result pending while it runs), plus\nany pending approvals. --wait blocks until it finishes, then prints. --tail <n>\nincludes the last n progress-log steps (--tail all for the whole transcript).\nDefaults to the most recent task. Shortcut: `coder result`.",
+      "Show a task's status and its final answer (result pending while it runs), plus\nany pending approvals. --wait blocks until it finishes, then prints. --tail <n>\nincludes the last n progress-log steps (--tail all for the whole transcript).\nDefaults to the most recent task. Shortcut: `coder result`.\n\nRun each --wait in its own background shell, one per task. Never wait on several\ntasks in one call, or their approvals and answers never reach you one by one.",
     flags: [
-      ['--wait', 'block until the task finishes, then print'],
+      ['--wait', 'block until the task finishes or needs an approval, then print'],
       ['--turns', "every turn's answer (a steered task accretes turns)"],
       ['--tail <n|all>', 'include the last n progress-log steps (default: 0, final result only)'],
       SERVER_FLAG,

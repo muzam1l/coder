@@ -15,6 +15,8 @@ export type Db = PgDatabase<PgQueryResultHKT, typeof tables>;
 export interface Connection {
   db: PostgresJsDatabase<typeof tables>;
   profile: DatabaseProfile;
+  /** Runs `work` with Postgres's statement_timeout at `ms` for each statement it sends outside a transaction. */
+  statementTimeout<T>(ms: number, work: () => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
 
@@ -124,14 +126,33 @@ export function readQuery<T>(db: Db, query: () => PromiseLike<T>): Promise<T> {
 }
 
 /** A read on a connection the server dropped runs once more; a write may have reached the server, so it fails. */
-function retryDead(sql: postgres.Sql, reads: AsyncLocalStorage<boolean>): postgres.Sql {
+function retryDead(
+  sql: postgres.Sql,
+  reads: AsyncLocalStorage<boolean>,
+  bounds: AsyncLocalStorage<number>,
+): postgres.Sql {
   type Query = PromiseLike<unknown> & Record<'values' | 'raw', () => Query>;
   const unsafe = sql.unsafe as unknown as (...args: unknown[]) => Query;
   sql.unsafe = ((...args: unknown[]) => {
     const retryable = reads.getStore() === true;
+    const bound = bounds.getStore();
     const first = unsafe(...args);
     const modes: ('values' | 'raw')[] = [];
-    const again = () => modes.reduce((query, mode) => query[mode](), unsafe(...args));
+    const again = () =>
+      bound
+        ? // Postgres's own statement_timeout, set for this statement alone in one pipelined round trip.
+          bounds
+            .exit(() =>
+              sql.begin(tx => [
+                tx.unsafe(`set local statement_timeout = ${Math.ceil(bound)}`),
+                modes.reduce(
+                  (query, mode) => query[mode](),
+                  (tx.unsafe as unknown as (...args: unknown[]) => Query)(...args),
+                ),
+              ]),
+            )
+            .then(results => (results as unknown[])[1])
+        : modes.reduce((query, mode) => query[mode](), unsafe(...args));
     // After a macrotask, so postgres.js has closed every connection the same drop took.
     const retry = () => new Promise(resolve => setTimeout(resolve)).then(again);
     const pending: Query = new Proxy(first, {
@@ -140,7 +161,7 @@ function retryDead(sql: postgres.Sql, reads: AsyncLocalStorage<boolean>): postgr
           ? () => (modes.push(key), target[key](), pending)
           : key === 'then'
             ? (resolve?: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) =>
-                target
+                (bound ? again() : target)
                   .then(undefined, (error: { code?: string; severity?: string } | undefined) =>
                     disconnected(error) && retryable ? retry() : Promise.reject(error),
                   )
@@ -166,12 +187,14 @@ export function connect(databaseUrl: string, options: PoolOptions = {}): Connect
   });
   const profile = new DatabaseProfile();
   const reads = new AsyncLocalStorage<boolean>();
-  const sql = Object.assign(retryDead(prepared(raw, raw.options.prepare, profile), reads), {
+  const bounds = new AsyncLocalStorage<number>();
+  const sql = Object.assign(retryDead(prepared(raw, raw.options.prepare, profile), reads, bounds), {
     reads,
   });
   return {
     db: drizzle(sql, { schema: tables, casing: CASING }),
     profile,
+    statementTimeout: (ms, work) => bounds.run(ms, work),
     close: () => sql.end(),
   };
 }

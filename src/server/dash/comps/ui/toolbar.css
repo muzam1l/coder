@@ -24,6 +24,20 @@
   grid-row: 1;
   grid-column: 3;
 }
+.page {
+  container-type: inline-size;
+}
+/* with a primary action, the filters drop under the title before they would wrap */
+@container (max-width: 720px) {
+  .head.tools:has(> .actions) > .filters {
+    grid-row: auto;
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+  .head.tools:has(> .actions) .search {
+    max-width: none;
+  }
+}
 
 /* lists: filters above, rows load on scroll */
 .filters {

@@ -21,6 +21,7 @@ If `coder` is not on PATH, install it yourself without asking: `npm install -g @
 
 - The CLI is the reference. `coder --help` and every subcommand's `--help` list the flags and exit codes, and each command prints the recommended next step when it returns. Follow it.
 - `coder docs` lists the deeper guides; `coder docs <topic>` prints one.
+- Wait on each task with `coder task result <task-id> --wait` in its own background shell, one per task, never several tasks in one call, so each approval and answer reaches you.
 - If your harness sandboxes or gates terminal commands (Codex does both), run every `coder` command with escalated permissions; the runtime is a supervisor with its own sandbox and approval policy.
 
 ## Running tasks

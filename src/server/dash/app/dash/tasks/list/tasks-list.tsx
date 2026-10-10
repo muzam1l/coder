@@ -2,15 +2,33 @@
 
 import './tasks-list.css';
 
-import { useEffect, useState } from 'preact/hooks';
+import { dynamic } from '@wular/pnext/dynamic';
+import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
 import { formatCount, formatDate, formatDay, formatDuration } from '@/utils/format';
-import { iClock, iDots, iMonitor, iPlug, iTerminal } from '@/comps/ui/icons';
-import { Menu, MenuItem, MenuRadio } from '@/comps/ui/menu';
+import {
+  iAgent,
+  iClock,
+  iDots,
+  iFolder,
+  iMonitor,
+  iPlug,
+  iPlus,
+  iTerminal,
+} from '@/comps/ui/icons';
+import { Menu, MenuItem } from '@/comps/ui/menu';
 import { Link } from '@wular/pnext/link';
+import { useRouter } from '@wular/pnext/navigation/client';
 import { usePaged } from '@/utils/paged';
-import type { TaskCounts, TaskRow, TasksPage } from '@coder/client/types';
+import type {
+  IntegrationInfo,
+  TaskCounts,
+  TaskEvent,
+  TaskRow,
+  TasksPage,
+} from '@coder/client/types';
+import { BrandIcon } from '@/app/dash/agents/agent/agent-pills';
 import { Card, Empty } from '@/comps/ui/card';
 import { Id } from '@/comps/ui/badge';
 import { ConfirmDialog } from '@/comps/ui/confirm';
@@ -19,8 +37,8 @@ import { approvalParts } from '@/app/dash/tasks/[id]/task-actions';
 import { reasonText } from '@/utils/format';
 import { Status } from './status';
 import { Icon } from '@/comps/ui/icon';
-import { Select } from '@/comps/ui/select';
-import { taskActive } from '@/app/dash/tasks/list/task';
+import { Filter, type Facet } from '@/comps/ui/filter';
+import { addRows, listOrder, taskActive, withAdded } from '@/app/dash/tasks/list/task';
 import { taskTitle } from '@/app/dash/tasks/list/task';
 import { LIST_PAGE } from '@/utils/paged';
 import { Search, Toolbar, queryOf, useFilters } from '@/comps/ui/toolbar';
@@ -33,6 +51,20 @@ import {
   sourceLabel,
 } from '@/app/dash/tasks/list/task';
 import { NeedsCredential } from '@/app/dash/tasks/composer';
+import { useTaskEvents } from '@/comps/frame/task-toasts';
+
+const NewTaskButton = dynamic(
+  () => import('@/app/dash/tasks/composer').then(m => m.NewTaskButton),
+  {
+    // TODO: stays disabled after client navigation until pnext SSRs nested dynamic() like Next.js.
+    loading: () => (
+      <button type="button" class="btn new-task" disabled>
+        <Icon d={iPlus} />
+        New task
+      </button>
+    ),
+  },
+);
 
 type Keys = 'q' | 'status' | 'source' | 'agent';
 
@@ -41,9 +73,7 @@ const SOURCE_ICONS: Record<string, string> = {
   cli: iTerminal,
   schedule: iClock,
 };
-
-/** How often a list with running tasks refreshes their status. */
-const LIVE_MS = 4000;
+const sourceIcon = (source: string) => SOURCE_ICONS[source] ?? iPlug;
 
 /** How long ago, under a day; the date after that. */
 function ago(value: number, now: number, tz: string) {
@@ -56,6 +86,7 @@ function ago(value: number, now: number, tz: string) {
 
 function TaskRowView({
   task,
+  brand,
   back,
   scoped,
   tz,
@@ -64,6 +95,8 @@ function TaskRowView({
   onError,
 }: {
   task: TaskRow;
+  /** The source platform's brand art, when it has one. */
+  brand?: IntegrationInfo['brand'];
   onDone: (what: RowAction) => void;
   onError: (message: string) => void;
   /** The list to return to, when it is not the plain Tasks page. */
@@ -90,28 +123,37 @@ function TaskRowView({
           {taskTitle(task)}
         </Link>
         <span class="sub">
-          {scoped ? null : `${task.task.agent} · `}
+          {scoped ? null : (
+            <>
+              <Icon d={iAgent} />
+              {`${task.task.agent} · `}
+            </>
+          )}
           <Id value={task.task.id} />
           {kind ? ` · ${kind}` : null}
           {task.task.cwd ? (
-            <span title={task.task.cwd}>{` · ${folderName(task.task.cwd)}`}</span>
+            <>
+              {' · '}
+              <span title={task.task.cwd}>
+                <Icon d={iFolder} />
+                {folderName(task.task.cwd)}
+              </span>
+            </>
           ) : null}
         </span>
       </td>
       <td>
         <Status status={task.status} />
       </td>
-      <td>
-        <span class="source" title={sourceLabel(source)}>
-          <Icon d={SOURCE_ICONS[source] ?? iPlug} />
-          {sourceLabel(source)}
-        </span>
-      </td>
       <td class="when" title={formatDate(task.createdAt, tz)}>
         {ago(task.createdAt, now, tz)}
       </td>
-      <td class="num">
-        {formatDuration(elapsed)}
+      <td class="num">{formatDuration(elapsed)}</td>
+      <td>
+        <span class="source" title={sourceLabel(source)}>
+          {brand ? <BrandIcon brand={brand} /> : <Icon d={sourceIcon(source)} />}
+          {sourceLabel(source)}
+        </span>
         <span class="row-acts">
           <RowActions task={task} onDone={onDone} onError={onError} />
         </span>
@@ -184,6 +226,7 @@ function RowActions({
 export function TasksList({
   first,
   platforms,
+  brands = {},
   agents = [],
   filters,
   agent,
@@ -195,7 +238,9 @@ export function TasksList({
   first: TasksPage;
   /** Platform ids, the sources besides the dashboard, CLI and schedule. */
   platforms: [string, string][];
-  /** Every agent's id, for the agent filter. */
+  /** Each platform's brand art, as the Agents page shows it. */
+  brands?: Record<string, IntegrationInfo['brand']>;
+  /** The first agents, for the agent filter before typing. */
   agents?: [string, string][];
   filters: Record<Keys, string>;
   agent?: string;
@@ -218,6 +263,26 @@ export function TasksList({
     ...listFilters(values),
     agent: agent ?? values.agent,
   };
+  const facets: Facet<Keys>[] = [
+    { key: 'status', label: 'Status', options: STATUSES, inline: true },
+    {
+      key: 'source',
+      label: 'Source',
+      options: [...SOURCES, ...platforms],
+      icon: value => (brands[value] ? <BrandIcon brand={brands[value]} /> : sourceIcon(value)),
+    },
+  ];
+  if (!agent)
+    facets.push({
+      key: 'agent',
+      label: 'Agent',
+      options: agents,
+      icon: () => iAgent,
+      search: (q, limit) =>
+        client.agents
+          .list({ cursor: '', limit, q })
+          .then(page => page.items.map((row): [string, string] => [row.id, row.name])),
+    });
   const list = usePaged<TaskRow>({
     name: `tasks${scope}`,
     fetchPage: cursor => client.tasks.list({ ...options, cursor }),
@@ -227,97 +292,190 @@ export function TasksList({
   });
   const [fresh, setFresh] = useState<{
     rows: Record<string, TaskRow>;
+    /** Tasks newer than the loaded pages, on top. */
+    added: TaskRow[];
     counts?: TaskCounts;
     query?: string;
-  }>({ rows: {} });
+  }>({ rows: {}, added: [] });
   const [gone, setGone] = useState<string[]>([]);
   // Rows hidden after an archive or delete come back into view when the filters change.
   useEffect(() => setGone([]), [query]);
   const [actionError, setActionError] = useState('');
-  const rows = list.rows
-    .filter(task => !gone.includes(task.task.id))
-    .map(task => fresh.rows[task.task.id] ?? task);
+  const rows = withAdded(list.rows, fresh.query === query ? fresh.added : [], fresh.rows).filter(
+    task => !gone.includes(task.task.id),
+  );
   const counts =
     (fresh.query === query ? fresh.counts : undefined) ??
     (list.meta.counts as TaskCounts | undefined);
-  const live = rows.some(taskActive) || !!counts?.active;
 
-  // Running tasks' status follows while they run; the rows themselves stay where they are.
+  // One first-page refetch at a time and a second apart, longer after failures; a change meanwhile asks for one more, with the filters then; a hidden tab waits to show.
+  const refetching = useRef<number>();
+  const again = useRef(false);
+  const hidden = useRef(false);
+  const spaced = useRef<ReturnType<typeof setTimeout>>();
+  const left = useRef(false);
+  const failures = useRef(0);
+  // Bumped by a reset, so a fetch started before it never writes over the page that follows.
+  const era = useRef(0);
+  // When each row last took an event, so an older page never undoes it.
+  const touched = useRef<Record<string, number>>({});
+  // The minute's resync reads every loaded row, not just the first page.
+  const deep = useRef(false);
+  const refresh = (all = false) => {
+    deep.current ||= all;
+    if (document.visibilityState === 'hidden') return void (hidden.current = true);
+    if (refetching.current) return void (again.current = true);
+    const started = (refetching.current = Date.now());
+    const before = era.current;
+    const loaded = deep.current ? rows : [];
+    deep.current = false;
+    // Pages of up to 200 until every loaded row is covered.
+    const read = async () => {
+      const first = await client.tasks.list({
+        ...options,
+        limit: Math.min(200, Math.max(LIST_PAGE, loaded.length)),
+        cursor: '',
+      });
+      let page = first;
+      const items = [...first.items];
+      while (page.next && items.length < loaded.length) {
+        page = await client.tasks.list({ ...options, limit: 200, cursor: page.next });
+        items.push(...page.items);
+      }
+
+      return { ...page, items, counts: first.counts };
+    };
+    void read()
+      .then(page => {
+        if (era.current !== before) return;
+        // A loaded row the read covers but no longer lists has left this view.
+        const last = page.items.at(-1);
+        const fetched = new Set(page.items.map(row => row.task.id));
+        const left = loaded.filter(
+          row =>
+            !fetched.has(row.task.id) &&
+            (touched.current[row.task.id] ?? 0) <= started &&
+            (!page.next || (last && listOrder(row, last) < 0)),
+        );
+        if (left.length) setGone(current => [...current, ...left.map(row => row.task.id)]);
+        setFresh(current => ({
+          rows: {
+            ...current.rows,
+            // A page row is a summary, so what events added to the row stays.
+            ...Object.fromEntries(
+              page.items
+                .filter(row => (touched.current[row.task.id] ?? 0) <= started)
+                .map(row => [row.task.id, { ...current.rows[row.task.id], ...row }]),
+            ),
+          },
+          added: addRows(current.query === query ? current.added : [], page.items),
+          counts: page.counts,
+          query,
+        }));
+        failures.current = 0;
+      })
+      // A failed read stays wanted, and tries again later each time.
+      .catch(() => {
+        failures.current++;
+        again.current = true;
+      })
+      .finally(() => {
+        if (left.current) return;
+        if (!again.current) return void (refetching.current = undefined);
+        again.current = false;
+        spaced.current = setTimeout(
+          () => {
+            refetching.current = undefined;
+            latest.current();
+          },
+          Math.min(30_000, 1000 * 2 ** failures.current),
+        );
+      });
+  };
+  const latest = useRef(refresh);
+  latest.current = refresh;
   useEffect(() => {
-    if (!live) return;
+    const show = () => {
+      if (document.visibilityState !== 'visible' || !hidden.current) return;
+      hidden.current = false;
+      latest.current();
+    };
+    addEventListener('visibilitychange', show);
+    return () => {
+      removeEventListener('visibilitychange', show);
+      clearTimeout(spaced.current);
+      left.current = true;
+    };
+  }, []);
 
-    const byId = (items: TaskRow[]) => Object.fromEntries(items.map(row => [row.task.id, row]));
-    const timer = setInterval(() => {
-      void Promise.all([
-        client.tasks.list({ ...options, cursor: '' }),
-        // A row whose status leaves the filter still takes its new status.
-        options.status
-          ? client.tasks.list({ ...options, status: undefined, counts: false, cursor: '' })
-          : undefined,
-      ])
-        .then(([page, recent]) =>
-          setFresh(current => ({
-            rows: { ...current.rows, ...byId(recent?.items ?? []), ...byId(page.items) },
-            counts: page.counts,
-            query,
-          })),
-        )
-        .catch(() => {});
-    }, LIVE_MS);
-    return () => clearInterval(timer);
-  }, [live, query, agent]);
+  // Changes were missed, so every loaded page goes: the page renders again from the server.
+  const nav = useRouter();
+  const reset = () => {
+    era.current++;
+    touched.current = {};
+    setFresh({ rows: {}, added: [] });
+    setGone([]);
+    nav.refresh();
+  };
+
+  // Rows follow the events stream at once; counts, and tasks the list lacks, come with its first page again.
+  useTaskEvents(
+    (event: TaskEvent) => {
+      const row = rows.find(task => task.task.id === event.id);
+      if (!row) {
+        // A deleted or archived task stays out even if a read from before it brings it; an unarchived one comes back.
+        if (event.deleted || (event.archivedAt && values.status !== 'archived'))
+          setGone(current => [...current, event.id]);
+        else
+          setGone(current =>
+            current.includes(event.id) ? current.filter(id => id !== event.id) : current,
+          );
+        // A row kept from another view would outlive this change, so it goes.
+        setFresh(current => {
+          const { [event.id]: _kept, ...rows } = current.rows;
+          return _kept ? { ...current, rows } : current;
+        });
+        if (event.deleted || (agent || values.agent || event.agent) === event.agent) refresh();
+        return;
+      }
+      touched.current[event.id] = Date.now();
+      if (refetching.current) again.current = true;
+      // A change that moves the counts asks the server; a continued task also brings its new prompt.
+      if (
+        event.deleted ||
+        event.status !== row.status ||
+        Boolean(event.archivedAt) !== Boolean(row.archivedAt)
+      )
+        refresh();
+      if (event.deleted || (event.archivedAt && values.status !== 'archived'))
+        return setGone(current => [...current, event.id]);
+      setFresh(current => {
+        const was = current.rows[event.id] ?? row;
+        return {
+          ...current,
+          rows: {
+            ...current.rows,
+            [event.id]: {
+              ...was,
+              status: event.status,
+              approval: event.approval ?? undefined,
+              archivedAt: event.archivedAt,
+              startedAt: event.startedAt,
+              finishedAt: event.finishedAt,
+            },
+          },
+        };
+      });
+    },
+    reset,
+    () => refresh(true),
+  );
 
   return (
     <>
-      <Toolbar head={head}>
+      <Toolbar head={head} action={head ? <NewTaskButton /> : undefined}>
         <Search value={values.q} label="Search tasks" onInput={value => set('q', value, 250)} />
-        <Select
-          label="Status"
-          value={values.status}
-          options={STATUSES}
-          onChange={value => set('status', value)}
-        />
-        <Menu
-          class="filter-more"
-          label="More filters"
-          summaryClass={`field-btn${values.source || values.agent ? ' on' : ''}`}
-          summary="Filter"
-        >
-          <p class="pop-label">Source</p>
-          <div role="group" aria-label="Source">
-            {[...SOURCES, ...platforms].map(([value, label]) => (
-              <MenuRadio
-                key={value}
-                on={values.source === value}
-                onPick={() => set('source', value)}
-              >
-                {label}
-              </MenuRadio>
-            ))}
-          </div>
-          {agent ? null : (
-            <>
-              <p class="pop-label">Agent</p>
-              <div role="group" aria-label="Agent">
-                {[
-                  ['', 'All agents'] as [string, string],
-                  ...(values.agent && !agents.some(([id]) => id === values.agent)
-                    ? [[values.agent, values.agent] as [string, string]]
-                    : []),
-                  ...agents,
-                ].map(([value, label]) => (
-                  <MenuRadio
-                    key={value}
-                    on={values.agent === value}
-                    onPick={() => set('agent', value)}
-                  >
-                    {label}
-                  </MenuRadio>
-                ))}
-              </div>
-            </>
-          )}
-        </Menu>
+        <Filter name="tasks" facets={facets} values={values} onChange={set} />
       </Toolbar>
       {missing ? <NeedsCredential /> : null}
       <Card
@@ -348,9 +506,9 @@ export function TasksList({
                 <tr>
                   <th>Task</th>
                   <th>Status</th>
-                  <th>Source</th>
                   <th>Created</th>
                   <th class="num">Duration</th>
+                  <th>Source</th>
                 </tr>
               </thead>
               <tbody>
@@ -358,6 +516,7 @@ export function TasksList({
                   <TaskRowView
                     key={task.task.id}
                     task={task}
+                    brand={brands[task.task.event?.integration ?? task.task.source]}
                     back={back}
                     scoped={Boolean(agent)}
                     tz={tz}
@@ -367,19 +526,7 @@ export function TasksList({
                       // An archived row leaves every view but the archive; a stopped one just refreshes.
                       if (what === 'delete' || (what === 'archive' && values.status !== 'archived'))
                         setGone(current => [...current, task.task.id]);
-                      void client.tasks
-                        .list({ ...options, cursor: '' })
-                        .then(page =>
-                          setFresh(current => ({
-                            rows: {
-                              ...current.rows,
-                              ...Object.fromEntries(page.items.map(row => [row.task.id, row])),
-                            },
-                            counts: page.counts,
-                            query,
-                          })),
-                        )
-                        .catch(() => {});
+                      refresh();
                     }}
                   />
                 ))}
@@ -392,7 +539,7 @@ export function TasksList({
           <Empty title="No tasks yet">
             {agent
               ? 'Tasks appear here as this agent runs.'
-              : 'Type what you want done in the box above and press Enter. Tasks from the dashboard, the CLI and platforms like GitHub show up here, newest first.'}
+              : 'Start one with New task. Tasks from the dashboard, the CLI and platforms like GitHub show up here, newest first.'}
           </Empty>
         )}
         <Tail noun="tasks" {...list} />

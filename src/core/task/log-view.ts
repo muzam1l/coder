@@ -37,12 +37,16 @@ export interface TaskDisplayRow {
   tool?: string;
   exitCode?: number;
   tokens?: TokenUsage;
+  result?: { ok: boolean; exitCode?: number; durationMs: number; detail: string };
+  state?: string;
 }
 
 export const isApproval = (kind: string) =>
   kind.includes('approval') || kind === 'sidecar-decision' || kind === 'auto-review';
 
-function stripCwd(text: string, cwd?: string): string {
+const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+export function stripCwd(text: string, cwd?: string): string {
   return cwd ? text.split(`${cwd}/`).join('').split(cwd).join('.') : text;
 }
 
@@ -70,19 +74,38 @@ export function logEntry(line: string): TaskLogEntry | undefined {
 export class LogView {
   private prevKind: string | null = null;
   private lastAssistant = '';
-  private lastTool: string | null = null;
   private lastToolText = '';
+  private openCalls: TaskDisplayRow[] = [];
+  // Engine invocation ids, so concurrent calls of one tool close with their own results.
+  private callIds = new WeakMap<TaskDisplayRow, string>();
+  private approval: TaskDisplayRow | undefined;
+  private approvals = new Map<string, TaskDisplayRow>();
   private lastUsageTotal = 0;
 
-  constructor(private readonly cwd?: string) {}
+  constructor(
+    private readonly cwd?: string,
+    private readonly opts: { keepAnsi?: boolean } = {},
+  ) {}
 
   get lastAssistantMessage(): string {
     return this.lastAssistant;
   }
 
+  /** A result or verdict that completes an earlier call or approval returns that row again, keyed by its seq. */
   reduce(record: TaskLog): TaskDisplayRow[] {
     const entry = record.entry;
     const sourceKind = entry ? String(entry.kind ?? 'status') : 'line';
+    const earlier = !entry
+      ? undefined
+      : sourceKind === 'tool-result'
+        ? this.close(record, entry)
+        : isApproval(sourceKind)
+          ? this.decide(record, entry, sourceKind)
+          : undefined;
+    if (earlier) {
+      this.prevKind = sourceKind;
+      return [earlier];
+    }
     const row: TaskDisplayRow = {
       seq: record.seq,
       at: record.at,
@@ -109,6 +132,25 @@ export class LogView {
       row.kind = 'usage';
       row.tokens = tokens;
       row.title = `ctx ${tokenCount(tokens.input + tokens.cachedInput)} · out ${tokenCount(tokens.output)}`;
+    } else if (
+      (sourceKind === 'approval-decision' && entry.decision === 'escalate') ||
+      sourceKind === 'approval-escalated'
+    ) {
+      const summary = stripCwd(entry.summary ? String(entry.summary) : '', this.cwd);
+      const target =
+        /^(?:run command: |Run command\. |Apply file changes\. |\w+: )?([\s\S]*)$/.exec(
+          summary,
+        )![1]!;
+      const method = String(entry.method ?? '');
+      const name = method && !method.includes('/') ? method : this.openCalls.at(-1)?.tool;
+      const word = target.startsWith('{') ? '' : target.split(/\s+/)[0];
+      const reason = stripCwd(entry.reason ? String(entry.reason) : '', this.cwd);
+      row.kind = 'approval';
+      row.title = ['Approval', [name, word].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+      row.detail = [target, reason && `Policy · ${reason}`].filter(Boolean).join('\n');
+      row.state = sourceKind === 'approval-escalated' ? 'waiting' : 'escalated';
+      if (sourceKind === 'approval-escalated') this.approvals.set(String(entry.approvalId), row);
+      else this.approval = row;
     } else if (isApproval(sourceKind) && (entry.decision || !entry.message)) {
       row.kind = 'approval';
       const label =
@@ -141,18 +183,20 @@ export class LogView {
         row.durationMs = typeof entry.durationMs === 'number' ? entry.durationMs : 0;
       } else if (sourceKind === 'tool') {
         row.kind = 'tool';
-        this.lastTool = entry.tool ? String(entry.tool) : null;
+        if (entry.tool) row.tool = String(entry.tool);
         this.lastToolText = row.title;
+        if (entry.callId) this.callIds.set(row, String(entry.callId));
+        this.openCalls.push(row);
       } else if (sourceKind === 'tool-result') {
         row.kind = 'tool-result';
+        row.title = this.output(raw);
         row.exitCode = typeof entry.exitCode === 'number' ? entry.exitCode : undefined;
         row.tone =
           (row.exitCode !== undefined && row.exitCode !== 0) || entry.isError === true
             ? 'error'
             : 'muted';
         row.durationMs = typeof entry.durationMs === 'number' ? entry.durationMs : 0;
-        const tool = entry.tool ? String(entry.tool) : null;
-        if (tool && tool !== this.lastTool) row.tool = tool;
+        if (entry.tool) row.tool = String(entry.tool);
       }
     }
     if (this.prevKind !== null) {
@@ -164,6 +208,76 @@ export class LogView {
     this.prevKind = sourceKind;
     return [row];
   }
+
+  // A result closes the call with its invocation id; without one, the oldest open call of its tool, or the latest call.
+  private close(record: TaskLog, entry: TaskLogEntry): TaskDisplayRow | undefined {
+    const tool = entry.tool ? String(entry.tool) : undefined;
+    const byId = entry.callId
+      ? this.openCalls.findIndex(call => this.callIds.get(call) === String(entry.callId))
+      : -1;
+    const index =
+      byId >= 0
+        ? byId
+        : tool
+          ? this.openCalls.findIndex(call => call.tool === tool)
+          : this.openCalls.length - 1;
+    if (index < 0) return undefined;
+
+    const [call] = this.openCalls.splice(index, 1);
+    const exitCode = typeof entry.exitCode === 'number' ? entry.exitCode : undefined;
+    const durationMs =
+      typeof entry.durationMs === 'number' ? entry.durationMs : record.at - call!.at || 0;
+    return {
+      ...call!,
+      result: {
+        ok: !exitCode && entry.isError !== true,
+        exitCode,
+        durationMs: Math.max(0, durationMs),
+        detail: this.output(entry.message ? String(entry.message) : ''),
+      },
+    };
+  }
+
+  // Sidecar verdicts and escalations follow the policy verdict before them; answers carry the approval id.
+  private decide(record: TaskLog, entry: TaskLogEntry, kind: string): TaskDisplayRow | undefined {
+    const id = String(entry.approvalId ?? '');
+    const accepted = entry.decision === 'accept';
+    if (kind === 'sidecar-decision' && this.approval) {
+      const reason = stripCwd(entry.reason ? String(entry.reason) : '', this.cwd);
+      const row = {
+        ...this.approval,
+        detail: [this.approval.detail, reason && `Sidecar · ${reason}`].filter(Boolean).join('\n'),
+      };
+      if (entry.decision === 'escalate') return (this.approval = row);
+      this.approval = undefined;
+      return settle(row, record, `${accepted ? 'accepted' : 'denied'} by sidecar`, accepted);
+    }
+    if (kind === 'approval-escalated' && this.approval) {
+      const row = { ...this.approval, state: 'waiting' };
+      this.approval = undefined;
+      this.approvals.set(id, row);
+      return row;
+    }
+    const open = this.approvals.get(id);
+    if (!open || (kind !== 'approval-answered' && kind !== 'approval-timeout')) return undefined;
+
+    this.approvals.delete(id);
+    return kind === 'approval-timeout'
+      ? settle(open, record, 'timed out', false)
+      : settle(open, record, `${accepted ? 'accepted' : 'denied'} by reviewer`, accepted);
+  }
+
+  private output(text: string): string {
+    return stripCwd(this.opts.keepAnsi ? text : text.replace(ANSI, ''), this.cwd);
+  }
+}
+
+function settle(row: TaskDisplayRow, record: TaskLog, state: string, ok: boolean): TaskDisplayRow {
+  return {
+    ...row,
+    state,
+    result: { ok, durationMs: Math.max(0, record.at - row.at || 0), detail: '' },
+  };
 }
 
 function tokenCount(n: number): string {

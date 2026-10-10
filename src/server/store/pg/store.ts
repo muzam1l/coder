@@ -20,7 +20,7 @@ import { alias, type PgColumn } from 'drizzle-orm/pg-core';
 import type { AgentApp } from '../../../agent/types';
 import type { AgentVersionRecord, DeliveryLease, TaskLogLine } from '../types';
 import type { ServerConfig } from '../../context';
-import {type EngineLogin} from '../../settings/logins';
+import { type EngineLogin } from '../../settings/logins';
 import {
   completeLogin,
   credentialId,
@@ -588,11 +588,11 @@ export class DrizzleStore implements Store {
     kind: K,
     id: string,
     value: StoreRecords[K],
-    opts: { ttlMs?: number } = {},
+    opts: { ttlMs?: number; unarchive?: boolean } = {},
   ): Promise<void> {
     const expiresAt = opts.ttlMs === undefined ? null : date(this.now() + opts.ttlMs);
 
-    await this.kinds[kind].put(id, value, expiresAt);
+    await this.kinds[kind].put(id, value, expiresAt, opts);
   }
 
   async putMany<K extends StoreKind>(

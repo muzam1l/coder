@@ -47,6 +47,7 @@ export interface RunTurnOptions {
   configOverrides?: Record<string, unknown> | null;
   /** Extra MCP servers (env already resolved) plus the tools the turn may call. */
   mcpServers?: McpServerSpec[];
+  nativeMcp?: boolean;
   effort?: Effort | null;
   sandbox?: string;
   approvalPolicy?: string;
@@ -98,10 +99,25 @@ export function codexReadOnlyProfile(
  * keys (the same overlay shape custom model providers use). `enabled_tools` is
  * codex's per-server tool allowlist.
  */
-export function buildCodexMcpOverrides(servers: McpServerSpec[] = []): Record<string, unknown> {
+export function buildCodexMcpOverrides(
+  servers: McpServerSpec[] = [],
+  nativeServers: string[] = [],
+  nativeMcp = false,
+): Record<string, unknown> {
   const overrides: Record<string, unknown> = {};
+  if (!nativeMcp && nativeServers.length) {
+    overrides.mcp_servers = Object.fromEntries(
+      nativeServers.map(name => [name, { enabled: false }]),
+    );
+  }
+  const names = new Set([...nativeServers, ...servers.map(server => server.name)]);
   for (const server of servers) {
-    overrides[`mcp_servers.${server.name}`] = {
+    let name = server.name;
+    if (nativeServers.includes(name)) {
+      for (let suffix = 1; names.has(name); suffix++) name = `${server.name}_coder_${suffix}`;
+      names.add(name);
+    }
+    overrides[`mcp_servers.${name}`] = {
       ...(server.url
         ? { url: server.url, ...(server.headers ? { http_headers: server.headers } : {}) }
         : {
@@ -129,11 +145,17 @@ function cleanCodexStderr(stderr: string) {
 async function withAppServer<T>(
   cwd: string,
   fn: (client: AppServerClient) => Promise<T>,
-  internals: { connect?: typeof CodexAppServerClient.connect; networkAccess?: boolean } = {},
+  internals: {
+    connect?: typeof CodexAppServerClient.connect;
+    networkAccess?: boolean;
+    nativeMcp?: boolean;
+  } = {},
 ): Promise<T> {
   const connect = internals.connect ?? CodexAppServerClient.connect;
-  const clientOptions =
-    internals.networkAccess === undefined ? {} : { networkAccess: internals.networkAccess };
+  const clientOptions = {
+    ...(internals.networkAccess === undefined ? {} : { networkAccess: internals.networkAccess }),
+    nativeMcp: internals.nativeMcp ?? false,
+  };
   let client: AppServerClient | null = null;
   try {
     client = await connect(cwd, clientOptions);
@@ -350,11 +372,10 @@ export async function runTurn(
     throw new Error('A prompt is required.');
   }
 
-  const mcpOverrides = buildCodexMcpOverrides(options.mcpServers ?? []);
   const profile = codexReadOnlyProfile(options.sandbox, options.writableRoots);
   // A permission profile replaces the sandbox mode; codex rejects the two together.
   const sandbox = profile ? {} : { sandbox: options.sandbox ?? 'read-only' };
-  const merged = { ...(options.configOverrides ?? {}), ...profile, ...mcpOverrides };
+  const merged = { ...(options.configOverrides ?? {}), ...profile };
   const configOverrides = Object.keys(merged).length ? merged : null;
   const sandboxPolicy = codexSandboxPolicy(
     options.sandbox,
@@ -365,6 +386,16 @@ export async function runTurn(
   const turnOn = async (client: AppServerClient): Promise<TurnResult> => {
     let controlServer: Awaited<ReturnType<typeof startCodexControlServer>> | null = null;
     let threadId: string;
+    const effective = await client.request('config/read', { cwd, includeLayers: false });
+    const threadConfig = {
+      ...configOverrides,
+      ...buildCodexMcpOverrides(
+        options.mcpServers,
+        Object.keys(effective.config?.mcp_servers ?? {}),
+        options.nativeMcp,
+      ),
+      ...(!options.nativeMcp ? { 'features.apps': false, 'features.plugins': false } : {}),
+    };
 
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, 'starting', {
@@ -380,7 +411,7 @@ export async function runTurn(
         cwd,
         model: options.model ?? null,
         modelProvider: options.modelProvider ?? null,
-        config: configOverrides,
+        config: threadConfig,
         approvalPolicy: options.approvalPolicy ?? 'never',
         ...sandbox,
         // Only sent when set: older codex builds reject unknown enum-bearing fields.
@@ -395,7 +426,7 @@ export async function runTurn(
         cwd,
         model: options.model ?? null,
         modelProvider: options.modelProvider ?? null,
-        config: configOverrides,
+        config: threadConfig,
         approvalPolicy: options.approvalPolicy ?? 'never',
         ...sandbox,
         ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
@@ -492,7 +523,11 @@ export async function runTurn(
     }
   };
   const run = () =>
-    withAppServer(cwd, attempt, { ...internals, networkAccess: options.networkAccess });
+    withAppServer(cwd, attempt, {
+      ...internals,
+      networkAccess: options.networkAccess,
+      nativeMcp: options.nativeMcp,
+    });
 
   // Retried once, and only while the turn has done nothing that a rerun could repeat.
   let retried = false;

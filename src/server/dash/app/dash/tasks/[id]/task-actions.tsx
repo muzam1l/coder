@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'preact/hooks';
+import { useEffect, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
 import { useRouter } from '@wular/pnext/navigation/client';
@@ -12,6 +12,7 @@ import { ConfirmDialog } from '@/comps/ui/confirm';
 import { Menu, MenuItem } from '@/comps/ui/menu';
 import { Icon } from '@/comps/ui/icon';
 import { iDots } from '@/comps/ui/icons';
+import { showToast, toastError } from '@/comps/frame/task-toasts';
 
 export function approvalParts(approval: unknown): {
   id?: string;
@@ -114,6 +115,14 @@ export function TaskActions({ task, live }: { task: TaskRow; live: boolean }) {
       )}
       <Menu summary={<Icon d={iDots} />} summaryClass="icon-btn" label="More actions">
         {live && !archived ? <MenuItem title="Archive" onClick={archive} /> : null}
+        <MenuItem
+          title="Copy task id"
+          onClick={() =>
+            void navigator.clipboard
+              .writeText(task.task.id)
+              .then(() => showToast('Copied', task.task.id))
+          }
+        />
         <MenuItem title="Delete" danger onClick={() => setDeleting('ask')} />
       </Menu>
       <ConfirmDialog
@@ -131,9 +140,26 @@ export function TaskActions({ task, live }: { task: TaskRow; live: boolean }) {
 
 export function Approval({ task }: { task: TaskRow }) {
   const action = useAction(task.task.id);
+  const [busy, setBusy] = useState<'accept' | 'decline'>();
+  // A sent decision hides its card at once; the events stream catches up after.
+  const [decided, setDecided] = useState<string>();
   const { id, action: tool, reason } = approvalParts(task.approval);
-  const decide = (decision: 'accept' | 'decline') =>
-    void action.run('approve', { approvalId: id, decision });
+
+  const decide = async (decision: 'accept' | 'decline') => {
+    setBusy(decision);
+    const ok = await action.run('approve', { approvalId: id, decision });
+    setBusy(undefined);
+    if (!ok) return;
+    setDecided(id);
+    showToast(decision === 'accept' ? 'Allowed' : 'Denied', 'The task continues.');
+  };
+
+  useEffect(() => {
+    if (action.error) toastError('Not sent', action.error);
+  }, [action.error]);
+
+  if (id && decided === id) return null;
+
   return (
     <Card
       tone="accent"
@@ -141,11 +167,22 @@ export function Approval({ task }: { task: TaskRow }) {
       actions={
         task.task.flow === 'default' ? (
           <>
-            <Flash {...action} />
-            <button type="button" class="btn outline sm" onClick={() => decide('decline')}>
+            <button
+              type="button"
+              class="btn outline sm"
+              disabled={Boolean(busy)}
+              aria-busy={busy === 'decline'}
+              onClick={() => void decide('decline')}
+            >
               Deny
             </button>
-            <button type="button" class="btn sm" onClick={() => decide('accept')}>
+            <button
+              type="button"
+              class="btn sm"
+              disabled={Boolean(busy)}
+              aria-busy={busy === 'accept'}
+              onClick={() => void decide('accept')}
+            >
               Allow
             </button>
           </>

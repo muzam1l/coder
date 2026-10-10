@@ -17,7 +17,7 @@ export const TASK_FLAGS: HelpRow[] = [
   ['--resume <task-id>', "continue that task's thread instead of a fresh run"],
   [
     '--mcp <names|all|json>',
-    'attach MCP servers from `mcp` in .coder/config.json by name (or all), or an inline JSON array [{"name","command","args","env","tools"}]',
+    'attach MCP servers from `mcp` in .coder/config.json by name (or all), or an inline JSON array [{"name","command","args","env","tools"}]; none by default, all adds your engine\'s own MCP servers',
   ],
   [
     '--add-dir <dir>',

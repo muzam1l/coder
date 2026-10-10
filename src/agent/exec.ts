@@ -10,7 +10,7 @@ import { loadConfig } from '../core/config';
 import {
   CoderError,
   dispatchTask,
-  parseMcpServers,
+  selectMcpServers,
   resolveTaskOptions,
   waitTask,
   capPermissions,
@@ -160,16 +160,18 @@ export async function execAgent(options: {
     const noteFile = options.noteFile ?? path.join(noteDir!, 'note');
     if (!options.noteFile) await fs.writeFile(noteFile, task.context?.note ?? '');
     const resolved = resolveTaskOptions(effectiveSettings(agent), config);
+    const selectedMcp = selectMcpServers(task.mcp?.join(','), config.mcp, agent.definition.mcp);
     const mcp = [
       ...taskToolServers(task, options.toolEnvironment?.tokens ?? localTokens(task, process.env)),
       noteToolServer(noteFile),
-      ...(task.mcp?.length ? parseMcpServers(task.mcp.join(','), config.mcp) : []),
+      ...selectedMcp.mcp,
     ];
     const dispatched = options.resumeTaskId
       ? { taskId: options.resumeTaskId }
       : await dispatchTask({
           taskId: options.taskId,
           mcp,
+          nativeMcp: selectedMcp.nativeMcp,
           cwd,
           agentId: task.agent,
           ...(task.author ? { author: task.author } : {}),
@@ -335,6 +337,7 @@ export async function agentTaskOptions(
   permissions?: string;
   system?: string;
   mcp: McpServerSpec[];
+  nativeMcp: boolean;
 }> {
   const agents = await loadAgents(cwd, INTEGRATIONS);
   const agent = agents.find(a => a.id === id);
@@ -345,11 +348,7 @@ export async function agentTaskOptions(
   const { definition, usage } = agent;
 
   const own = definition.mcp ?? {};
-  const mcp = mcpFlag
-    ? parseMcpServers(mcpFlag, { ...loadConfig(cwd).mcp, ...own })
-    : Object.keys(own).length
-      ? parseMcpServers('all', own)
-      : [];
+  const mcp = selectMcpServers(mcpFlag, loadConfig(cwd).mcp, own);
 
   return {
     engine: usage?.engine ?? definition.engine,
@@ -357,7 +356,7 @@ export async function agentTaskOptions(
     effort: usage?.effort ?? definition.effort,
     permissions: usage?.permissions ?? definition.permissions,
     system: agentInstructions(agent) || undefined,
-    mcp,
+    ...mcp,
   };
 }
 
@@ -471,6 +470,15 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
   const dir = agentMailboxDir(cwd, task);
   if (!dir) return () => {};
   const ceiling = { agent: task.agentId!, permissions: task.permissions ?? 'auto' };
+  const launchCwd = realpathSync(cwd);
+  const authorizedMcp = new Map((task.mcp ?? []).map(server => [server.name, server] as const));
+  // Pinned to the parent's launch directory when a request picks it, so a mailbox cwd cannot swap it.
+  const pinned = (server: McpServerSpec) => {
+    if (!server.command) return server;
+    const [resolved] = resolveMcpServers([server], process.env, launchCwd);
+
+    return { ...server, command: resolved!.command, args: resolved!.args };
+  };
 
   // Canonical paths on both sides, so a symlink inside the workspace cannot point a task outside it.
   const real = (target: string) => {
@@ -493,7 +501,33 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
   return serveMailbox(dir, {
     async dispatch(p) {
       const name = p.name ?? 'task';
-      const asked = path.resolve(String(p.cwd ?? cwd));
+      if (p.mcp !== undefined && (typeof p.mcp !== 'string' || /^[\[{]/.test(p.mcp.trim())))
+        throw new CoderError('invalid-option', 'Mailbox MCP selections must be server names.');
+
+      const selection: string = p.mcp ?? '';
+      const mcp = selection
+        .split(',')
+        .map(name => name.trim())
+        .filter(Boolean)
+        .map(name => {
+          const server = name === 'all' ? undefined : authorizedMcp.get(name);
+          if (!server)
+            throw new CoderError(
+              'invalid-option',
+              `MCP server "${name}" is not authorized for agent "${ceiling.agent}".`,
+            );
+
+          return pinned(server);
+        });
+
+      const asked = path.resolve(String(p.cwd ?? launchCwd));
+      // The flow runtime always sends its cwd; only a different directory is an override.
+      if (real(asked) !== real(launchCwd) && mcp.some(server => server.command))
+        throw new CoderError(
+          'invalid-option',
+          'Inherited stdio MCP servers do not allow a cwd override.',
+        );
+
       const requested = [asked, ...(p.addDirs ?? []).map((d: string) => path.resolve(asked, d))];
       const missing = requested.find(target => !real(target));
       if (missing)
@@ -523,6 +557,7 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
           engine: p.engine,
           model: p.model,
           effort: p.effort,
+          mcp,
           permissions: capPermissions(name, p.permissions, ceiling),
           name: p.name,
           system: p.system,

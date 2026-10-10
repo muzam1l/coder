@@ -4,7 +4,7 @@ import './credentials-list.css';
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { client } from '@/utils/client';
+import { client, poll } from '@/utils/client';
 import { iCheck, iCopy, iDots } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import type { CredentialRow, EngineStatus, Me } from '@coder/client/types';
@@ -336,23 +336,30 @@ export function EngineLogins({ status: initial }: { status: EngineStatus }) {
   const [status, setStatus] = useState(initial);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
-  const waiting = useRef<ReturnType<typeof setInterval>>();
+  const waiting = useRef<() => void>();
 
   // A sign-in finishes in the browser the engine opened; the status says when.
   const watch = (engine: string) => {
-    clearInterval(waiting.current);
+    waiting.current?.();
     const until = Date.now() + 5 * 60_000;
-    waiting.current = setInterval(() => {
-      void client.engines.status().then(next => {
-        setStatus(next);
-        if (next[engine as 'claude' | 'codex']?.signedIn || Date.now() > until) {
-          clearInterval(waiting.current);
-          setBusy('');
-        }
-      });
+    // A status read from a sign-in already stopped never stops the next one.
+    let current = true;
+    const stopPoll = poll(async () => {
+      const next = await client.engines.status();
+      if (!current) return;
+      setStatus(next);
+      if (next[engine as 'claude' | 'codex']?.signedIn || Date.now() > until) {
+        stop();
+        setBusy('');
+      }
     }, 2000);
+    const stop = () => {
+      current = false;
+      stopPoll();
+    };
+    waiting.current = stop;
   };
-  useEffect(() => () => clearInterval(waiting.current), []);
+  useEffect(() => () => waiting.current?.(), []);
   const act = (engine: string, action: 'login' | 'logout') => {
     setBusy(`${engine}:${action}`);
     setError('');
@@ -413,7 +420,7 @@ export function EngineLogins({ status: initial }: { status: EngineStatus }) {
                   type="button"
                   class="btn ghost sm"
                   onClick={() => {
-                    clearInterval(waiting.current);
+                    waiting.current?.();
                     setBusy('');
                   }}
                 >

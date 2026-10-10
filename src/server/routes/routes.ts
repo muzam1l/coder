@@ -94,7 +94,7 @@ import {
   steerTask,
   taskLogs,
 } from '../tasks/admin';
-import { taskStream } from '../tasks/stream';
+import { taskEvents, taskStream } from '../tasks/stream';
 import { patchConfiguration, readConfig, saveConfiguration } from '../settings/config';
 import {
   aliasModel,
@@ -278,6 +278,7 @@ const tasksRoutes = [
   route('POST', '/tasks/:id/approve', approveTask),
   route('POST', '/tasks/:id/cancel', cancelTask),
   route('POST', '/tasks/:id/archive', archiveTask),
+  route('GET', '/events', taskEvents),
 ];
 
 const configRoutes = [

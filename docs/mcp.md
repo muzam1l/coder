@@ -1,6 +1,6 @@
 # MCP
 
-Give tasks tools of your own: an MCP server is saved once under `mcp` in `.coder/config.json`, then attached to a task by name. Nothing attaches unless asked, so the default run stays lean.
+Give tasks tools of your own: an MCP server is saved once under `mcp` in `.coder/config.json`, then attached to a task by name. Nothing attaches unless asked, so the default run stays lean. `--mcp all` also loads your engine's own MCP servers and connectors.
 
 ```sh
 coder mcp add docs -- npx -y docs-mcp                       # stdio server: the command after --

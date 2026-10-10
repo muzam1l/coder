@@ -33,7 +33,7 @@ function printSteer(outcome: Steered, wait = false): void {
     );
     if (wait)
       process.stdout.write(
-        `\n${outStyle.dim('[coder] --wait is not available for a queued follow-up.')}\n\n${formatHints([`Wait for the answer: coder task result ${taskId} --wait`], outStyle)}\n`,
+        `\n${outStyle.dim('[coder] --wait is not available for a queued follow-up.')}\n\n${formatHints([`Wait in its own background shell, one per task: coder task result ${taskId} --wait`], outStyle)}\n`,
       );
     return;
   }
@@ -44,7 +44,7 @@ function printSteer(outcome: Steered, wait = false): void {
         : `${outStyle.dim('[coder]')} resumed task ${outStyle.cyan(taskId)} with the follow-up (same thread, same id).\n`,
     );
     process.stdout.write(
-      `\n${formatHints([`Wait for the answer: coder task result ${taskId} --wait`], outStyle)}\n`,
+      `\n${formatHints([`Wait in its own background shell, one per task: coder task result ${taskId} --wait`], outStyle)}\n`,
     );
     return;
   }

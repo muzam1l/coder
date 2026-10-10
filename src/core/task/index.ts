@@ -13,7 +13,6 @@ import {
   dispatchTask,
   isSandboxFailure,
   isStartupError,
-  parseMcpServers,
   readTask,
   waitTask,
   withResumeDefaults,
@@ -181,7 +180,8 @@ async function run(
   const dispatchOpts: DispatchOptions = {
     ...inherited,
     ...(opts.agent ? { agentId: opts.agent } : {}),
-    mcp: agent?.mcp ?? (opts.mcp ? parseMcpServers(opts.mcp, loadConfig(cwd).mcp) : undefined),
+    mcp: agent?.mcp ?? opts.mcp,
+    nativeMcp: agent?.nativeMcp,
     ...(opts.onFallback ? { onFallback: opts.onFallback } : {}),
     ...(opts.onNote ? { onNote: opts.onNote } : {}),
   };

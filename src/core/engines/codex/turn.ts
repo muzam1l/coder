@@ -355,6 +355,15 @@ function unwrapShell(command: string): string {
 
 // Messages are logged raw (full command, full output) like the claude core;
 // the text views trim them for display and --json keeps everything.
+/** Tags a tool call and its result with the item id, so concurrent calls pair with their own results. */
+function withCallId(line: ProgressLine | null, item: TurnItem): ProgressLine | null {
+  const kind = line?.extra?.kind;
+  if (!line || (kind !== 'tool' && kind !== 'tool-result') || typeof item.id !== 'string')
+    return line;
+
+  return { ...line, extra: { ...line.extra, callId: item.id } };
+}
+
 function describeStartedItem(item: TurnItem, cwd?: string): ProgressLine | null {
   switch (item.type) {
     case 'commandExecution':
@@ -617,7 +626,10 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
       break;
     case 'item/started':
       recordItem(state, message.params.item, 'started', message.params.threadId ?? null);
-      emitLine(state.onProgress, describeStartedItem(message.params.item, state.cwd));
+      emitLine(
+        state.onProgress,
+        withCallId(describeStartedItem(message.params.item, state.cwd), message.params.item),
+      );
       break;
     case 'item/completed': {
       recordItem(state, message.params.item, 'completed', message.params.threadId ?? null);
@@ -627,7 +639,7 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
           if (change.path) state.reportedChanges.add(shortPath(state.cwd, change.path));
         }
       }
-      emitLine(state.onProgress, describeCompletedItem(item, state.cwd));
+      emitLine(state.onProgress, withCallId(describeCompletedItem(item, state.cwd), item));
       break;
     }
     case 'thread/tokenUsage/updated': {

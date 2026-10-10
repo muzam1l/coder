@@ -16,7 +16,8 @@ export function taskRunNextSteps(taskId: string): string {
     [
       {
         usage: `coder task result ${taskId} --wait`,
-        blurb: 'run in a background shell; returns with the answer or a pending approval',
+        blurb:
+          'run this in its own background shell, one per task (never wait on several tasks in one call). Returns with the answer or a pending approval.',
       },
       {
         usage: `coder task steer ${taskId} "<follow-up>"`,
@@ -53,7 +54,7 @@ function printWaiting(taskId: string): void {
 
 function printDetached(taskId: string): void {
   process.stderr.write(
-    `\n${outStyle.dim('[coder] Detached. The task is still running.')}\n\n${formatHints([`Wait for the answer: coder task result ${taskId} --wait`], errStyle)}\n`,
+    `\n${outStyle.dim('[coder] Detached. The task is still running.')}\n\n${formatHints([`Wait in its own background shell, one per task: coder task result ${taskId} --wait`], errStyle)}\n`,
   );
 }
 
@@ -80,7 +81,7 @@ export const commandTask = command({
   name: 'task run',
   help: {
     usage: 'coder task run "<task text>"',
-    summary: `Dispatch a coding task to the configured engine. Backgrounds by default and\nprints a task id; --wait runs in the foreground and prints the answer.\nShortcut: \`coder run "<text>"\`.\n\nWriting a task: one task per focused goal, independent goals as parallel runs.\nThe worker starts with nothing but the text, so include the goal, file paths,\nconstraints and any context only you have. Delegate rather than doing the work\nyourself first, however small it looks.\n\n${MODEL_HINT}`,
+    summary: `Dispatch a coding task to the configured engine. Backgrounds by default and\nprints a task id; --wait runs in the foreground and prints the answer.\nShortcut: \`coder run "<text>"\`.\n\nWriting a task: one task per focused goal, independent goals as parallel runs.\nThe worker starts with nothing but the text, so include the goal, file paths,\nconstraints and any context only you have. Delegate rather than doing the work\nyourself first, however small it looks.\n\nWaiting: run \`coder task result <task-id> --wait\` in its own background shell, one\nper task. Never wait on several tasks in one call, or their approvals and answers\nnever reach you one by one.\n\n${MODEL_HINT}`,
     flags: [
       ['--output-schema <json>', 'JSON Schema for the task answer'],
       ['--name <name>', 'label the task (shown in list/result)'],

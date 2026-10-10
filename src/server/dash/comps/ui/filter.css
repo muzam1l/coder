@@ -1,0 +1,64 @@
+/* applied filters sit in the toolbar's row and scroll sideways instead of wrapping it */
+.filter-chips {
+  display: flex;
+  flex: 1 1 0;
+  gap: 4px;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.filters:has(> .filter-chips) > .search {
+  flex-grow: 1000;
+}
+/* in a page head the filters keep to the right, so chips fill in from the search's left */
+.head.tools .filter-chips {
+  order: -1;
+}
+.head.tools .filter-chips > :first-child {
+  margin-left: auto;
+}
+.filter-chips .chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  max-width: 200px;
+}
+.filter-chips .chip .grow {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.filter-chips .chip .ic {
+  width: 12px;
+  height: 12px;
+}
+/* brand art takes the same box as the other icons, so labels line up */
+.filter-panel .pop-item > .brand-icon {
+  width: 16px;
+  height: 16px;
+}
+.filter-panel [data-facet] {
+  color: var(--muted);
+}
+.filter-panel .search {
+  margin: 4px 0 6px;
+}
+.filter-panel .search input {
+  width: 100%;
+}
+
+@media (max-width: 760px) {
+  /* the button sits at the left edge here, so its menu opens rightward */
+  @supports (anchor-scope: --menu) {
+    .filters .menu.filter-more > .pop {
+      inset: anchor(bottom) auto auto anchor(left);
+    }
+  }
+  .head.tools .filter-chips {
+    order: 0;
+  }
+  .head.tools .filter-chips > :first-child {
+    margin-left: 0;
+  }
+}

@@ -1,7 +1,7 @@
 import { completeLogin, parseCredentialId, type StoredCredential } from '../settings/credentials';
 import type { CredentialScope, CredentialWork, DeliveryLease, TaskStatus } from './types';
 import type { Store, StoreKind, StoreRecords, LoginPatch, LoginFence } from './types';
-import {type EngineLogin} from '../settings/logins';
+import { type EngineLogin } from '../settings/logins';
 
 interface Entry {
   value: unknown;
@@ -139,12 +139,14 @@ export class MemoryStore implements Store {
     kind: K,
     id: string,
     value: StoreRecords[K],
-    options: { ttlMs?: number } = {},
+    options: { ttlMs?: number; unarchive?: boolean } = {},
   ): Promise<void> {
     const expiresAt = options.ttlMs === undefined ? undefined : this.now() + options.ttlMs;
     const bucket = this.bucket(kind);
     const archivedAt =
-      kind === 'task' ? (bucket.get(id)?.value as TaskStatus | undefined)?.archivedAt : undefined;
+      kind === 'task' && !options.unarchive
+        ? (bucket.get(id)?.value as TaskStatus | undefined)?.archivedAt
+        : undefined;
 
     bucket.set(id, {
       value: archivedAt === undefined ? value : Object.assign({}, value, { archivedAt }),

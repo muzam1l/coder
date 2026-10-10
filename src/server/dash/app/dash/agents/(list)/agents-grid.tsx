@@ -9,8 +9,7 @@ import type { AgentCardRow, IntegrationInfo, Paged } from '@coder/client/types';
 import { Empty } from '@/comps/ui/card';
 import { initial } from '@/utils/format';
 import { AgentPills, BrandIcon, Platform } from '@/app/dash/agents/agent/agent-pills';
-import { Menu, MenuRadio } from '@/comps/ui/menu';
-import { Icon } from '@/comps/ui/icon';
+import { Filter } from '@/comps/ui/filter';
 import { NewAgentMenu } from './agent-menu';
 import { Search, Toolbar, queryOf, useFilters } from '@/comps/ui/toolbar';
 import { Tail } from '@/comps/ui/tail';
@@ -93,39 +92,23 @@ export function AgentsGrid({
     <>
       <Toolbar head={head} action={<NewAgentMenu />}>
         <Search value={values.q} label="Search agents" onInput={value => set('q', value, 250)} />
-        <Menu
-          class="filter-more"
-          label="More filters"
-          summaryClass={`field-btn${values.platform || values.type ? ' on' : ''}`}
-          summary="Filter"
-        >
-          <p class="pop-label">Platform</p>
-          <div role="group" aria-label="Platform">
-            <MenuRadio on={!values.platform} onPick={() => set('platform', '')}>
-              All platforms
-            </MenuRadio>
-            {catalog.map(entry => (
-              <MenuRadio
-                key={entry.id}
-                on={values.platform === entry.id}
-                onPick={() => set('platform', entry.id)}
-              >
-                <span class="pf">
-                  <BrandIcon brand={entry.brand} />
-                  {entry.name}
-                </span>
-              </MenuRadio>
-            ))}
-          </div>
-          <p class="pop-label">Source</p>
-          <div role="group" aria-label="Source">
-            {KINDS.map(([value, label]) => (
-              <MenuRadio key={value} on={values.type === value} onPick={() => set('type', value)}>
-                {label}
-              </MenuRadio>
-            ))}
-          </div>
-        </Menu>
+        <Filter
+          name="agents"
+          facets={[
+            {
+              key: 'platform',
+              label: 'Platform',
+              options: catalog.map((entry): [string, string] => [entry.id, entry.name]),
+              icon: value => {
+                const entry = catalog.find(item => item.id === value);
+                return entry ? <BrandIcon brand={entry.brand} /> : undefined;
+              },
+            },
+            { key: 'type', label: 'Source', options: KINDS },
+          ]}
+          values={values}
+          onChange={set}
+        />
       </Toolbar>
       {children}
       {list.rows.length ? (

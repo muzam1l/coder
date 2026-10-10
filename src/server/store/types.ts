@@ -6,13 +6,13 @@ import type {
   Installation,
 } from '../../agent/types';
 import type { TaskTurn } from '../../client/types';
-import {type EngineLogin} from '../settings/logins';
+import { type EngineLogin } from '../settings/logins';
 import type { StoredCredential } from '../settings/credentials';
 import type { StoredConfig } from '../settings/config';
 import type { InboxEntry } from '../tasks/queue';
 import type { LocalCompletion, LocalStart } from '../tasks/local';
 import type { SessionBinding, PendingHandoff } from '../tasks/events';
-import {type PairingRecord} from '../settings/runners';
+import { type PairingRecord } from '../settings/runners';
 import type { SnapshotState } from '../runners/vercel-sandbox';
 
 export interface StoreRecords {
@@ -163,11 +163,12 @@ export interface Store {
     id: string,
   ): Promise<StoredCredential | undefined>;
   get<T extends EngineLogin>(kind: 'login', id: string): Promise<EngineLogin | undefined>;
+  /** A task's archivedAt survives a put unless `unarchive` replaces it. */
   put<K extends StoreKind>(
     kind: K,
     id: string,
     value: StoreRecords[K],
-    opts?: { ttlMs?: number },
+    opts?: { ttlMs?: number; unarchive?: boolean },
   ): Promise<void>;
   putMany<K extends StoreKind>(
     kind: K,
@@ -320,6 +321,8 @@ export interface TaskStatus {
   logSeq?: number;
   logBytes?: number;
   archivedAt?: number;
+  /** Archived by the auto-archive sweep, which lists take up on their next read rather than as an event. */
+  autoArchived?: true;
   approval?: unknown;
   /** Ask-sidecar answers in arrival order. */
   answer?: unknown[];

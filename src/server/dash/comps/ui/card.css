@@ -8,6 +8,7 @@
 }
 .card.accent {
   border-color: var(--warn);
+  background: var(--warnbg);
 }
 .card.danger {
   border-color: var(--bad);

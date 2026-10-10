@@ -4,7 +4,7 @@ import './runners-list.css';
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { client } from '@/utils/client';
+import { client, poll } from '@/utils/client';
 import {
   iCheck,
   iCopy,
@@ -246,15 +246,19 @@ function AddRunner({
   useEffect(() => {
     if (!pairing) return;
     const until = Math.min(pairing.expiresAt, Date.now() + 15 * 60_000);
-    const timer = setInterval(() => {
+    // A list read from a pairing already gone never ends the next one.
+    let current = true;
+    const stop = poll(async () => {
       if (Date.now() > until) return cancel();
-      void client.runners.list().then(rows => {
-        if (!rows.items.some(row => !known.includes(row.id))) return;
-        onAdded(rows);
-        cancel();
-      });
+      const rows = await client.runners.list();
+      if (!current || !rows.items.some(row => !known.includes(row.id))) return;
+      onAdded(rows);
+      cancel();
     }, 2000);
-    return () => clearInterval(timer);
+    return () => {
+      current = false;
+      stop();
+    };
   }, [pairing]);
 
   const cancel = () => {
@@ -411,10 +415,7 @@ export function RunnersList({ first, me }: { first: Runners; me: Me }) {
   const items = sortedRunners(rows.items);
 
   // Online dots stay fresh while the tab is open.
-  useEffect(() => {
-    const timer = setInterval(() => void client.runners.list().then(setRows, () => {}), 30_000);
-    return () => clearInterval(timer);
-  }, []);
+  useEffect(() => poll(() => client.runners.list().then(setRows), 30_000), []);
 
   const change = async (act: () => Promise<unknown>) => {
     setError('');

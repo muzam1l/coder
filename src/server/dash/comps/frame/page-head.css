@@ -36,7 +36,17 @@
   font-size: 12px;
   color: var(--muted);
 }
+/* stuck: the back link shrinks to its arrow before the title */
+.stuck > div:first-child:has(> .back) {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .stuck .back {
+  flex: none;
+  margin: 0;
+}
+.stuck .back > span {
   display: none;
 }
 .back:hover {

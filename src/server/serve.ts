@@ -227,6 +227,8 @@ async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
     closed = true;
     clearInterval(kickTimer);
     clearInterval(sweepTimer);
+    context.taskWatcher?.close();
+    context.logWatcher?.close();
     await new Promise<void>((resolve, reject) =>
       listener.close(error => (error ? reject(error) : resolve())),
     );

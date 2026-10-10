@@ -87,13 +87,18 @@ function headers(input: http.IncomingHttpHeaders): Headers {
   return result;
 }
 
-async function webRequest(req: http.IncomingMessage, limit: number): Promise<Request> {
+async function webRequest(
+  req: http.IncomingMessage,
+  limit: number,
+  signal: AbortSignal,
+): Promise<Request> {
   const path = req.url ?? '/';
   const body = await readLimited(req, req.headers['content-length'], limit);
   return new Request(`http://${req.headers.host ?? 'localhost'}${path}`, {
     method: req.method,
     headers: headers(req.headers),
     body: body.byteLength ? Buffer.from(body) : undefined,
+    signal,
   });
 }
 
@@ -109,11 +114,19 @@ export function nodeListener(
 ): http.RequestListener {
   return async (incoming, outgoing) => {
     if (!admit(incoming)) return void outgoing.writeHead(404).end('Not found');
+    // A client that leaves aborts the request, so streams it opened stop.
+    const left = new AbortController();
+    const check = () => {
+      if (incoming.socket.destroyed) left.abort();
+    };
+    outgoing.once('close', () => left.abort());
+    check();
     try {
       const result = await handle(
-        await webRequest(incoming, limit(incoming.url ?? '/')),
+        await webRequest(incoming, limit(incoming.url ?? '/'), left.signal),
         incoming.socket.remoteAddress?.replace(/^::ffff:/, ''),
       );
+      check();
       const head: http.OutgoingHttpHeaders = Object.fromEntries(result.headers.entries());
       const cookies = result.headers.getSetCookie();
       if (cookies.length) head['set-cookie'] = cookies;

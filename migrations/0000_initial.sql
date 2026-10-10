@@ -209,6 +209,12 @@ CREATE TABLE "coder"."task_log" (
 	CONSTRAINT "task_log_taskId_seq_unique" UNIQUE("task_id","seq")
 );
 --> statement-breakpoint
+CREATE TABLE "coder"."task_tombstone" (
+	"organization_id" text NOT NULL,
+	"public_id" text NOT NULL,
+	"deleted_at" timestamp with time zone NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE "coder"."usage" (
 	"id" bigserial PRIMARY KEY NOT NULL,
 	"organization_id" text NOT NULL,
@@ -246,7 +252,9 @@ CREATE INDEX "platform_link_user_id_index" ON "coder"."platform_link" USING btre
 CREATE INDEX "secret_organization_id_kind_index" ON "coder"."secret" USING btree ("organization_id","kind");--> statement-breakpoint
 CREATE INDEX "task_public_id_index" ON "coder"."task" USING btree ("public_id");--> statement-breakpoint
 CREATE INDEX "task_organization_id_created_at_public_id_index" ON "coder"."task" USING btree ("organization_id","created_at" DESC NULLS LAST,"public_id" DESC NULLS LAST);--> statement-breakpoint
+CREATE INDEX "task_organization_id_updated_at_index" ON "coder"."task" USING btree ("organization_id","updated_at");--> statement-breakpoint
 CREATE INDEX "task_organization_id_index" ON "coder"."task" USING btree ("organization_id") WHERE "coder"."task"."status" = 'queued';--> statement-breakpoint
 CREATE INDEX "task_status_created_at_index" ON "coder"."task" USING btree ("status","created_at");--> statement-breakpoint
 CREATE INDEX "task_inbox_task_id_generation_seq_index" ON "coder"."task_inbox" USING btree ("task_id","generation","seq");--> statement-breakpoint
+CREATE INDEX "task_tombstone_organization_id_deleted_at_index" ON "coder"."task_tombstone" USING btree ("organization_id","deleted_at");--> statement-breakpoint
 CREATE INDEX "usage_organization_id_at_index" ON "coder"."usage" USING btree ("organization_id","at");

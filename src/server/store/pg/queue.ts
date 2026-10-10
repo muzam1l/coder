@@ -7,15 +7,17 @@ import {
   asc,
   desc,
   eq,
+  gt,
   getTableColumns,
   ilike,
   inArray,
   isNotNull,
   isNull,
-  not,
+  lt,
   or,
   sql,
   type SQL,
+  type SQLWrapper,
 } from 'drizzle-orm';
 
 import { createTaskToken } from '../../tasks/token';
@@ -40,6 +42,9 @@ import {
 } from '../../tasks/queue';
 import { taskRecord, stateKey, statePrefix, rows, defined, ms } from './tables/shared';
 import { CASING, pipeline, readQuery, type Db } from './client';
+import { TERMINAL_STATUSES } from '../../../core/types';
+import { listRank } from '../../../core/defaults';
+import { AUTO_ARCHIVE_MS } from '../../../core/state';
 import {
   integrationApp as app,
   integrationAppInstallation as install,
@@ -48,6 +53,7 @@ import {
   task,
   taskInbox,
   taskLog,
+  taskTombstone,
 } from './schema';
 
 function addTokens(previous: SQL, value: unknown): SQL {
@@ -60,6 +66,24 @@ function addTokens(previous: SQL, value: unknown): SQL {
 
   return sql`(case when jsonb_typeof(${previous}) = 'object' then ${previous} else '{}'::jsonb end || jsonb_build_object(${sql.join(fields, sql`, `)}))`;
 }
+
+/** `listRank` as SQL. */
+const rank = (status: SQLWrapper) =>
+  sql<number>`(case ${status} ${sql.join(
+    [...ACTIVE_STATES, ...TERMINAL_STATUSES].map(
+      state => sql`when ${state} then ${sql.raw(String(listRank(state)))}`,
+    ),
+    sql` `,
+  )} end)`;
+
+/** Milliseconds, as cursors carry them. */
+const millis = (at: SQLWrapper) => sql`date_trunc('milliseconds', ${at})`;
+
+const pageOrder = (row: Record<'status' | 'createdAt' | 'publicId', SQLWrapper>) => [
+  asc(rank(row.status)),
+  desc(millis(row.createdAt)),
+  desc(row.publicId),
+];
 
 export class DrizzleQueue implements TaskQueue {
   constructor(private readonly db: Db) {}
@@ -163,7 +187,7 @@ export class DrizzleQueue implements TaskQueue {
       ), ${receipt} ${
         session
           ? sql`advanced as (
-        update ${task} set inbox_seq = inbox_seq + 1 where id in (select id from target) and exists (select 1 from receipt)
+        update ${task} set inbox_seq = inbox_seq + 1, updated_at = ${stamp}::timestamptz where id in (select id from target) and exists (select 1 from receipt)
         returning id, inbox_seq, generation
       ), forwarded as (
         insert into ${taskInbox} (organization_id, task_id, seq, generation, at, kind, value)
@@ -315,7 +339,7 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     fence: TaskFence = {},
   ): Promise<boolean> {
-    const { answer, archivedAt, lastSeenAt, ...fields } = patch;
+    const { answer, archivedAt, autoArchived: _auto, lastSeenAt, ...fields } = patch;
     const [row] = await this.db
       .update(task)
       .set({
@@ -336,6 +360,21 @@ export class DrizzleQueue implements TaskQueue {
       .where(this.fence(organizationId, id, fence))
       .returning({ id: task.id });
     return Boolean(row);
+  }
+
+  async archiveStopped(organizationId: string, now: number, ids?: string[]): Promise<void> {
+    await this.db
+      .update(task)
+      .set({ archivedAt: new Date(now) })
+      .where(
+        and(
+          eq(task.organizationId, organizationId),
+          ids ? inArray(task.publicId, ids) : undefined,
+          isNull(task.archivedAt),
+          inArray(task.status, [...TERMINAL_STATUSES]),
+          lt(sql`coalesce(${task.finishedAt}, ${task.updatedAt})`, new Date(now - AUTO_ARCHIVE_MS)),
+        ),
+      );
   }
 
   async requeue(
@@ -421,6 +460,7 @@ export class DrizzleQueue implements TaskQueue {
         cancelRequestedAt: null,
         approval: null,
         answer: null,
+        archivedAt: null,
         updatedAt: new Date(now),
       })
       .where(
@@ -557,19 +597,14 @@ export class DrizzleQueue implements TaskQueue {
       .select(columns)
       .from(task)
       .where(and(this.filter(organizationId, opts), before ? this.after(before) : undefined))
-      .orderBy(
-        desc(inArray(task.status, ACTIVE_STATES)),
-        desc(task.createdAt),
-        desc(task.publicId),
-      );
+      .orderBy(...pageOrder(task));
     return opts.limit === undefined ? query : query.limit(opts.limit);
   }
 
-  /** Rows after the cursor in list order: active first, then newest. */
+  /** Rows after the cursor in list order. */
   private after(before: ListCursor) {
-    const older = sql`(${task.createdAt}, ${task.publicId}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.id})`;
-    const active = inArray(task.status, ACTIVE_STATES);
-    return before.active ? or(not(active), and(active, older)) : and(not(active), older);
+    const older = sql`(${millis(task.createdAt)}, ${task.publicId}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.id})`;
+    return or(gt(rank(task.status), before.rank), and(eq(rank(task.status), before.rank), older));
   }
 
   private record(row: Record<string, unknown>, summary?: boolean): TaskStatus {
@@ -594,6 +629,90 @@ export class DrizzleQueue implements TaskQueue {
   async list(organizationId: string, opts: TaskListOptions = {}): Promise<TaskStatus[]> {
     const records = await readQuery(this.db, () => this.pageQuery(organizationId, opts));
     return records.map(row => this.record(row, opts.summary));
+  }
+
+  async changes(scopes: Array<{ organizationId: string; ids: string[] }>, since: number) {
+    if (!scopes.length) return { rows: [], deleted: [] };
+    const organizationIds = scopes.map(scope => scope.organizationId);
+    // Two array parameters however many tasks are asked.
+    const organizations = scopes.flatMap(scope => scope.ids.map(() => scope.organizationId));
+    const ids = scopes.flatMap(scope => scope.ids);
+    const asked = ids.length
+      ? sql`(${task.organizationId}, ${task.publicId}) in (select * from unnest(${sql.param(organizations)}::text[], ${sql.param(ids)}::text[]))`
+      : sql`false`;
+    // Only asked tasks carry their result, error and answers.
+    const [records, tombstones] = await Promise.all([
+      readQuery(this.db, () =>
+        this.db
+          .select({
+            organizationId: task.organizationId,
+            publicId: task.publicId,
+            source: task.source,
+            agent: task.agent,
+            flow: task.flow,
+            status: task.status,
+            approval: task.approval,
+            answer: sql<unknown>`case when ${asked} then ${task.answer} end`,
+            result: sql<
+              typeof task.$inferSelect.result
+            >`case when ${asked} then ${task.result} end`,
+            error: sql<string | null>`case when ${asked} then ${task.error} end`,
+            attempts: task.attempts,
+            archivedAt: task.archivedAt,
+            createdAt: task.createdAt,
+            startedAt: task.startedAt,
+            finishedAt: task.finishedAt,
+            updatedAt: task.updatedAt,
+          })
+          .from(task)
+          .where(
+            or(
+              and(
+                inArray(task.organizationId, organizationIds),
+                gt(task.updatedAt, new Date(since)),
+              ),
+              ids.length ? asked : undefined,
+            ),
+          ),
+      ),
+      readQuery(this.db, () =>
+        this.db
+          .select()
+          .from(taskTombstone)
+          .where(
+            and(
+              inArray(taskTombstone.organizationId, organizationIds),
+              gt(taskTombstone.deletedAt, new Date(since)),
+            ),
+          ),
+      ),
+    ]);
+    const rows = records.map(row => ({
+      organizationId: row.organizationId,
+      status: defined({
+        task: { id: row.publicId, source: row.source, agent: row.agent, flow: row.flow },
+        status: row.status,
+        approval: row.approval,
+        answer: Array.isArray(row.answer) ? row.answer : undefined,
+        result: row.result,
+        error: row.error,
+        attempts: row.attempts,
+        archivedAt: row.archivedAt && ms(row.archivedAt),
+        createdAt: ms(row.createdAt),
+        startedAt: row.startedAt && ms(row.startedAt),
+        finishedAt: row.finishedAt && ms(row.finishedAt),
+        updatedAt: ms(row.updatedAt),
+      }) as TaskStatus,
+    }));
+
+    return {
+      rows,
+      deleted: tombstones.map(row => ({
+        organizationId: row.organizationId,
+        id: row.publicId,
+        at: ms(row.deletedAt),
+      })),
+    };
   }
 
   private countQuery(organizationId: string, filter: TaskFilter) {
@@ -635,9 +754,11 @@ export class DrizzleQueue implements TaskQueue {
         .from(totals)
         .leftJoin(page, sql`true`)
         .orderBy(
-          desc(inArray(fields.status!, ACTIVE_STATES)),
-          desc(page.createdAt),
-          desc(page.publicId),
+          ...pageOrder({
+            status: fields.status!,
+            createdAt: fields.createdAt!,
+            publicId: fields.publicId!,
+          }),
         ),
     );
     const { all = 0, active = 0, waiting = 0 } = records[0] ?? {};
@@ -744,7 +865,7 @@ export class DrizzleQueue implements TaskQueue {
       this.db,
       sql`
       with next as (
-        update ${task} set inbox_seq = inbox_seq + 1 where ${this.fence(organizationId, id, { generation, statuses: ACTIVE_STATES })} returning id, inbox_seq, generation
+        update ${task} set inbox_seq = inbox_seq + 1, updated_at = ${new Date(now).toISOString()}::timestamptz where ${this.fence(organizationId, id, { generation, statuses: ACTIVE_STATES })} returning id, inbox_seq, generation
       ) insert into ${taskInbox} (organization_id, task_id, seq, generation, kind, value, at)
         select ${organizationId}, id, inbox_seq, generation, ${kind}, ${JSON.stringify(value ?? null)}::jsonb, ${new Date(now).toISOString()}::timestamptz from next returning seq`,
     );
@@ -793,7 +914,8 @@ export class DrizzleQueue implements TaskQueue {
           status = case when exists(select 1 from applied where kind = 'cancel') then 'cancelled'
             when exists(select 1 from applied where kind = 'approve' and value->>'approvalId' = ${task.approval}->>'id') then 'running' else status end,
           approval = case when exists(select 1 from applied where kind = 'approve' and value->>'approvalId' = ${task.approval}->>'id') then null else approval end,
-          finished_at = case when exists(select 1 from applied where kind = 'cancel') then now() else finished_at end
+          finished_at = case when exists(select 1 from applied where kind = 'cancel') then now() else finished_at end,
+          updated_at = now()
         from answers where id in (select id from current)
       ) select exists (select 1 from current) as accepted`,
     );

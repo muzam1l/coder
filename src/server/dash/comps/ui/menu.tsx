@@ -135,10 +135,13 @@ export function MoreList({ label, children }: { label: string; children: Compone
 export function MenuRadio({
   on,
   onPick,
+  icon,
   children,
 }: {
   on: boolean;
   onPick: () => void;
+  /** An icon path or a ready element. */
+  icon?: string | ComponentChildren;
   children: ComponentChildren;
 }) {
   return (
@@ -149,6 +152,7 @@ export function MenuRadio({
       class={on ? 'pop-item on' : 'pop-item'}
       onClick={onPick}
     >
+      {typeof icon === 'string' ? <Icon d={icon} /> : icon}
       <span class="grow">{children}</span>
       {on ? <Icon d={iCheck} /> : null}
     </button>

@@ -151,7 +151,7 @@ export async function reportResult(
   )
     return json({ error: 'Invalid task result' }, 400);
 
-  const now = (ctx.now ?? Date.now)();
+  let now = (ctx.now ?? Date.now)();
   if (body.status === 'running' || body.status === 'waiting') {
     await ctx.queue.patchTask(
       ctx.organizationId,
@@ -177,6 +177,8 @@ export async function reportResult(
     return json({ ok: true });
   }
   await copyRunnerLogs(ctx, authorized).catch(() => {});
+  // Stamped after the log copy, so a reader looking back a fixed time still sees the finish.
+  now = (ctx.now ?? Date.now)();
 
   const output = typeof body.result === 'string' ? body.result : JSON.stringify(body.result ?? '');
   const result = {

@@ -8,20 +8,16 @@ import { AGENT_TASK_PREFIX, execAgent, agentTaskOptions } from '../../agent/exec
 import type { AgentTask, TaskSource } from '../../agent/types';
 import type { TaskTurn } from '../../client/types';
 import type { TaskLogLine, TaskStatus, UsageRecord } from '../store/types';
-import { deleteTask, stopTask, askTask, steerTask } from '../../core/task/actions';
+import { deleteTask, stopTask, askTask, steerTask, recentTasks } from '../../core/task/actions';
 import { answerApproval, listPendingApprovals } from '../../core/approvals';
 import { loadConfig } from '../../core/config';
 import { logEntry } from '../../core/task/log-view';
+import { CoderError, dispatchTask, readResultJson, spawnWorker } from '../../core/dispatch';
 import {
-  CoderError,
-  dispatchTask,
-  parseMcpServers,
-  readResultJson,
-  spawnWorker,
-} from '../../core/dispatch';
-import {
+  archiveDue,
   archiveTask,
   generateTaskId,
+  queueRowWins,
   listArchivedTasks,
   listTasks,
   loadTask,
@@ -35,7 +31,7 @@ import {
   readTurnResults,
   writeTask,
 } from '../../core/state';
-import { ACTIVE_STATUSES, type Task } from '../../core/types';
+import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Task } from '../../core/types';
 import { readFlowRecord } from '../../flow/runs';
 import { stopRun, stopFlowTasks } from '../../flow/executor';
 import { applyTaskMessage } from '../../runner/task';
@@ -119,7 +115,13 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
       ...(task.prompt ? { prompt: task.currentPrompt ?? task.prompt } : {}),
       definition: { integrations: {} },
       ...(task.engine
-        ? { usage: { engine: task.engine, ...(task.model ? { model: task.model } : {}) } }
+        ? {
+            usage: {
+              engine: task.engine,
+              ...(task.model ? { model: task.model } : {}),
+              ...(task.effort ? { effort: task.effort } : {}),
+            },
+          }
         : {}),
       tools: {},
     },
@@ -140,22 +142,40 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
     ...(task.error ? { error: task.error } : {}),
     ...(task.fallbacks?.length ? { fallbacks: task.fallbacks } : {}),
     ...(task.archivedAt ? { archivedAt: at(task.archivedAt) } : {}),
+    ...(task.autoArchived ? { autoArchived: true as const } : {}),
     createdAt,
-    startedAt: createdAt,
-    ...(task.completedAt ? { finishedAt: at(task.completedAt) } : {}),
+    // The current turn's start, as a stored task's, so a resume shows as a new run.
+    startedAt: at(task.resumedAt) ?? createdAt,
+    // A resumed turn still carries the last turn's completedAt until it finishes.
+    ...(task.completedAt && !ACTIVE_STATUSES.includes(task.status)
+      ? { finishedAt: at(task.completedAt) }
+      : {}),
     updatedAt: at(task.updatedAt) ?? createdAt,
     local: true,
     ...(detail ? { turns } : {}),
   };
 }
 
-/** Local tasks, without the engine tasks that server tasks ran on. */
+/** Local tasks after the CLI's auto-archive sweep, without the engine tasks that server tasks ran on. */
 export function localTasks(cwd: string, archived: boolean): TaskStatus[] {
-  const tasks = archived ? listArchivedTasks(cwd, { migrate: false }) : listTasks(cwd);
+  const recent = recentTasks(cwd);
+  const tasks = archived ? listArchivedTasks(cwd, { migrate: false }) : recent;
   return tasks.filter(own).map(task => {
     const status = row(cwd, task);
     return archived ? { ...status, archivedAt: status.archivedAt ?? status.updatedAt } : status;
   });
+}
+
+/** The CLI's auto-archive sweep on queue rows that are the task, by their own stopped time. */
+export async function sweepLocalQueue(ctx: ServerContext, cwd: string): Promise<void> {
+  const now = (ctx.now ?? Date.now)();
+  const ids = (
+    await ctx.queue.list(ctx.organizationId, { archived: false, statuses: [...TERMINAL_STATUSES] })
+  )
+    .filter(row => archiveDue(row.finishedAt ?? row.updatedAt, now) && queueRowWins(cwd, row))
+    .map(row => row.task.id);
+
+  if (ids.length) await ctx.queue.archiveStopped(ctx.organizationId, now, ids);
 }
 
 /** Spawn a dashboard task; its worker records startup failures on the task. */
@@ -214,11 +234,8 @@ export async function startLocalTask(
         effort: input.effort ?? (input.engine ? undefined : agent?.effort),
         permissions: input.permissions ?? agent?.permissions,
         system: agent?.system,
-        mcp: agent
-          ? agent.mcp
-          : input.mcp?.length
-            ? parseMcpServers(input.mcp.join(','), loadConfig(cwd).mcp)
-            : undefined,
+        mcp: agent ? agent.mcp : input.mcp?.join(','),
+        nativeMcp: agent?.nativeMcp,
         ...(agent ? { agentId: input.agent } : {}),
         source: 'dashboard',
         onFallback: info => fallbacks.push(info),
@@ -841,7 +858,7 @@ export async function localTaskAction(
       await ctx.queue.patchTask(
         ctx.organizationId,
         id,
-        { archivedAt: (ctx.now ?? Date.now)() },
+        { archivedAt: (ctx.now ?? Date.now)(), autoArchived: undefined },
         (ctx.now ?? Date.now)(),
       );
     return Response.json({ ok: true });

@@ -823,8 +823,8 @@ export function LoadingComposer() {
   );
 }
 
-/** Opens the composer in a dialog with `agent` picked; starting a task opens it. */
-export function NewTaskButton({ agent }: { agent: string }) {
+/** Opens the composer in a dialog, with `agent` picked when given; starting a task opens it. */
+export function NewTaskButton({ agent }: { agent?: string }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [setup, setSetup] = useState<Awaited<ReturnType<typeof loadComposer>>>();
   const [error, setError] = useState('');
@@ -852,18 +852,19 @@ export function NewTaskButton({ agent }: { agent: string }) {
         onPointerEnter={prepare}
         onFocus={prepare}
       >
+        <Icon d={iPlus} />
         New task
       </button>
       <dialog
         ref={dialog}
         class="compose-dialog"
-        aria-label={`New task for ${agent}`}
+        aria-label={agent ? `New task for ${agent}` : 'New task'}
         onClose={() => setShown(false)}
         onClick={event => event.target === event.currentTarget && dialog.current?.close()}
       >
         <header>
           <h2>New task</h2>
-          <span class="sub">{agent}</span>
+          {agent ? <span class="sub">{agent}</span> : null}
           <button
             type="button"
             class="icon-btn"
@@ -876,7 +877,7 @@ export function NewTaskButton({ agent }: { agent: string }) {
         {!shown ? null : setup ? (
           <Composer
             {...setup}
-            initial={{ ...savedChoice(document.cookie), agent }}
+            initial={{ ...savedChoice(document.cookie), ...(agent ? { agent } : {}) }}
             tz={Intl.DateTimeFormat().resolvedOptions().timeZone}
           />
         ) : error ? (

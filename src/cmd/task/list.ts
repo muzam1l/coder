@@ -156,7 +156,7 @@ export const commandTasks = command({
   help: {
     usage: 'coder task list [--running] [--stopped] [--archived [--limit N]] [--server [url]]',
     summary:
-      'List recent tasks across all workspaces, most recent first: running tasks plus\nones stopped within the last 10 minutes. Older stopped tasks auto-archive and\nmove to --archived. Shortcut: `coder list`.',
+      'List recent tasks across all workspaces, most recent first: running tasks plus\nones stopped within the last 30 minutes. Older stopped tasks auto-archive and\nmove to --archived. Shortcut: `coder list`.',
     flags: [
       ['--running', 'show only running tasks'],
       ['--stopped', 'show only recently stopped tasks (not yet archived)'],

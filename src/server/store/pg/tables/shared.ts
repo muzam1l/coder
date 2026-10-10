@@ -25,7 +25,7 @@ export interface Kind<T> {
   /** Column predicates for a `<parent>:<padded number>` key, so lookups use the indexes. */
   split?(parent: string, from?: number, exact?: boolean): SQL;
   rows(where: SQL | undefined, limit?: number): Promise<Rows<T>>;
-  put(id: string, value: T, expiresAt: Date | null): Promise<void>;
+  put(id: string, value: T, expiresAt: Date | null, opts?: { unarchive?: boolean }): Promise<void>;
   delete(id: string): Promise<void>;
 }
 

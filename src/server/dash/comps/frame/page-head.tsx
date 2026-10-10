@@ -29,10 +29,11 @@ function backTo(back: string | null | undefined): { to: To; label: string } | un
 /** Back to the logical parent, wherever the visitor came from; a `back` search param wins. */
 export function Back({ label, back, ...to }: To & { label: string; back?: string | null }) {
   const param = backTo(back);
+  const name = param?.label ?? label;
   return (
-    <Link class="back" {...(param?.to ?? to)}>
+    <Link class="back" aria-label={name} {...(param?.to ?? to)}>
       <Icon d={iLeft} />
-      {param?.label ?? label}
+      <span>{name}</span>
     </Link>
   );
 }

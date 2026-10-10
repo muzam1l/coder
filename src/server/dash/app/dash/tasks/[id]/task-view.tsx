@@ -12,7 +12,7 @@ import { formatDate, formatDuration, reasonText } from '@/utils/format';
 import { Link } from '@wular/pnext/link';
 import { useSearchParams } from '@wular/pnext/navigation/client';
 import type { TaskLog, TaskRow } from '@coder/client/types';
-import { iAgent, iCheck, iCopy, iDown } from '@/comps/ui/icons';
+import { iAgent, iCheck, iClock, iDown, iFolder, iPlug, iTerminal } from '@/comps/ui/icons';
 import { Badge } from '@/comps/ui/badge';
 import { Card, Loading } from '@/comps/ui/card';
 import { Collapse } from '@/comps/ui/collapse';
@@ -25,7 +25,7 @@ import { Status } from '@/app/dash/tasks/list/status';
 import { folderName, sourceLabel, taskActive, taskTitle } from '@/app/dash/tasks/list/task';
 import { Approval, TaskActions, useAction } from './task-actions';
 import { Activity } from './activity';
-import { toastError, watchTask } from '@/comps/frame/task-toasts';
+import { toastError, useTaskEvents, watchTask } from '@/comps/frame/task-toasts';
 
 const TABS = ['Conversation', 'Activity'];
 
@@ -104,30 +104,10 @@ function TaskBack() {
   );
 }
 
-function CopyId({ id }: { id: string }) {
-  const [copied, setCopied] = useState(false);
-  const label = copied ? 'Copied' : 'Copy task id';
-  useEffect(() => {
-    if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), 1500);
-    return () => clearTimeout(timer);
-  }, [copied]);
-  return (
-    <button
-      type="button"
-      class={copied ? 'copy copied' : 'copy'}
-      aria-label={label}
-      title={label}
-      onClick={() => void navigator.clipboard.writeText(id).then(() => setCopied(true))}
-    >
-      <Icon d={copied ? iCheck : iCopy} />
-    </button>
-  );
-}
-
-/** The task's one-row head: back, title, status, source and agent, its actions, and a muted line with id, created time and duration. */
+/** The task's one-row head: back, title, status, source and agent, its actions, and a muted line with created time, source, folder, and the agent with its model. */
 function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
   const live = taskActive(task);
+  const { engine, model, effort } = { ...task.task.definition, ...task.task.usage };
   const source = task.task.event?.integration ?? task.task.source;
   const kind = task.task.event?.type ?? (task.task.flow !== 'default' ? task.task.flow : undefined);
 
@@ -143,23 +123,39 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
       }
       lead={
         <>
-          <span class="task-id">{task.task.id}</span>
-          <CopyId id={task.task.id} />
-          <span>{formatDate(task.createdAt, tz)}</span>
-          {task.startedAt && task.finishedAt ? (
-            <span>{formatDuration(task.finishedAt - task.startedAt)}</span>
+          <span class="fact" title={`Created ${formatDate(task.createdAt, tz)}`}>
+            <Icon d={iClock} />
+            {formatDate(task.createdAt, tz, true)}
+            {task.startedAt && task.finishedAt
+              ? `, ran ${formatDuration(task.finishedAt - task.startedAt)}`
+              : null}
+          </span>
+          <span class="fact" title="Source">
+            <Icon d={task.task.event ? iPlug : iTerminal} />
+            {kind ? `${sourceLabel(source)} ${kind}` : sourceLabel(source)}
+          </span>
+          {task.task.cwd ? (
+            <span class="fact" title={task.task.cwd}>
+              <Icon d={iFolder} />
+              {folderName(task.task.cwd)}
+            </span>
           ) : null}
-          <span>{kind ? `${sourceLabel(source)} ${kind}` : sourceLabel(source)}</span>
-          {task.task.cwd ? <span title={task.task.cwd}>{folderName(task.task.cwd)}</span> : null}
-          <Link
-            class="agent-link"
-            href="/dash/agents/[slug]"
-            params={{ slug: task.task.agent }}
-            search={{ from: `/dash/tasks/${task.task.id}` }}
-          >
-            <Icon d={iAgent} />
-            {task.task.agent}
-          </Link>
+          <span class="fact">
+            <Link
+              class="agent-link"
+              href="/dash/agents/[slug]"
+              params={{ slug: task.task.agent }}
+              search={{ from: `/dash/tasks/${task.task.id}` }}
+            >
+              <Icon d={iAgent} />
+              {task.task.agent}
+            </Link>
+            {engine ? (
+              <span class="fact-dim" title="Engine, model and effort">
+                {[engine, model, effort].filter(Boolean).join('/')}
+              </span>
+            ) : null}
+          </span>
         </>
       }
       actions={<TaskActions task={task} live={live} />}
@@ -167,12 +163,16 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
   );
 }
 
-/** Display rows for the lines so far; new lines only extend them. */
+/** Display rows for the lines so far; new lines extend them or complete an earlier call. */
 function useDisplayRows(lines: TaskLog[]) {
   const view = useRef<{ log: LogView; rows: TaskDisplayRow[]; seen: number }>();
   return useMemo(() => {
     const state = (view.current ??= { log: new LogView(), rows: [], seen: 0 });
-    for (const line of lines.slice(state.seen)) state.rows.push(...state.log.reduce(line));
+    for (const line of lines.slice(state.seen))
+      for (const row of state.log.reduce(line)) {
+        if (row.seq > (state.rows.at(-1)?.seq ?? -1)) state.rows.push(row);
+        else state.rows[state.rows.findLastIndex(({ seq }) => seq === row.seq)] = row;
+      }
     state.seen = lines.length;
     return [...state.rows];
   }, [lines]);
@@ -214,16 +214,106 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
     if (action.error) toastError('Not sent', action.error);
   }, [action.error]);
 
+  const pending = useRef<TaskLog[]>([]);
   const append = (more: TaskLog[]) => {
     const fresh = more.filter(line => line.seq > after.current);
     if (!fresh.length) return;
     after.current = fresh.at(-1)!.seq;
-    setLines(value => [...value, ...fresh]);
+    // Lines that land together render once.
+    if (pending.current.push(...fresh) === fresh.length)
+      setTimeout(() => {
+        const batch = pending.current.splice(0);
+        setLines(value => [...value, ...batch]);
+      });
   };
 
   useEffect(() => {
     if (live && replies) input.current?.focus();
   }, []);
+
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const sync = () => setVisible(document.visibilityState === 'visible');
+    sync();
+    addEventListener('visibilitychange', sync);
+    return () => removeEventListener('visibilitychange', sync);
+  }, []);
+
+  // Logs stream from when the task runs until the stream ends them, which waits for logs still arriving.
+  const [streaming, setStreaming] = useState(live);
+  useEffect(() => {
+    if (live) setStreaming(true);
+  }, [live]);
+
+  // Each turn's reads apply to it alone: a continue, here or from elsewhere, starts the next.
+  const [round, setRound] = useState(0);
+  const roundNow = useRef(0);
+  roundNow.current = round;
+
+  const reload = () => {
+    const started = roundNow.current;
+    void client.tasks
+      .get(task.task.id)
+      .then(({ logs: _logs, ...full }) => {
+        if (roundNow.current === started) setTask(full);
+      })
+      .catch(reason => setStatus(reasonText(reason)));
+  };
+
+  // A running stream follows its own cursor; a stopped page fetches the lines it missed.
+  const catchUp = () => {
+    reload();
+    if (!streaming) setComplete(false);
+  };
+
+  // A new turn's prompt, from this page or elsewhere; its state comes from the events stream.
+  useEffect(() => {
+    if (!round) return;
+    void client.tasks
+      .get(task.task.id)
+      .then(({ turns }) => {
+        if (roundNow.current === round)
+          setTask(current => (taskActive(current) ? { ...current, turns } : current));
+      })
+      .catch(() => {});
+  }, [round]);
+
+  // The head follows the browser's events stream; a finish brings the full task.
+  useTaskEvents(
+    event => {
+      if (event.id !== task.task.id || event.deleted) return;
+      if (live && !taskActive(event)) reload();
+      // A new run, even one that finished and was continued between two events.
+      const rerun = live && task.startedAt !== undefined && event.startedAt !== task.startedAt;
+      if (taskActive(event) && (!live || rerun)) {
+        setRound(value => value + 1);
+        setStreaming(true);
+      }
+      // A turn continued and finished elsewhere while this page heard nothing of it.
+      if (!live && !taskActive(event) && event.finishedAt !== task.finishedAt) {
+        reload();
+        setComplete(false);
+      }
+      setTask(current => ({
+        ...current,
+        status: event.status,
+        approval: event.approval ?? undefined,
+        archivedAt: event.archivedAt,
+        startedAt: event.startedAt,
+        finishedAt: event.finishedAt,
+        ...(event.result === undefined
+          ? {}
+          : {
+              result: event.result ?? undefined,
+              error: event.error ?? undefined,
+              answer: event.answer ?? undefined,
+            }),
+      }));
+    },
+    // Missed events: refetch the task and catch up its logs from the cursor.
+    catchUp,
+    () => document.visibilityState === 'visible' && catchUp(),
+  );
 
   // Older lines a chunk at a time, then the stream follows the run.
   useEffect(() => {
@@ -237,8 +327,9 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       .catch(reason => setStatus(reasonText(reason)));
   }, [complete, lines.length]);
 
+  // A hidden tab holds no log stream and resumes from its cursor.
   useEffect(() => {
-    if (!complete || !live) return;
+    if (!complete || !streaming || !visible) return;
     const abort = new AbortController();
     const follow = async () => {
       while (!abort.signal.aborted) {
@@ -250,10 +341,9 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
           }
           setStatus('');
           for await (const event of serverEvents(response.body)) {
+            if (abort.signal.aborted) return;
             if (event.event === 'log') append([JSON.parse(event.data)]);
-            else if (event.event === 'status')
-              setTask(current => ({ ...current, ...JSON.parse(event.data) }));
-            else if (event.event === 'end') return;
+            else if (event.event === 'end') return setStreaming(false);
           }
         } catch {
           if (abort.signal.aborted) return;
@@ -264,7 +354,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
     };
     void follow();
     return () => abort.abort();
-  }, [complete, live]);
+  }, [complete, streaming, visible, round]);
 
   const turns = task.turns ?? [
     {
@@ -295,12 +385,14 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
     const ok = await action.run(kind, { text }).finally(() => setSending(false));
     if (!ok) return;
     input.current!.value = '';
-    if (kind === 'continue')
+    if (kind === 'continue') {
+      setRound(value => value + 1);
       setTask(current => ({
         ...current,
         status: 'queued',
         result: undefined,
         error: undefined,
+        startedAt: undefined,
         finishedAt: undefined,
         turns: [
           ...turns.map((turn, index) =>
@@ -311,7 +403,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
           { prompt: text },
         ],
       }));
-    else {
+    } else {
       setSent(value => [...value, { kind, text, turn: turns.length - 1 }]);
       setTab('activity');
     }
@@ -332,6 +424,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
           {fallback.engine} was unavailable. {fallback.detail} This task is using {fallback.next}.
         </p>
       ))}
+      {task.approval ? <Approval task={task} /> : null}
       <nav class="tabs" role="tablist" aria-label="Task">
         {TABS.map(label => {
           const key = label.toLowerCase() as Tab;
@@ -366,7 +459,6 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
                   <p class="who">Prompt</p>
                   <Collapse class="prose">{turn.prompt}</Collapse>
                 </div>
-                {last && task.approval ? <Approval task={task} /> : null}
                 {last
                   ? (task.answer ?? []).slice(0, knownAnswers.current).map((answer, index) => (
                       <div key={`a${index}`} class="turn answer">

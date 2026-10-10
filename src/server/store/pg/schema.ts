@@ -253,6 +253,7 @@ export const task = pgTable(
     unique().on(t.organizationId, t.publicId),
     index().on(t.publicId),
     index().on(t.organizationId, t.createdAt.desc(), t.publicId.desc()),
+    index().on(t.organizationId, t.updatedAt),
     index()
       .on(t.organizationId)
       .where(sql`${t.status} = 'queued'`),
@@ -291,6 +292,17 @@ export const taskLog = pgTable(
     line: text().notNull(),
   },
   t => [unique().on(t.taskId, t.seq)],
+);
+
+/** A deleted task's id for a while, so every server's events streams drop it from their lists. */
+export const taskTombstone = pgTable(
+  'task_tombstone',
+  {
+    organizationId: text().notNull(),
+    publicId: text().notNull(),
+    deletedAt: at().notNull(),
+  },
+  t => [index().on(t.organizationId, t.deletedAt)],
 );
 
 /** What a finished task cost. */
@@ -361,6 +373,7 @@ export const tables = {
   task,
   taskInbox,
   taskLog,
+  taskTombstone,
   usage,
   chatState,
   chatItem,
