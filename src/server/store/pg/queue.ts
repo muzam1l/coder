@@ -372,7 +372,10 @@ export class DrizzleQueue implements TaskQueue {
           ids ? inArray(task.publicId, ids) : undefined,
           isNull(task.archivedAt),
           inArray(task.status, [...TERMINAL_STATUSES]),
-          lt(sql`coalesce(${task.finishedAt}, ${task.updatedAt})`, new Date(now - AUTO_ARCHIVE_MS)),
+          lt(
+            sql`coalesce(${task.finishedAt}, ${task.updatedAt})`,
+            sql`${new Date(now - AUTO_ARCHIVE_MS).toISOString()}::timestamptz`,
+          ),
         ),
       );
   }
