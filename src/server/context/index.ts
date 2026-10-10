@@ -96,10 +96,9 @@ export interface AuthApi {
 
 export interface ServerContext {
   limits?: import('../limits').ServerLimits;
-  /** The last healthy `/health` answer, reused for a few seconds. */
-  health?: { at: number; body: unknown; status: number };
+  /** When `/health` last passed; reused for a few seconds. */
+  healthyAt?: number;
   databaseHealth?: () => Promise<void>;
-  healthRunners?: () => Promise<{ online: number; total: number }>;
   config: ServerConfig;
   settings?: ServerSettings;
   authorizedRequest?: Request;

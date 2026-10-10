@@ -1,8 +1,7 @@
 import type { ServerContext } from './context';
 import type { TaskStatus } from './store/types';
-import { readVersion } from '../core/runtime';
 import { localTasks } from './tasks/local';
-import {json} from './routes/http';
+import { json } from './routes/http';
 
 /** Paired and configured runners plus the server's own built-in one, which is always up while the server answers. */
 async function runners(ctx: ServerContext) {
@@ -18,36 +17,23 @@ async function runners(ctx: ServerContext) {
   };
 }
 
-/** Probes poll this; a healthy answer is reused for 5 s so the database sees one check per interval, a failure is rechecked at once. */
+/** Probes poll this; a pass is reused for 5 s so the database sees one check per interval, a failure is rechecked at once. */
 export async function health(ctx: ServerContext): Promise<Response> {
   const now = (ctx.now ?? Date.now)();
-  const kept = ctx.health;
-  const { body, status } = kept && now - kept.at < 5_000 ? kept : await probe(ctx);
-  ctx.health =
-    status === 200
-      ? { at: kept && now - kept.at < 5_000 ? kept.at : now, body, status }
-      : undefined;
-
-  const uptime = Math.max(0, now - (ctx.limits?.startedAt ?? now)) / 1000;
-  return json({ ...(body as object), uptime }, status, { 'cache-control': 'no-store' });
+  const kept = ctx.healthyAt !== undefined && now - ctx.healthyAt < 5_000;
+  const ok = kept || (await probe(ctx));
+  ctx.healthyAt = ok ? (kept ? ctx.healthyAt : now) : undefined;
+  return json({ ok }, ok ? 200 : 503, { 'cache-control': 'no-store' });
 }
 
+/** In postgres mode, a live database query; other modes answer while the server does. */
 async function probe(ctx: ServerContext) {
-  let db: 'ok' | 'down' | 'none' = ctx.config.store === 'postgres' ? 'down' : 'none';
-  let counts = { online: 0, total: 0 };
-  let ok = true;
-  try {
-    if (ctx.config.store === 'postgres') {
-      if (!ctx.databaseHealth) throw new Error('Database health probe is unavailable');
-      await ctx.databaseHealth();
-      db = 'ok';
-    }
-    counts = ctx.healthRunners ? await ctx.healthRunners() : await runners(ctx);
-  } catch {
-    ok = false;
-    if (ctx.config.store === 'postgres') db = 'down';
-  }
-  return { body: { ok, version: readVersion(), db, runners: counts }, status: ok ? 200 : 503 };
+  if (ctx.config.store !== 'postgres') return true;
+  if (!ctx.databaseHealth) return false;
+  return ctx.databaseHealth().then(
+    () => true,
+    () => false,
+  );
 }
 
 export async function metrics(ctx: ServerContext) {

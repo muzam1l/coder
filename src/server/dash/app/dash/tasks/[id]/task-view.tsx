@@ -374,10 +374,11 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       input.current!.value = '';
       setSent(value => [...value, { kind, text, turn: turns.length - 1 }]);
       setAsking(count => count + 1);
+      setTab('conversation');
       void action.run(kind, { question: text }).then(ok => {
         setAsking(count => count - 1);
-        if (ok) return setTab('conversation');
-        setSent(value => value.filter(message => message.text !== text || message.kind !== kind));
+        if (!ok)
+          setSent(value => value.filter(message => message.text !== text || message.kind !== kind));
       });
       return;
     }

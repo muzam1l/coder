@@ -14,7 +14,6 @@ import { handleRequest } from '../routes';
 import { DashboardHosts } from '../dash/serve';
 import { ServerLimits } from '../limits';
 import { sql } from 'drizzle-orm';
-import { runner as runnerTable } from '../store/pg/schema';
 import { createBackend } from '../store';
 import { recoverLocalTasks, stopLocalTasks, syncLocalUsage } from '../tasks/local';
 import { LogWatcher, TaskWatcher } from '../tasks/stream';
@@ -162,15 +161,6 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
                 await backend.connection!.db.execute(sql`select 1`);
               },
               statementTimeout: backend.connection.statementTimeout,
-              healthRunners: async () => {
-                const [counts] = await backend
-                  .connection!.db.select({
-                    total: sql<number>`count(*)::int`,
-                    online: sql<number>`count(*) filter (where ${runnerTable.lastSeen} > clock_timestamp() - interval '5 minutes')::int`,
-                  })
-                  .from(runnerTable);
-                return counts ?? { online: 0, total: 0 };
-              },
             }
           : {}),
         config,
