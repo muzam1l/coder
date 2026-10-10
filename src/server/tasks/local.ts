@@ -262,6 +262,8 @@ export interface LocalStart {
   cwd: string;
   input?: NewTask;
   resume?: boolean;
+  /** Model, effort or permissions the resumed turn runs with instead of the task's. */
+  overrides?: { model?: string; effort?: string; permissions?: string };
   startedId?: string;
 }
 
@@ -304,6 +306,7 @@ export async function startQueuedLocalTask(
       if (!task) throw new Error('Local task is missing');
       await steerTask(start.cwd, task, status.task.prompt ?? '', {
         outputSchema: status.task.context?.outputSchema,
+        ...start.overrides,
       });
     } else if (start.input)
       await startLocalTask(
@@ -863,20 +866,23 @@ export async function localTaskAction(
       );
     return Response.json({ ok: true });
   }
-  if (action === 'steer' || action === 'continue') {
+  if (action === 'steer') {
     const text = String(body.text ?? '');
     if (!text.trim()) return refuse('text is required', 400);
-    if (action === 'steer' && !active) return refuse(`Task "${id}" is not active`);
-    if (action === 'continue' && active)
-      return refuse(`Task "${id}" is still active; steer or ask it instead`);
-    const outputSchema = action === 'continue' ? body.outputSchema : undefined;
+    // A live task takes the follow-up now; a finished one resumes on the same id with these.
+    const outputSchema = active ? undefined : body.outputSchema;
+    const overrides = Object.fromEntries(
+      (['model', 'effort', 'permissions'] as const).flatMap(key =>
+        typeof body[key] === 'string' && body[key] ? [[key, body[key] as string]] : [],
+      ),
+    );
     if (
       outputSchema !== undefined &&
       (!outputSchema || typeof outputSchema !== 'object' || Array.isArray(outputSchema))
     )
       return refuse('outputSchema must be an object', 400);
     try {
-      if (action === 'continue' && ctx) {
+      if (!active && ctx) {
         const priorWatch = ctx.store.completionWatches?.get(id);
         if (priorWatch) await priorWatch.work;
 
@@ -895,6 +901,7 @@ export async function localTaskAction(
         await ctx.store.put('snapshot', `local-start:${id}`, {
           cwd,
           resume: true,
+          ...(Object.keys(overrides).length ? { overrides } : {}),
         } satisfies LocalStart);
         if (previous) {
           if (
@@ -925,8 +932,9 @@ export async function localTaskAction(
       }
       const result = await steerTask(cwd, task, text, {
         ...(typeof outputSchema === 'object' && outputSchema ? { outputSchema } : {}),
+        ...overrides,
       });
-      return Response.json(action === 'continue' ? localTask(cwd, id) : result);
+      return Response.json(active ? result : localTask(cwd, id));
     } catch (error) {
       return refuse((error as Error).message);
     }

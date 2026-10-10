@@ -54,6 +54,10 @@ export function remove(out: string, file: string): void {
 /** Everything in dist but the dashboard, its stages, and build bookkeeping. */
 const cliFile = (file: string) => !/^(dash|dash\.[^/]*|\.[^/]*)(\/|$)/.test(file);
 
+/** An .npmignore line matching this file literally, route brackets included. */
+const ignoreLine = (file: string) =>
+  '/' + file.replaceAll(path.sep, '/').replace(/[[\]*?!#\\()]/g, '\\$&');
+
 /** Move a finished CLI build into place, retaining only its predecessor's dropped files. */
 export function swapCli(stage: string, out: string, now = Date.now()): void {
   const ledgerFile = path.join(out, '.retired.json');
@@ -66,9 +70,7 @@ export function swapCli(stage: string, out: string, now = Date.now()): void {
   writeFileSync(ledgerFile, `${JSON.stringify(kept, null, 2)}\n`);
   writeFileSync(
     path.join(out, '.npmignore'),
-    `${Object.keys(kept)
-      .map(file => '/' + file.split(path.sep).join('/'))
-      .join('\n')}\n/.*\n/dash.*\n/dash/*\n!/dash/manifest.json\n!/dash/public/\n!/dash/server/\n`,
+    `${Object.keys(kept).map(ignoreLine).join('\n')}\n/.*\n/dash.*\n/dash/*\n!/dash/standalone/\n`,
   );
 }
 
@@ -85,13 +87,16 @@ export function buildKeepingAssets(
     if (status !== 0) return status;
     const ledger = readLedger(path.join(out, 'retired.json'));
     const kept: Record<string, number> = {};
-    for (const dir of ['public/assets', 'server']) {
+    for (const dir of ['standalone/static/assets', 'standalone/server']) {
       const current = new Set(files(path.join(stage, dir)));
       for (const name of files(path.join(out, dir))) {
         const file = path.join(dir, name);
         if (current.has(name)) continue;
         // A server bundle is only ever extended, never added beside the new one.
-        if (dir === 'server' && !existsSync(path.join(stage, dir, name.split(path.sep)[0]!)))
+        if (
+          dir === 'standalone/server' &&
+          !existsSync(path.join(stage, dir, name.split(path.sep)[0]!))
+        )
           continue;
         if (ledger[file] !== undefined) continue;
         mkdirSync(path.dirname(path.join(stage, file)), { recursive: true });
@@ -102,9 +107,7 @@ export function buildKeepingAssets(
     writeFileSync(path.join(stage, 'retired.json'), `${JSON.stringify(kept, null, 2)}\n`);
     writeFileSync(
       path.join(stage, '.npmignore'),
-      `${Object.keys(kept)
-        .map(file => '/' + file.split(path.sep).join('/'))
-        .join('\n')}\n/retired.json\n/cache/\n`,
+      `${Object.keys(kept).map(ignoreLine).join('\n')}\n/retired.json\n/cache/\n`,
     );
     for (const file of moveInto(stage, out)) remove(out, file);
     return 0;

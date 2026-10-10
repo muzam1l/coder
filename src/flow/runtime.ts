@@ -17,10 +17,17 @@ import {
 } from '../core/dispatch';
 import { mailboxDir, askWorker } from '../core/mailbox';
 import { formatEngineSpec, loadTask } from '../core/state';
+import { steerTask } from '../core/task/actions';
 import type { TokenUsage, TurnResult } from '../core/types';
 import { Journal, defined, fingerprint } from './journal';
 import { resolveFlow } from './discover';
-import type { FlowSchema, FlowTaskOptions, FlowTaskResult, GateResult } from './types';
+import type {
+  FlowSchema,
+  FlowSteerOptions,
+  FlowTaskOptions,
+  FlowTaskResult,
+  GateResult,
+} from './types';
 import { readFlowRecord, writeFlowRecord } from './runs';
 
 // ---------------------------------------------------------------------------
@@ -253,18 +260,69 @@ function dispatchOptsFrom(opts: FlowTaskOptions, cwd: string, ctx?: RunContext) 
   };
 }
 
-async function runOneTask(
-  prompt: string,
-  opts: FlowTaskOptions,
-  ctx: RunContext | undefined,
-  resume?: string,
-): Promise<{
+type TurnOutcome = {
   taskId: string;
   status: string;
   output: string;
   tokens: TokenUsage | null;
   model: string | null;
-}> {
+};
+
+function turnOutcome(taskId: string, waited: WorkerWait): TurnOutcome {
+  return {
+    taskId,
+    status: waited.status,
+    output: waited.result?.finalMessage || waited.result?.error?.message || '',
+    tokens: waited.result?.tokens ?? null,
+    model: waited.result?.model ?? waited.model,
+  };
+}
+
+async function waitTurn(cwd: string, taskId: string, ctx?: RunContext): Promise<WorkerWait> {
+  ctx?.running.add(taskId);
+  try {
+    if (mailboxDir()) return await askWorker<WorkerWait>('wait', { taskId });
+    const done = await waitTask(cwd, taskId);
+    return {
+      status: done.status,
+      result: done.result,
+      model: done.task.model ?? null,
+      next: turnFallbackEngine(cwd, done) ?? null,
+    };
+  } finally {
+    ctx?.running.delete(taskId);
+  }
+}
+
+// One more turn on an existing task's thread, same id; another engine cannot continue it.
+async function steerOnce(
+  taskId: string,
+  text: string,
+  opts: FlowSteerOptions,
+  ctx: RunContext | undefined,
+): Promise<TurnOutcome> {
+  const cwd = ctx?.cwd ?? process.cwd();
+  if (mailboxDir()) await askWorker('steer', { taskId, text, ...opts });
+  else {
+    const current = loadTask(cwd, taskId);
+    if (!current) throw new CoderError('invalid-option', `No task "${taskId}".`);
+    await steerTask(current.cwd ?? cwd, current, text, {
+      model: opts.model,
+      effort: opts.effort,
+      permissions:
+        ctx?.ceiling && opts.permissions
+          ? capPermissions(current.name, opts.permissions, ctx.ceiling)
+          : opts.permissions,
+    });
+  }
+  return turnOutcome(taskId, await waitTurn(cwd, taskId, ctx));
+}
+
+async function runOneTask(
+  prompt: string,
+  opts: FlowTaskOptions,
+  ctx: RunContext | undefined,
+): Promise<TurnOutcome> {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : (ctx?.cwd ?? process.cwd());
   const outputSchema = opts.returns ? await toJSONSchema(opts.returns) : null;
   const system =
@@ -280,9 +338,7 @@ async function runOneTask(
       ...dispatchOptsFrom(opts, cwd, ctx),
       system,
       ...(outputSchema ? { outputSchema } : {}),
-      ...(chainEngine
-        ? { engine: chainEngine, model: undefined, effort: undefined, resume: undefined }
-        : { resume: resume ?? opts.resume }),
+      ...(chainEngine ? { engine: chainEngine, model: undefined, effort: undefined } : {}),
     };
     // Inside an agent's sandbox the worker starts the task; here it only asks.
     const mailbox = Boolean(mailboxDir());
@@ -297,7 +353,6 @@ async function runOneTask(
               `${f.engine} failed to start. Falling back to ${f.next}. ${f.detail.replace(/\s+/g, ' ').slice(0, 140)}`,
             ),
         });
-    ctx?.running.add(dispatch.taskId);
     // Resolved engine spec ("claude/opus/medium") from the task record. The
     // dispatch may have picked the engine via the chain, not the flow author.
     const task = loadTask(cwd, dispatch.taskId);
@@ -309,22 +364,7 @@ async function runOneTask(
       engine,
       depth: currentDepth(),
     });
-    let waited: WorkerWait;
-    try {
-      if (mailbox) {
-        waited = await askWorker<WorkerWait>('wait', { taskId: dispatch.taskId });
-      } else {
-        const done = await waitTask(cwd, dispatch.taskId);
-        waited = {
-          status: done.status,
-          result: done.result,
-          model: done.task.model ?? null,
-          next: turnFallbackEngine(cwd, done) ?? null,
-        };
-      }
-    } finally {
-      ctx?.running.delete(dispatch.taskId);
-    }
+    const waited = await waitTurn(cwd, dispatch.taskId, ctx);
 
     if (waited.next) {
       const next = waited.next;
@@ -333,13 +373,7 @@ async function runOneTask(
       continue;
     }
 
-    return {
-      taskId: dispatch.taskId,
-      status: waited.status,
-      output: waited.result?.finalMessage || waited.result?.error?.message || '',
-      tokens: waited.result?.tokens ?? null,
-      model: waited.result?.model ?? waited.model,
-    };
+    return turnOutcome(dispatch.taskId, waited);
   }
 }
 
@@ -393,7 +427,7 @@ async function executeTask(
     }
     if (!parsed.ok) {
       const retryPrompt = `Your previous reply did not match the required format: ${parsed.errors}\n\nReply again with the required JSON object.`;
-      const retry = await runOneTask(retryPrompt, opts, ctx, first.taskId);
+      const retry = await steerOnce(first.taskId, retryPrompt, {}, ctx);
       output = retry.output || output;
       tokens = addTokens(tokens, retry.tokens);
       try {
@@ -460,7 +494,8 @@ export async function task<T = unknown>(
     permissions: opts.permissions,
     name: opts.name,
     system: opts.system,
-    resume: opts.resume,
+    // Removed option, kept so journals recorded before still replay.
+    resume: undefined,
     cwd: opts.cwd,
     ...(opts.addDirs?.length ? { addDirs: opts.addDirs } : {}),
     returns: await returnsPart(opts.returns),
@@ -507,6 +542,64 @@ export async function task<T = unknown>(
       endedAt: new Date().toISOString(),
     });
     return res as FlowTaskResult<T>;
+  });
+}
+
+/** Continue a task this run started, on the same id, and await the turn. Mirrors `coder task steer --wait`. */
+export async function steer(
+  taskId: string,
+  text: string,
+  opts: FlowSteerOptions = {},
+): Promise<FlowTaskResult> {
+  const ctx = ctxALS.getStore();
+  const run = async () => {
+    if (ctx?.dryRun) {
+      process.stdout.write(`\n[dry-run] steer ${taskId}:\n${text}\n`);
+      return {
+        taskId,
+        status: 'completed',
+        output: '[dry-run]',
+        tokens: null,
+        model: opts.model ?? null,
+      };
+    }
+    const turn = await steerOnce(taskId, text, opts, ctx);
+    if (turn.status !== 'completed')
+      throw new CoderError(
+        'task-failed',
+        `Task ${taskId} ${turn.status}: ${turn.output || 'no output'}`,
+        { taskId, result: turn },
+      );
+    return turn;
+  };
+  if (!ctx) return run();
+
+  const fp = fingerprint('steer', defined({ taskId, text, ...opts }));
+  const hit = ctx.journal.replay(fp);
+  if (hit) return hit.result as FlowTaskResult;
+
+  ctx.taskCount += 1;
+  if (ctx.taskCount > ctx.maxTasks) {
+    throw new Error(
+      `Flow exceeded --max-tasks (${ctx.maxTasks}). Raise it with --max-tasks, or fix a runaway loop; the run is resumable.`,
+    );
+  }
+  return ctx.semaphore.run(async () => {
+    const startedAt = new Date().toISOString();
+    const res = await run();
+    recordLedger(ctx, res);
+    if (!ctx.dryRun)
+      ctx.hooks.onTaskEnd?.({ taskId: res.taskId, status: res.status, tokens: res.tokens });
+    ctx.journal.record({
+      kind: 'task',
+      fingerprint: fp,
+      result: res,
+      taskId: res.taskId,
+      tokens: res.tokens,
+      startedAt,
+      endedAt: new Date().toISOString(),
+    });
+    return res;
   });
 }
 

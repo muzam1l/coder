@@ -1,7 +1,7 @@
 import '@/comps/ui/segmented.css';
 import '@/app/dash/usage/range-bar.css';
 import './usage.css';
-import { formatCount, formatDuration, zoneOf } from '@/utils/format';
+import { formatCompact, formatCount, formatDuration, zoneOf } from '@/utils/format';
 import { daysIn, rangeFor } from '@/utils/range';
 import { load } from '@/api/load';
 import type { UsageAmount, UsagePage } from '@coder/client/types';
@@ -75,7 +75,14 @@ export default function UsagePage({ request }: { request?: Request }) {
                   <Stat label="Agents" value={formatCount(summary.agents)} />
                   <Stat label="Tasks" value={formatCount(summary.tasks)} />
                   <Stat label="Runner time" value={formatDuration(summary.runnerMs)} />
-                  <Stat label="Tokens" value={formatCount(summary.tokenCount)} />
+                  <Stat
+                    label="Tokens"
+                    value={
+                      <strong title={formatCount(summary.tokenCount)}>
+                        {formatCompact(summary.tokenCount)}
+                      </strong>
+                    }
+                  />
                 </Stats>
                 {summary.tasks ? (
                   <Card title={`${METRIC_LABEL[metric]} per day`}>

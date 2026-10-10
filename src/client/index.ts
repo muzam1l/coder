@@ -335,8 +335,12 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       }),
     cancel: (id: string): Promise<{ ok: true }> =>
       this.post(`/admin/tasks/${encodeURIComponent(id)}/cancel`),
-    steer: (id: string, text: string) =>
-      this.post(`/admin/tasks/${encodeURIComponent(id)}/steer`, { text }),
+    /** Steer a running task, or resume a finished one on the same id; overrides apply to a resumed turn. */
+    steer: (
+      id: string,
+      text: string,
+      options: { model?: string; effort?: string; permissions?: string; outputSchema?: object } = {},
+    ) => this.post(`/admin/tasks/${encodeURIComponent(id)}/steer`, { text, ...options }),
     ask: (id: string, question: string) =>
       this.post(`/admin/tasks/${encodeURIComponent(id)}/ask`, { question }),
     approve: (id: string, approvalId: string, decision: 'accept' | 'decline') =>
@@ -355,13 +359,6 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       input: T,
     ): Promise<T extends { event: D['event'] } ? { tasks: string[] } : D['task']> =>
       this.post('/admin/tasks', input),
-    /** Ask a finished task something new, on the same thread. */
-    continue: (
-      id: string,
-      text: string,
-      options: { outputSchema?: object } = {},
-    ): Promise<D['task']> =>
-      this.post(`/admin/tasks/${encodeURIComponent(id)}/continue`, { text, ...options }),
     /** Follow the task's event stream until it ends; `onLog` sees each log line as it lands. */
     wait: async (
       id: string,

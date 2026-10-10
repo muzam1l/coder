@@ -3,9 +3,11 @@ import process from 'node:process';
 
 import { CoderError } from '../../core/dispatch';
 import type { SteerOutcome } from '../../core/task/actions';
-import { formatHints, outStyle } from '../../tui/output';
+import type { TaskStatus } from '../../server/store/types';
+import { errStyle, formatHints, outStyle } from '../../tui/output';
 import { baseOptions, flag, optStr, str } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
+import { finishedHints, printOutcome } from './result';
 
 const serverOptions = { server: optStr, workspace: str, yes: flag };
 
@@ -50,7 +52,7 @@ function printSteer(outcome: Steered, wait = false): void {
   }
   process.stdout.write(`\n${outcome.finalMessage || '(no final message)'}\n\n`);
   process.stderr.write(
-    `${outStyle.dim(`[coder] task=${taskId} status=${outcome.status ?? 'unknown'}`)}\n`,
+    `${outStyle.dim(`[coder] task=${taskId} status=${outcome.status ?? 'unknown'}`)}\n\n${finishedHints(taskId, errStyle)}\n`,
   );
 }
 
@@ -59,7 +61,7 @@ export const commandSteer = command({
   help: {
     usage: 'coder task steer <task-id> "<follow-up instructions>" [--wait] [--server [url]]',
     summary:
-      "Continue a task's thread with new instructions. They are injected into a live Codex or\nClaude turn at its next tool boundary and queued across a startup or completion race.\nA stopped task resumes on the same task id. It reuses the task's engine, model, and\npermissions unless overridden.",
+      "Continue a task's thread with new instructions. They are injected into a live Codex or\nClaude turn at its next tool boundary and queued across a startup or completion race.\nA stopped, finished, or archived task resumes on the same task id. It reuses the\ntask's engine, model, and permissions unless overridden.",
     flags: [
       ['--wait', 'run in the foreground and block until the answer is ready'],
       ['--model <alias|slug>', "override the task's model for this follow-up"],
@@ -76,7 +78,6 @@ export const commandSteer = command({
     model: str,
     effort: str,
     permissions: str,
-    background: flag,
     wait: flag,
     ...serverOptions,
   },
@@ -100,13 +101,14 @@ export const commandSteer = command({
           finalMessage: outcome.finalMessage ?? null,
         };
   },
-  print: (result, { options, args: [id] }) =>
-    options.server !== undefined
-      ? process.stdout.write(`Steered server task ${outStyle.cyan(id!)}.\n`)
-      : printSteer(result as Steered, options.wait),
+  print(result, { options, args: [id] }) {
+    if (options.server === undefined) return printSteer(result as Steered, options.wait);
+    if (options.wait) return printOutcome(result as unknown as TaskStatus, outStyle);
+    process.stdout.write(`Steered server task ${outStyle.cyan(id!)}.\n`);
+  },
   exit(result, { options }) {
     const outcome = result as Steered;
-    if (options.server === undefined && options.wait && outcome.steered !== 'queued')
+    if (options.wait && (options.server !== undefined || outcome.steered !== 'queued'))
       return outcome.status === 'completed' ? 0 : 1;
   },
 });

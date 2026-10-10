@@ -12,7 +12,6 @@ import { spawn } from 'node:child_process';
 import * as z from 'zod/mini';
 
 import {
-  findTask,
   generateTaskId,
   loadTask,
   readTaskLog,
@@ -392,15 +391,12 @@ export interface DispatchOptions {
   prompt: string;
   outputSchema?: object;
   cwd: string;
-  /** Whether the caller explicitly selected cwd instead of accepting resume inheritance. */
-  cwdExplicit?: boolean;
   engine?: string;
   model?: string;
   effort?: string;
   permissions?: string;
   name?: string | null;
   system?: string | null;
-  resume?: string;
   wait?: boolean;
   simulateApproval?: boolean;
   /** Tags the created task as belonging to a flow run (for `coder list` grouping). */
@@ -441,21 +437,6 @@ export function capPermissions(
   return asked;
 }
 
-export function withResumeDefaults(opts: DispatchOptions): DispatchOptions {
-  if (!opts.resume) return opts;
-  const referenced = findTask(opts.cwd, opts.resume);
-  if (!referenced) return opts;
-  return {
-    ...opts,
-    cwd: opts.cwdExplicit === false ? (referenced.cwd ?? opts.cwd) : opts.cwd,
-    engine: opts.engine ?? referenced.engine,
-    model: opts.model ?? referenced.model ?? undefined,
-    effort: opts.effort ?? referenced.effort ?? undefined,
-    permissions: opts.permissions ?? referenced.permissions ?? undefined,
-    outputSchema: opts.outputSchema ?? referenced.outputSchema,
-  };
-}
-
 export interface DispatchResult {
   taskId: string;
   task: Task;
@@ -487,7 +468,6 @@ async function attemptOnce(
   opts: DispatchOptions & { mcp?: McpServerSpec[] },
   taskExtras: {
     name?: string | null;
-    resume?: string;
     simulateApproval?: boolean;
   },
   waitForStartup: boolean,
@@ -513,13 +493,7 @@ async function attemptOnce(
       : modelVersionWarning('codex', resolveCodexModel(resolved.model), availability);
   if (outdated) opts.onNote?.(outdated);
 
-  let resumeThreadId: string | null = null;
-  let addDirs = opts.addDirs ?? [];
-  if (taskExtras.resume) {
-    const referenced = findTask(cwd, taskExtras.resume);
-    resumeThreadId = referenced?.threadId ?? taskExtras.resume;
-    addDirs = [...new Set([...(referenced?.addDirs ?? []), ...addDirs])];
-  }
+  const addDirs = opts.addDirs ?? [];
 
   const taskId = opts.taskId ?? generateTaskId();
   const task = writeTask(cwd, taskId, {
@@ -534,7 +508,7 @@ async function attemptOnce(
     model: resolved.model,
     effort: resolved.effort,
     permissions: resolved.permissions,
-    resumeThreadId,
+    resumeThreadId: null,
     cwd,
     background: !opts.wait,
     ...(taskExtras.simulateApproval ? { simulateApproval: true } : {}),
@@ -668,15 +642,14 @@ export async function dispatchTask(
     });
   }
 
-  opts = withResumeDefaults(opts);
   opts = { ...opts, addDirs: resolveAddDirs(opts.cwd, opts.addDirs) };
   const config = loadConfig(opts.cwd);
   const mcp = selectMcpServers(opts.mcp, config.mcp);
   const dispatchOpts = { ...opts, mcp: mcp.mcp, nativeMcp: opts.nativeMcp ?? mcp.nativeMcp };
 
-  // First attempt uses the full request (model/effort/name/resume/simulate).
+  // First attempt uses the full request (model/effort/name/simulate).
   // A chain fallback re-resolves fresh for the next engine, deliberately dropping
-  // model, effort, name, and resume. The next engine uses its own config default.
+  // model, effort, and name. The next engine uses its own config default.
   let resolveInput: Record<string, any> = {
     engine: opts.engine,
     model: opts.model,
@@ -685,7 +658,6 @@ export async function dispatchTask(
   };
   let taskExtras = {
     name: opts.name,
-    resume: opts.resume,
     simulateApproval: opts.simulateApproval,
   };
 
@@ -718,7 +690,6 @@ export async function dispatchTask(
       resolveInput = { engine: next, permissions: opts.permissions };
       taskExtras = {
         name: undefined,
-        resume: undefined,
         simulateApproval: undefined,
       };
     }

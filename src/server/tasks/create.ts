@@ -265,11 +265,19 @@ export function taskTurns(status: TaskStatus): TaskTurn[] {
 }
 
 /** Ask a finished task something new: the same task runs again with the earlier turns as its thread. */
+/** What a resumed turn may change: model and effort, and permissions only downward. */
+export interface TurnOverrides {
+  model?: string;
+  effort?: string;
+  permissions?: string;
+}
+
 export async function continueTask(
   ctx: ServerContext,
   status: TaskStatus,
   text: string,
   outputSchema?: object,
+  overrides: TurnOverrides = {},
 ): Promise<TaskStatus> {
   if (
     outputSchema !== undefined &&
@@ -278,6 +286,18 @@ export async function continueTask(
     throw new TaskInputError('outputSchema must be an object');
   if (!text.trim()) throw new TaskInputError('text is required');
   if (text.length > MAX_PROMPT_CHARS) throw new TaskInputError('text is longer than 64 KB');
+  const { model, effort, permissions } = overrides;
+  if (model !== undefined && (typeof model !== 'string' || !model.trim()))
+    throw new TaskInputError('model must be text');
+  if (effort !== undefined && !EFFORTS.has(effort))
+    throw new TaskInputError(`Unknown effort "${effort}"`);
+  if (permissions !== undefined && !(permissions in PERMISSION_MODES))
+    throw new TaskInputError(`Unknown permissions "${permissions}"`);
+  const rank = (mode?: string) => Object.keys(PERMISSION_MODES).indexOf(mode ?? 'auto');
+  if (permissions !== undefined && rank(permissions) > rank(status.task.permissions))
+    throw new TaskInputError(
+      `permissions can only be lowered on a resumed task (it runs ${status.task.permissions ?? 'auto'})`,
+    );
   if (ctx.session && status.task.requester && status.task.requester !== ctx.session.user.id)
     throw new TaskInputError('Only the member who asked can continue this task', 403);
   const now = (ctx.now ?? Date.now)();
@@ -299,6 +319,16 @@ export async function continueTask(
     task: {
       ...status.task,
       prompt: text,
+      ...(model || effort
+        ? {
+            usage: {
+              ...status.task.usage,
+              ...(model ? { model } : {}),
+              ...(effort ? { effort: effort as AgentUsage['effort'] } : {}),
+            },
+          }
+        : {}),
+      ...(permissions ? { permissions: permissions as Permission } : {}),
       context: {
         ...context,
         ...(outputSchema ? { outputSchema } : {}),

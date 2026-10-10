@@ -1,4 +1,4 @@
-import { formatCount, formatDuration } from '@/utils/format';
+import { formatCompact, formatCount, formatDuration } from '@/utils/format';
 
 export type Metric = 'tasks' | 'runnerMs' | 'tokenCount';
 
@@ -9,5 +9,6 @@ export const METRIC_LABEL: Record<Metric, string> = {
 };
 
 export function formatMetric(metric: Metric, value: number) {
-  return metric === 'runnerMs' ? formatDuration(value) : formatCount(value);
+  if (metric === 'runnerMs') return formatDuration(value);
+  return metric === 'tokenCount' ? formatCompact(value) : formatCount(value);
 }

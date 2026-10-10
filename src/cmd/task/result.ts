@@ -490,6 +490,11 @@ export function replyOf(status: TaskStatus): string | undefined {
   return undefined;
 }
 
+/** Once a task has finished, steer continues it on the same id. */
+export function finishedHints(taskId: string, s: Style, server = false): string {
+  return formatHints([`Continue on the same task: coder task steer ${taskId} "<follow-up>"${server ? ' --server' : ''}`], s);
+}
+
 export function printOutcome(status: TaskStatus, s: Style): void {
   process.stdout.write(
     `${s.bold(status.task.id)}  ${statusStyle(status.status, s)}${status.error ? `  ${s.red(status.error)}` : ''}${took(status) ? `  ${s.dim(`took ${took(status)}`)}` : ''}\n`,
@@ -497,6 +502,8 @@ export function printOutcome(status: TaskStatus, s: Style): void {
   if (status.credential) process.stdout.write(`${s.dim('credential')}  ${status.credential}\n`);
   const reply = replyOf(status);
   if (reply) process.stdout.write(`\n${s.bold('Reply')}\n${reply.trim()}\n`);
+  if (['completed', 'failed', 'cancelled'].includes(status.status))
+    process.stdout.write(`\n${finishedHints(status.task.id, s, true)}\n`);
 }
 
 /** `task result --json`: the inspection without what only the text view uses. */
@@ -619,6 +626,7 @@ async function printResult(
   } else {
     lines.push(s.dim('(no result)'));
   }
+  if (!running) lines.push('', finishedHints(task.id, s));
   // While it's still running, point at --wait to block for the answer (and to
   // the transcript if it looks stalled).
   if (running && !opts.wait) {

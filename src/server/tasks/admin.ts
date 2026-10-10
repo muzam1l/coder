@@ -256,10 +256,23 @@ export async function steerTask(
   }
   if (status.task.flow !== 'default')
     return json({ error: `${'steer'} is available only for default-flow tasks` }, 409);
-  if (!['queued', 'running', 'waiting'].includes(status.status))
-    return json({ error: `Task "${taskId}" is not active` }, 409);
 
   const body = await req.json().catch(() => undefined);
+  // A finished task resumes on the same id; a live one takes the follow-up in its inbox.
+  if (DONE.has(status.status)) {
+    const { text, outputSchema, model, effort, permissions } = (body ?? {}) as Record<string, any>;
+    try {
+      const next = await continueTask(ctx, status, String(text ?? ''), outputSchema, {
+        model,
+        effort,
+        permissions,
+      });
+      scheduleKick(ctx, true);
+      return json(redactTask(next));
+    } catch (error) {
+      return taskError(error);
+    }
+  }
   const entry = await addInbox(
     ctx,
     taskId,
@@ -308,47 +321,6 @@ export async function askTask(
   );
 
   return entry ? json(entry) : json({ error: `Task "${taskId}" is no longer active` }, 409);
-}
-
-export async function continueTaskRequest(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  const id = params.id!;
-  const taskId = id;
-  const after = Number(url.searchParams.get('after') ?? -1);
-  const cursor = Number.isFinite(after) ? after : -1;
-  const lines = url.searchParams.has('limit') ? pageLimit(url, 500, 2000) : undefined;
-  // A stored log read needs nothing from the task row, so it starts beside it.
-  const status = await ctx.store.get('task', taskId);
-  if (
-    !status ||
-    (ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default')
-  ) {
-    const cwd = status?.task.cwd ?? ctx.local?.cwd;
-    if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
-
-    return localTaskAction(req, cwd, taskId, 'continue', ctx);
-  }
-  if (status.task.flow !== 'default')
-    return json({ error: 'continue is available only for default-flow tasks' }, 409);
-  if (!DONE.has(status.status))
-    return json({ error: `Task "${taskId}" is still active; steer or ask it instead` }, 409);
-
-  const body = (await req.json().catch(() => ({}))) as {
-    text?: unknown;
-    outputSchema?: object;
-  };
-
-  try {
-    return json(
-      redactTask(await continueTask(ctx, status, String(body.text ?? ''), body.outputSchema)),
-    );
-  } catch (error) {
-    return taskError(error);
-  }
 }
 
 export async function approveTask(

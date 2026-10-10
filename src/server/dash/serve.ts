@@ -1,17 +1,7 @@
 import path from 'node:path';
 import { match, type Params } from '../routes/match';
 import { createHash, randomBytes } from 'node:crypto';
-import {
-  cpSync,
-  existsSync,
-  readFileSync,
-  readdirSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  symlinkSync,
-} from 'node:fs';
-import { tmpdir } from 'node:os';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   brotliDecompressSync,
@@ -74,63 +64,34 @@ function packageRoot(moduleUrl: string): string {
 function resolveDashRoot(moduleUrl = import.meta.url): string | undefined {
   const moduleDirectory = path.dirname(fileURLToPath(moduleUrl));
   const root = packageRoot(moduleUrl);
-  const candidates = [path.join(root, 'dist/dash'), path.join(moduleDirectory, '../dash')];
-  return candidates.find(candidate => existsSync(path.join(candidate, 'manifest.json')));
+  // A literal URL beside the bundled chunk, so an app's tracer ships the dash with this package.
+  const bundled = fileURLToPath(new URL('./dash/standalone/server/entry.js', import.meta.url));
+  const candidates = [
+    path.resolve(bundled, '../../..'),
+    path.join(root, 'dist/dash'),
+    path.join(moduleDirectory, '../dash'),
+  ];
+  return candidates.find(candidate => existsSync(manifestFile(candidate)));
 }
+
+const manifestFile = (dashRoot: string) => path.join(dashRoot, 'standalone/server/manifest.json');
 
 export function serverEntry(root: string): string {
-  const directory = path.join(root, 'server');
-  if (!existsSync(directory)) throw new Error('The Coder dashboard server bundle is missing.');
-  const entries = readdirSync(directory, { withFileTypes: true })
-    .filter(entry => entry.isDirectory() && entry.name.startsWith('bundle-'))
-    .map(entry => path.join(directory, entry.name, 'entry.js'))
-    .filter(existsSync);
-  if (!entries.length) throw new Error('The Coder dashboard server bundle is missing.');
-  if (entries.length !== 1) throw new Error('The Coder dashboard has multiple server bundles.');
-  return entries[0]!;
+  const entry = path.join(root, 'standalone/server/entry.js');
+  if (!existsSync(entry)) throw new Error('The Coder dashboard server bundle is missing.');
+  return entry;
 }
 
-/** A fresh copy of the source, so a rebuilt dashboard is imported anew; keeps this process's last two. */
-function sourceCopy(root: string, generation: number): string {
-  const base = path.join(
-    tmpdir(),
-    'coder-dash',
-    createHash('sha256').update(root).digest('hex').slice(0, 12),
-  );
-  for (const name of existsSync(base) ? readdirSync(base) : []) {
-    const [pid, copy] = name.split('-').map(Number);
-    let alive = pid === process.pid;
-    if (!alive)
-      try {
-        process.kill(pid!, 0);
-        alive = true;
-      } catch (error) {
-        alive = (error as NodeJS.ErrnoException).code === 'EPERM';
-      }
-    if (!alive || (pid === process.pid && copy! < generation - 1))
-      rmSync(path.join(base, name), { recursive: true, force: true });
-  }
-  const target = path.join(base, `${process.pid}-${generation}`);
-  cpSync(path.join(root, 'src'), path.join(target, 'src'), { recursive: true });
-  for (const link of ['dist', 'node_modules'])
-    symlinkSync(path.join(root, link), path.join(target, link), 'dir');
-  // pnext resolves its root through symlinks; the manifest must name the same paths.
-  return realpathSync(path.join(target, 'src/server/dash'));
-}
-
-async function createDashHost(moduleUrl: string, generation = 0): Promise<DashHost> {
-  const root = packageRoot(moduleUrl);
+// The build's standalone folder serves itself; root only scopes .env loading, so it stays inside the build.
+async function createDashHost(moduleUrl: string): Promise<DashHost> {
   const dashRoot = resolveDashRoot(moduleUrl);
   if (!dashRoot) throw new Error(DASH_NOT_BUILT);
-  const raw = JSON.parse(readFileSync(path.join(dashRoot, 'manifest.json'), 'utf8')) as Manifest;
-  const actualRoot = generation ? sourceCopy(root, generation) : path.join(root, 'src/server/dash');
-  const manifest = { ...raw, outDir: dashRoot };
-  const entryFile = serverEntry(dashRoot);
-  const entry = (await import(pathToFileURL(entryFile).href)) as {
-    createRequestHandler(options: { root: string; manifest: Manifest }): Promise<RequestHandler>;
+  const manifest = JSON.parse(readFileSync(manifestFile(dashRoot), 'utf8')) as Manifest;
+  const entry = (await import(pathToFileURL(serverEntry(dashRoot)).href)) as {
+    createRequestHandler(options: { root: string }): Promise<RequestHandler>;
   };
   return {
-    handler: await entry.createRequestHandler({ root: actualRoot, manifest }),
+    handler: await entry.createRequestHandler({ root: path.join(dashRoot, 'standalone') }),
     manifest,
   };
 }
@@ -138,7 +99,6 @@ async function createDashHost(moduleUrl: string, generation = 0): Promise<DashHo
 type Loaded = { host: Promise<DashHost>; build?: number; checked: number };
 export class DashboardHosts {
   readonly hosts = new Map<string, Loaded>();
-  readonly made = new Map<string, number>();
 }
 /** How often a request looks for a newer build. */
 const RECHECK_MS = 1000;
@@ -148,14 +108,14 @@ function buildStamp(moduleUrl: string): number | undefined {
   const root = resolveDashRoot(moduleUrl);
   if (!root) return undefined;
   try {
-    return statSync(path.join(root, 'manifest.json')).mtimeMs;
+    return statSync(manifestFile(root)).mtimeMs;
   } catch {
     return undefined;
   }
 }
 
 /** The dashboard host, replaced once a rebuild lands so a running server serves it. */
-function dashHost(moduleUrl: string, { hosts, made }: DashboardHosts): Promise<DashHost> {
+function dashHost(moduleUrl: string, { hosts }: DashboardHosts): Promise<DashHost> {
   const now = Date.now();
   const loaded = hosts.get(moduleUrl);
   if (loaded && now - loaded.checked < RECHECK_MS) return loaded.host;
@@ -164,9 +124,7 @@ function dashHost(moduleUrl: string, { hosts, made }: DashboardHosts): Promise<D
     loaded.checked = now;
     if (build === undefined || build === loaded.build) return loaded.host;
   }
-  const generation = made.get(moduleUrl) ?? 0;
-  made.set(moduleUrl, generation + 1);
-  const next = { build, checked: now, host: createDashHost(moduleUrl, generation) };
+  const next = { build, checked: now, host: createDashHost(moduleUrl) };
   hosts.set(moduleUrl, next);
   return next.host;
 }

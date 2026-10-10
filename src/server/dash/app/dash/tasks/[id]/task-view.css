@@ -340,7 +340,7 @@ form.reply {
 .act:is(.tool, .tool-result, .status, .line, .reasoning, .usage) .act-title {
   color: var(--muted);
 }
-.act.open .act-title {
+.act.open:not(.warning, .error) .act-title {
   color: var(--fg);
 }
 

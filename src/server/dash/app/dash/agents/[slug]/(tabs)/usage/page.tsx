@@ -1,7 +1,7 @@
 import '@/comps/ui/segmented.css';
 import '@/app/dash/usage/range-bar.css';
 import './page.css';
-import { formatCount, formatDuration, zoneOf } from '@/utils/format';
+import { formatCompact, formatCount, formatDuration, zoneOf } from '@/utils/format';
 import { daysIn, rangeFor } from '@/utils/range';
 import { load } from '@/api/load';
 import type { UsageTotal } from '@coder/client/types';
@@ -49,7 +49,9 @@ function Breakdown({
                     </td>
                     <td class="num">{formatCount(row.tasks)}</td>
                     <td class="num">{formatDuration(row.runnerMs)}</td>
-                    <td class="num">{formatCount(row.tokenCount)}</td>
+                    <td class="num" title={formatCount(row.tokenCount)}>
+                      {formatCompact(row.tokenCount)}
+                    </td>
                   </tr>
                 );
               })}
@@ -117,7 +119,14 @@ export default async function AgentUsagePage({
                 <Stats label="Totals">
                   <Stat label="Tasks" value={formatCount(tasks)} />
                   <Stat label="Runner time" value={formatDuration(runner)} />
-                  <Stat label="Tokens" value={formatCount(sum(row => row.tokenCount))} />
+                  <Stat
+                    label="Tokens"
+                    value={
+                      <strong title={formatCount(sum(row => row.tokenCount))}>
+                        {formatCompact(sum(row => row.tokenCount))}
+                      </strong>
+                    }
+                  />
                   <Stat
                     label="Average task"
                     value={tasks ? formatDuration(runner / tasks) : 'Not available'}

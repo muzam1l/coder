@@ -17,6 +17,8 @@ import {
   resolveMcpServers,
   turnFallbackEngine,
 } from '../core/dispatch';
+import { loadTask as loadTaskRecord } from '../core/state';
+import { steerTask } from '../core/task/actions';
 import type { McpServerSpec, Task } from '../core/types';
 import type { Integration } from '../integrations/types';
 import { effectiveSettings, resolveTools } from './definition';
@@ -543,12 +545,6 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
           'invalid-option',
           `task "${name}" asks for ${outside}, outside the workspace of agent "${ceiling.agent}"`,
         );
-      if (p.resume && !started.has(p.resume))
-        throw new CoderError(
-          'invalid-option',
-          `task "${name}" resumes a task this flow did not start`,
-        );
-
       const dispatched = await dispatchTask(
         {
           prompt: String(p.prompt ?? ''),
@@ -561,7 +557,6 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
           permissions: capPermissions(name, p.permissions, ceiling),
           name: p.name,
           system: p.system,
-          resume: p.resume,
           addDirs,
           flowRunId: p.flowRunId,
           wait: true,
@@ -570,6 +565,21 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
       );
       started.set(dispatched.taskId, taskCwd);
       return { taskId: dispatched.taskId };
+    },
+
+    async steer(p) {
+      const taskCwd = started.get(p.taskId);
+      if (!taskCwd)
+        throw new CoderError('invalid-option', `No task "${p.taskId}" started by this flow.`);
+      const current = loadTaskRecord(taskCwd, p.taskId);
+      if (!current) throw new CoderError('invalid-option', `No task "${p.taskId}".`);
+      return steerTask(taskCwd, current, String(p.text ?? ''), {
+        model: p.model,
+        effort: p.effort,
+        permissions: p.permissions
+          ? capPermissions(current.name, p.permissions, ceiling)
+          : undefined,
+      });
     },
 
     async wait(p) {

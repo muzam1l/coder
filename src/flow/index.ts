@@ -15,9 +15,16 @@ import {
 import type { DiscoveredFlow, FlowEvent, FlowRecord } from './types';
 import type { RunOptions, RunSummary, StopSummary } from './executor';
 
-export { task, gate, pipeline, log, flow } from './runtime';
+export { task, steer, gate, pipeline, log, flow } from './runtime';
 export { CoderError } from '../core/dispatch';
-export type { FlowEvent, FlowStep, FlowTaskResult, GateResult, FlowTaskOptions } from './types';
+export type {
+  FlowEvent,
+  FlowStep,
+  FlowTaskResult,
+  GateResult,
+  FlowTaskOptions,
+  FlowSteerOptions,
+} from './types';
 
 /**
  * The flow's `--args` value. A Proxy over the ALS-bound current args, so a

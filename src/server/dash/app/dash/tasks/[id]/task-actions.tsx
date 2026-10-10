@@ -58,7 +58,7 @@ export function useAction(taskId: string) {
         await client.tasks.approve(taskId, body.approvalId ?? '', body.decision ?? 'decline');
       else if (name === 'ask') await client.tasks.ask(taskId, body.question ?? '');
       else if (name === 'continue' || name === 'steer')
-        await client.tasks[name](taskId, body.text ?? '');
+        await client.tasks.steer(taskId, body.text ?? '');
       else await client.tasks[name](taskId);
       setOutcome(DONE[name]!);
       return true;

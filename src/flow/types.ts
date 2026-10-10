@@ -30,10 +30,16 @@ export interface FlowTaskOptions<T = unknown> {
   mcp?: string | McpServerSpec[];
   name?: string;
   system?: string;
-  resume?: string;
   cwd?: string;
   addDirs?: string[];
   returns?: FlowSchema<T>;
+}
+
+/** Overrides for one more turn, as `coder task steer` takes them. */
+export interface FlowSteerOptions {
+  model?: string;
+  effort?: string;
+  permissions?: string;
 }
 
 export type FlowRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped';

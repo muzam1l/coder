@@ -10,7 +10,7 @@ Every command, grouped by what it acts on. Run `coder <command> --help` for the 
 | `coder list`                                 | Recent tasks, running and just stopped. `--running`, `--stopped`, `--archived`, `--limit <n>`. |
 | `coder result [task-id]`                     | Status and final answer. `--wait` blocks until it's ready.                                     |
 | `coder task watch [task-id]`                 | Stream the live transcript.                                                                    |
-| `coder task steer <task-id> "<text>"`        | Continue the task's thread with new instructions, mid-run.                                     |
+| `coder task steer <task-id> "<text>"`        | Continue the task's thread mid-run, or resume a finished or archived task on the same id.      |
 | `coder task ask <task-id> "<question>"`      | Ask about a task without interrupting it.                                                      |
 | `coder task stop <task-id>`                  | Interrupt a running task.                                                                      |
 | `coder task approvals [task-id]`             | Approvals waiting on you, across tasks or for one.                                             |
@@ -33,7 +33,6 @@ Every command, grouped by what it acts on. Run `coder <command> --help` for the 
 | `--add-dir <dir>`                  | Give the task another directory beyond `--cwd`. Repeatable.                      |
 | `--output-schema <json>`           | JSON Schema the answer must match.                                               |
 | `--name <name>`                    | Label the task in `list` and `result`.                                           |
-| `--resume <task-id>`               | Continue that task's thread instead of starting fresh.                           |
 | `--server [url]`                   | Run on your Coder server and follow it here. `--repo` and `--runner` pick where. |
 
 ## Flows

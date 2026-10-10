@@ -8,7 +8,7 @@ import { errStyle, formatHints, formatTokens, outStyle } from '../../tui/output'
 import { baseOptions, flag, optStr, str, strList } from '../../utils/args';
 import { TASK_FLAGS } from '.';
 import { command, MODEL_HINT } from '../../cli';
-import { printOutcome } from './result';
+import { finishedHints, printOutcome } from './result';
 import { printLine } from './watch';
 
 export function taskRunNextSteps(taskId: string): string {
@@ -73,7 +73,7 @@ function printFinished(done: {
   );
   const tokensNote = done.tokens ? ` tokens=${formatTokens(done.tokens, done.model)}` : '';
   process.stderr.write(
-    `${outStyle.dim(`[coder] task=${done.taskId} status=${done.status}${tokensNote}`)}\n`,
+    `${outStyle.dim(`[coder] task=${done.taskId} status=${done.status}${tokensNote}`)}\n\n${finishedHints(done.taskId, errStyle)}\n`,
   );
 }
 
@@ -96,7 +96,7 @@ export const commandTask = command({
       ...TASK_FLAGS,
       [
         '--server [url] [--workspace <slug>]',
-        'run the task on your Coder server and follow it here (--background prints its id); --resume continues a finished server task',
+        'run the task on your Coder server and follow it here (--background prints its id)',
       ],
       ['--repo <owner/name>', "with --server: check out a repo from the workspace's installs"],
       ['--runner <name>', 'with --server: where it runs (a runner kind or a registered runner)'],
@@ -134,7 +134,6 @@ export const commandTask = command({
     model: str,
     effort: str,
     permissions: str,
-    resume: str,
     // Older plugin skills still pass --host; every engine now runs through the runtime's own CLI path.
     host: str,
     name: str,
@@ -170,7 +169,6 @@ export const commandTask = command({
       permissions: options.permissions,
       name: options.name,
       system: options.system,
-      resume: options.resume,
       mcp: options.mcp,
       addDirs: options['add-dir'],
       // A server task is followed until it ends unless --background; a local one only with --wait.

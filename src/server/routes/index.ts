@@ -131,11 +131,7 @@ async function request(
           parts[3] &&
           parts[4] === 'run'))
     )
-      scheduleKick(
-        ctx,
-        (adminTask && parts.length === 3 && req.method === 'POST') ||
-          (adminTask && parts.length === 5 && Boolean(parts[3]) && parts[4] === 'continue'),
-      );
+      scheduleKick(ctx, adminTask && parts.length === 3 && req.method === 'POST');
     streamed =
       Boolean(response.body) && (response.headers.get('content-type') ?? '').includes('text/html');
     return streamed ? untilSent(response, scope.end) : response;

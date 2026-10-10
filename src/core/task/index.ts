@@ -15,7 +15,6 @@ import {
   isStartupError,
   readTask,
   waitTask,
-  withResumeDefaults,
   type DispatchOptions,
 } from '../dispatch';
 import {
@@ -94,7 +93,6 @@ export interface TaskRunOptions {
   permissions?: string;
   name?: string;
   system?: string;
-  resume?: string;
   /** Extra directories the task may reach, resolved against cwd. */
   addDirs?: string[];
   /** MCP servers to attach, by name from config. */
@@ -138,22 +136,20 @@ async function run(
     throw new CoderError('invalid-option', 'outputSchema must be an object.');
   const { cwd, api } = target(opts);
   if (api) {
-    const created = opts.resume
-      ? await api.tasks.continue(opts.resume, prompt, { outputSchema: opts.outputSchema })
-      : await api.tasks.create({
-          source: 'cli',
-          prompt,
-          ...(opts.cwd ? { cwd: opts.cwd } : {}),
-          ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
-          ...(opts.repo ? { repo: opts.repo } : {}),
-          ...(opts.agent ? { agent: opts.agent } : {}),
-          ...(opts.engine ? { engine: opts.engine } : {}),
-          ...(opts.model ? { model: opts.model } : {}),
-          ...(opts.effort ? { effort: opts.effort } : {}),
-          ...(opts.permissions ? { permissions: opts.permissions } : {}),
-          ...(opts.runner ? { runner: opts.runner } : {}),
-          ...(opts.mcp ? { mcp: opts.mcp.split(',').map(name => name.trim()) } : {}),
-        });
+    const created = await api.tasks.create({
+      source: 'cli',
+      prompt,
+      ...(opts.cwd ? { cwd: opts.cwd } : {}),
+      ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
+      ...(opts.repo ? { repo: opts.repo } : {}),
+      ...(opts.agent ? { agent: opts.agent } : {}),
+      ...(opts.engine ? { engine: opts.engine } : {}),
+      ...(opts.model ? { model: opts.model } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.permissions ? { permissions: opts.permissions } : {}),
+      ...(opts.runner ? { runner: opts.runner } : {}),
+      ...(opts.mcp ? { mcp: opts.mcp.split(',').map(name => name.trim()) } : {}),
+    });
     return opts.wait ? api.tasks.wait(created.task.id, { onLog: opts.onLog }) : created;
   }
 
@@ -161,24 +157,19 @@ async function run(
   const agent = opts.agent
     ? await (await import('../../agent/exec')).agentTaskOptions(cwd, opts.agent, opts.mcp)
     : undefined;
-  const inherited = withResumeDefaults({
+  const dispatchOpts: DispatchOptions = {
     prompt,
     outputSchema: opts.outputSchema,
     cwd,
-    cwdExplicit: Boolean(opts.cwd),
     engine: opts.engine ?? agent?.engine,
     model: opts.model ?? (opts.engine ? undefined : agent?.model),
     effort: opts.effort ?? (opts.engine ? undefined : agent?.effort),
     permissions: opts.permissions ?? agent?.permissions,
     name: opts.name,
     system: opts.system ?? agent?.system,
-    resume: opts.resume,
     wait: opts.wait,
     simulateApproval: opts.simulateApproval,
     addDirs: opts.addDirs,
-  });
-  const dispatchOpts: DispatchOptions = {
-    ...inherited,
     ...(opts.agent ? { agentId: opts.agent } : {}),
     mcp: agent?.mcp ?? opts.mcp,
     nativeMcp: agent?.nativeMcp,
@@ -230,7 +221,6 @@ async function run(
         model: undefined,
         effort: undefined,
         name: undefined,
-        resume: undefined,
         simulateApproval: undefined,
       });
       continue;
@@ -445,7 +435,14 @@ async function steer(
   } = {},
 ) {
   const { cwd, api } = target(opts);
-  if (api) return api.tasks.steer(id, text) as Promise<Record<string, unknown>>;
+  if (api) {
+    const steered = await api.tasks.steer(id, text, {
+      ...(opts.model ? { model: opts.model } : {}),
+      ...(opts.effort ? { effort: opts.effort } : {}),
+      ...(opts.permissions ? { permissions: opts.permissions } : {}),
+    });
+    return (opts.wait ? api.tasks.wait(id) : steered) as Promise<Record<string, unknown>>;
+  }
   const outcome = await steerTask(cwd, localTask(cwd, id), text, {
     model: opts.model,
     effort: opts.effort,

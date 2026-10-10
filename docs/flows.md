@@ -59,7 +59,7 @@ const r = await task('Explain the auth module', {
 r.output; // final message text
 ```
 
-Options are the same as the `coder run` flags (`engine`, `model`, `effort`, `permissions`, `name`, `system`, `resume`, `cwd`, and `addDirs` for `--add-dir` - see `coder run --help`), plus one of its own:
+Options are the same as the `coder run` flags (`engine`, `model`, `effort`, `permissions`, `name`, `system`, `cwd`, and `addDirs` for `--add-dir` - see `coder run --help`), plus one of its own:
 
 - `returns` - a zod schema for structured output instead of prose. The runtime passes the schema natively, validates the reply (one corrective retry on mismatch), and the parsed value lands on `r.data`:
 
@@ -74,6 +74,17 @@ r.data.files; // string[], validated
 Returns `{ taskId, status, output, data?, tokens, model }`. If the task fails, `task()` throws; catch the error to inspect the failed result or retry.
 
 > Note: unlike the SDK's `task.run()`, which returns a task id right away and leaves waiting to you, the flow `task()` waits for the result in one call, and inside a run it is journaled and concurrency-limited.
+
+### `steer(taskId, text, opts?)`
+
+Give a task this run started one more turn on its own thread, under the same task id, and await it. It mirrors `coder task steer --wait`, with the same `model`, `effort` and `permissions` overrides:
+
+```ts
+const draft = await task('Draft the migration for the new orders table.');
+const fixed = await steer(draft.taskId, 'Now add the down migration.');
+```
+
+Returns the same shape as `task()` without `data`, throws if the turn fails, and is journaled like `task()`.
 
 ### `gate(cmd, opts?)`
 

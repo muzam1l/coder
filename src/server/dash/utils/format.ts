@@ -60,20 +60,26 @@ export function formatDay(value: number, tz: string) {
   return `${p.month} ${p.day}, ${p.year}`;
 }
 
+const compact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
+
+/** Hours are the largest unit; past 10,000 h they read as 12.3K h. */
 export function formatDuration(value?: number) {
   if (value === undefined) return 'Not available';
   if (value < 1000) return `${Math.round(value)} ms`;
   if (value < 60_000) return `${(value / 1000).toFixed(1)} s`;
-  const [unit, size] =
-    value < 3_600_000
-      ? (['min', 60_000] as const)
-      : value < 172_800_000
-        ? (['h', 3_600_000] as const)
-        : (['d', 86_400_000] as const);
-  return `${(value / size).toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 })} ${unit}`;
+  const [unit, amount] = value < 3_600_000 ? ['min', value / 60_000] : ['h', value / 3_600_000];
+  const text =
+    amount >= 10_000
+      ? compact.format(amount)
+      : amount.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+  return `${text} ${unit}`;
 }
 
 export const formatCount = (value: number) => value.toLocaleString('en-US');
+
+/** Large counts read as 5.4B or 12.3K; small ones stay exact. */
+export const formatCompact = (value: number) =>
+  value < 10_000 ? formatCount(value) : compact.format(value);
 
 export function initial(name?: string) {
   return (name ?? '?').trim().charAt(0).toUpperCase() || '?';
