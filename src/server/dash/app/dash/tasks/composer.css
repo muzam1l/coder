@@ -60,9 +60,6 @@
   flex: none;
   margin-left: 4px;
 }
-.composer-line .send[aria-busy="true"] .ic {
-  visibility: hidden;
-}
 .composer > .flash {
   flex-basis: 100%;
   margin: 0 4px 2px;
@@ -102,10 +99,10 @@
   padding: 4px 8px 4px 10px;
   font-size: 12px;
 }
-.model-pick input[aria-expanded="true"] {
+.model-pick input[aria-expanded='true'] {
   cursor: text;
 }
-.model-pick input[aria-expanded="true"]::placeholder {
+.model-pick input[aria-expanded='true']::placeholder {
   color: var(--dim);
 }
 .model-pick > .ic {
@@ -133,7 +130,7 @@
 .model-list .pop-item > .ic {
   visibility: hidden;
 }
-.model-list .pop-item[aria-selected="true"] > .ic {
+.model-list .pop-item[aria-selected='true'] > .ic {
   visibility: visible;
   color: var(--acc);
 }
@@ -169,22 +166,6 @@
 }
 .composer-slash > .loading {
   padding: 6px 10px;
-}
-
-/* one-line notices beside the composer and in the list */
-.notice.slim {
-  flex-wrap: nowrap;
-  gap: 10px;
-  padding: 8px 8px 8px 14px;
-  font-size: 12px;
-}
-.notice.slim .grow {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.card > .notice.slim {
-  margin: 12px 16px 0;
 }
 
 /* the composer in a dialog */
@@ -270,7 +251,7 @@ dialog.compose-dialog::backdrop {
   outline-offset: -2px;
 }
 .pop-chev:hover,
-.pop-chev[aria-expanded="true"] {
+.pop-chev[aria-expanded='true'] {
   color: var(--fg);
   background: var(--wash);
 }
@@ -279,7 +260,7 @@ dialog.compose-dialog::backdrop {
   height: 14px;
   transition: rotate 0.15s;
 }
-.pop-chev[aria-expanded="true"] .ic {
+.pop-chev[aria-expanded='true'] .ic {
   rotate: 90deg;
 }
 .pop-sub {

@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import http from 'node:http';
 import process from 'node:process';
 
@@ -113,6 +114,36 @@ export type ServeDetails = ServeResult & {
   dashboard?: string;
 };
 
+/** The process listening on `port`, as lsof and ps name it; undefined where they cannot tell. */
+function portHolder(port: number): { pid: number; command: string } | undefined {
+  const listed = spawnSync('lsof', ['-nP', `-iTCP:${port}`, '-sTCP:LISTEN', '-t'], {
+    encoding: 'utf8',
+  });
+  const pid = Number(listed.stdout?.split('\n')[0]);
+  if (!pid) return undefined;
+  const named = spawnSync('ps', ['-o', 'command=', '-p', String(pid)], { encoding: 'utf8' });
+  return { pid, command: named.stdout?.trim().slice(0, 120) || 'another process' };
+}
+
+/** A busy port as a startup error that names its holder and how to stop it. */
+function portInUse(port: number): CoderError {
+  const holder = portHolder(port);
+  const coder = holder && /\bcoder (dash|server serve)\b/.test(holder.command);
+  return new CoderError(
+    'server',
+    holder
+      ? coder
+        ? `Coder is already running on port ${port} (pid ${holder.pid}): http://localhost:${port}`
+        : `Port ${port} is in use by ${holder.command} (pid ${holder.pid}).`
+      : `Port ${port} is in use.`,
+    {
+      hint: holder
+        ? `Stop it with \`kill ${holder.pid}\`, or use another port: --port ${port + 1}`
+        : `Use another port: --port ${port + 1}`,
+    },
+  );
+}
+
 /** Start the HTTP host. Returns after listening; never prints or installs signal handlers. */
 async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
   requireBunServer();
@@ -217,7 +248,7 @@ async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
     clearInterval(kickTimer);
     clearInterval(sweepTimer);
     await host.close();
-    throw error;
+    throw (error as NodeJS.ErrnoException).code === 'EADDRINUSE' ? portInUse(port) : error;
   });
 
   const cacheStart = startCache ? setTimeout(startCache, 0) : undefined;

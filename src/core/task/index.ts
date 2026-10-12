@@ -7,10 +7,12 @@ import type { TaskLogLine, TaskStatus } from '../../server/store/types';
 import { readJsonFile } from '../../utils/fsx';
 import { answerApproval, listPendingApprovals } from '../approvals';
 import { loadConfig } from '../config';
+import { localConnections } from '../connections';
 import {
   buildFallbackPayload,
   CoderError,
   dispatchTask,
+  selectMcpServers,
   isSandboxFailure,
   isStartupError,
   readTask,
@@ -97,6 +99,8 @@ export interface TaskRunOptions {
   addDirs?: string[];
   /** MCP servers to attach, by name from config. */
   mcp?: string;
+  /** Connection ids the task may use, within the agent's. */
+  connections?: string[];
   /** Block until the task finishes, walking the engine chain when a turn fails to start. */
   wait?: boolean;
   simulateApproval?: boolean;
@@ -149,14 +153,20 @@ async function run(
       ...(opts.permissions ? { permissions: opts.permissions } : {}),
       ...(opts.runner ? { runner: opts.runner } : {}),
       ...(opts.mcp ? { mcp: opts.mcp.split(',').map(name => name.trim()) } : {}),
+      ...(opts.connections ? { connections: opts.connections } : {}),
     });
     return opts.wait ? api.tasks.wait(created.task.id, { onLog: opts.onLog }) : created;
   }
 
   // A local agent's options come from its definition, loaded only when asked for.
   const agent = opts.agent
-    ? await (await import('../../agent/exec')).agentTaskOptions(cwd, opts.agent, opts.mcp)
+    ? await (
+        await import('../../agent/exec')
+      ).agentTaskOptions(cwd, opts.agent, opts.mcp, undefined, opts.connections)
     : undefined;
+  const connected = agent?.connected ?? (await localConnections(opts.connections));
+  for (const warning of connected.warnings) opts.onNote?.(warning);
+  const selectedMcp = agent ?? selectMcpServers(opts.mcp, loadConfig(cwd).mcp, {}, connected.mcp);
   const dispatchOpts: DispatchOptions = {
     prompt,
     outputSchema: opts.outputSchema,
@@ -171,8 +181,12 @@ async function run(
     simulateApproval: opts.simulateApproval,
     addDirs: opts.addDirs,
     ...(opts.agent ? { agentId: opts.agent } : {}),
-    mcp: agent?.mcp ?? opts.mcp,
-    nativeMcp: agent?.nativeMcp,
+    mcp: selectedMcp.mcp,
+    mcpBindings: selectedMcp.mcpBindings,
+    mcpWarnings: selectedMcp.warnings,
+    connectionEnv: connected.env,
+    connections: connected.ids,
+    nativeMcp: selectedMcp.nativeMcp,
     ...(opts.onFallback ? { onFallback: opts.onFallback } : {}),
     ...(opts.onNote ? { onNote: opts.onNote } : {}),
   };

@@ -131,6 +131,10 @@ function retryDead(
   reads: AsyncLocalStorage<boolean>,
   bounds: AsyncLocalStorage<number>,
 ): postgres.Sql {
+  const begin = sql.begin;
+  // An explicit transaction keeps the driver's reserved connection, outside per-statement bounds.
+  sql.begin = ((...args: Parameters<typeof begin>) =>
+    bounds.exit(() => begin.apply(sql, args))) as typeof begin;
   type Query = PromiseLike<unknown> & Record<'values' | 'raw', () => Query>;
   const unsafe = sql.unsafe as unknown as (...args: unknown[]) => Query;
   sql.unsafe = ((...args: unknown[]) => {

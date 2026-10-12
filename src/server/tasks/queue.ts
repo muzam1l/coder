@@ -1,4 +1,5 @@
 /** The task queue: claim, retry, finish, cancel. Logs and lookups go through the `Store` (`task`, `tasklog`). */
+import { deleteTaskConnections } from '../connections/resolve';
 import { randomUUID } from 'node:crypto';
 import { noteKey } from './thread';
 import { createTaskToken } from './token';
@@ -712,6 +713,7 @@ export class StoreQueue implements TaskQueue {
         finishedAt: now,
         updatedAt: now,
       });
+      await deleteTaskConnections(this.store, id);
 
       return true;
     });
@@ -760,6 +762,7 @@ export class StoreQueue implements TaskQueue {
         finishedAt: now,
         updatedAt: now,
       });
+      await deleteTaskConnections(this.store, id);
       return true;
     });
   }
@@ -792,6 +795,7 @@ export class StoreQueue implements TaskQueue {
         ...(entry ? { inboxSeq: entry.seq } : {}),
         updatedAt: now,
       } satisfies TaskStatus);
+      if (current.status === 'queued') await deleteTaskConnections(this.store, id);
       return true;
     });
   }
@@ -978,6 +982,7 @@ export class StoreQueue implements TaskQueue {
         updatedAt: Date.now(),
       });
       for (const row of applied) await this.store.delete('inbox', row.id);
+      if (cancelled) await deleteTaskConnections(this.store, id);
 
       return true;
     });

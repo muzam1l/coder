@@ -25,6 +25,10 @@ export type {
 /** One MCP server in the `.mcp.json` entry shape: stdio (`command`) or remote (`url`). */
 export interface McpServerSpec {
   name: string;
+  connection?: string;
+  repository?: boolean;
+  resolved?: boolean;
+  gitCredential?: boolean;
   command?: string;
   args?: string[];
   /** Values may hold `${VAR}` placeholders, resolved from the environment at spawn time. */
@@ -33,6 +37,8 @@ export interface McpServerSpec {
   url?: string;
   type?: 'stdio' | 'http' | 'sse';
   headers?: Record<string, string>;
+  /** Credential destination supplied by the connection resolver, removed before persistence. */
+  credentialFields?: { env?: string; header?: string };
   /** Tool allowlist; omit or empty for every tool the server offers. */
   tools?: string[];
 }
@@ -94,6 +100,9 @@ export interface Task {
   repo?: string;
   // Extra MCP servers (and their allowed tools) the worker attaches to the turn.
   mcp?: McpServerSpec[];
+  mcpBindings?: Pick<McpServerSpec, 'name' | 'connection' | 'tools'>[];
+  connections?: string[];
+  connectionSource?: 'local' | 'server';
   nativeMcp?: boolean;
   // Absolute extra directories the task may reach beyond cwd (--add-dir).
   addDirs?: string[];

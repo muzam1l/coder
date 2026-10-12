@@ -1,4 +1,5 @@
 /** The queue on Postgres: `FOR UPDATE SKIP LOCKED` claims; the kick after each enqueue starts the work. */
+import { connectionSnapshots } from './tables/resources';
 import { CasingCache } from 'drizzle-orm/casing';
 import { randomBytes } from 'node:crypto';
 
@@ -40,7 +41,16 @@ import {
   type TaskFence,
   type TaskPatch,
 } from '../../tasks/queue';
-import { taskRecord, stateKey, statePrefix, rows, defined, ms } from './tables/shared';
+import {
+  taskRecord,
+  storedTaskContext,
+  readTaskContext,
+  stateKey,
+  statePrefix,
+  rows,
+  defined,
+  ms,
+} from './tables/shared';
 import { CASING, pipeline, readQuery, type Db } from './client';
 import { TERMINAL_STATUSES } from '../../../core/types';
 import { listRank } from '../../../core/defaults';
@@ -203,7 +213,7 @@ export class DrizzleQueue implements TaskQueue {
           ${event ? sql`coalesce((select id from ${install} where key = ${`${event.appId}:${event.installationId}`} and organization_id = ${organizationId}), 0)` : sql`null`},
           ${json(event)}, ${agentTask.prompt ?? null}, ${json(agentTask.args)}, ${json(agentTask.mcp)}, ${agentTask.author ?? null}, ${json(agentTask.definition)},
           ${agentTask.credential ?? null}, ${agentTask.requester ?? null}, ${agentTask.runnerId ?? null}, ${json(agentTask.usage)}, ${json(agentTask.tools)},
-          ${json(agentTask.toolScopes)}, ${json(agentTask.context)}, ${json(agentTask.files)}, 0, ${stamp}::timestamptz, ${stamp}::timestamptz
+          ${json(agentTask.toolScopes)}, ${json(storedTaskContext(agentTask))}, ${json(agentTask.files)}, 0, ${stamp}::timestamptz, ${stamp}::timestamptz
         from capacity where allowed ${session ? sql`and ${session.create} and not exists (select 1 from target)` : sql``} ${delivery ? sql`and exists (select 1 from receipt)` : sql``}
         returning id
       ) select allowed, exists (select 1 from inserted) as inserted ${session ? sql`, exists (select 1 from forwarded) as steered` : sql``} from capacity`;
@@ -401,6 +411,20 @@ export class DrizzleQueue implements TaskQueue {
     return Boolean(row);
   }
 
+  private withConnections<T>(
+    organizationId: string,
+    id: string,
+    work: (db: Db) => Promise<T>,
+  ): Promise<T> {
+    return this.db.transaction(async tx => {
+      await tx.execute(
+        sql`select pg_advisory_xact_lock(3, hashtext(${`app:${organizationId}:connections:${id}`}))`,
+      );
+
+      return work(tx as unknown as Db);
+    });
+  }
+
   async finish(
     organizationId: string,
     id: string,
@@ -409,23 +433,26 @@ export class DrizzleQueue implements TaskQueue {
     fence: TaskFence = {},
   ): Promise<boolean> {
     const at = new Date(now);
-    const [row] = await this.db
-      .update(task)
-      .set({
-        status: outcome.status,
-        result: outcome.result ?? null,
-        error: outcome.error ?? null,
-        tokens: outcome.tokens ?? null,
-        lastSeenAt: at,
-        lockedAt: null,
-        finishedAt: at,
-        updatedAt: at,
-      })
-      .where(
-        this.fence(organizationId, id, { ...fence, statuses: ['queued', 'running', 'waiting'] }),
-      )
-      .returning({ id: task.id });
-    return Boolean(row);
+    return this.withConnections(organizationId, id, async db => {
+      const [row] = await db
+        .update(task)
+        .set({
+          status: outcome.status,
+          result: outcome.result ?? null,
+          error: outcome.error ?? null,
+          tokens: outcome.tokens ?? null,
+          lastSeenAt: at,
+          lockedAt: null,
+          finishedAt: at,
+          updatedAt: at,
+        })
+        .where(
+          this.fence(organizationId, id, { ...fence, statuses: ['queued', 'running', 'waiting'] }),
+        )
+        .returning({ id: task.id });
+      if (row) await db.delete(chatState).where(connectionSnapshots(organizationId, id));
+      return Boolean(row);
+    });
   }
 
   async continueTask(
@@ -440,7 +467,7 @@ export class DrizzleQueue implements TaskQueue {
         (${task.event}->>'appId') || ':' || (${task.event}->>'installationId') || ':' || coalesce(${task.event}->'chat'->'thread'->>'id', ${task.event}->>'deliveryId')
         else 'task:' || ${task.publicId} end
       and (${chatState.expiresAt} is null or ${chatState.expiresAt} > ${new Date(now).toISOString()}::timestamptz))`;
-    const context = sql`(${JSON.stringify(next.context ?? {})}::jsonb - 'note') || jsonb_strip_nulls(jsonb_build_object('note', nullif(${note}, '""'::jsonb)))`;
+    const context = sql`(${JSON.stringify(next.context ?? {})}::jsonb - 'note' - 'connections') || jsonb_strip_nulls(jsonb_build_object('connections', ${task.context}->'connections', 'note', nullif(${note}, '""'::jsonb)))`;
     const [row] = await this.db
       .update(task)
       .set({
@@ -473,7 +500,7 @@ export class DrizzleQueue implements TaskQueue {
         }),
       )
       .returning({ context: task.context });
-    if (row) next.context = row.context ?? undefined;
+    if (row) next.context = readTaskContext(row.context).context;
     return Boolean(row);
   }
 
@@ -483,28 +510,29 @@ export class DrizzleQueue implements TaskQueue {
     completion: Completion,
     now: number,
   ): Promise<boolean> {
-    const { outcome, usage: record, note } = completion;
-    const at = new Date(now).toISOString();
-    const noteKey = note && stateKey(organizationId, 'note', note.key);
-    const noteMutation = !note
-      ? sql``
-      : note.value
-        ? sql`, note as (
+    return this.withConnections(organizationId, id, async db => {
+      const { outcome, usage: record, note } = completion;
+      const at = new Date(now).toISOString();
+      const noteKey = note && stateKey(organizationId, 'note', note.key);
+      const noteMutation = !note
+        ? sql``
+        : note.value
+          ? sql`, note as (
       insert into ${chatState} (key, value, expires_at)
       select ${noteKey}, ${JSON.stringify(note.value)}::jsonb, ${new Date(now + note.ttlMs).toISOString()}::timestamptz from finished
       on conflict (key) do update set value = excluded.value, expires_at = excluded.expires_at
     )`
-        : sql`, note as (delete from ${chatState} where key = ${noteKey} and exists (select 1 from finished))`;
-    const [row] = await rows<{ completed: boolean }>(
-      this.db,
-      sql`
+          : sql`, note as (delete from ${chatState} where key = ${noteKey} and exists (select 1 from finished))`;
+      const [row] = await rows<{ completed: boolean }>(
+        db,
+        sql`
       with finished as (
         update ${task} set status = ${outcome.status}, result = ${JSON.stringify(outcome.result ?? null)}::jsonb,
           error = ${outcome.error ?? null}, tokens = ${JSON.stringify(outcome.tokens ?? null)}::jsonb,
           last_seen_at = ${at}::timestamptz, locked_at = null, finished_at = ${at}::timestamptz, updated_at = ${at}::timestamptz
         where ${this.fence(organizationId, id, { attempts: completion.attempts, tokenHash: completion.tokenHash, statuses: ['running', 'waiting'] })}
         returning id, installation_id, generation
-      ), inbox as (delete from ${taskInbox} where (task_id, generation) in (select id, generation from finished)), recorded as (
+      ), connections as (delete from ${chatState} where ${connectionSnapshots(organizationId, id)} and exists (select 1 from finished)), inbox as (delete from ${taskInbox} where (task_id, generation) in (select id, generation from finished)), recorded as (
         insert into ${usage} (organization_id, task_id, installation_id, agent, target, engine, model, credential, runner_ms, tokens, at, updated_at)
         select ${organizationId}, id, installation_id, ${record.agent}, ${record.target}, ${record.engine ?? null}, ${record.model ?? null},
           ${record.credential}, ${record.runnerElapsedMs}, ${JSON.stringify(record.tokens ?? null)}::jsonb, ${new Date(record.at).toISOString()}::timestamptz, ${at}::timestamptz from finished
@@ -513,8 +541,9 @@ export class DrizzleQueue implements TaskQueue {
           tokens = ${addTokens(sql`${usage.tokens}`, record.tokens)}, at = excluded.at, updated_at = excluded.updated_at
       ) ${noteMutation}
       select exists (select 1 from finished) as completed`,
-    );
-    return Boolean(row?.completed);
+      );
+      return Boolean(row?.completed);
+    });
   }
 
   async cancel(
@@ -523,22 +552,24 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     fence: TaskFence = {},
   ): Promise<boolean> {
-    const at = new Date(now).toISOString();
-    const [row] = await rows<{ accepted: boolean }>(
-      this.db,
-      sql`
+    return this.withConnections(organizationId, id, async db => {
+      const at = new Date(now).toISOString();
+      const [row] = await rows<{ accepted: boolean }>(
+        db,
+        sql`
       with cancelled as (
         update ${task} set status = case when status = 'queued' then 'cancelled' else status end,
           finished_at = case when status = 'queued' then ${at}::timestamptz else finished_at end,
           inbox_seq = case when status = 'queued' then inbox_seq else inbox_seq + 1 end,
           cancel_requested_at = ${at}::timestamptz, updated_at = ${at}::timestamptz
         where ${this.fence(organizationId, id, { ...fence, statuses: ACTIVE_STATES })} returning id, generation, inbox_seq, status
-      ), message as (
+      ), connections as (delete from ${chatState} where ${connectionSnapshots(organizationId, id)} and exists (select 1 from cancelled where status = 'cancelled')), message as (
         insert into ${taskInbox} (organization_id, task_id, seq, generation, kind, value, at)
         select ${organizationId}, id, inbox_seq, generation, 'cancel', 'null'::jsonb, ${at}::timestamptz from cancelled where status in ('running', 'waiting')
       ) select exists(select 1 from cancelled) as accepted`,
-    );
-    return Boolean(row?.accepted);
+      );
+      return Boolean(row?.accepted);
+    });
   }
 
   async cancelRequested(organizationId: string, id: string): Promise<boolean> {
@@ -901,9 +932,10 @@ export class DrizzleQueue implements TaskQueue {
     fence: TaskFence,
   ): Promise<boolean> {
     if (fence.generation !== undefined && fence.generation !== ack.generation) return false;
-    const [row] = await rows<{ accepted: boolean }>(
-      this.db,
-      sql`
+    return this.withConnections(organizationId, id, async db => {
+      const [row] = await rows<{ accepted: boolean }>(
+        db,
+        sql`
       with current as (
         select id from ${task} where ${this.fence(organizationId, id, { ...fence, generation: ack.generation, statuses: undefined })}
           and inbox_seq >= ${ack.seq} and (status in ('running', 'waiting') or (status in ('completed', 'failed', 'cancelled') and inbox_ack >= ${ack.seq})) for update
@@ -919,10 +951,11 @@ export class DrizzleQueue implements TaskQueue {
           approval = case when exists(select 1 from applied where kind = 'approve' and value->>'approvalId' = ${task.approval}->>'id') then null else approval end,
           finished_at = case when exists(select 1 from applied where kind = 'cancel') then now() else finished_at end,
           updated_at = now()
-        from answers where id in (select id from current)
-      ) select exists (select 1 from current) as accepted`,
-    );
-    return Boolean(row?.accepted);
+        from answers where id in (select id from current) returning status
+      ), connections as (delete from ${chatState} where ${connectionSnapshots(organizationId, id)} and exists (select 1 from updated where status = 'cancelled')) select exists (select 1 from current) as accepted`,
+      );
+      return Boolean(row?.accepted);
+    });
   }
 
   async pendingInbox(): Promise<ClaimedTask[]> {

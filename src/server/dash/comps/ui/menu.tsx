@@ -5,7 +5,7 @@ import './menu.css';
 import type { ComponentChildren } from 'preact';
 import { useId, useRef } from 'preact/hooks';
 
-import { iCheck } from './icons';
+import { iCheck, iInfo } from './icons';
 import { Icon } from './icon';
 
 /** A button and its popover panel, placed at the button; picking an item, an outside click or Escape closes it. */
@@ -111,17 +111,36 @@ export function MenuItem({
   );
 }
 
-/** A fixed "+n more" that opens the rest in a scrolling list, on hover or click. */
-export function MoreList({ label, children }: { label: string; children: ComponentChildren }) {
+/** A fixed "+n more" that opens the rest in a scrolling list, on hover or click; `title` names an icon-only trigger. */
+export function MoreList({
+  label,
+  title,
+  class: cls,
+  children,
+}: {
+  label: ComponentChildren;
+  title?: string;
+  class?: string;
+  children: ComponentChildren;
+}) {
   const id = useId();
   const list = useRef<HTMLDivElement>(null);
+  const closing = useRef<ReturnType<typeof setTimeout>>();
+  // Closing waits a beat, so the pointer can cross the gap into the list.
   const hover = (open: boolean) => (event: PointerEvent) => {
-    if (event.pointerType === 'mouse') list.current!.togglePopover(open);
+    if (event.pointerType !== 'mouse') return;
+    clearTimeout(closing.current);
+    if (open) list.current!.togglePopover(true);
+    else closing.current = setTimeout(() => list.current?.togglePopover(false), 150);
   };
 
   return (
-    <span class="more" onPointerEnter={hover(true)} onPointerLeave={hover(false)}>
-      <button popovertarget={id} type="button">
+    <span
+      class={cls ? `more ${cls}` : 'more'}
+      onPointerEnter={hover(true)}
+      onPointerLeave={hover(false)}
+    >
+      <button popovertarget={id} type="button" aria-label={title}>
         {label}
       </button>
       <div id={id} ref={list} class="more-list scroll-box" popover="auto">
@@ -130,6 +149,13 @@ export function MoreList({ label, children }: { label: string; children: Compone
     </span>
   );
 }
+
+/** An i that opens its explanation in the same hover card as "+n more". */
+export const InfoTip = ({ label, children }: { label: string; children: ComponentChildren }) => (
+  <MoreList label={<Icon d={iInfo} />} title={label} class="info">
+    {children}
+  </MoreList>
+);
 
 /** One choice in a menu section; the picked one shows a check. */
 export function MenuRadio({

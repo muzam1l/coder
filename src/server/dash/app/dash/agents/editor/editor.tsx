@@ -17,7 +17,7 @@ import type {
   IntegrationInfo,
   ModelsShape,
 } from '@coder/client/types';
-import { BrandIcon, Platform } from '@/app/dash/agents/agent/agent-pills';
+import { BrandIcon, DisabledBadge, PlatformLine } from '@/app/dash/agents/agent/agent-pills';
 import { Hero } from '@/app/dash/agents/agent/hero';
 import { Back, PageHead } from '@/comps/frame/page-head';
 import { HEADS } from '@/comps/frame/heads';
@@ -64,7 +64,7 @@ const ACCESS: Record<string, [string, string]> = {
 const TEMPLATES: Array<[Template, string, string]> = [
   ['blank', 'Blank', 'start from nothing'],
   ['helper', 'Slack helper', 'answers questions in chat'],
-  ['reviewer', 'Reviewer', 'reviews pull requests'],
+  ['reviewer', 'GitHub reviewer', 'reviews pull requests'],
 ];
 /** A search over platforms shows once the catalog is longer than this. */
 const SEARCH_FROM = 6;
@@ -72,16 +72,6 @@ const REVIEWER =
   'Review each pull request for bugs, risky changes and missing tests.\nComment on the lines that matter and keep it short.\nWhen mentioned, answer questions about the code and cite file paths.';
 const HELPER =
   "Answer the team's questions in the thread.\nRead the code before you answer, cite file paths, and say when you are unsure.\nIf asked to change code, describe the change and stop.";
-/** Summary words for common events; any other event reads as its name. */
-const DOES: Record<string, string> = {
-  mention: 'replies to @mentions',
-  pull_request: 'reviews pull requests',
-  issue: 'triages issues',
-  comment: 'reads comments',
-  message: 'reads messages',
-  reaction: 'answers reactions',
-  command: 'runs slash commands',
-};
 
 export type Template = 'import' | 'reviewer' | 'helper' | 'blank';
 
@@ -132,10 +122,10 @@ function draftOf(agent: AgentRow | undefined, suggested: string): Draft {
   };
   for (const [id, entry] of Object.entries(definition?.integrations ?? {})) {
     draft.platforms.push(id);
-    draft.events[id] = eventNames(entry.triggers);
+    draft.events[id] = eventNames(entry.events);
     draft.match[id] = {};
-    if (entry.triggers && !Array.isArray(entry.triggers))
-      for (const [name, options] of Object.entries(entry.triggers))
+    if (entry.events && !Array.isArray(entry.events))
+      for (const [name, options] of Object.entries(entry.events))
         if (options && typeof options === 'object' && 'match' in options)
           draft.match[id]![name] = String((options as { match: unknown }).match);
     draft.tools[id] = entry.tools as Draft['tools'][string];
@@ -184,7 +174,7 @@ function eventsFor(
   names: string[],
   match: Record<string, string>,
 ) {
-  const before = previous?.triggers && !Array.isArray(previous.triggers) ? previous.triggers : {};
+  const before = previous?.events && !Array.isArray(previous.events) ? previous.events : {};
   const built = Object.fromEntries(
     names.map(name => {
       const kept = before[name];
@@ -198,18 +188,6 @@ function eventsFor(
     }),
   );
   return Object.values(built).every(value => value === true) ? names : built;
-}
-
-/** One line on what the agent does, from its platforms' events. */
-function summaryOf(draft: Draft) {
-  const parts = draft.platforms
-    .filter(id => draft.events[id]?.length)
-    .map(
-      id =>
-        `${draft.events[id]!.map(event => DOES[event] ?? event.replace(/_/g, ' ')).join(' and ')} in ${id}`,
-    );
-  const text = parts.length ? parts.join(', ') : 'runs from the dashboard and the CLI';
-  return `${text.charAt(0).toUpperCase()}${text.slice(1)}.`;
 }
 
 const sameTools = (a: string[] = [], b: string[] = []) =>
@@ -274,6 +252,7 @@ export function AgentEditor({
   const [idTouched, setIdTouched] = useState(false);
   const [writing, setWriting] = useState('write');
   const [query, setQuery] = useState('');
+  const [more, setMore] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
@@ -302,14 +281,20 @@ export function AgentEditor({
     .filter(Boolean)
     .join(' · ');
   const permission = PERMISSIONS.find(([key]) => key === draft.permissions);
-  const run = [
-    ENGINE_NAMES[engine] ?? engine,
-    draft.model || aliasOf(engine, base.model),
-    draft.effort || base.effort,
-    permission?.[1].toLowerCase(),
-  ]
-    .filter(Boolean)
-    .join(' · ');
+  const repoAccess = permission?.[1].toLowerCase();
+  const run = creating
+    ? 'you can change these later in its settings'
+    : (draft.engine || draft.model || draft.effort
+        ? [
+            ENGINE_NAMES[engine] ?? engine,
+            draft.model || aliasOf(engine, base.model),
+            draft.effort || base.effort,
+            repoAccess,
+          ]
+        : ['Default models', repoAccess]
+      )
+        .filter(Boolean)
+        .join(' · ');
 
   useEffect(() => {
     if (!section) return;
@@ -376,7 +361,7 @@ export function AgentEditor({
     const integrations: NonNullable<AgentDefinition['integrations']> = {};
     for (const id of draft.platforms)
       integrations[id] = {
-        triggers: eventsFor(
+        events: eventsFor(
           agent?.definition?.integrations?.[id],
           draft.events[id] ?? [],
           draft.match[id] ?? {},
@@ -433,7 +418,12 @@ export function AgentEditor({
           Cancel
         </Link>
       )}
-      <button class="btn" disabled={busy || !draft.name.trim() || template === 'import'}>
+      <button
+        class="btn"
+        disabled={busy || !draft.name.trim() || template === 'import'}
+        aria-busy={busy}
+      >
+        {creating ? <Icon d={iPlus} /> : null}
         {creating ? 'Create agent' : 'Publish new version'}
       </button>
     </>
@@ -485,9 +475,17 @@ export function AgentEditor({
     );
 
   const needle = query.trim().toLowerCase();
-  const shown = catalog.filter(info =>
+  const matches = catalog.filter(info =>
     `${info.id} ${info.description}`.toLowerCase().includes(needle),
   );
+  // Featured and picked platforms first; the rest wait under Show more unless searching.
+  const upFront = (info: (typeof catalog)[number]) =>
+    !!info.featured || draft.platforms.includes(info.id);
+  const shown =
+    needle || more
+      ? [...matches.filter(upFront), ...matches.filter(info => !upFront(info))]
+      : matches.filter(upFront);
+  const hidden = needle ? 0 : catalog.length - catalog.filter(upFront).length;
   return (
     <form
       class="agent-new"
@@ -599,14 +597,23 @@ export function AgentEditor({
               class="part-head"
               onKeyDown={event => event.key === 'Enter' && event.preventDefault()}
             >
-              <h2>Where it listens</h2>
+              <h2>Handles</h2>
               {catalog.length > SEARCH_FROM ? (
                 <Search value={query} label="Search platforms" onInput={setQuery} />
               ) : null}
             </div>
             <p class="muted">
-              Each platform becomes an app, set up on the next page. With none it runs from the
-              dashboard and the CLI.
+              Each platform becomes the agent's handle there: its own app, set up on the next page,
+              where <span class="semi">@mentions</span> and events start tasks. The dashboard, the
+              CLI and the SDK can always start it.
+            </p>
+            <p class="muted">
+              <b>Connections</b> are separate and shared by all agents: add as many as tasks need,
+              like an API key, an MCP server or a member's own account, in{' '}
+              <Link class="link" href="/dash/settings/[tab]" params={{ tab: 'connections' }}>
+                Settings
+              </Link>
+              .
             </p>
             <ul class="listen">
               {shown.map(info => {
@@ -634,7 +641,7 @@ export function AgentEditor({
                       />
                     </label>
                     {on ? (
-                      <div class="triggers">
+                      <div class="events">
                         <div class="chips" role="group" aria-label={`What wakes it on ${info.id}`}>
                           {events.map(([event, spec]) => {
                             const pressed = ticked.includes(event);
@@ -674,6 +681,16 @@ export function AgentEditor({
               })}
               {shown.length ? null : <li class="listen-none muted">No platform matches.</li>}
             </ul>
+            {hidden ? (
+              <button
+                type="button"
+                class="btn ghost sm more-toggle"
+                aria-expanded={more}
+                onClick={() => setMore(!more)}
+              >
+                {more ? 'Show less' : 'Show more'}
+              </button>
+            ) : null}
             {levels.length ? (
               <Field
                 label="Platform access"
@@ -745,6 +762,7 @@ export function AgentEditor({
                 <span class="pills">
                   <Badge>dashboard</Badge>
                   {agent?.local ? null : <Badge>v{creating ? 1 : agent.currentVersion + 1}</Badge>}
+                  {agent?.settings?.disabled ? <DisabledBadge /> : null}
                 </span>
               </div>
             </div>
@@ -752,21 +770,14 @@ export function AgentEditor({
               <span>{draft.description.trim() || 'No description yet.'}</span>
             </div>
             {draft.platforms.length ? (
-              <span class="pfs">
-                {draft.platforms.map(id => (
-                  <Platform
-                    key={id}
-                    id={id}
-                    info={catalog.find(entry => entry.id === id)}
-                    state="none"
-                  />
-                ))}
-              </span>
+              <PlatformLine
+                platforms={draft.platforms.map(id => ({ id, state: 'none' as const }))}
+                catalog={catalog}
+              />
             ) : (
-              <span class="pfs muted">Listens nowhere yet</span>
+              <span class="pfs muted">No handles yet</span>
             )}
           </div>
-          <p class="summary">{summaryOf(draft)}</p>
         </aside>
       </div>
     </form>

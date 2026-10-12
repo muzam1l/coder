@@ -1,4 +1,6 @@
+import type { AgentApp, Installation } from '../../agent/types';
 import { completeLogin, parseCredentialId, type StoredCredential } from '../settings/credentials';
+import { InstallationBoundError } from './types';
 import type { CredentialScope, CredentialWork, DeliveryLease, TaskStatus } from './types';
 import type { Store, StoreKind, StoreRecords, LoginPatch, LoginFence } from './types';
 import { type EngineLogin } from '../settings/logins';
@@ -34,6 +36,34 @@ export async function writeCredentials<K extends CredentialScope>(
   }
 
   return Boolean(changes?.length);
+}
+
+/** Refuse a live installation whose account, or an account it covers, another installation on the same platform client holds; `rows` are every installation. */
+export function checkBinding(
+  rows: Array<[string, unknown]>,
+  id: string,
+  value: Installation,
+): void {
+  if (value.deletedAt !== undefined) return;
+
+  const client = value.app.split('/')[0]!;
+  const held = (key: string, row: Installation) => [
+    key.slice(row.app.length + 1),
+    ...(row.covers ?? []),
+  ];
+  const accounts = new Set(held(id, value));
+  const bound = rows.some(([key, row]) => {
+    const other = row as Installation;
+
+    return (
+      key !== id &&
+      !other.deletedAt &&
+      (other.app === client || other.app.startsWith(`${client}/`)) &&
+      held(key, other).some(account => accounts.has(account))
+    );
+  });
+
+  if (bound) throw new InstallationBoundError(`Installation "${id}" is bound through another app.`);
 }
 
 export class MemoryStore implements Store {
@@ -87,6 +117,15 @@ export class MemoryStore implements Store {
     return bucket;
   }
 
+  /** An app on a shared app's credentials reads them from that app. */
+  private read(kind: StoreKind, value: unknown): StoreRecords[StoreKind] {
+    const app = value as AgentApp;
+    if (kind !== 'app' || !app.shared) return value as StoreRecords[StoreKind];
+    const shared = this.live('app').get(app.shared)?.value as AgentApp | undefined;
+
+    return { ...app, credentials: shared?.credentials ?? '' };
+  }
+
   private live(kind: StoreKind): Map<string, Entry> {
     const bucket = this.bucket(kind);
     const now = this.now();
@@ -100,7 +139,9 @@ export class MemoryStore implements Store {
   get<T extends StoreRecords['snapshot']>(kind: 'snapshot', id: string): Promise<T | undefined>;
   get<T extends StoreRecords['delivery']>(kind: 'delivery', id: string): Promise<T | undefined>;
   async get(kind: StoreKind, id: string): Promise<StoreRecords[StoreKind] | undefined> {
-    return this.live(kind).get(id)?.value as StoreRecords[StoreKind] | undefined;
+    const entry = this.live(kind).get(id);
+
+    return entry && this.read(kind, entry.value);
   }
 
   async patchLogin(
@@ -141,6 +182,13 @@ export class MemoryStore implements Store {
     value: StoreRecords[K],
     options: { ttlMs?: number; unarchive?: boolean } = {},
   ): Promise<void> {
+    if (kind === 'installation')
+      checkBinding(
+        [...this.live(kind)].map(([key, entry]) => [key, entry.value]),
+        id,
+        value as Installation,
+      );
+
     const expiresAt = options.ttlMs === undefined ? undefined : this.now() + options.ttlMs;
     const bucket = this.bucket(kind);
     const archivedAt =
@@ -149,7 +197,12 @@ export class MemoryStore implements Store {
         : undefined;
 
     bucket.set(id, {
-      value: archivedAt === undefined ? value : Object.assign({}, value, { archivedAt }),
+      value:
+        archivedAt !== undefined
+          ? Object.assign({}, value, { archivedAt })
+          : kind === 'app' && (value as AgentApp).shared
+            ? { ...(value as AgentApp), credentials: '' }
+            : value,
       expiresAt,
     });
   }
@@ -189,7 +242,7 @@ export class MemoryStore implements Store {
       .filter(([id]) => !options.after || id > options.after)
       .sort(([left], [right]) => left.localeCompare(right))
       .slice(0, options.limit)
-      .map(([id, entry]) => ({ id, value: entry.value as StoreRecords[StoreKind] }));
+      .map(([id, entry]) => ({ id, value: this.read(kind, entry.value) }));
   }
 
   async delete(kind: StoreKind, id: string): Promise<void> {

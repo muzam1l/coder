@@ -1,5 +1,4 @@
-import type { McpServerSpec } from '../../core/types';
-import type { AgentEvent, Preset } from '../../agent/types';
+import type { AgentEvent, McpServerSpec, Preset } from '../types';
 
 /** Access levels of GitHub's MCP server; the narrowed token enforces them. */
 export const GITHUB_PRESETS: Record<Preset, string[]> = {

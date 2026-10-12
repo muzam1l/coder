@@ -1,4 +1,6 @@
 /** A platform event becomes a task: dedupe, installation, linked member, agent match, credential, then the queue. */
+import { taskConnectionSecrets } from '../connections/resolve';
+import { connectionGrants } from '../connections/grants';
 import { randomUUID } from 'node:crypto';
 import { effectiveSettings } from '../../agent/definition';
 import type { Integration } from '../../integrations/types';
@@ -18,14 +20,22 @@ import type { ServerContext } from '../context';
 import { updateMetadata } from '../store';
 import type { Store } from '../store/types';
 import { machineSignedIn, runLocalTask } from './local';
+import { syncLocalAgents } from '../store/local';
 import { credentialFix, resolveCredential } from '../settings/credentials';
-import { installationToken, resolveTokens, tokenBound } from './context';
+import { installationToken, requesterToken, resolveTokens, tokenBound } from './context';
 import { chooseRunner } from '../runners';
 import { sessionKey, addInbox } from './queue';
 import { buildContext, threadKey } from './thread';
-import { enqueueSteer, generateTaskId, loadTask, reconcileTask } from '../../core/state';
+import {
+  appendTaskLog,
+  enqueueSteer,
+  generateTaskId,
+  loadTask,
+  reconcileTask,
+} from '../../core/state';
 import { generateRunId } from '../../flow/runs';
 import { steerTask } from '../../core/task/actions';
+import { connectionWarnings } from './logs';
 
 const PENDING_TTL_MS = 60_000;
 
@@ -112,6 +122,14 @@ async function linkedMember(ctx: ServerContext, integration: Integration, event:
   return user?.organizations?.includes(ctx.organizationId) ? user : undefined;
 }
 
+function outsiderEvent(
+  ctx: ServerContext,
+  member: unknown,
+  canWrite: boolean | undefined,
+): boolean {
+  return ctx.auth ? !member : canWrite === false;
+}
+
 /** The link that makes an actor known, at most once a day each unless they asked for something that needs it. */
 async function sendLink(
   ctx: ServerContext,
@@ -175,7 +193,11 @@ async function frozenToolScopes(
     scopes[event.integration] = {
       repo: { owner: event.repo.owner, name: event.repo.name },
     };
-  else if (event.chat) scopes[event.integration] = { thread: event.chat.thread.id };
+  else if (event.chat)
+    scopes[event.integration] = {
+      thread: event.chat.thread.id,
+      ...(event.within ? { within: event.within } : {}),
+    };
 
   for (const [id, connection] of Object.entries(installation.connections ?? {})) {
     if (connection.kind !== 'installation') continue;
@@ -254,6 +276,9 @@ export async function dispatchEvent(
   const delivery = `delivery:${integration.id}:${app.id}:${event.installationId}:${event.chat?.thread.id ?? ''}:${event.deliveryId}`;
   const installation = await loadInstallation(ctx, app, event);
   if (!installation) return {};
+  if (ctx.local)
+    await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations, app.agent).catch(() => {});
+  if ((await ctx.store.get('agent', app.agent))?.settings?.disabled) return {};
   if (
     ctx.local &&
     (await ctx.store.get('delivery', delivery).then(receipt => receipt && !receipt.pending))
@@ -447,7 +472,7 @@ async function claimed(
   if (!match) return {};
 
   const steers = event.chat && match.flow === 'default' && integration.events[event.type]?.steers;
-  const local = (task: AgentTask) =>
+  const local = (task: AgentTask, fallbackText?: string, personal?: string) =>
     handoff(
       ctx,
       delivery,
@@ -456,6 +481,13 @@ async function claimed(
       async pending => {
         const saved = pending.task!;
         const started = await runLocalTask(ctx, saved, pending.taskId);
+        await taskConnectionSecrets(ctx, started.task.id, [
+          ...Object.values(resolved),
+          ...(personal ? [personal] : []),
+        ]);
+        if (fallbackText) {
+          appendTaskLog(ctx.local!.cwd, started.task.id, { kind: 'status', message: fallbackText });
+        }
         if (steers) {
           const session = await localSession(ctx, sessionKey(saved));
           if (session && session.id === pending.taskId)
@@ -503,7 +535,7 @@ async function claimed(
 
   const settings = effectiveSettings(agent);
   const tokens = declaredTokens(resolved, agent);
-  const [route, credential, toolScopes, context] = await Promise.all([
+  const [route, credential, toolScopes, context, grants, personalToken] = await Promise.all([
     chooseRunner(ctx, { requester, agent: agent.definition.runner }),
     resolveCredential(ctx.store, settings.engine, requester),
     frozenToolScopes(ctx, installation, event),
@@ -519,6 +551,10 @@ async function claimed(
         : undefined,
       member ?? null,
     ),
+    connectionGrants(ctx, requester, agent.usage?.connections, Boolean(ctx.auth && !member)),
+    match.actAs === 'requester'
+      ? requesterToken(ctx, integration, event, credentials).catch(() => undefined)
+      : undefined,
   ]);
   if (
     !credential &&
@@ -550,15 +586,38 @@ async function claimed(
     return effect(() => replies.post(setupText(ctx, settings.engine ?? 'claude')).then(() => {}));
   }
 
-  // Write tools need a requester who can write there, checked with the platform.
   const reads = new Set(integration.tools.presets.observe);
   const own = match.tools[event.integration] ?? [];
-  if (
-    member &&
-    integration.auth.canWrite &&
-    own.some(name => !reads.has(name)) &&
-    !(await integration.auth.canWrite(event, eventToken))
-  )
+  const fallback = !!ctx.auth && match.actAs === 'requester' && !personalToken;
+  const writes = own.some(name => !reads.has(name));
+  const check = ctx.auth
+    ? member && (writes || fallback)
+    : writes ||
+      grants.length > 0 ||
+      Object.entries(match.tools).some(
+        ([id, names]) => id !== event.integration && id in tokens && names.length,
+      );
+  const canWrite = check
+    ? await integration.auth.canWrite?.(event, eventToken).catch(() => false)
+    : undefined;
+  const outsider = outsiderEvent(ctx, member, canWrite);
+  const fallbackText = fallback
+    ? `Acting as the app because the requester's account has no usable ${integration.name} token. ${canWrite === true && !outsider ? 'The platform write check passed.' : 'Only reads are allowed.'} [Connect your account](${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}/dash/settings/connections).`
+    : undefined;
+  if (fallbackText)
+    context.instructions = [
+      context.instructions,
+      fallbackText,
+      'Include the account connection link in your reply.',
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+
+  if (outsider) {
+    const comments = new Set(integration.tools.presets.comment);
+    for (const id of Object.keys(match.tools))
+      match.tools[id] = id === event.integration ? own.filter(name => comments.has(name)) : [];
+  } else if ((member && canWrite === false) || (fallback && canWrite !== true))
     match.tools[event.integration] = own.filter(name => reads.has(name));
 
   const tools = Object.fromEntries(
@@ -593,12 +652,14 @@ async function claimed(
     ...(agent.files ? { files: agent.files } : {}),
     ...(agent.usage ? { usage: agent.usage } : {}),
     tools,
+    connections: outsider ? [] : grants,
     ...(Object.keys(toolScopes).length ? { toolScopes } : {}),
     ...(Object.keys(context).length ? { context } : {}),
   };
-  if (ctx.local && !event.repo && route.runner === 'local' && !route.runnerId) return local(task);
+  if (ctx.local && !event.repo && route.runner === 'local' && !route.runnerId)
+    return local(task, fallbackText, personalToken);
 
-  return ctx.queue.deliver(
+  const delivered = await ctx.queue.deliver(
     ctx.organizationId,
     task,
     now(),
@@ -606,4 +667,14 @@ async function claimed(
     Boolean(steers),
     ctx.config.maxQueued ?? 1000,
   );
+  if (delivered.taskId)
+    await taskConnectionSecrets(ctx, delivered.taskId, [
+      ...Object.values(tokens),
+      ...(personalToken ? [personalToken] : []),
+    ]);
+  if (fallbackText && delivered.taskId) {
+    await connectionWarnings(ctx, delivered.taskId, [fallbackText]);
+  }
+
+  return delivered;
 }

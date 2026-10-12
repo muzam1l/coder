@@ -1,5 +1,6 @@
 import type { SerializedMessage, SerializedThread } from 'chat';
 import type { TaskLogEntry } from '../core/task/log-view';
+import type { CreateStep, IntegrationErrorCode, PlatformPost } from '../integrations/types';
 
 export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 
@@ -59,7 +60,7 @@ export interface AgentDefinition {
   model?: string;
   effort?: string;
   permissions?: string;
-  integrations?: Record<string, { triggers?: string[] | Record<string, unknown>; tools?: unknown }>;
+  integrations?: Record<string, { events?: string[] | Record<string, unknown>; tools?: unknown }>;
 }
 
 /** Organization overrides for one agent (`AgentUsage` on the server). */
@@ -71,6 +72,10 @@ export interface AgentSettings {
   /** A registered runner id; unset follows the requester's default. */
   runner?: string;
   integrations?: Record<string, { allowedTools?: string | string[]; allowedEvents?: string[] }>;
+  /** Connections its tasks may use, by id; absent allows every granted one. */
+  connections?: string[];
+  /** Off in this workspace: no platform events, no new tasks. */
+  disabled?: boolean;
 }
 
 export interface AgentRow {
@@ -78,6 +83,8 @@ export interface AgentRow {
   name: string;
   description?: string;
   source: string;
+  /** The agent a task runs when it names none. */
+  default?: true;
   repo?: string;
   path?: string;
   /** Browser address of the tracked folder, for repository agents. */
@@ -92,6 +99,8 @@ export interface AgentRow {
   files?: Record<string, string>;
   settings?: AgentSettings;
   versions?: VersionRow[];
+  /** The names its platform apps answer to where it wakes on a mention. */
+  handles?: string[];
 }
 
 /** What an agent can listen to and do on an integration. */
@@ -101,10 +110,68 @@ export interface IntegrationInfo {
   brand: { color: string; icon: string; dark?: string; svg?: string };
   description: string;
   installLabel: string;
+  /** What one account an installation covers is called. */
+  covered?: string;
+  /** Listed first among an agent's handles. */
+  featured?: true;
+  /** Built-in agents install the server's shared app, or create their own like any agent. */
+  builtinApp: 'shared' | 'own';
+  /** Members can connect their own account here, for tasks that act as them. */
+  personal?: true;
+  /** A connection can sign in here with OAuth now: the integration has user OAuth and an app to sign in through. */
+  connectable?: true;
   organizationApps: boolean;
   events: Record<string, { description: string; noisy?: true; addressed?: true }>;
   presets: Record<string, string[]>;
   repositories?: boolean;
+  /** The form that creates an app; absent where creation happens on the platform itself. */
+  create?: CreateStep;
+  /** PUBLIC_URL is loopback, so platforms cannot reach this server and `create` shows a placeholder address. */
+  unreachable?: true;
+}
+
+/** A started create: its transaction, where the browser goes when creation happens on the platform, and an operator link's form. */
+export interface CreateStart {
+  tx: string;
+  /** The platform's own create form, which the browser posts. */
+  post?: PlatformPost;
+  create?: CreateStep;
+}
+
+/** How a create, install or link flow ended; the Platforms tab and `/dash/setup` word it. */
+export interface SetupOutcome {
+  status:
+    | 'connected'
+    | 'created'
+    | 'linked'
+    | 'cancelled'
+    | 'install-expired'
+    | 'create-expired'
+    | 'link-expired'
+    | 'unknown-integration'
+    | 'no-public-url'
+    | 'unknown-app'
+    | 'installation-taken'
+    | 'installation-bound'
+    | 'account-taken'
+    | 'not-member'
+    | 'disconnected'
+    | 'renew-failed'
+    | 'failed'
+    | IntegrationErrorCode;
+  /** Integration id. */
+  platform?: string;
+  /** The account it got connected to. */
+  account?: string;
+  /** The app it created. */
+  app?: string;
+  /** The app an install was for, by id. */
+  appId?: string;
+  /** The platform's own error code. */
+  error?: string;
+  /** Integrations offered to connect next, linked to installation `link`. */
+  connect?: string[];
+  link?: string;
 }
 
 export interface CredentialRow {
@@ -197,6 +264,7 @@ export interface InstallationRow {
   app: string;
   integration: string;
   account: { login: string; type?: string };
+  covers?: string[];
   deletedAt?: number;
   settings?: {
     configRepo?: string;
@@ -234,6 +302,32 @@ export interface Me {
     url?: string;
     subscriptions?: { claude: boolean; codex: boolean };
   };
+  /** May enter operator mode. */
+  operator?: boolean;
+}
+
+/** One platform in the operator area, with the built-in agent's shared app when this server has it. */
+export interface OperatorAppRow {
+  integration: string;
+  name: string;
+  brand: IntegrationInfo['brand'];
+  organizationApps: boolean;
+  app?: { id: string; name: string; createdAt: number };
+}
+
+export interface OperatorApps {
+  /** The name a new shared app gets unless the operator picks one. */
+  name: string;
+  platforms: OperatorAppRow[];
+  /** Platforms cannot reach this server yet, so creating an app would fail. */
+  unreachable?: true;
+}
+
+export interface AuditRow {
+  at: number;
+  actor: { id: string; name?: string; email?: string };
+  action: string;
+  target: string;
 }
 
 export interface Paged<T> {
@@ -285,7 +379,6 @@ export type Config = {
   chain?: string[];
   engines?: Record<string, EngineEntry | undefined>;
   models?: Record<string, ModelEntry>;
-  mcp?: Record<string, McpEntry>;
   approvals?: { escalationTimeoutMs?: number; allowedNetworkHosts?: string[] };
 };
 export type RunnerKind = 'local' | 'local-docker' | 'vercel-sandbox' | 'github-actions' | 'http';
@@ -359,6 +452,47 @@ export interface ProbeResult {
   detail: string;
 }
 export type McpRows = Record<string, McpEntry>;
+
+/** One connection as the dashboard lists it; secrets never leave the server. */
+export interface ConnectionRow {
+  id: string;
+  name: string;
+  /** `mcp`, `env` for an API key tasks read from `env`, or the integration id whose API it reaches. */
+  provider: string;
+  /** Set on a member's own connection; `mine` when that member is the viewer. */
+  owner?: string;
+  mine?: true;
+  access: 'observe' | 'write';
+  auth: 'none' | 'key' | 'oauth';
+  /** The remote server, or the stdio command, it is bound to. */
+  url?: string;
+  command?: string;
+  /** The environment variable an `env` connection's key is in. */
+  env?: string;
+  account?: string;
+  /** `authorize`: OAuth not finished yet; `reconnect`: its secret stopped working. */
+  status: 'ok' | 'authorize' | 'reconnect';
+  createdAt: number;
+}
+
+/** What Add connection posts; `key` is write-only. */
+export interface ConnectionInput {
+  name: string;
+  /** Slug; derived from `name` when absent. */
+  id?: string;
+  /** `mcp`, `env` with `keyIn.env`, or an integration id to connect a member's own account there. */
+  provider?: string;
+  /** `me` makes it the viewer's own instead of the workspace's. */
+  owner?: 'me';
+  access?: 'observe' | 'write';
+  endpoint?: McpEntry;
+  auth?: 'none' | 'key' | 'oauth';
+  /** For `env`, a new credential holding `key`; without `key` or `credential`, a visible credential with `keyIn.env`. */
+  key?: string;
+  keyIn?: { header: string } | { env: string };
+  /** The credential id an `env` connection reads. */
+  credential?: string;
+}
 export type RegistryInput = {
   name: string;
   label?: string;
@@ -369,6 +503,8 @@ export type RegistryInput = {
 };
 export type Found = {
   name: string;
+  verified?: true;
+  curated?: true;
   title: string;
   description: string;
   type: string;
@@ -428,6 +564,8 @@ export type TaskInput = {
   permissions?: string;
   runner?: string;
   mcp?: string[];
+  /** Narrows the connections the task is granted. */
+  connections?: string[];
 };
 export type ImportAgent = {
   id: string;
@@ -436,6 +574,7 @@ export type ImportAgent = {
   version?: number;
   commit?: string;
   taken?: boolean;
+  warnings?: string[];
 };
 
 export interface AgentEvent {

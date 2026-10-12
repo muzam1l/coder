@@ -1,7 +1,6 @@
 /** Teams apps: the user's own single-tenant Azure Bot, bound to its directory by an Entra sign-in from that directory. */
-import { escapeHtml, htmlResponse } from '../../utils/html';
-import { credentialsPage, idClaims, postedFields, tokenGrant } from '../setup';
-import type { IntegrationApp } from '../types';
+import { idClaims, postedFields, tokenGrant } from '../setup';
+import { IntegrationError, type IntegrationApp } from '../types';
 
 export interface TeamsAppCredentials {
   /** The bot's Microsoft App ID, its Entra app registration's client ID. */
@@ -19,23 +18,53 @@ const FIELDS = ['appId', 'appPassword', 'tenantId'] as const;
 const base = (publicUrl: string) => publicUrl.replace(/\/$/, '');
 
 export const teamsApp: IntegrationApp = {
-  createPage({ publicUrl, state }) {
-    return credentialsPage(publicUrl, 'teams', state, {
-      title: 'Connect Microsoft Teams',
-      steps: [
-        'In the Azure portal, create an Azure Bot of type Single Tenant with a new app registration.',
-        `Set its messaging endpoint to ${base(publicUrl)}/hooks/teams?app= followed by the Microsoft App ID, and turn on the Microsoft Teams channel.`,
-        `In the app registration, add the web redirect URI ${base(publicUrl)}/install/teams/callback and create a client secret.`,
-        'In the Teams Developer Portal, create a Teams app for the bot and install it in your organization.',
-        'Fill in the Microsoft App ID, the client secret, and the directory (tenant) ID.',
-      ],
-      fields: [
-        ['appId', 'Microsoft App ID'],
-        ['appPassword', 'Client secret'],
-        ['tenantId', 'Directory (tenant) ID'],
-      ],
-    });
-  },
+  builtin: 'own',
+  createStep: publicUrl => ({
+    intro: 'Teams runs the agent as your own single-tenant Azure Bot.',
+    link: 'https://portal.azure.com',
+    steps: [
+      {
+        text: 'In the Azure portal, go to **Create a resource › Azure Bot › Create** and make an Azure Bot of type **Single Tenant** with a new app registration.',
+        link: 'https://portal.azure.com',
+      },
+      {
+        text: 'Set **Azure Bot › Settings › Configuration › Messaging endpoint** to this address followed by the Microsoft App ID, then turn on **Azure Bot › Settings › Channels › Microsoft Teams**.',
+        copy: [`${base(publicUrl)}/hooks/teams?app=`],
+      },
+      {
+        text: 'In the app registration, add this redirect URI under **Authentication › Redirect URI configuration › Add Redirect URI › Web**, then create a client secret under **Certificates & secrets › Client secrets › New client secret**.',
+        link: 'https://entra.microsoft.com',
+        copy: [`${base(publicUrl)}/install/teams/callback`],
+      },
+      {
+        text: 'In the Teams Developer Portal, go to **Apps › New app** to create a Teams app for the bot, then publish it to your organization under **Publish › Publish to org**.',
+        link: 'https://dev.teams.microsoft.com',
+      },
+    ],
+    fields: [
+      {
+        name: 'appId',
+        label: 'Microsoft App ID',
+        placeholder: '00000000-0000-0000-0000-000000000000',
+        required: true,
+      },
+      {
+        name: 'appPassword',
+        label: 'Client secret',
+        hint: "the secret's value, not its ID",
+        placeholder: 'abc8Q~…',
+        required: true,
+      },
+      {
+        name: 'tenantId',
+        label: 'Directory (tenant) ID',
+        hint: "on the app registration's overview",
+        placeholder: '00000000-0000-0000-0000-000000000000',
+        required: true,
+      },
+    ],
+    submit: 'Create Teams app',
+  }),
   async createCallback(req, { state, definition }) {
     const credentials: TeamsAppCredentials = await postedFields(req, FIELDS);
     return { platformAppId: credentials.appId, name: definition.name ?? state.agent, credentials };
@@ -54,7 +83,7 @@ export const teamsApp: IntegrationApp = {
   // The bot serves one directory; a sign-in from that directory binds it.
   async installCallback(req, { credentials, publicUrl, fetch: request }) {
     const code = new URL(req.url).searchParams.get('code');
-    if (!code) throw new Error('Microsoft sent no authorization code');
+    if (!code) throw new IntegrationError('missing-code');
     const { appId, appPassword, tenantId } = credentials as TeamsAppCredentials;
     const { idToken } = await tokenGrant(
       `${LOGIN}/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`,
@@ -69,15 +98,11 @@ export const teamsApp: IntegrationApp = {
       request,
     );
     const claims = idClaims(idToken, appId);
-    if (claims.tid !== tenantId)
-      throw new Error('That account belongs to another Microsoft directory than the bot');
+    if (claims.tid !== tenantId) throw new IntegrationError('wrong-account');
     const domain = String(claims.preferred_username ?? '').split('@')[1] || tenantId;
     return {
       platformInstallId: tenantId,
       account: { login: domain },
-      response: htmlResponse(
-        `<title>Connected</title><p>Connected Microsoft Teams for ${escapeHtml(domain)}.</p>`,
-      ),
     };
   },
 };

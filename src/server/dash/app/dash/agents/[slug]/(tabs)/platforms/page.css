@@ -2,6 +2,9 @@
   color: var(--muted);
   max-width: 72ch;
 }
+.tab-lead b {
+  color: var(--fg);
+}
 .more-list .inst {
   padding: 4px 6px;
 }
@@ -39,6 +42,78 @@
 .plat .acts .pop {
   text-align: left;
   white-space: normal;
+}
+.plat .acts .info .more-list p {
+  margin: 0;
+}
+
+/* an app's create form */
+dialog.create-dialog {
+  width: min(560px, calc(100vw - 32px));
+  max-height: calc(100dvh - 48px);
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--line2);
+  background: var(--tile);
+  color: inherit;
+  text-align: left;
+  white-space: normal;
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+dialog.create-dialog::backdrop {
+  background: light-dark(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.72));
+}
+.create-dialog form {
+  display: grid;
+  gap: 14px;
+  padding: 16px 20px 20px;
+}
+.create-dialog header {
+  display: flex;
+  align-items: center;
+  margin-right: -10px;
+}
+.create-dialog h2 {
+  flex: 1;
+  font-size: 15px;
+  font-weight: 700;
+}
+.create-open {
+  justify-self: start;
+}
+.create-steps {
+  display: grid;
+  gap: 10px;
+  padding-left: 22px;
+  list-style: decimal;
+  color: var(--muted);
+}
+.create-steps li > * + * {
+  margin-top: 6px;
+}
+.create-more > summary {
+  width: max-content;
+  color: var(--muted);
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.create-more ul {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-left: 22px;
+  list-style: disc;
+  color: var(--muted);
+}
+.create-more .ui-name,
+.create-steps .ui-name {
+  padding: 0 4px;
+  color: var(--fg);
+  background: var(--wash);
+}
+.create-dialog .actions {
+  justify-content: flex-end;
+  margin-top: 4px;
 }
 
 @media (max-width: 1180px) {
@@ -84,4 +159,8 @@
   .plat.early .where {
     grid-column: 1 / -1;
   }
+}
+.create-steps a {
+  color: var(--acc);
+  overflow-wrap: anywhere;
 }

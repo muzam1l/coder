@@ -1,9 +1,13 @@
-import { Card } from '@/comps/ui/card';
+import { FoldCard } from '@/comps/ui/card';
 
 /** How a server on this machine receives platform events: a public tunnel to its port, then PUBLIC_URL. */
 export function TunnelGuide({ port }: { port: string }) {
   return (
-    <Card title="Receive platform events">
+    <FoldCard
+      title="Receive platform events"
+      note={`Expose port ${port} so platforms can reach this server`}
+      open="Show"
+    >
       <div class="guide">
         <p>
           Platforms reach this server through a public address. Expose port {port} with one of
@@ -23,6 +27,6 @@ export function TunnelGuide({ port }: { port: string }) {
           tunnel serves only webhooks and app setup, never this dashboard.
         </p>
       </div>
-    </Card>
+    </FoldCard>
   );
 }

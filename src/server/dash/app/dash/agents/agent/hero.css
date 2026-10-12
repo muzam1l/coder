@@ -8,6 +8,32 @@
 .hero > .grow {
   flex: 1 1 280px;
 }
+.hero .handles {
+  font-size: 12px;
+  color: var(--muted);
+}
+.hero.stuck .handles {
+  display: none;
+}
+/* stuck: the back arrow, then the mark, then the title, on one line */
+.hero.stuck > .grow {
+  display: contents;
+}
+.hero.stuck .back {
+  order: -1;
+}
+.hero.stuck .title-row {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.hero .title-row button.link {
+  padding: 0;
+  border-width: 0 0 1px;
+  background: none;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
 .hero-mark {
   display: grid;
   place-items: center;

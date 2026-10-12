@@ -1,0 +1,23 @@
+.copy-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.copy-line > code,
+.copy-line > a {
+  flex: 1;
+  min-width: 0;
+}
+.copy-line code {
+  display: block;
+  padding: 8px 10px;
+  background: var(--wash2);
+  font: 12px/1.5 var(--mono);
+  overflow-wrap: anywhere;
+}
+.copy-line > a code {
+  color: var(--acc);
+}
+.copy-line > a:hover code {
+  background: var(--accbg);
+}

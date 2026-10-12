@@ -1,3 +1,4 @@
+import { deleteTaskConnections } from '../connections/resolve';
 import { type TaskStatus } from '../store/types';
 import { decodeCursor, json, page, pageLimit, paged } from '../routes/http';
 import {
@@ -184,6 +185,7 @@ export async function removeTask(
   }
   if (!(await deleteTask(ctx, status)))
     return json({ error: 'Task changed while deleting. Try again.' }, 409);
+  await deleteTaskConnections(ctx.store, taskId);
   if (ctx.local) {
     await ctx.store.delete('snapshot', `local-start:${taskId}`);
     await ctx.store.delete('snapshot', `completion:${taskId}`);

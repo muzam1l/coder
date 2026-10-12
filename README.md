@@ -15,7 +15,7 @@ Coder turns any model into an agent you own. One runtime and one set of rules, w
 - **Fast dispatch.** Handoffs are instant, and light enough to run many agents at once.
 - **Fully controlled.** One permission model across every engine, live visibility into every task, and steering mid-run.
 - **Always on.** Your agents run in the cloud, connected to GitHub, Slack and any other app, each task in its own workspace with only the access you grant.
-- **Your agents, your team.** Build agents with their own instructions, triggers and tools, and share them, with their credentials, across your workspace.
+- **Your agents, your team.** Build agents with their own instructions, events and tools, and share them, with their credentials, across your workspace.
 - **Flows and SDK.** Orchestrate whole waves of tasks from one TypeScript file, or drive everything from your own code.
 - **Built-in review.** Review any diff with a read-only agent that checks every finding against your repo.
 
@@ -75,7 +75,7 @@ coder dash
 
 Your agents, always on at **[coder.wular.ai](https://coder.wular.ai)** or [on your own servers](#self-host). Connect GitHub, Slack or any other app, and they work right inside it.
 
-- **Your agents.** Instructions, triggers and tools, set in the dashboard or in `.coder/agents/` in your repo.
+- **Your agents.** Instructions, events and tools, set in the dashboard or in `.coder/agents/` in your repo.
 - **Every app, one dashboard.** GitHub, Slack and the rest of the integration catalog.
 - **Scoped access.** Each task gets a fresh workspace and a platform token limited to that task.
 - **A built-in agent.** `coder` answers questions, reviews pull requests, and opens them for requested changes.

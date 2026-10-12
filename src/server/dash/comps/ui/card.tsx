@@ -1,6 +1,9 @@
 import './card.css';
 import type { ComponentChildren } from 'preact';
 
+import { Icon } from './icon';
+import { iPlus } from './icons';
+
 export function Card({
   title,
   count,
@@ -27,6 +30,43 @@ export function Card({
       ) : null}
       {children}
     </section>
+  );
+}
+
+/** A card that starts folded: its bar shows the title and a one-line note, and a click opens it. */
+export function FoldCard({
+  title,
+  note,
+  actions,
+  open = 'Add',
+  opened,
+  children,
+}: {
+  title: ComponentChildren;
+  note: ComponentChildren;
+  actions?: ComponentChildren;
+  /** The folded bar's button; Add shows a plus. */
+  open?: string;
+  /** Starts unfolded, as when there is nothing in the list under it yet. */
+  opened?: boolean;
+  children: ComponentChildren;
+}) {
+  return (
+    <details class="card frame fold" open={opened}>
+      <summary class="bar">
+        <h2>{title}</h2>
+        <span class="fold-note">{note}</span>
+        {actions ? <span class="bar-r">{actions}</span> : null}
+        <span class="btn outline sm fold-open" aria-hidden="true">
+          {open === 'Add' ? <Icon d={iPlus} /> : null}
+          {open}
+        </span>
+        <span class="btn ghost sm fold-close" aria-hidden="true">
+          Close
+        </span>
+      </summary>
+      {children}
+    </details>
   );
 }
 

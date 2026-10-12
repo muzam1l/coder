@@ -7,7 +7,6 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { client, poll } from '@/utils/client';
 import {
   iCheck,
-  iCopy,
   iDots,
   iDown,
   iGit,
@@ -19,6 +18,7 @@ import {
 } from '@/comps/ui/icons';
 import { Card, Loading } from '@/comps/ui/card';
 import { Badge } from '@/comps/ui/badge';
+import { CopyLine } from '@/comps/ui/copy';
 import { ErrorText, Field } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
 import { Menu, MenuItem } from '@/comps/ui/menu';
@@ -171,36 +171,17 @@ function RunnerItem({
   );
 }
 
-/** One command to copy. */
-function Command({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false);
-  return (
-    <div class="runner-cmd">
-      <code>{value}</code>
-      <button
-        type="button"
-        class={copied ? 'icon-btn copied' : 'icon-btn'}
-        aria-label={copied ? 'Copied' : 'Copy command'}
-        title={copied ? 'Copied' : 'Copy command'}
-        onClick={() => void navigator.clipboard.writeText(value).then(() => setCopied(true))}
-      >
-        <Icon d={copied ? iCheck : iCopy} />
-      </button>
-    </div>
-  );
-}
-
 /** A pairing in progress: what to run on the other computer, step by step, and a wait until it connects. */
 function Pairing({ pairing, onCancel }: { pairing: RunnerPairing; onCancel: () => void }) {
   return (
     <div class="runner-pair">
       <details class="runner-step">
         <summary>Install the Coder CLI on that computer, if it is not there yet</summary>
-        <Command value="npm install -g @wular/coder" />
+        <CopyLine value="npm install -g @wular/coder" />
       </details>
       <div class="runner-step">
         <p>Run this there. The token works once and expires in 15 minutes.</p>
-        <Command value={pairing.command} />
+        <CopyLine value={pairing.command} />
       </div>
       <details class="runner-step">
         <summary>Behind a firewall? This server has to reach that computer over HTTPS</summary>
@@ -208,7 +189,7 @@ function Pairing({ pairing, onCancel }: { pairing: RunnerPairing; onCancel: () =
           Open a tunnel on that computer first, then add its address to the command above as{' '}
           <code>--runner-url</code>.
         </p>
-        <Command value="cloudflared tunnel --url http://localhost:4100" />
+        <CopyLine value="cloudflared tunnel --url http://localhost:4100" />
       </details>
       <div class="runner-wait">
         <Loading label="Waiting for that computer to connect" inline dots />

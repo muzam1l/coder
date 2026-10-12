@@ -1,13 +1,62 @@
 /** A task's output log in the `Store` (`tasklog`), filled from its runner with every secret the task holds redacted. */
 import type { TaskLogLine, TaskStatus, Store } from '../store/types';
 import type { ServerContext } from '../context';
-import { taskContext } from './context';
+import { taskLogSecrets } from './context';
 import { taskRunner } from '../runners';
 import { logEntry } from '../../core/task/log-view';
+import { DrizzleStore } from '../store/pg/store';
+import { DrizzleQueue } from '../store/pg/queue';
 
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
 
 const logKey = (taskId: string, seq: number) => `${taskId}:${String(seq).padStart(6, '0')}`;
+
+export async function connectionWarnings(
+  ctx: ServerContext,
+  taskId: string,
+  warnings: string[],
+): Promise<void> {
+  if (!warnings.length) return;
+  await ctx.store.withAppLock(`connection-warnings:${taskId}`, async store => {
+    const queue = store instanceof DrizzleStore ? new DrizzleQueue(store.db) : ctx.queue;
+    const pending: string[] = [];
+    for (const warning of new Set(warnings))
+      if (!(await store.get('delivery', `connection-warning:${taskId}:${warning}`)))
+        pending.push(warning);
+    if (!pending.length) return;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const current = await store.get('task', taskId);
+      if (!current) return;
+      const seq = current.logSeq ?? 0;
+      const cursor = current.logCursor ?? -1;
+      const now = (ctx.now ?? Date.now)();
+      const saved = await queue.appendLogs(
+        ctx.organizationId,
+        taskId,
+        pending.map((line, index) => ({ seq: seq + index, at: now, level: 'sys', line })),
+        { seq, cursor },
+        {
+          seq: seq + pending.length,
+          cursor,
+          bytes:
+            (current.logBytes ?? 0) +
+            pending.reduce((size, line) => size + Buffer.byteLength(line), 0),
+        },
+        now,
+        {
+          attempts: current.attempts,
+          tokenHash: current.tokenHash ?? null,
+          handle: current.handle,
+          generation: current.generation ?? 0,
+        },
+      );
+      if (!saved) continue;
+      for (const warning of pending)
+        await store.put('delivery', `connection-warning:${taskId}:${warning}`, { at: now });
+      return;
+    }
+  });
+}
 
 /** Append output lines to a task's log through the store. */
 export async function appendLog(
@@ -79,11 +128,9 @@ export async function copyRunnerLogs(
   const runner = await taskRunner(ctx, status.task);
   if (!runner) return readLog(ctx.store, status.task.id, after, limit);
 
-  const [current, value] = await Promise.all([
-    ctx.store.get('task', status.task.id),
-    taskContext(ctx, status).catch(() => undefined),
-  ]);
-  if (!value) return readLog(ctx.store, status.task.id, after, limit);
+  const secrets = await taskLogSecrets(ctx, status).catch(() => undefined);
+  const current = await ctx.store.get('task', status.task.id);
+  if (!secrets) return readLog(ctx.store, status.task.id, after, limit);
 
   const sameRun =
     current &&
@@ -95,14 +142,6 @@ export async function copyRunnerLogs(
   const cursor = state.logCursor ?? -1;
   const seq = state.logSeq ?? 0;
   const bytes = state.logBytes ?? 0;
-  const secrets = [
-    ...Object.values(value.tokens),
-    ...Object.values(value.credential.env),
-    ...Object.values(value.config.mcp ?? {}).flatMap(entry => [
-      ...Object.values(entry.env ?? {}),
-      ...Object.values(entry.headers ?? {}),
-    ]),
-  ];
   const fetched = await runner.logs(status.handle, cursor);
   const now = (ctx.now ?? Date.now)();
   const redacted = (line: string) =>

@@ -5,6 +5,8 @@ import * as oidc from 'openid-client';
 
 import type { AuthApi, ServerConfig, OrganizationInfo, SessionInfo } from '../context';
 import type { Db } from '../store/pg/client';
+import type { Store } from '../store/types';
+import { DrizzleStore } from '../store/pg/store';
 import { platformLink } from '../store/pg/schema';
 import {sameOriginProof} from '../routes/guards';
 import {forbidden,notFound} from '../routes/http';
@@ -14,12 +16,17 @@ import { COOKIE_PREFIX, safeReturnPath } from './sign-in';
 
 const SESSION_COOKIE = `${COOKIE_PREFIX}.session`;
 const FLOW_COOKIE = `${COOKIE_PREFIX}.oidc`;
+const OPERATOR_COOKIE = `${COOKIE_PREFIX}.operator`;
+const OPERATOR_PATH = '/dash/operator';
 // Browsers cap a cookie near 4 KB; larger sessions split into numbered chunks.
 const CHUNK_SIZE = 3800;
 /** Admin, agent, credential and member changes act on roles at most this old, in seconds. */
 const PRIVILEGED_FRESHNESS_S = 60;
 const SESSION_TTL_S = 30 * 24 * 3600;
 const FLOW_TTL_S = 600;
+/** Operator mode lasts this long from the re-authentication, and ends sooner after `OPERATOR_IDLE_S` without a request. */
+const OPERATOR_TTL_S = 3600;
+const OPERATOR_IDLE_S = 900;
 // A rotated refresh token's result, for requests that still carry the cookie it replaced.
 const REFRESHED_TTL_MS = 60_000;
 
@@ -43,6 +50,15 @@ interface Flow extends JWTPayload {
   state: string;
   nonce: string;
   return: string;
+  operator?: boolean;
+}
+
+/** An operator session: who re-authenticated, for which server, when, and their last request. */
+interface Operator extends JWTPayload {
+  sub: string;
+  aud: string;
+  at: number;
+  seen: number;
 }
 
 const epoch = () => Math.floor(Date.now() / 1000);
@@ -107,6 +123,7 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
   const resource = new URL(publicUrl).origin;
   const secure = publicUrl.startsWith('https:');
   const keys = await authKeys(config);
+  const accountDb = (store?: Store) => (store instanceof DrizzleStore ? store.db : db);
   const redirectUri = `${publicUrl}${CALLBACK_PATH}`;
 
   const cookie = (name: string, value: string, maxAge: number) =>
@@ -247,15 +264,18 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
   async function signIn(url: URL): Promise<Response> {
     const wular = await configuration().catch(() => undefined);
     if (!wular) return Response.redirect(`${publicUrl}/login?error=unavailable`, 302);
+    const operator = url.searchParams.get('operator') === '1';
     const flow: Flow = {
       verifier: oidc.randomPKCECodeVerifier(),
       state: oidc.randomState(),
       nonce: oidc.randomNonce(),
-      return: safeReturnPath(url.searchParams.get('return'), resource),
+      return: operator ? OPERATOR_PATH : safeReturnPath(url.searchParams.get('return'), resource),
+      ...(operator ? { operator } : {}),
     };
     const target = oidc.buildAuthorizationUrl(wular, {
       redirect_uri: redirectUri,
-      scope: SCOPE,
+      // Operator mode re-authenticates and takes only the identity, so no refresh token exists for it.
+      ...(operator ? { scope: 'openid', prompt: 'login' } : { scope: SCOPE }),
       code_challenge: await oidc.calculatePKCECodeChallenge(flow.verifier),
       code_challenge_method: 'S256',
       state: flow.state,
@@ -283,6 +303,7 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
     const denied = url.searchParams.get('error');
     if (denied) return failed(denied);
     let claims: Claims;
+    let authTime: unknown;
     try {
       const tokens = await oidc.authorizationCodeGrant(
         await configuration(),
@@ -295,13 +316,35 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
         },
       );
       claims = fromTokens(tokens);
+      authTime = tokens.claims()?.auth_time;
     } catch {
       return failed('sign_in_failed');
     }
+    if (flow.operator) return enterOperator(req, claims.sub, authTime);
     const headers = new Headers({ location: flow.return });
     headers.append('set-cookie', cookie(FLOW_COOKIE, '', 0));
     for (const value of await storeSession(req.headers, claims))
       headers.append('set-cookie', value);
+    return new Response(null, { status: 302, headers });
+  }
+
+  const sealOperator = (entered: Operator) =>
+    seal(entered, entered.at + OPERATOR_TTL_S - entered.seen).then(sealed =>
+      cookie(OPERATOR_COOKIE, sealed, entered.at + OPERATOR_TTL_S - entered.seen),
+    );
+
+  /** Starts operator mode for the signed-in operator who just signed in again; the normal session stays as it is. */
+  async function enterOperator(req: Request, sub: string, authTime: unknown): Promise<Response> {
+    const session = await open<Claims>(readSession(req.headers));
+    const now = epoch();
+    const fresh = typeof authTime === 'number' && now - authTime <= PRIVILEGED_FRESHNESS_S;
+    const allowed = fresh && session?.sub === sub && config.operators?.includes(sub);
+    const headers = new Headers({
+      location: allowed ? OPERATOR_PATH : `${OPERATOR_PATH}?error=${fresh ? 'denied' : 'stale'}`,
+    });
+    headers.append('set-cookie', cookie(FLOW_COOKIE, '', 0));
+    if (allowed)
+      headers.append('set-cookie', await sealOperator({ sub, aud: resource, at: now, seen: now }));
     return new Response(null, { status: 302, headers });
   }
 
@@ -319,6 +362,7 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
         : signedOut;
     const response = Response.json({ url });
     for (const value of clearSession(req.headers)) response.headers.append('set-cookie', value);
+    response.headers.append('set-cookie', cookie(OPERATOR_COOKIE, '', 0));
     return response;
   }
 
@@ -355,6 +399,22 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
         claims.org,
       );
     },
+    async operator(headers, cookies = []) {
+      const sealed = readCookies(headers).get(OPERATOR_COOKIE);
+      const entered = await open<Operator>(sealed);
+      const now = epoch();
+      if (
+        !entered ||
+        entered.aud !== resource ||
+        now - entered.seen > OPERATOR_IDLE_S ||
+        now >= entered.at + OPERATOR_TTL_S
+      ) {
+        if (sealed) cookies.push(cookie(OPERATOR_COOKIE, '', 0));
+        return undefined;
+      }
+      cookies.push(await sealOperator({ ...entered, seen: now }));
+      return entered.sub;
+    },
     async setOrganization(headers, slug) {
       const claims = await open<Claims>(readSession(headers));
       const org = claims?.orgs.find(candidate => candidate.slug === slug);
@@ -364,14 +424,14 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
         cookies: await storeSession(headers, { ...claims, org: org.id }),
       };
     },
-    async link(user, platform, platformUserId, extra = {}) {
+    async link(user, platform, platformUserId, extra = {}, store) {
       const known = {
         name: user.name,
         email: user.email,
         ...(extra.organizations ? { organizations: extra.organizations } : {}),
         ...(extra.token ? { token: extra.token } : {}),
       };
-      await db
+      await accountDb(store)
         .insert(platformLink)
         .values({ platform, platformUserId, userId: user.id, ...known })
         .onConflictDoUpdate({
@@ -379,13 +439,55 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
           set: known,
           setWhere: eq(platformLink.userId, user.id),
         });
-      const [row] = await db
+      const [row] = await accountDb(store)
         .select({ userId: platformLink.userId })
         .from(platformLink)
         .where(
           and(eq(platformLink.platform, platform), eq(platformLink.platformUserId, platformUserId)),
         );
       return row?.userId === user.id ? 'linked' : 'taken';
+    },
+    async linkedAccounts(userId, store) {
+      const rows = await accountDb(store)
+        .select()
+        .from(platformLink)
+        .where(eq(platformLink.userId, userId));
+
+      return rows.map(row => ({
+        platform: row.platform,
+        platformUserId: row.platformUserId,
+        name: row.name,
+        email: row.email,
+        ...(row.organizations ? { organizations: row.organizations } : {}),
+        ...(row.token ? { token: row.token } : {}),
+      }));
+    },
+    async unlink(userId, platform, platformUserId, store) {
+      await accountDb(store)
+        .delete(platformLink)
+        .where(
+          and(
+            eq(platformLink.userId, userId),
+            eq(platformLink.platform, platform),
+            eq(platformLink.platformUserId, platformUserId),
+          ),
+        );
+    },
+    async refreshLinkedToken(userId, platform, platformUserId, previous, next, store) {
+      const [row] = await accountDb(store)
+        .update(platformLink)
+        .set({ token: next })
+        .where(
+          and(
+            eq(platformLink.userId, userId),
+            eq(platformLink.platform, platform),
+            eq(platformLink.platformUserId, platformUserId),
+            eq(platformLink.token, previous),
+          ),
+        )
+        .returning({ userId: platformLink.userId });
+
+      return !!row;
     },
     async linkedUser(platform, platformUserId) {
       const [row] = await db

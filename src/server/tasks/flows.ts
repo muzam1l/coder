@@ -8,9 +8,11 @@ import { json } from '../routes/http';
 import { type AgentApp } from '../../agent/types';
 import { type Integration, type OwnEvent } from '../../integrations/types';
 import { importAgents, sourceEvent } from '../agents/repo';
+import { storeInstallation } from '../agents/install';
 import { chatFor, deliver, eventReplies, later } from '../chat';
 import { updateMetadata } from '../store';
 import { decryptSecret } from '../store/secrets';
+import { InstallationBoundError } from '../store/types';
 
 const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
 
@@ -159,6 +161,33 @@ async function ownEvent(
     });
 
     return json({ ok: true });
+  }
+  if ('covers' in own) {
+    const { installation: id, add = [], remove = [] } = own.covers;
+    const tenant = await forInstallation(ctx, id);
+    let found = false;
+    try {
+      if (tenant)
+        await storeInstallation(
+          tenant.store,
+          id,
+          current => {
+            found = Boolean(current);
+            if (!current || current.deletedAt) return undefined;
+            const covers = [...new Set([...(current.covers ?? []), ...add])];
+            return { ...current, covers: covers.filter(entry => !remove.includes(entry)) };
+          },
+          now,
+        );
+    } catch (error) {
+      if (!(error instanceof InstallationBoundError)) throw error;
+      console.error(`coder server: ${id} covers an account bound elsewhere; grant ignored`);
+    }
+
+    // The platform sends it again later, once the install callback has stored the installation.
+    return found
+      ? json({ ok: true })
+      : new Response('Installation not stored yet', { status: 503 });
   }
   if ('changes' in own) {
     const change = own.changes;

@@ -13,16 +13,21 @@ import type {
 } from '@coder/client/types';
 import { Card, Empty } from '@/comps/ui/card';
 import { Badge, Chips } from '@/comps/ui/badge';
-import { MoreList } from '@/comps/ui/menu';
+import { InfoTip, MoreList } from '@/comps/ui/menu';
 import { Settle } from '@/comps/frame/stream';
 import { loadAgent } from '@/api/load';
 import { needsTunnel } from '@/api/types';
 import { editableAgent } from '@/api/types';
 import { TunnelGuide } from '@/app/dash/settings/tunnel-guide';
 import { Platform } from '@/app/dash/agents/agent/agent-pills';
-import { Lead } from './loading';
+import { Outcome, readOutcome, succeeded } from '@/app/dash/setup/outcome';
+import { ConnectionsLine, Lead } from './loading';
 
 const PlatformActions = dynamic(() => import('./platform-actions').then(m => m.PlatformActions));
+const InstallButton = dynamic(() => import('./platform-actions').then(m => m.InstallButton));
+
+/** Outcomes the person fixes by installing again. */
+const RETRY = new Set(['cancelled', 'install-expired', 'platform-error', 'missing-code', 'failed']);
 
 const eventNames = (events: unknown): string[] =>
   Array.isArray(events)
@@ -66,6 +71,7 @@ function Platforms({
   everywhere,
   catalog,
   tz,
+  operator = false,
 }: {
   agent: AgentRow;
   apps: AppRow[];
@@ -73,6 +79,8 @@ function Platforms({
   everywhere: InstallationRow[];
   catalog: IntegrationInfo[];
   tz: string;
+  /** The viewer runs this server and can set up its shared apps. */
+  operator?: boolean;
 }) {
   const declared = agent.definition?.integrations ?? {};
   const ids = Object.keys(declared).sort();
@@ -94,6 +102,11 @@ function Platforms({
       </Empty>
     );
 
+  // Featured handles first, then the rest.
+  const featured = (id: string) => catalog.some(entry => entry.id === id && entry.featured);
+  const order = [...ids.filter(featured), ...ids.filter(id => !featured(id))];
+
+  const builtin = agent.source === 'builtin';
   const def = agent.definition ? encodeDefinition(agent.definition) : '';
   const createUrl = (integration: string) => {
     const params = new URLSearchParams({ agent: agent.id, def });
@@ -105,7 +118,7 @@ function Platforms({
   };
 
   return (
-    <Card>
+    <Card title="Handles" count={ids.length}>
       <div class="table-scroll">
         <table class="plat stacked early">
           <thead>
@@ -119,12 +132,13 @@ function Platforms({
             </tr>
           </thead>
           <tbody>
-            {ids.map(id => {
+            {order.map(id => {
+              const info = catalog.find(entry => entry.id === id);
               const own = apps.filter(app => app.integration === id);
               const installs = installations.filter(entry => own.some(app => app.id === entry.app));
               const state: Reach = !own.length ? 'none' : installs.length ? 'installed' : 'created';
               const narrowed = agent.settings?.integrations?.[id];
-              const events = narrowed?.allowedEvents ?? eventNames(declared[id]?.triggers);
+              const events = narrowed?.allowedEvents ?? eventNames(declared[id]?.events);
               const tools = narrowed?.allowedTools ?? declared[id]?.tools;
               const place = (entry: InstallationRow) => (
                 <span key={entry.id} class="inst">
@@ -132,6 +146,8 @@ function Platforms({
                   <span class="sub">
                     {[
                       entry.account.type?.toLowerCase(),
+                      entry.covers &&
+                        `${entry.covers.length} ${info?.covered ?? 'account'}${entry.covers.length === 1 ? '' : 's'}`,
                       [entry.settings?.configRepo, entry.settings?.engine, entry.settings?.effort]
                         .filter(Boolean)
                         .join(', '),
@@ -144,7 +160,7 @@ function Platforms({
               return (
                 <tr key={id}>
                   <td>
-                    <Platform id={id} info={catalog.find(entry => entry.id === id)} state={state} />
+                    <Platform id={id} info={info} state={state} />
                   </td>
                   <td>
                     <Chips values={events} />
@@ -157,16 +173,17 @@ function Platforms({
                         : 'observe'}
                   </td>
                   <td>
-                    {own.length ? (
-                      own.map(app => (
-                        <span key={app.id} class="inst">
-                          <b>{app.name}</b>
-                          <span class="sub">created {formatDay(app.createdAt, tz)}</span>
-                        </span>
-                      ))
-                    ) : (
-                      <span class="muted">No app yet</span>
-                    )}
+                    {own.length
+                      ? own.map(app => (
+                          <span key={app.id} class="inst">
+                            <b>{app.name}</b>
+                            <span class="sub">
+                              {events.includes('mention') ? `mention @${app.name} · ` : ''}
+                              created {formatDay(app.createdAt, tz)}
+                            </span>
+                          </span>
+                        ))
+                      : null}
                   </td>
                   <td class="where">
                     {installs.length ? (
@@ -178,22 +195,45 @@ function Platforms({
                           </MoreList>
                         ) : null}
                       </>
-                    ) : (
-                      <span class="muted">{own.length ? 'Not installed' : 'Not available'}</span>
-                    )}
+                    ) : own.length ? (
+                      <span class="muted">Not installed</span>
+                    ) : null}
                   </td>
                   <td class="acts">
-                    <Badge tone={REACH_BADGE[state].tone}>{REACH_BADGE[state].label}</Badge>
-                    <PlatformActions
-                      integration={id}
-                      apps={own.map(app => ({
-                        id: app.id,
-                        name: app.name,
-                      }))}
-                      installed={installs.length > 0}
-                      createUrl={createUrl(id)}
-                      owners={organizationsOn(id, catalog, everywhere)}
-                    />
+                    {builtin && !own.length && info?.builtinApp !== 'own' ? (
+                      <>
+                        <Badge>{REACH_BADGE.none.label}</Badge>
+                        {operator ? (
+                          <Link class="btn outline sm" href="/dash/operator">
+                            Set up shared app
+                          </Link>
+                        ) : (
+                          <InfoTip label={`Why ${info?.name ?? id} is not set up`}>
+                            <p>
+                              This server has no shared {info?.name ?? id} app yet. Ask whoever runs
+                              this server to add one.
+                            </p>
+                          </InfoTip>
+                        )}
+                      </>
+                    ) : (
+                      <>
+                        <Badge tone={REACH_BADGE[state].tone}>{REACH_BADGE[state].label}</Badge>
+                        <PlatformActions
+                          integration={id}
+                          apps={own.map(app => ({
+                            id: app.id,
+                            name: app.name,
+                          }))}
+                          installed={installs.length > 0}
+                          createUrl={createUrl(id)}
+                          create={info?.create}
+                          unreachable={catalog.some(entry => entry.unreachable)}
+                          owners={organizationsOn(id, catalog, everywhere)}
+                          shared={builtin && info?.builtinApp !== 'own'}
+                        />
+                      </>
+                    )}
                   </td>
                 </tr>
               );
@@ -220,12 +260,17 @@ export default async function AgentPlatformsPage({
   const apps = load(request).apps.list(slug).then(unwrap);
   const everywhere = load(request).installations.list().then(unwrap);
   const catalog = load(request)
-    .integrations.list()
+    .integrations.list(slug)
     .catch(() => []);
   const me = load(request)
     .me()
     .catch(() => undefined);
   const port = new URL(request.url).port || '8787';
+  const outcome = readOutcome(new URL(request.url).searchParams);
+  const appOn = (apps: AppRow[], integration?: string) =>
+    apps.find(app => app.integration === integration);
+  const retried = (apps: AppRow[]) =>
+    apps.find(app => app.id === outcome?.appId) ?? appOn(apps, outcome?.platform);
   apps.catch(() => {});
   everywhere.catch(() => {});
 
@@ -237,6 +282,26 @@ export default async function AgentPlatformsPage({
           Promise.all([agent, apps, everywhere, catalog, me]).then(
             ([row, own, all, integrations, who]) => (
               <>
+                {outcome ? (
+                  <Outcome outcome={outcome} catalog={integrations}>
+                    {succeeded(outcome) ? (
+                      (outcome.connect ?? []).map(id => {
+                        const app = appOn(own, id);
+                        const name = integrations.find(entry => entry.id === id)?.name ?? id;
+                        return app ? (
+                          <InstallButton
+                            key={id}
+                            app={app.id}
+                            link={outcome.link}
+                            label={`Connect ${name} so the agent can act there`}
+                          />
+                        ) : null;
+                      })
+                    ) : RETRY.has(outcome.status) && retried(own) ? (
+                      <InstallButton app={retried(own)!.id} label="Install again" />
+                    ) : null}
+                  </Outcome>
+                ) : null}
                 <Platforms
                   agent={row}
                   apps={own}
@@ -246,8 +311,14 @@ export default async function AgentPlatformsPage({
                   everywhere={all.filter(entry => !entry.deletedAt)}
                   catalog={integrations}
                   tz={tz}
+                  operator={who?.operator === true}
                 />
-                {who && needsTunnel(who) ? <TunnelGuide port={port} /> : null}
+                <ConnectionsLine />
+                {(who && needsTunnel(who)) || integrations.some(entry => entry.unreachable) ? (
+                  <div id="tunnel">
+                    <TunnelGuide port={port} />
+                  </div>
+                ) : null}
               </>
             ),
           )

@@ -244,6 +244,34 @@ export async function pickDetailed<T extends string>(opts: PickOptions<T>): Prom
   }
 }
 
+/** A secret typed at a hidden prompt, or read whole from piped stdin. */
+export async function askSecret(title: string): Promise<string> {
+  const stdin = process.stdin;
+  if (!stdin.isTTY) {
+    let value = '';
+    for await (const chunk of stdin) value += chunk.toString();
+    return value.replace(/\r?\n$/, '');
+  }
+
+  process.stderr.write(`${outStyle.bold(title)} `);
+  stdin.setRawMode(true);
+  stdin.resume();
+  let value = '';
+  try {
+    for (;;) {
+      const key = await readKey();
+      if (KEYS.cancel.includes(key)) throw new PromptCancelled();
+      if (KEYS.enter.includes(key)) return value;
+      if (KEYS.backspace.includes(key)) value = value.slice(0, -1);
+      else if (key.length === 1 && key >= ' ') value += key;
+    }
+  } finally {
+    stdin.setRawMode(false);
+    stdin.pause();
+    process.stderr.write('\n');
+  }
+}
+
 /** Free-text line with a default; `validate` returns an error to show inline and ask again. */
 export async function ask(
   title: string,

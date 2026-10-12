@@ -2,12 +2,23 @@ import { eventOptions } from '../../agent/definition';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import { BROKERED, BROKERED_PLACEHOLDER } from '../runners/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
-import type { AgentEvent, Connection, Installation } from '../../agent/types';
+import type { AgentEvent, InstallationLink, Installation } from '../../agent/types';
 import type { EngineCredential, TaskStatus } from '../store/types';
 import type { ServerContext } from '../context';
 import type { CoderConfig } from '../../core/config';
 import { taskConfig } from '../settings/config';
 import { credentialValue, resolveCredential } from '../settings/credentials';
+import {
+  resolvedTaskConnections,
+  connectionSecretValues,
+  taskConnectionSecrets,
+  readTaskConnectionSecrets,
+} from '../connections/resolve';
+import type { McpServerSpec } from '../../core/types';
+import { connectionWarnings } from './logs';
+import { LocalStore } from '../store/local';
+import { mcpSecretValue } from '../../core/mcp';
+import { nativeCredential, nativeApp } from '../connections/records';
 
 /** Installation tokens are encrypted at rest; integrations see plaintext only in memory. */
 export function unsealed(ctx: ServerContext, installation: Installation): Installation {
@@ -38,7 +49,7 @@ export function installationToken(
 }
 
 /** The linked member's own platform token, refreshed and stored again when it had expired. */
-async function requesterToken(
+export async function requesterToken(
   ctx: ServerContext,
   integration: Integration,
   event: AgentEvent,
@@ -47,14 +58,21 @@ async function requesterToken(
   if (!integration.auth.user || !ctx.auth) return undefined;
   const user = await ctx.auth.linkedUser(integration.id, event.actor.id);
   if (!user?.token || !user.organizations?.includes(ctx.organizationId)) return undefined;
+  const stored = nativeCredential(ctx.config, user.token);
+  const needsApp = stored.app && stored.app !== event.appId;
+  const app = needsApp ? await nativeApp(ctx, integration.id, stored.app) : undefined;
+  if (needsApp && !app) return undefined;
   const access = await integration.auth.user.access(
-    decryptSecret<string>(ctx.config, user.token),
-    credentials,
+    stored.token,
+    app ? decryptSecret(ctx.config, app.credentials) : credentials,
     { fetch: ctx.fetch ?? fetch, now: (ctx.now ?? Date.now)() },
   );
   if (access.refreshed)
     await ctx.auth.link(user, integration.id, event.actor.id, {
-      token: encryptSecret(ctx.config, access.refreshed),
+      token: encryptSecret(
+        ctx.config,
+        stored.app ? { app: stored.app, token: access.refreshed } : access.refreshed,
+      ),
     });
   return access.accessToken;
 }
@@ -93,11 +111,9 @@ const repoName = (value: string | undefined) => {
 async function connectionToken(
   ctx: ServerContext,
   integration: string,
-  connection: Connection,
+  connection: InstallationLink,
   task?: Pick<TaskStatus['task'], 'tools' | 'toolScopes'>,
 ): Promise<string | undefined> {
-  if (connection.kind === 'oauth') return decryptSecret<string>(ctx.config, connection.token);
-
   const linked = await ctx.store.get('installation', connection.id);
   if (!linked || linked.deletedAt) return undefined;
 
@@ -177,23 +193,59 @@ export async function taskContext(
 ): Promise<{
   task: TaskStatus['task'];
   tokens: Record<string, string>;
+  nativeTokens: Record<string, string>;
   credential: EngineCredential;
   config: Partial<CoderConfig>;
+  connections: Record<string, McpServerSpec>;
+  connectionEnv: Record<string, string>;
+  connectionSecrets: string[];
 }> {
   const task = status.task;
-  const [tokens, config, credential] = await Promise.all([
+  const [tokens, config, credential]: [
+    Record<string, string>,
+    Partial<CoderConfig>,
+    EngineCredential,
+  ] = await Promise.all([
     task.event ? eventTokens(ctx, status.task) : {},
-    ctx.local ? {} : taskConfig(ctx.store, ctx.config),
+    ctx.local ? {} : taskConfig(ctx.store),
     taskCredential(ctx, task),
   ]);
-  if (task.runner !== 'vercel-sandbox') return { task, tokens, credential, config };
+  const resolved = await resolvedTaskConnections(ctx, status, tokens);
+  const connectionEnv = { ...resolved.env };
+  const warnings = [...resolved.warnings];
+  for (const name of Object.keys(connectionEnv)) {
+    if (credential.env[name] === undefined) continue;
+    delete connectionEnv[name];
+    warnings.push(`${name} is temporarily unavailable; skipped for this task.`);
+  }
+  const currentSecrets = await connectionSecretValues(ctx, task);
+  const safeTask = { ...task, tools: resolved.tools, toolScopes: resolved.toolScopes };
+  const connectionSecrets = await taskConnectionSecrets(ctx, task.id, [
+    ...resolved.secrets,
+    ...currentSecrets,
+    ...Object.values(resolved.tokens),
+    ...Object.values(tokens),
+    ...credentialSecrets(credential.env),
+  ]);
+  await connectionWarnings(ctx, task.id, warnings);
+  const common = {
+    task: safeTask,
+    tokens: { ...resolved.tokens, ...tokens },
+    nativeTokens: resolved.nativeTokens,
+    credential,
+    config,
+    connections: resolved.mcp,
+    connectionEnv,
+    connectionSecrets,
+  };
+  if (task.runner !== 'vercel-sandbox') return common;
   const env = Object.fromEntries(
     Object.entries(credential.env).map(([name, value]) => [
       name,
       name in BROKERED ? BROKERED_PLACEHOLDER : value,
     ]),
   );
-  return { task, tokens, credential: { ...credential, env }, config };
+  return { ...common, credential: { ...credential, env } };
 }
 
 /** The task's engine credential; a member's own runner falls back to the machine's logins. */
@@ -219,4 +271,74 @@ export async function taskCredential(
       'claude') as EngineCredential['engine'],
     env: {},
   };
+}
+
+function credentialSecrets(env: Record<string, string>): string[] {
+  const secrets: string[] = [];
+  for (const [name, value] of Object.entries(env)) {
+    if (!/(?:KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH)/i.test(name) && !mcpSecretValue(value))
+      continue;
+    secrets.push(value);
+    if (name.endsWith('_AUTH_JSON')) {
+      const auth = JSON.parse(value) as {
+        OPENAI_API_KEY?: string;
+        tokens?: Record<string, string>;
+      };
+      secrets.push(
+        ...[
+          auth.OPENAI_API_KEY,
+          ...Object.entries(auth.tokens ?? {})
+            .filter(([name]) => /TOKEN|KEY|SECRET/i.test(name))
+            .map(([, value]) => value),
+        ].filter((entry): entry is string => typeof entry === 'string'),
+      );
+    }
+  }
+
+  return secrets;
+}
+
+async function storedPlatformSecrets(
+  ctx: ServerContext,
+  task: TaskStatus['task'],
+): Promise<string[]> {
+  if (!task.event) return [];
+  const installation = await ctx.store.get(
+    'installation',
+    `${task.event.appId}:${task.event.installationId}`,
+  );
+  const secrets: string[] = [];
+  for (const row of [
+    installation,
+    ...(await Promise.all(
+      Object.values(installation?.connections ?? {})
+        .filter(link => link.kind === 'installation')
+        .map(link => ctx.store.get('installation', link.id)),
+    )),
+  ])
+    if (row?.token) secrets.push(decryptSecret<string>(ctx.config, row.token));
+
+  return secrets;
+}
+
+export async function taskLogSecrets(ctx: ServerContext, status: TaskStatus): Promise<string[]> {
+  const [connections, credential, platform]: [string[], EngineCredential, string[]] =
+    await Promise.all([
+      readTaskConnectionSecrets(ctx, status.task),
+      taskCredential(ctx, status.task),
+      storedPlatformSecrets(ctx, status.task),
+    ]);
+  const recovered =
+    ctx.store instanceof LocalStore &&
+    status.task.event &&
+    !ctx.store.connectionSecrets?.get(status.task.id)?.length
+      ? Object.values(await eventTokens(ctx, status.task))
+      : [];
+
+  if (recovered.length)
+    await taskConnectionSecrets(ctx, status.task.id, [...connections, ...platform, ...recovered]);
+
+  return [...connections, ...platform, ...recovered, ...credentialSecrets(credential.env)].filter(
+    value => value.length >= 8,
+  );
 }

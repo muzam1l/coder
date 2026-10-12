@@ -4,7 +4,7 @@ import { client } from '@/utils/client';
 import type { ComponentChildren } from 'preact';
 import { useRef, useState } from 'preact/hooks';
 
-import { Card, Loading } from '@/comps/ui/card';
+import { Card, FoldCard, Loading } from '@/comps/ui/card';
 import { ErrorText, Field } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
 import { MenuItem } from '@/comps/ui/menu';
@@ -99,7 +99,11 @@ function AddModel({
   const known = builtin[provider] ?? {};
   const example = known[EXAMPLES[provider]!] ?? Object.values(known)[0];
   return (
-    <Card title="Add a model" actions={<ErrorText value={error} />}>
+    <FoldCard
+      title="Add a model"
+      note="A short name for an engine model, or an OpenAI-compatible endpoint"
+      actions={<ErrorText value={error} />}
+    >
       <form
         class="add-form"
         method="post"
@@ -165,7 +169,7 @@ function AddModel({
                 onChange={setEffort}
               />
             </Field>
-            <button class="btn" disabled={busy}>
+            <button class="btn" disabled={busy} aria-busy={busy}>
               Add
             </button>
           </div>
@@ -180,7 +184,7 @@ function AddModel({
           />
         )}
       </form>
-    </Card>
+    </FoldCard>
   );
 }
 
@@ -363,7 +367,7 @@ function CustomFields({
             </Field>
           </div>
         </details>
-        <button class="btn" disabled={busy}>
+        <button class="btn" disabled={busy} aria-busy={busy}>
           Add model
         </button>
       </div>

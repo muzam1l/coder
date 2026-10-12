@@ -400,6 +400,7 @@ export function EngineLogins({ status: initial }: { status: EngineStatus }) {
                   type="button"
                   class="btn secondary-danger sm"
                   disabled={busy === `${engine.id}:logout`}
+                  aria-busy={busy === `${engine.id}:logout`}
                   onClick={() => act(engine.id, 'logout')}
                 >
                   Sign out

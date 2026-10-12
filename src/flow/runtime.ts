@@ -12,13 +12,15 @@ import {
   CoderError,
   capPermissions,
   dispatchTask,
+  selectMcpServers,
   turnFallbackEngine,
   waitTask,
 } from '../core/dispatch';
 import { mailboxDir, askWorker } from '../core/mailbox';
 import { formatEngineSpec, loadTask } from '../core/state';
 import { steerTask } from '../core/task/actions';
-import type { TokenUsage, TurnResult } from '../core/types';
+import type { TokenUsage, TurnResult, McpServerSpec } from '../core/types';
+import { loadConfig } from '../core/config';
 import { Journal, defined, fingerprint } from './journal';
 import { resolveFlow } from './discover';
 import type {
@@ -83,6 +85,7 @@ export interface RunContext {
   hooks: FlowHooks;
   /** Caller-owned platform credential; in memory only, never written to flow.json. */
   integrationToken?: string;
+  connections?: { mcp: Record<string, McpServerSpec>; env: Record<string, string>; ids: string[] };
   ceiling?: { agent: string; permissions: string };
 }
 
@@ -307,6 +310,17 @@ async function steerOnce(
     const current = loadTask(cwd, taskId);
     if (!current) throw new CoderError('invalid-option', `No task "${taskId}".`);
     await steerTask(current.cwd ?? cwd, current, text, {
+      ...(ctx?.connections
+        ? {
+            resolveConnections: async granted => ({
+              mcp: Object.fromEntries(
+                Object.entries(ctx.connections!.mcp).filter(([id]) => granted.includes(id)),
+              ),
+              env: ctx.connections!.env,
+              warnings: [],
+            }),
+          }
+        : {}),
       model: opts.model,
       effort: opts.effort,
       permissions:
@@ -342,10 +356,22 @@ async function runOneTask(
     };
     // Inside an agent's sandbox the worker starts the task; here it only asks.
     const mailbox = Boolean(mailboxDir());
+    const selected = ctx?.connections
+      ? selectMcpServers(request.mcp, loadConfig(cwd).mcp, {}, ctx.connections.mcp)
+      : undefined;
     const dispatch = mailbox
       ? await askWorker<{ taskId: string }>('dispatch', request)
       : await dispatchTask({
           ...request,
+          ...(ctx?.connections
+            ? {
+                ...selected,
+                mcpWarnings: selected?.warnings,
+                connectionEnv: ctx.connections.env,
+                connections: ctx.connections.ids,
+                connectionSource: 'server' as const,
+              }
+            : {}),
           // Surface the gate's silent chain walk. Otherwise the user stares at
           // nothing for the failed engine's whole startup window.
           onFallback: f =>

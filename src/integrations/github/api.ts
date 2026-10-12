@@ -1,6 +1,5 @@
 /** GitHub REST: request headers for Coder's own calls, and repository reads through the Chat SDK adapter's Octokit. */
-import type { AgentEvent } from '../../agent/types';
-import type { PullRequestSummary } from '../types';
+import type { AgentEvent, PullRequestSummary } from '../types';
 
 export const API = 'https://api.github.com';
 

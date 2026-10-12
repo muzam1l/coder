@@ -13,7 +13,8 @@ export const commandTools = command({
     const { agentTools } = await import('../../agent/mcp');
 
     const id = args[0] ?? '';
-    const tools = agentTools(id);
+    const allowed = (process.env.CODER_AGENT_TOOLS ?? '').split(',').filter(Boolean);
+    const tools = agentTools(id, allowed);
     if (!tools)
       throw new Error(
         `Unknown tool set "${id}"; known: ${[...Object.keys(INTEGRATIONS).filter(key => INTEGRATIONS[key]!.tools.serve), 'note'].join(', ')}`,
@@ -26,7 +27,7 @@ export const commandTools = command({
     await serveTools(`coder-${id}`, tools, {
       token,
       fetch,
-      tools: (process.env.CODER_AGENT_TOOLS ?? '').split(',').filter(Boolean),
+      tools: allowed,
       ...(scope ? { scope } : {}),
     });
   },

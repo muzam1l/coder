@@ -5,7 +5,13 @@ import './agent-settings-form.css';
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
-import type { AgentRow, AgentSettings } from '@coder/client/types';
+import { useRouter } from '@wular/pnext/navigation/client';
+import { Link } from '@wular/pnext/link';
+import { editableAgent } from '@/api/types';
+import { ConfirmDialog } from '@/comps/ui/confirm';
+import type { AgentRow, AgentSettings, ConnectionRow, IntegrationInfo } from '@coder/client/types';
+import { BrandIcon } from '@/app/dash/agents/agent/agent-pills';
+import { AgentToggle } from '@/app/dash/agents/agent/agent-toggle';
 import { reasonText } from '@/utils/format';
 import { ErrorText, Field } from '@/comps/ui/field';
 import { Chips } from '@/comps/ui/badge';
@@ -60,49 +66,88 @@ function Choice({
   );
 }
 
-/** How this agent runs here: engine settings, then one tab per platform to narrow access and events. One Save. */
+type Panel = 'run' | 'platforms' | 'manage';
+
+/** How this agent runs here: engine settings, every platform's access and events on one panel, and deleting it. One Save. */
 export function AgentSettingsForm({
   agent,
+  catalog,
   models,
   defaults,
   runners,
+  connections,
 }: {
   agent: AgentRow;
+  catalog: IntegrationInfo[];
   models: Record<string, string[]>;
   defaults: Defaults;
   runners: Option[];
+  /** The workspace's connections, to narrow. */
+  connections: ConnectionRow[];
 }) {
-  const [panel, setPanel] = useState(0);
+  const nav = useRouter();
+  const [panel, setPanel] = useState<Panel>('run');
   const [error, setError] = useState('');
   const [saved, setSaved] = useState('');
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState('');
-  const [hits, setHits] = useState<number[]>();
+  const [hits, setHits] = useState<Panel[]>();
+  const [deleting, setDeleting] = useState<'ask' | 'busy'>();
   const form = useRef<HTMLFormElement>(null);
   const settings = agent.settings ?? {};
   const [model, setModel] = useState(modelValue(settings.engine, settings.model));
+  const [narrowed, setNarrowed] = useState(settings.connections ? 'some' : '');
   const declared = agent.definition?.integrations ?? {};
   const platforms = Object.keys(declared).sort();
   const own = agent.definition;
   const engine = own?.engine ?? defaults.engine;
+  const deletable = agent.source !== 'builtin';
 
-  // Filters every panel's fields by label and current value, and moves to a panel that has a match.
+  // Filters every panel's fields by label, current value and platform, and moves to a panel that has a match.
   useLayoutEffect(() => {
     const needle = query.trim().toLowerCase();
-    const found: number[] = [];
-    form.current!.querySelectorAll('.vpanel').forEach((section, index) => {
+    const found: Panel[] = [];
+    form.current!.querySelectorAll<HTMLElement>('.vpanel').forEach(section => {
       let any = false;
       section.querySelectorAll<HTMLElement>('.field').forEach(field => {
         const values = [...field.querySelectorAll('input')].map(input => input.value).join(' ');
-        const match = !needle || `${field.textContent} ${values}`.toLowerCase().includes(needle);
+        const platform = field.closest('.vplatform')?.querySelector('h3')?.textContent ?? '';
+        const match =
+          !needle || `${platform} ${field.textContent} ${values}`.toLowerCase().includes(needle);
         field.hidden = !match;
         any ||= match;
       });
-      if (any) found.push(index);
+      section.querySelectorAll<HTMLElement>('.vplatform').forEach(block => {
+        block.hidden = !block.querySelector('.field:not([hidden])');
+      });
+      if (any) found.push(section.dataset.panel as Panel);
     });
     setHits(needle ? found : undefined);
     if (needle && found.length && !found.includes(panel)) setPanel(found[0]!);
   }, [query]);
+
+  const remove = () => {
+    setDeleting('busy');
+    setError('');
+    void client.agents
+      .remove(agent.id)
+      .then(() => nav.push('/dash/agents'))
+      .catch(reason => {
+        setDeleting(undefined);
+        setError(reasonText(reason));
+      });
+  };
+
+  const tab = (key: Panel, label: string) => (
+    <button
+      type="button"
+      aria-current={panel === key ? 'true' : undefined}
+      class={hits && !hits.includes(key) ? 'miss' : undefined}
+      onClick={() => setPanel(key)}
+    >
+      {label}
+    </button>
+  );
 
   const submit = async (event: SubmitEvent) => {
     event.preventDefault();
@@ -114,21 +159,24 @@ export function AgentSettingsForm({
     const picked = splitModel(model);
     if (picked.engine) next.engine = picked.engine;
     if (picked.model) next.model = picked.model;
+    if (narrowed) next.connections = values.getAll('connection').map(String);
     for (const id of platforms) {
       const current = settings.integrations?.[id] ?? {};
       const entry: NonNullable<AgentSettings['integrations']>[string] = {};
       if (Array.isArray(current.allowedTools)) entry.allowedTools = current.allowedTools;
       else if (text(`tools:${id}`)) entry.allowedTools = text(`tools:${id}`);
-      const names = eventNames(declared[id]?.triggers);
+      const names = eventNames(declared[id]?.events);
       const picked = values.getAll(`event:${id}`).map(String);
       if (names.length && picked.length < names.length) entry.allowedEvents = picked;
       if (Object.keys(entry).length) (next.integrations ??= {})[id] = entry;
     }
+    if (agent.settings?.disabled) next.disabled = true;
     setBusy(true);
     setError('');
     setSaved('');
     try {
       await client.agents.settings(agent.id, next);
+      nav.refresh();
       setSaved('Saved. New tasks use these settings.');
     } catch (reason) {
       setError(reasonText(reason));
@@ -140,33 +188,17 @@ export function AgentSettingsForm({
     <form ref={form} class="vsettings card frame" onSubmit={submit}>
       <nav class="tabs vertical" aria-label="Settings sections">
         <p class="tabs-label">Runtime</p>
-        <button
-          type="button"
-          aria-current={panel === 0 ? 'true' : undefined}
-          class={hits && !hits.includes(0) ? 'miss' : undefined}
-          onClick={() => setPanel(0)}
-        >
-          How it runs
-        </button>
-        {platforms.length ? <p class="tabs-label">Platforms</p> : null}
-        {platforms.map((id, index) => (
-          <button
-            key={id}
-            type="button"
-            aria-current={panel === index + 1 ? 'true' : undefined}
-            class={hits && !hits.includes(index + 1) ? 'miss' : undefined}
-            onClick={() => setPanel(index + 1)}
-          >
-            {id}
-          </button>
-        ))}
+        {tab('run', 'How it runs')}
+        {platforms.length ? tab('platforms', 'Platforms') : null}
+        <p class="tabs-label">Agent</p>
+        {tab('manage', 'Manage')}
       </nav>
       <div class="vbody">
         <div class="vsearch">
           <Search value={query} label="Search settings" onInput={setQuery} />
           {hits && !hits.length ? <span class="muted">No setting matches.</span> : null}
         </div>
-        <section class="vpanel" hidden={panel !== 0}>
+        <section class="vpanel" data-panel="run" hidden={panel !== 'run'}>
           <h2>How it runs</h2>
           <p class="muted">Anything left on Default follows the agent's own definition.</p>
           <div class="fields">
@@ -221,74 +253,205 @@ export function AgentSettingsForm({
                 />
               </Field>
             ) : null}
-          </div>
-        </section>
-        {platforms.map((id, index) => {
-          const current = settings.integrations?.[id] ?? {};
-          const names = eventNames(declared[id]?.triggers);
-          const allowed = current.allowedEvents;
-          const tools = declared[id]?.tools;
-          return (
-            <section key={id} class="vpanel" hidden={panel !== index + 1}>
-              <h2>{id}</h2>
-              <p class="muted">
-                Narrow what the agent does here. Only the events its definition declares can be
-                picked.
-              </p>
-              {Array.isArray(current.allowedTools) ? (
-                <div class="field">
-                  <span>Platform access</span>
-                  <Chips values={current.allowedTools} />
-                </div>
-              ) : (
-                <Choice
-                  name={`tools:${id}`}
-                  label="Platform access"
-                  hint="observe reads, comment also replies, write also pushes and merges"
-                  value={
-                    typeof current.allowedTools === 'string' ? current.allowedTools : undefined
-                  }
-                  options={PRESETS}
-                  blank={defaultLabel(
-                    typeof tools === 'string' ? tools : tools ? 'custom' : 'observe',
-                  )}
-                />
-              )}
-              {names.length ? (
-                <div class="field">
-                  <span>
-                    Events <small>all declared events unless you narrow it</small>
-                  </span>
+            <Field label="Connections" hint="which workspace connections its tasks can use" group>
+              <Select
+                label="Connections"
+                value={narrowed}
+                options={[
+                  ['', 'Every workspace connection'],
+                  ['some', 'Only the ones picked'],
+                ]}
+                onChange={setNarrowed}
+              />
+            </Field>
+            {narrowed ? (
+              <div class="field picked">
+                <span>
+                  Picked connections <small>tasks can use only these</small>
+                </span>
+                {connections.length ? (
                   <div class="checks">
-                    {names.map(name => (
-                      <label key={name} class="check">
+                    {connections.map(row => (
+                      <label key={row.id} class="check">
                         <input
                           type="checkbox"
-                          name={`event:${id}`}
-                          value={name}
-                          defaultChecked={!allowed || allowed.includes(name)}
+                          name="connection"
+                          value={row.id}
+                          defaultChecked={settings.connections?.includes(row.id)}
                         />
-                        {name}
+                        {row.name}
                       </label>
                     ))}
                   </div>
+                ) : (
+                  <span class="muted">
+                    This workspace has no connections yet.{' '}
+                    <Link class="link" href="/dash/settings/[tab]" params={{ tab: 'connections' }}>
+                      Add one in Settings
+                    </Link>
+                  </span>
+                )}
+              </div>
+            ) : null}
+          </div>
+        </section>
+        {platforms.length ? (
+          <section class="vpanel" data-panel="platforms" hidden={panel !== 'platforms'}>
+            <h2>Platforms</h2>
+            <p class="muted">
+              Overrides for this workspace: turn events off or lower access.{' '}
+              {editableAgent(agent) ? (
+                <>
+                  To add an event or a platform,{' '}
+                  <Link
+                    href="/dash/agents/[slug]/edit"
+                    params={{ slug: agent.id }}
+                    search={{ section: 'platforms' }}
+                  >
+                    edit {agent.name}
+                  </Link>
+                  .
+                </>
+              ) : agent.source === 'repo' ? (
+                <>
+                  {agent.name} comes from {agent.repo ?? 'a repository'}; add an event or a platform
+                  in its{' '}
+                  {agent.sourceUrl ? (
+                    <a href={agent.sourceUrl} target="_blank" rel="noreferrer">
+                      agent.json
+                    </a>
+                  ) : (
+                    'agent.json'
+                  )}{' '}
+                  there.
+                </>
+              ) : (
+                <>
+                  {agent.name} is built in, so its events and platforms ship with Coder. To listen
+                  anywhere else, <Link href="/dash/agents/new">create your own agent</Link>.
+                </>
+              )}
+            </p>
+            {platforms.map(id => {
+              const current = settings.integrations?.[id] ?? {};
+              const names = eventNames(declared[id]?.events);
+              const allowed = current.allowedEvents;
+              const tools = declared[id]?.tools;
+              const info = catalog.find(entry => entry.id === id);
+              return (
+                <div key={id} class="vplatform">
+                  <h3>
+                    {info ? <BrandIcon brand={info.brand} /> : null}
+                    {info?.name ?? id}
+                  </h3>
+                  {Array.isArray(current.allowedTools) ? (
+                    <div class="field">
+                      <span>Platform access</span>
+                      <Chips values={current.allowedTools} />
+                    </div>
+                  ) : (
+                    <Choice
+                      name={`tools:${id}`}
+                      label="Platform access"
+                      hint={`observe reads, comment also replies, write also pushes and merges; at most ${typeof tools === 'string' ? tools : tools ? 'its tools' : 'observe'}, as the definition grants`}
+                      value={
+                        typeof current.allowedTools === 'string' ? current.allowedTools : undefined
+                      }
+                      options={
+                        typeof tools === 'string'
+                          ? PRESETS.slice(0, PRESETS.indexOf(tools) + 1)
+                          : tools
+                            ? PRESETS
+                            : PRESETS.slice(0, 1)
+                      }
+                      blank={defaultLabel(
+                        typeof tools === 'string' ? tools : tools ? 'custom' : 'observe',
+                      )}
+                    />
+                  )}
+                  {names.length ? (
+                    <div class="field">
+                      <span>
+                        Events{' '}
+                        <small>the definition's events; turn off any it should ignore here</small>
+                      </span>
+                      <div class="checks">
+                        {names.map(name => (
+                          <label key={name} class="check">
+                            <input
+                              type="checkbox"
+                              name={`event:${id}`}
+                              value={name}
+                              defaultChecked={!allowed || allowed.includes(name)}
+                            />
+                            {name}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-              ) : null}
-            </section>
-          );
-        })}
-        <div class="form-actions save">
-          <button class="btn" disabled={busy}>
-            Save
-          </button>
-          <ErrorText value={error} />
-          {saved ? (
-            <span class="flash" role="status">
-              {saved}
+              );
+            })}
+          </section>
+        ) : null}
+        <section class="vpanel" data-panel="manage" hidden={panel !== 'manage'}>
+          <h2>Manage</h2>
+          <div class="field row-action">
+            <span>
+              Disable agent
+              <small>
+                stops its events and new tasks in this workspace; its apps and tasks stay
+              </small>
             </span>
-          ) : null}
-        </div>
+            <AgentToggle agent={agent} class="btn outline" onError={setError} />
+          </div>
+          <div class="field row-action">
+            <span>
+              Delete agent
+              <small>
+                {deletable
+                  ? 'removes it and every version; its tasks and platform apps stay'
+                  : `${agent.name} is built in and cannot be deleted; disable it above instead`}
+              </small>
+            </span>
+            <button
+              type="button"
+              class="btn secondary-danger"
+              disabled={!deletable}
+              onClick={() => setDeleting('ask')}
+            >
+              Delete agent
+            </button>
+          </div>
+          <ErrorText value={error} />
+        </section>
+
+        {panel === 'manage' ? null : (
+          <div class="form-actions save">
+            <ErrorText value={error} />
+            {saved ? (
+              <span class="flash" role="status">
+                {saved}
+              </span>
+            ) : null}
+            <button class="btn" disabled={busy} aria-busy={busy}>
+              Save
+            </button>
+          </div>
+        )}
       </div>
+      {deleting ? (
+        <ConfirmDialog
+          open
+          title={`Delete ${agent.name}?`}
+          body="It stops answering on every platform. This cannot be undone."
+          confirmLabel="Delete agent"
+          busy={deleting === 'busy'}
+          onClose={() => setDeleting(undefined)}
+          onConfirm={remove}
+        />
+      ) : null}
     </form>
   );
 }

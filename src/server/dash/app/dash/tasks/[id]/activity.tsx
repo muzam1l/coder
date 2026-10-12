@@ -176,6 +176,7 @@ export function Activity({
   useEffect(() => {
     const onScroll = () => setFollow(atEnd());
     addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
     return () => removeEventListener('scroll', onScroll);
   }, []);
 

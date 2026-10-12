@@ -4,44 +4,28 @@ import {
   loadConfig,
   withDefaults,
   type CoderConfig,
-  type McpConfigEntry,
   resolveUserConfigFile,
   validateConfig,
   writeUserConfig,
 } from '../../core/config';
 import { taskError } from '../tasks/admin';
 import { json } from '../routes/http';
-import { type ServerConfig, type ServerContext } from '../context';
-import { decryptSecret, encryptSecret, keyVersion, secretKeyVersion } from '../store/secrets';
+import { type ServerContext } from '../context';
 import { type Store } from '../store/types';
 
-/** The workspace's CLI config on the server: what `.coder/config.json` holds locally; a local server edits the user's own file. */
+/** The workspace's CLI config on the server: what `.coder/config.json` holds locally; a local server edits the user's own file. MCP servers are connections, not config. */
 
-type Keys = Pick<ServerConfig, 'encryptionKey' | 'previousEncryptionKey'>;
 type Where = Pick<ServerContext, 'store' | 'config' | 'local' | 'settings'>;
-type Secrets = Record<string, Pick<McpConfigEntry, 'env' | 'headers'>>;
 
-/** Stored form: MCP `env` and `headers` values sealed together in `sealed`. */
-export type StoredConfig = Partial<CoderConfig> & { sealed?: string };
+export type StoredConfig = Partial<CoderConfig>;
 
 export class ConfigError extends Error {}
 
 const read = async (store: Store) => (await store.get('config', 'workspace')) ?? {};
 
-/** The config a task runs with, secrets included. */
-export async function taskConfig(store: Store, keys: Keys): Promise<Partial<CoderConfig>> {
-  const { sealed, ...config } = await read(store);
-  if (!sealed) return config;
-  const secrets = decryptSecret<Secrets>(keys, sealed);
-  return {
-    ...config,
-    mcp: Object.fromEntries(
-      Object.entries(config.mcp ?? {}).map(([name, entry]) => [
-        name,
-        { ...entry, ...secrets[name] },
-      ]),
-    ),
-  };
+/** The config a task runs with. */
+export async function taskConfig(store: Store): Promise<Partial<CoderConfig>> {
+  return read(store);
 }
 
 /** `$CODER_HOME/config.json`, the file `coder config` reads and writes. */
@@ -55,26 +39,18 @@ function userConfig(): Partial<CoderConfig> {
   }
 }
 
-/** `config` with every MCP `env` and `headers` value masked. */
-export function maskedMcp<T extends Partial<CoderConfig>>(config: T): T {
-  return config.mcp
-    ? {
-        ...config,
-        mcp: Object.fromEntries(
-          Object.entries(config.mcp).map(([name, entry]) => [name, masked(entry)]),
-        ),
-      }
-    : config;
+/** `config` without the `mcp` map a local user file may hold. */
+function withoutMcp<T extends Partial<CoderConfig>>(config: T): T {
+  const { mcp: _mcp, ...rest } = config;
+  return rest as T;
 }
 
-/** The config as members see it: MCP secret values masked. */
+/** The config as members see it. */
 export async function shownConfig(where: Where): Promise<Partial<CoderConfig>> {
-  if (where.local) return maskedMcp(userConfig());
-  const { sealed: _sealed, ...config } = await read(where.store);
-  return config;
+  return where.local ? withoutMcp(userConfig()) : read(where.store);
 }
 
-/** Validate and store a whole config; a masked value keeps the stored one. */
+/** Validate and store a whole config. */
 export async function saveConfig(
   where: Where,
   next: Partial<CoderConfig>,
@@ -104,49 +80,26 @@ function assertConfig(next: unknown): asserts next is Partial<CoderConfig> {
 
 async function storeConfig(where: Where, next: unknown): Promise<Partial<CoderConfig>> {
   assertConfig(next);
-  const current = where.local ? userConfig() : await taskConfig(where.store, where.config);
-  const plain: NonNullable<CoderConfig['mcp']> = {};
-  const secrets: Secrets = {};
-  const mcp = Object.fromEntries(
-    Object.entries(next.mcp ?? {}).map(([name, entry]) => {
-      const kept = (field: 'env' | 'headers') =>
-        entry[field] &&
-        Object.fromEntries(
-          Object.entries(entry[field]).map(([key, value]) => [
-            key,
-            value === MASK ? (current.mcp?.[name]?.[field]?.[key] ?? '') : value,
-          ]),
-        );
-      const env = kept('env');
-      const headers = kept('headers');
-      if (env || headers)
-        secrets[name] = { ...(env ? { env } : {}), ...(headers ? { headers } : {}) };
-      plain[name] = { ...entry, ...secrets[name] };
-      return [name, masked(entry)];
-    }),
-  );
+  if (next.mcp) throw new ConfigError('Add a connection in Settings to attach an MCP server');
   if (where.local) {
-    writeUserConfig({ ...next, ...(next.mcp ? { mcp: plain } : {}) } as CoderConfig);
+    const { mcp } = userConfig();
+    writeUserConfig({ ...next, ...(mcp ? { mcp } : {}) } as CoderConfig);
     return shownConfig(where);
   }
-  const stored: StoredConfig = {
-    ...next,
-    ...(next.mcp ? { mcp } : {}),
-    ...(Object.keys(secrets).length ? { sealed: encryptSecret(where.config, secrets) } : {}),
-  };
-  await where.store.put('config', 'workspace', stored);
+  await where.store.put('config', 'workspace', next);
   return shownConfig(where);
 }
 
-/** Change part of the config, as `coder model` and `coder mcp` change one file. */
+const current = async (where: Where) =>
+  where.local ? withoutMcp(userConfig()) : taskConfig(where.store);
+
+/** Change part of the config, as `coder model` changes one file. */
 export async function updateConfig(
   where: Where,
   change: (config: Partial<CoderConfig>) => void,
 ): Promise<Partial<CoderConfig>> {
   return serialize(where, async locked => {
-    const config = structuredClone(
-      locked.local ? userConfig() : await taskConfig(locked.store, locked.config),
-    );
+    const config = structuredClone(await current(locked));
     change(config);
     return storeConfig(locked, config);
   });
@@ -154,11 +107,9 @@ export async function updateConfig(
 
 /** RFC 7396 merge patch; validation applies to the resulting config. */
 export function patchConfig(where: Where, patch: unknown): Promise<Partial<CoderConfig>> {
-  return serialize(where, async locked => {
-    const current = locked.local ? userConfig() : await taskConfig(locked.store, locked.config);
-    const next = mergePatch(current, patch);
-    return storeConfig(locked, next);
-  });
+  return serialize(where, async locked =>
+    storeConfig(locked, mergePatch(await current(locked), patch)),
+  );
 }
 
 function mergePatch(target: unknown, patch: unknown): unknown {
@@ -178,32 +129,6 @@ function mergePatch(target: unknown, patch: unknown): unknown {
       });
   }
   return result;
-}
-
-const MASK = '********';
-
-function masked(entry: McpConfigEntry): McpConfigEntry {
-  const hide = (values?: Record<string, string>) =>
-    values && Object.fromEntries(Object.keys(values).map(key => [key, MASK]));
-  return {
-    ...entry,
-    ...(entry.env ? { env: hide(entry.env) } : {}),
-    ...(entry.headers ? { headers: hide(entry.headers) } : {}),
-  };
-}
-
-/** Re-seal the MCP secrets under the current key. */
-export async function resealConfig(store: Store, keys: Keys): Promise<number> {
-  return store.withConfigLock(async locked => {
-    const stored = await read(locked);
-    if (!stored.sealed || secretKeyVersion(keys, stored.sealed) === keyVersion(keys.encryptionKey!))
-      return 0;
-    await locked.put('config', 'workspace', {
-      ...stored,
-      sealed: encryptSecret(keys, decryptSecret(keys, stored.sealed)),
-    });
-    return 1;
-  });
 }
 
 export async function body<T>(req: Request): Promise<T> {
@@ -237,7 +162,7 @@ export async function readConfig(
 
         return json({
           config,
-          effective: ctx.local ? maskedMcp(loadConfig(ctx.local.cwd)) : withDefaults(config),
+          effective: ctx.local ? withoutMcp(loadConfig(ctx.local.cwd)) : withDefaults(config),
         });
       }
     }

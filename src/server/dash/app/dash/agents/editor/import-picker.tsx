@@ -23,6 +23,7 @@ type Found = {
   version?: number;
   commit?: string;
   taken?: boolean;
+  warnings?: string[];
 };
 type Preview = { repo: string; agents?: Found[]; error?: string };
 
@@ -92,6 +93,11 @@ function Agents({ preview, onDone }: { preview: Preview; onDone: (ids: string[])
                     ? 'An agent with this id already exists here.'
                     : (agent.description ?? 'No description.')}
                 </small>
+                {agent.warnings?.map(warning => (
+                  <small key={warning} role="status">
+                    {warning}
+                  </small>
+                ))}
               </span>
             </label>
           </li>

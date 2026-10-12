@@ -45,6 +45,7 @@
   font-size: 13px;
 }
 .stuck.hero {
+  align-items: center;
   gap: 12px;
 }
 .hero.stuck .title-row .badge {

@@ -12,6 +12,7 @@ import {
   installationRowId,
   ms,
   taskRecord,
+  storedTaskContext,
   taskRowId,
   type Kind,
 } from './shared';
@@ -54,7 +55,7 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
         usage: j.usage ?? null,
         tools: j.tools,
         toolScopes: j.toolScopes ?? null,
-        context: j.context ?? null,
+        context: storedTaskContext(j) ?? null,
         files: j.files ?? null,
         result: value.result ?? null,
         error: value.error ?? null,

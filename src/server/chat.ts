@@ -3,8 +3,7 @@ import { createHash } from 'node:crypto';
 
 import { Chat, Message, type SerializedMessage, type SerializedThread, type Thread } from 'chat';
 
-import { BUILTIN_AGENT } from '../agent/load';
-import type { AgentApp, AgentEvent, TaskContext } from '../agent/types';
+import { type AgentApp, type AgentEvent, type TaskContext } from '../agent/types';
 import type { ChatRoute, Integration, TokenBound } from '../integrations/types';
 import { appOwner, forInstallation, scoped, type ServerContext } from './context';
 import { appChatState, LocalChatState } from './store/chat';
@@ -23,6 +22,8 @@ export interface Target {
   repo?: NonNullable<AgentEvent['repo']>;
   /** The app's own platform user. */
   self?: string;
+  /** The covered account it happened in. */
+  within?: string;
 }
 
 /** A token for one of the app's bound installations; an unbound or removed one gets none. */
@@ -109,9 +110,17 @@ export async function deliver(
   event: AgentEvent,
   replies: Replies,
 ): Promise<string | undefined> {
-  const tenant = await forInstallation(ctx, `${app.id}:${event.installationId}`);
+  if (app.builtin && integration.app.builtin !== 'shared') return;
+  const key = `${app.id}:${event.installationId}`;
+  const tenant = await forInstallation(ctx, key);
   // A workspace's own app only ever serves that workspace.
   if (!tenant || (!app.builtin && tenant.organizationId !== ctx.organizationId)) return;
+  const installation =
+    tenant.boundInstallation?.installation.id === key
+      ? tenant.boundInstallation.installation
+      : await tenant.store.get('installation', key);
+  // An installation that covers several accounts acts only in the ones granted to it.
+  if (installation?.covers && !installation.covers.includes(event.within ?? '')) return;
   const dispatched = await dispatchEvent(
     tenant,
     integration,
@@ -185,12 +194,10 @@ function chatEvent(
   message: Message,
   delivery = message.id,
 ): AgentEvent | undefined {
-  // The built-in agent hears messages only when addressed, by its plain name too.
+  // A shared app hears messages only when its agent is addressed, by its plain name too.
   const address =
-    route === 'message' && app.agent === BUILTIN_AGENT
-      ? addressedTo(message.text, BUILTIN_AGENT)
-      : undefined;
-  if (route === 'message' && app.agent === BUILTIN_AGENT && address === undefined) return;
+    route === 'message' && app.builtin ? addressedTo(message.text, app.agent) : undefined;
+  if (route === 'message' && app.builtin && address === undefined) return;
   const type = raisedBy(integration, address === undefined ? route : 'mention');
   // Agents never wake agents; Chat already drops the app's own messages.
   if (!type || message.author.isBot === true) return;
@@ -220,6 +227,7 @@ function chatEvent(
     },
     text,
     chat: { thread: stored(thread.toJSON()), message: stored(message.toJSON()) },
+    ...(target.within ? { within: target.within } : {}),
     ...(target.repo ? { repo: target.repo } : {}),
     ...extra,
   };
@@ -255,6 +263,7 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
         (app.builtin || tenant?.organizationId === ctx.organizationId),
       );
     },
+    privateState: () => new LocalChatState(),
   });
   const state = appChatState(ctx.chatState ?? new LocalChatState(), app.id);
   const chat = new Chat({
@@ -330,6 +339,7 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
         ...(command.user.userName ? { login: command.user.userName } : {}),
       },
       text: command.text.trim(),
+      ...(target.within ? { within: target.within } : {}),
     };
     later(
       ctx,

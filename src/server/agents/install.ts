@@ -1,18 +1,55 @@
 import { type Params } from '../routes/match';
 import { decryptSecret, encryptSecret } from '../store/secrets';
+import { InstallationBoundError, type Store } from '../store/types';
+import { checkBinding } from '../store/memory';
 import { type Installation } from '../../agent/types';
+import { IntegrationError } from '../../integrations/types';
 import { consumeNonce, inspectNonce } from '../auth/nonce';
 import { encodeJson } from '../../utils/base64url';
 import { decodeParam, redirect } from '../routes/http';
 import {
   type AppsContext,
   OPERATOR,
-  page,
+  outcome,
+  platformsPath,
   link,
   linkedSibling,
   connectLinks,
   backPath,
 } from './platform';
+
+/** Write an installation under its lock from its current value; the same app's own installations of accounts it now covers are retired. */
+export function storeInstallation(
+  store: Store,
+  id: string,
+  next: (current: Installation | undefined) => Installation | undefined,
+  now: number,
+): Promise<Installation | undefined> {
+  return store.withAppLock(`installation:${id}`, async locked => {
+    const value = next(await locked.get('installation', id));
+    if (!value) return undefined;
+
+    const rows = await locked.list('installation');
+    const retiring = rows.filter(
+      row =>
+        row.id !== id &&
+        row.value.app === value.app &&
+        !row.value.deletedAt &&
+        value.covers?.includes(row.id.slice(value.app.length + 1)),
+    );
+    const retired = new Set(retiring.map(row => row.id));
+    checkBinding(
+      rows.map(row => [row.id, retired.has(row.id) ? { ...row.value, deletedAt: now } : row.value]),
+      id,
+      value,
+    );
+    for (const own of retiring)
+      await locked.put('installation', own.id, { ...own.value, deletedAt: now });
+    await locked.put('installation', id, value);
+
+    return value;
+  });
+}
 
 export async function installPage(
   req: Request,
@@ -25,33 +62,27 @@ export async function installPage(
   if (!/^[a-z0-9_-]+$/.test(url.pathname.split('/')[2]!)) return undefined;
 
   const userId = operator ? OPERATOR : (ctx.session?.user.id ?? 'anonymous');
-  const integration = ctx.integrations[id!];
-  if (!integration)
-    return page(`Unknown integration "${id}"; run coder agent integrations list to see them`, 404);
-
-  const publicUrl = ctx.config.publicUrl;
-  if (!publicUrl)
-    return page(
-      'PUBLIC_URL is not set on this server; set it to the address platforms should call and restart',
-      400,
-    );
-
-  const request = ctx.fetch ?? fetch;
-  const now = ctx.now?.() ?? Date.now();
   const linkState = decodeParam<{
     link?: string;
     tx?: string;
     back?: string;
   }>(url.searchParams.get('state'));
+  const back = backPath(linkState?.back);
+  const integration = ctx.integrations[id!];
+  if (!integration) return outcome(ctx, 'unknown-integration', { platform: id }, back);
+
+  const publicUrl = ctx.config.publicUrl;
+  if (!publicUrl) return outcome(ctx, 'no-public-url', {}, back);
+
   const appId = url.searchParams.get('app');
   const transactionTarget = linkState?.tx
     ? await inspectNonce(ctx, linkState.tx, 'install', userId)
     : undefined;
   if (!transactionTarget || (appId && appId !== transactionTarget))
-    return page('This installation link is invalid, expired, or already used', 403);
+    return outcome(ctx, 'install-expired', { platform: id, appId: appId ?? undefined }, back);
 
   const app = await ctx.store.get('app', appId ?? transactionTarget);
-  if (!app) return page('This app is not known to this server; create it first', 400);
+  if (!app) return outcome(ctx, 'unknown-app', { platform: id }, back);
 
   const credentials = decryptSecret(ctx.config, app!.credentials);
 
@@ -74,35 +105,40 @@ export async function completeInstall(
   if (!/^[a-z0-9_-]+$/.test(url.pathname.split('/')[2]!)) return undefined;
 
   const userId = operator ? OPERATOR : (ctx.session?.user.id ?? 'anonymous');
-  const integration = ctx.integrations[id!];
-  if (!integration)
-    return page(`Unknown integration "${id}"; run coder agent integrations list to see them`, 404);
-
-  const publicUrl = ctx.config.publicUrl;
-  if (!publicUrl)
-    return page(
-      'PUBLIC_URL is not set on this server; set it to the address platforms should call and restart',
-      400,
-    );
-
-  const request = ctx.fetch ?? fetch;
-  const now = ctx.now?.() ?? Date.now();
   const linkState = decodeParam<{
     link?: string;
     tx?: string;
     back?: string;
   }>(url.searchParams.get('state'));
+  const stated = backPath(linkState?.back);
+  const integration = ctx.integrations[id!];
+  if (!integration) return outcome(ctx, 'unknown-integration', { platform: id }, stated);
+
+  const publicUrl = ctx.config.publicUrl;
+  if (!publicUrl) return outcome(ctx, 'no-public-url', {}, stated);
+
+  const request = ctx.fetch ?? fetch;
+  const now = ctx.now?.() ?? Date.now();
   const appId = url.searchParams.get('app');
   const transactionTarget = linkState?.tx
     ? await inspectNonce(ctx, linkState.tx, 'install', userId)
     : undefined;
+  // Failed installs name the app, so installing again retries that one.
+  const retry = { platform: id, appId: appId ?? transactionTarget };
+
+  // OAuth's error redirect installs nothing; `access_denied` is the person cancelling.
+  const error = url.searchParams.get('error');
+  if (error)
+    return error === 'access_denied'
+      ? outcome(ctx, 'cancelled', retry, stated)
+      : outcome(ctx, 'platform-error', { ...retry, error }, stated);
+
   if (!transactionTarget || (appId && appId !== transactionTarget))
-    return page('This installation link is invalid, expired, or already used', 403);
+    return outcome(ctx, 'install-expired', retry, stated);
   if (!(await consumeNonce(ctx, linkState!.tx!, 'install', userId, transactionTarget)))
-    return page('This installation link is invalid, expired, or already used', 403);
+    return outcome(ctx, 'install-expired', retry, stated);
 
   const app = await ctx.store.get('app', appId ?? transactionTarget);
-  if (false) return page('This app is not known to this server; create it first', 400);
   // Install callback: state carries the one-time transaction and optional sibling link.
 
   const linked = linkState?.link ? await ctx.store.get('installation', linkState.link) : undefined;
@@ -110,8 +146,12 @@ export async function completeInstall(
   // GitHub's setup redirect carries no app id; the installation webhook records the install.
   if (!target)
     return linkState && !linkState.link
-      ? page('Connected.')
-      : page('This install does not match any app on this server; create the app first', 400);
+      ? outcome(ctx, 'connected', { platform: id }, stated)
+      : outcome(ctx, 'unknown-app', { platform: id }, stated);
+  if (target.builtin && integration.app.builtin !== 'shared')
+    return outcome(ctx, 'unknown-app', { platform: id }, stated);
+
+  const back = stated ?? (target.builtin ? undefined : platformsPath(target.agent));
 
   const credentials = decryptSecret(ctx.config, target.credentials);
   const result = await integration.app
@@ -122,7 +162,11 @@ export async function completeInstall(
       fetch: request,
       connect: connectLinks(ctx, target, publicUrl),
     })
-    .catch(error => page(error instanceof Error ? error.message : String(error), 400));
+    .catch((error: unknown) =>
+      error instanceof IntegrationError
+        ? outcome(ctx, error.code, { platform: id, appId: target.id, error: error.error }, back)
+        : outcome(ctx, 'failed', { platform: id, appId: target.id }, back),
+    );
   if (result instanceof Response) return result;
 
   const installationId = `${target.id}:${result.platformInstallId}`;
@@ -142,6 +186,7 @@ export async function completeInstall(
     account: result.account ?? existing?.account ?? linked?.account ?? { login: 'unknown' },
     ...(result.token ? { token: encryptSecret(ctx.config, result.token) } : {}),
     ...(result.installer ? { installer: result.installer } : {}),
+    ...(result.covers ? { covers: result.covers } : {}),
     createdAt: existing?.createdAt ?? now,
   };
   delete installation.deletedAt;
@@ -150,12 +195,22 @@ export async function completeInstall(
   if (sibling) installation = link(installation, sibling.integration, sibling.id);
 
   try {
-    await ctx.store.put('installation', installationId, installation);
-  } catch {
-    return page(
-      `This ${id} installation is already connected to another workspace; disconnect it there first`,
-      409,
-    );
+    installation = (await storeInstallation(
+      ctx.store,
+      installationId,
+      current =>
+        result.covers === null ? { ...installation, covers: current?.covers ?? [] } : installation,
+      now,
+    ))!;
+  } catch (error) {
+    return error instanceof InstallationBoundError
+      ? outcome(
+          ctx,
+          'installation-bound',
+          { platform: id, account: installation.account.login },
+          back,
+        )
+      : outcome(ctx, 'installation-taken', { platform: id }, back);
   }
   if (sibling) await ctx.store.put('installation', sibling.id, link(sibling, id!, installationId));
   if (integration.renew) {
@@ -164,17 +219,27 @@ export async function completeInstall(
     )
       .renewInstallation({ ...ctx, fetch: request }, target, result.platformInstallId)
       .then(
-        () => undefined,
-        (error: unknown) => (error instanceof Error ? error.message : String(error)),
+        () => false,
+        () => true,
       );
     if (failed)
-      return page(
-        `Connected, but ${id} did not start sending events yet. ${failed}. Coder tries again within the hour.`,
-        502,
+      return outcome(
+        ctx,
+        'renew-failed',
+        { platform: id, account: installation.account.login },
+        back,
       );
   }
 
-  const back = backPath(linkState?.back);
-
-  return back ? redirect(`${publicUrl.replace(/\/$/, '')}${back}`) : result.response;
+  return outcome(
+    ctx,
+    'connected',
+    {
+      platform: id,
+      account: installation.account.login,
+      connect: Object.keys(result.connect ?? {}),
+      link: result.connect ? installationId : undefined,
+    },
+    back,
+  );
 }

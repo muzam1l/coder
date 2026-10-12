@@ -21,13 +21,14 @@ import { loadTask as loadTaskRecord } from '../core/state';
 import { steerTask } from '../core/task/actions';
 import type { McpServerSpec, Task } from '../core/types';
 import type { Integration } from '../integrations/types';
-import { effectiveSettings, resolveTools } from './definition';
+import { effectiveSettings, parseAgentDefinition, resolveTools } from './definition';
 import { loadAgents } from './load';
 import { postReview, resolveReviewTarget, REVIEW_PLATFORM } from '../flow/builtin/review';
 import { INTEGRATIONS } from '../integrations';
 import { taskToolServers, tokenEnvName, toolServerToken, noteToolServer } from './mcp';
 import type { Agent, AgentEvent, AgentTask, TaskContext, TaskSource } from './types';
 import { serveMailbox, agentMailboxDir } from '../core/mailbox';
+import { connectionEnvironment, localConnections, narrowConnections } from '../core/connections';
 
 /** Names the local engine task an agent task runs on, so listings can tell them apart. */
 export const AGENT_TASK_PREFIX = 'agent:';
@@ -71,6 +72,7 @@ export async function postReply(
     name: author,
     installationId: event.installationId,
     token: async () => token,
+    privateState: () => new LocalChatState(),
   });
   const chat = new Chat({
     userName: author,
@@ -122,6 +124,8 @@ export async function execAgent(options: {
   onStart?: import('../flow/runtime').FlowHooks['onStart'];
   /** Secrets passed only to task-core MCP children, never inherited by the engine. */
   toolEnvironment?: { tokens: Record<string, string> };
+  connections?: Record<string, McpServerSpec>;
+  connectionEnv?: Record<string, string>;
   postToken?: string;
   noteFile?: string;
   onApproval?: (approval: unknown) => void | Promise<void>;
@@ -142,7 +146,7 @@ export async function execAgent(options: {
     agent = {
       id: task.agent,
       name: task.definition.name ?? task.agent,
-      definition: task.definition,
+      definition: parseAgentDefinition(task.agent, task.definition),
       ...(task.usage ? { usage: task.usage } : {}),
       ...(task.files ? { files: task.files } : {}),
       builtin: false,
@@ -153,6 +157,15 @@ export async function execAgent(options: {
   const event = task.event;
   const integration = event && INTEGRATIONS[event.integration];
   if (event && !integration) throw new Error(`Unknown integration "${event.integration}".`);
+  const connected = connectionEnvironment(options.connections ?? {}, options.connectionEnv);
+
+  const native = connectionEnvironment(
+    Object.fromEntries(
+      taskToolServers(task, options.toolEnvironment?.tokens ?? localTokens(task, process.env)).map(
+        server => [`native:${server.name}`, { ...server, resolved: true }],
+      ),
+    ),
+  );
 
   if (flow === 'default') {
     const defaults = defaultTask(agent, task);
@@ -162,18 +175,23 @@ export async function execAgent(options: {
     const noteFile = options.noteFile ?? path.join(noteDir!, 'note');
     if (!options.noteFile) await fs.writeFile(noteFile, task.context?.note ?? '');
     const resolved = resolveTaskOptions(effectiveSettings(agent), config);
-    const selectedMcp = selectMcpServers(task.mcp?.join(','), config.mcp, agent.definition.mcp);
-    const mcp = [
-      ...taskToolServers(task, options.toolEnvironment?.tokens ?? localTokens(task, process.env)),
-      noteToolServer(noteFile),
-      ...selectedMcp.mcp,
-    ];
+    const selectedMcp = selectMcpServers(
+      task.mcp?.join(','),
+      config.mcp,
+      agent.definition.mcp,
+      connected.mcp,
+    );
+    const mcp = [...Object.values(native.mcp), noteToolServer(noteFile), ...selectedMcp.mcp];
     const dispatched = options.resumeTaskId
       ? { taskId: options.resumeTaskId }
       : await dispatchTask({
           taskId: options.taskId,
           mcp,
+          mcpBindings: selectedMcp.mcpBindings,
+          mcpWarnings: selectedMcp.warnings,
           nativeMcp: selectedMcp.nativeMcp,
+          connectionEnv: { ...connected.env, ...native.env },
+          connections: task.connections,
           cwd,
           agentId: task.agent,
           ...(task.author ? { author: task.author } : {}),
@@ -236,6 +254,11 @@ export async function execAgent(options: {
           task.permissions ?? resolveTaskOptions(effectiveSettings(agent), config).permissions,
       },
       ...(options.postToken ? { integrationToken: options.postToken } : {}),
+      connections: {
+        mcp: { ...connected.mcp, ...native.mcp },
+        env: { ...connected.env, ...native.env },
+        ids: task.connections ?? [],
+      },
     },
     {
       ...(options.onTask
@@ -332,6 +355,8 @@ export async function agentTaskOptions(
   cwd: string,
   id: string,
   mcpFlag?: string,
+  connections?: Record<string, McpServerSpec>,
+  narrowed?: string[],
 ): Promise<{
   engine?: string;
   model?: string;
@@ -339,7 +364,12 @@ export async function agentTaskOptions(
   permissions?: string;
   system?: string;
   mcp: McpServerSpec[];
+  mcpBindings?: Task['mcpBindings'];
   nativeMcp: boolean;
+  warnings?: string[];
+  mcpWarnings?: string[];
+  connections?: string[];
+  connected?: Awaited<ReturnType<typeof localConnections>>;
 }> {
   const agents = await loadAgents(cwd, INTEGRATIONS);
   const agent = agents.find(a => a.id === id);
@@ -348,9 +378,12 @@ export async function agentTaskOptions(
       hint: `Agents here: ${agents.map(a => a.id).join(', ')}`,
     });
   const { definition, usage } = agent;
-
+  const connected =
+    connections === undefined
+      ? await localConnections(narrowConnections(usage?.connections, narrowed))
+      : undefined;
   const own = definition.mcp ?? {};
-  const mcp = selectMcpServers(mcpFlag, loadConfig(cwd).mcp, own);
+  const mcp = selectMcpServers(mcpFlag, loadConfig(cwd).mcp, own, connections ?? connected?.mcp);
 
   return {
     engine: usage?.engine ?? definition.engine,
@@ -359,6 +392,9 @@ export async function agentTaskOptions(
     permissions: usage?.permissions ?? definition.permissions,
     system: agentInstructions(agent) || undefined,
     ...mcp,
+    mcpWarnings: mcp.warnings,
+    connections: usage?.connections,
+    ...(connected ? { connected } : {}),
   };
 }
 
@@ -474,10 +510,12 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
   const ceiling = { agent: task.agentId!, permissions: task.permissions ?? 'auto' };
   const launchCwd = realpathSync(cwd);
   const authorizedMcp = new Map((task.mcp ?? []).map(server => [server.name, server] as const));
+  const connectionSource = task.connectionSource ?? (task.connections ? 'server' : undefined);
   // Pinned to the parent's launch directory when a request picks it, so a mailbox cwd cannot swap it.
   const pinned = (server: McpServerSpec) => {
     if (!server.command) return server;
     const [resolved] = resolveMcpServers([server], process.env, launchCwd);
+    if (!resolved) throw new Error(`MCP server "${server.name}" is not approved.`);
 
     return { ...server, command: resolved!.command, args: resolved!.args };
   };
@@ -521,6 +559,13 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
 
           return pinned(server);
         });
+      for (const id of task.connections ?? []) {
+        const server = [...authorizedMcp.values()].find(
+          server => server.connection === id || (!server.connection && server.name === id),
+        );
+        if (server && !mcp.some(selected => selected.name === server.name))
+          mcp.push(pinned(server));
+      }
 
       const asked = path.resolve(String(p.cwd ?? launchCwd));
       // The flow runtime always sends its cwd; only a different directory is an override.
@@ -554,6 +599,8 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
           model: p.model,
           effort: p.effort,
           mcp,
+          connections: task.connections,
+          connectionSource,
           permissions: capPermissions(name, p.permissions, ceiling),
           name: p.name,
           system: p.system,
@@ -574,6 +621,22 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
       const current = loadTaskRecord(taskCwd, p.taskId);
       if (!current) throw new CoderError('invalid-option', `No task "${p.taskId}".`);
       return steerTask(taskCwd, current, String(p.text ?? ''), {
+        ...(connectionSource === 'server'
+          ? {
+              resolveConnections: async granted => ({
+                ...connectionEnvironment(
+                  Object.fromEntries(
+                    resolveMcpServers(task.mcp, process.env, launchCwd).flatMap(server => {
+                      const id = server.connection ?? server.name;
+
+                      return granted.includes(id) ? [[id, pinned(server)]] : [];
+                    }),
+                  ),
+                ),
+                warnings: [],
+              }),
+            }
+          : {}),
         model: p.model,
         effort: p.effort,
         permissions: p.permissions

@@ -25,6 +25,7 @@ export const iGit =
 export const iMenu = 'M4 6h16M4 12h16M4 18h16';
 export const iX = 'M18 6 6 18M6 6l12 12';
 export const iCheck = 'M20 6 9 17l-5-5';
+export const iInfo = 'M12 16v-4M12 8h.01M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0';
 export const iDots =
   'M4 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M18 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0';
 export const iPlus = 'M12 5v14M5 12h14';

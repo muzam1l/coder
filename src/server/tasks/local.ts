@@ -6,13 +6,20 @@ import { execFile, spawn } from 'node:child_process';
 
 import { AGENT_TASK_PREFIX, execAgent, agentTaskOptions } from '../../agent/exec';
 import type { AgentTask, TaskSource } from '../../agent/types';
+import { defaultAgent } from '../../agent/load';
 import type { TaskTurn } from '../../client/types';
 import type { TaskLogLine, TaskStatus, UsageRecord } from '../store/types';
 import { deleteTask, stopTask, askTask, steerTask, recentTasks } from '../../core/task/actions';
 import { answerApproval, listPendingApprovals } from '../../core/approvals';
 import { loadConfig } from '../../core/config';
 import { logEntry } from '../../core/task/log-view';
-import { CoderError, dispatchTask, readResultJson, spawnWorker } from '../../core/dispatch';
+import {
+  CoderError,
+  dispatchTask,
+  readResultJson,
+  spawnWorker,
+  selectMcpServers,
+} from '../../core/dispatch';
 import {
   archiveDue,
   archiveTask,
@@ -38,7 +45,12 @@ import { applyTaskMessage } from '../../runner/task';
 import { readJsonFile, writeJsonFileAtomic } from '../../utils/fsx';
 import type { ServerContext } from '../context';
 import { eventTokens } from './context';
-import { check, TaskInputError, taskCwd, type NewTask } from './create';
+import { connectionGrants } from '../connections/grants';
+import { resolveConnections, taskConnectionSecrets } from '../connections/resolve';
+import { connectionEnvironment, narrowConnections } from '../../core/connections';
+import { taskToolServers } from '../../agent/mcp';
+import { connectionWarnings } from './logs';
+import { assertEnabled, check, TaskInputError, taskCwd, type NewTask } from './create';
 import { noteKey } from './thread';
 import { sessionKey, pushInbox, type TaskFence, type InboxEntry, type InboxAck } from './queue';
 import { kick, scheduleKick } from './kick';
@@ -102,7 +114,7 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
     task: {
       id: task.id,
       source: (task.source ?? 'cli') as TaskSource,
-      agent: task.agentId ?? 'coder',
+      agent: task.agentId ?? defaultAgent() ?? '',
       flow: flow ?? 'default',
       ...(task.name
         ? { name: task.name }
@@ -193,7 +205,11 @@ export async function startLocalTask(
     return undefined;
   const cwd = taskCwd(ctx, input) ?? ctx.local.cwd;
   await syncLocalAgents(ctx.store, cwd, ctx.integrations);
-  const { version } = await agentWithVersion(ctx.store, input.agent ?? 'coder');
+  const preferred = defaultAgent();
+  const slug = input.agent ?? preferred;
+  if (!slug) throw new TaskInputError('Name an agent: this server has no default agent.');
+  const { record, version } = await agentWithVersion(ctx.store, slug);
+  assertEnabled(ctx, slug, record);
   const route = await chooseRunner(ctx, {
     requester: ctx.session?.user.id,
     runner: input.runner,
@@ -207,21 +223,50 @@ export async function startLocalTask(
     const task: AgentTask = {
       id: generateTaskId(),
       source: 'dashboard',
-      agent: input.agent ?? 'coder',
+      agent: slug,
       flow: 'default',
       runner: 'local',
       cwd,
       prompt: input.prompt,
-      definition: { integrations: {} },
+      definition: version?.definition ?? { integrations: {} },
+      ...(record?.settings ? { usage: record.settings } : {}),
+      connections: await connectionGrants(
+        ctx,
+        undefined,
+        narrowConnections(record?.settings?.connections, input.connections),
+      ),
       tools: {},
     };
     return enqueueLocalTask(ctx, task, { input, cwd });
   }
   try {
+    const saved = taskId ? await ctx.store.get('task', taskId) : undefined;
+    const granted =
+      saved?.task.connections ??
+      (await connectionGrants(
+        ctx,
+        undefined,
+        narrowConnections(record?.settings?.connections, input.connections),
+      ));
+    const resolved = await resolveConnections(
+      ctx,
+      saved?.task ?? ({ connections: granted, tools: {} } as AgentTask),
+    );
+    const connected = connectionEnvironment(resolved.mcp, resolved.env);
+    const native = connectionEnvironment(
+      Object.fromEntries(
+        taskToolServers({ tools: resolved.tools }, resolved.tokens).map(server => [
+          `native:${server.name}`,
+          { ...server, resolved: true },
+        ]),
+      ),
+    );
     const agent =
-      input.agent && input.agent !== 'coder'
-        ? await agentTaskOptions(cwd, input.agent, input.mcp?.join(','))
+      slug !== preferred
+        ? await agentTaskOptions(cwd, slug, input.mcp?.join(','), connected.mcp)
         : undefined;
+    const selectedMcp =
+      agent ?? selectMcpServers(input.mcp?.join(','), loadConfig(cwd).mcp, {}, connected.mcp);
     const fallbacks: NonNullable<Task['fallbacks']> = [];
     const dispatched = await dispatchTask(
       {
@@ -234,8 +279,12 @@ export async function startLocalTask(
         effort: input.effort ?? (input.engine ? undefined : agent?.effort),
         permissions: input.permissions ?? agent?.permissions,
         system: agent?.system,
-        mcp: agent ? agent.mcp : input.mcp?.join(','),
-        nativeMcp: agent?.nativeMcp,
+        mcp: [...Object.values(native.mcp), ...selectedMcp.mcp],
+        mcpBindings: selectedMcp.mcpBindings,
+        mcpWarnings: [...(selectedMcp.warnings ?? []), ...resolved.warnings],
+        connectionEnv: { ...connected.env, ...native.env },
+        connections: granted,
+        nativeMcp: selectedMcp.nativeMcp,
         ...(agent ? { agentId: input.agent } : {}),
         source: 'dashboard',
         onFallback: info => fallbacks.push(info),
@@ -619,8 +668,16 @@ export async function runLocalTask(
     return enqueueLocalTask(ctx, { ...task, id: taskId ?? generateTaskId(), cwd }, { cwd });
   }
 
-  const tokens = task.event ? await eventTokens(ctx, task) : {};
-  const token = task.event && tokens[task.event.integration];
+  const handles = task.event ? await eventTokens(ctx, task) : {};
+  const resolved = await resolveConnections(ctx, task, handles);
+  await connectionWarnings(ctx, taskId ?? task.id, resolved.warnings);
+  await taskConnectionSecrets(ctx, taskId ?? task.id, [
+    ...resolved.secrets,
+    ...Object.values(resolved.tokens),
+  ]);
+  task = { ...task, tools: resolved.tools, toolScopes: resolved.toolScopes };
+  const tokens = resolved.tokens;
+  const token = task.event && handles[task.event.integration];
   const cwd = taskCwd(ctx, task) ?? ctx.local!.cwd;
   const queued = await ctx.store.get('task', taskId ?? task.id);
   const completion: LocalCompletion = {
@@ -673,7 +730,8 @@ export async function runLocalTask(
 
   const existing = task.flow === 'default' && taskId ? loadTask(cwd, taskId) : undefined;
   if (existing) {
-    if (existing.status === 'queued' && !existing.pid) spawnWorker(cwd, existing.id);
+    if (existing.status === 'queued' && !existing.pid)
+      spawnWorker(cwd, existing.id, connectionEnvironment(resolved.mcp, resolved.env).env);
     watchCompletion(ctx, existing.id, completion);
     return row(cwd, existing);
   }
@@ -689,6 +747,8 @@ export async function runLocalTask(
     task,
     taskId,
     toolEnvironment: { tokens },
+    connections: resolved.mcp,
+    connectionEnv: resolved.env,
     post: task.flow === 'default' ? false : task.source === task.event?.integration,
     ...(task.flow === 'default'
       ? { noteFile: path.join(resolveTaskDir(cwd, taskId!), 'agent-note') }
@@ -1033,7 +1093,7 @@ function taskUsage(
         `cli:${task.id}:${finishedAt}`,
         {
           taskId: task.id,
-          agent: task.agentId ?? 'coder',
+          agent: task.agentId ?? defaultAgent() ?? '',
           target: task.source ?? 'cli',
           ...(task.engine ? { engine: task.engine } : {}),
           ...((result.model ?? task.model) ? { model: (result.model ?? task.model)! } : {}),
@@ -1167,7 +1227,7 @@ async function scanLocalUsage(ctx: ServerContext): Promise<void> {
 }
 
 export const LOCAL_LOGINS =
-  "A local server stores no credentials. Tasks use this machine's own claude and codex sign-in.";
+  "A local server stores no engine credentials. Tasks use this machine's own claude and codex sign-in.";
 
 export type EngineStatus = Record<'claude' | 'codex', { signedIn: boolean; command: string }>;
 

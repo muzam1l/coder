@@ -1,8 +1,9 @@
 /** The `app`, `installation` and `credential` kinds, whose secrets live sealed in the `secret` table. */
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, ne, or, sql } from 'drizzle-orm';
 import { alias } from 'drizzle-orm/pg-core';
 
 import type { AgentApp, Installation } from '../../../../agent/types';
+import { InstallationBoundError } from '../../types';
 import {
   credentialId,
   parseCredentialId,
@@ -62,9 +63,17 @@ export function apps(s: DrizzleStore): Kind<AgentApp> {
           .from(t)
           .innerJoin(secret, eq(secret.id, t.credentialsSecretId))
           .where(and(s.mine(t.organizationId), eq(t.key, id)));
+        // An app on a shared app's credentials points at that app's secret.
+        const [shared] = value.shared
+          ? await s.db
+              .select({ secretId: t.credentialsSecretId })
+              .from(t)
+              .where(and(eq(t.organizationId, UNSCOPED_ORGANIZATION), eq(t.key, value.shared)))
+          : [];
+        if (value.shared && !shared) throw new Error(`No shared app ${value.shared}`);
         const credentialsSecretId =
-          existing?.secretId ?? (await addSecret(s, 'app', value.credentials));
-        if (existing && opaque(existing.sealed) !== value.credentials)
+          existing?.secretId ?? shared?.secretId ?? (await addSecret(s, 'app', value.credentials));
+        if (existing && !value.shared && opaque(existing.sealed) !== value.credentials)
           await setSecret(s, credentialsSecretId, value.credentials);
         const row = {
           integration: value.integration,
@@ -88,7 +97,10 @@ export function apps(s: DrizzleStore): Kind<AgentApp> {
           .delete(t)
           .where(and(s.mine(t.organizationId), eq(t.key, id)))
           .returning({ secretId: t.credentialsSecretId });
-        if (existing) await s.db.delete(secret).where(eq(secret.id, existing.secretId));
+        if (existing)
+          await s.db
+            .delete(secret)
+            .where(and(eq(secret.id, existing.secretId), s.mine(secret.organizationId)));
       }),
   };
 }
@@ -105,10 +117,39 @@ export function installationValue(
     account: r.account,
     token: sealed ? opaque(sealed) : undefined,
     installer: r.installer,
+    covers: r.covers,
     connections: r.connections,
     settings: r.settings,
     createdAt: ms(r.createdAt),
     deletedAt: r.deletedAt ? ms(r.deletedAt) : undefined,
+  });
+}
+
+/** Refuse an installation whose account, or an account it covers, another live installation on the same platform client holds, in any workspace. */
+export function checkBinding(s: DrizzleStore, id: string, value: Installation): Promise<void> {
+  const client = value.app.split('/')[0]!;
+  const accounts = [id.slice(value.app.length + 1), ...(value.covers ?? [])];
+  const list = sql`array[${sql.join(
+    accounts.map(account => sql`${account}`),
+    sql`, `,
+  )}]::text[]`;
+
+  return s.transaction(`binding:${client}`, async s => {
+    const [bound] = await s.db
+      .select({ id: install.id })
+      .from(install)
+      .innerJoin(app, eq(app.id, install.appId))
+      .where(
+        and(
+          or(inArray(install.platformInstallId, accounts), sql`${install.covers} ?| ${list}`),
+          isNull(install.deletedAt),
+          ne(install.key, id),
+          or(eq(app.key, client), sql`left(${app.key}, ${client.length + 1}) = ${`${client}/`}`),
+        ),
+      )
+      .limit(1);
+    if (bound)
+      throw new InstallationBoundError(`Installation "${id}" is bound through another app.`);
   });
 }
 
@@ -143,6 +184,7 @@ export function installations(s: DrizzleStore): Kind<Installation> {
           .where(eq(t.key, id));
         const taken = () => new Error(`Installation "${id}" belongs to another workspace.`);
         if (existing && existing.organizationId !== s.organizationId) throw taken();
+        if (value.deletedAt === undefined) await checkBinding(s, id, value);
         let tokenSecretId = existing?.secretId ?? null;
         if (value.token) {
           if (tokenSecretId) {
@@ -156,6 +198,7 @@ export function installations(s: DrizzleStore): Kind<Installation> {
           account: value.account,
           tokenSecretId: value.token ? tokenSecretId : null,
           installer: value.installer ?? null,
+          covers: value.covers ?? null,
           connections: value.connections ?? null,
           settings: value.settings ?? null,
           createdAt: date(value.createdAt),

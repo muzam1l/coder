@@ -31,7 +31,14 @@ function Actions({ agent }: { agent: AgentRow }) {
           Open in repository
         </a>
       ) : null}
-      <NewTaskButton agent={agent.id} />
+      {agent.settings?.disabled ? (
+        <button type="button" class="btn" disabled title="Enable this agent to start tasks">
+          <Icon d={iPlus} />
+          New task
+        </button>
+      ) : (
+        <NewTaskButton agent={agent.id} />
+      )}
     </>
   );
 }

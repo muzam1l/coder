@@ -2,7 +2,7 @@ import { type Params } from '../routes/match';
 import { type AgentTask } from '../../agent/types';
 import { type TaskStatus, type UsageRecord } from '../store/types';
 import { type ServerContext } from '../context';
-import { taskContext } from './context';
+import { taskContext, taskLogSecrets } from './context';
 import { writeBackCodexAuth } from '../settings/credentials';
 import { copyRunnerLogs } from './logs';
 import { type InboxAck } from './queue';
@@ -11,6 +11,7 @@ import { taskClaims, taskTokenHash } from './token';
 import { bearerToken } from '../routes/guards';
 import { json } from '../routes/http';
 import { type EngineLogin } from '../settings/logins';
+import { decryptSecret } from '../store/secrets';
 
 export async function authorizeTask(
   req: Request,
@@ -151,6 +152,22 @@ export async function reportResult(
   )
     return json({ error: 'Invalid task result' }, 400);
 
+  if (authorized.task.connections?.length) {
+    const secrets = (await taskLogSecrets(ctx, authorized)).sort(
+      (left, right) => right.length - left.length,
+    );
+    Object.assign(
+      body,
+      JSON.parse(
+        JSON.stringify(body, (_key, value) =>
+          typeof value === 'string'
+            ? secrets.reduce((text, secret) => text.replaceAll(secret, '[REDACTED]'), value)
+            : value,
+        ),
+      ) as TaskCallback,
+    );
+  }
+
   let now = (ctx.now ?? Date.now)();
   if (body.status === 'running' || body.status === 'waiting') {
     await ctx.queue.patchTask(
@@ -269,8 +286,9 @@ export async function readContext(
   const authorized = ctx.callbackTask!;
 
   try {
+    const { connectionSecrets: _secrets, ...context } = await taskContext(ctx, authorized);
     return json({
-      ...(await taskContext(ctx, authorized)),
+      ...context,
       generation: authorized.generation ?? 0,
     });
   } catch (error) {

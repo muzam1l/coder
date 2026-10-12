@@ -15,6 +15,7 @@ import { CLAUDE_PERMISSION_FLAGS, CLAUDE_SIDECAR_FLAGS, claudeTurnSettings } fro
 import { mailboxId, type MailboxKey } from '../../mailbox';
 import { shortPath } from '../../../utils/fsx';
 import { CLI_PATH } from '../../runtime';
+import { engineEnvironment } from '../../connections';
 import type {
   AuthStatus,
   Availability,
@@ -168,7 +169,7 @@ function normalizeClaudeUsage(usage: any): TokenUsage | null {
 }
 
 export function getClaudeAvailability(): Availability {
-  const probe = spawnSync('claude', ['--version'], { encoding: 'utf8' });
+  const probe = spawnSync('claude', ['--version'], { encoding: 'utf8', env: engineEnvironment() });
   if (probe.error || probe.status !== 0) {
     return {
       available: false,
@@ -186,7 +187,10 @@ export function getClaudeAuthStatus(): AuthStatus {
   if (process.env.ANTHROPIC_API_KEY) {
     return { loggedIn: true, detail: 'ANTHROPIC_API_KEY configured' };
   }
-  const probe = spawnSync('claude', ['auth', 'status', '--json'], { encoding: 'utf8' });
+  const probe = spawnSync('claude', ['auth', 'status', '--json'], {
+    encoding: 'utf8',
+    env: engineEnvironment(),
+  });
   if (probe.error || probe.status !== 0) {
     return { loggedIn: false, detail: 'not logged in' };
   }
@@ -260,7 +264,7 @@ export function buildClaudeMcpConfig(
     mcpServers.coder = {
       type: 'stdio',
       command: process.execPath,
-      args: [CLI_PATH, 'mcp', 'serve', options.approvalTaskId, '--cwd', cwd],
+      args: [CLI_PATH, 'task', 'mcp', options.approvalTaskId, '--cwd', cwd],
     };
   }
   for (const server of extraServers) {
@@ -301,7 +305,11 @@ export function buildClaudeTurnArgs(
   args.push(options.resumeSessionId ? '--resume' : '--session-id', sessionId);
   if (options.model) args.push('--model', options.model);
   if (options.effort) args.push('--effort', options.effort);
-  if (options.outputSchema) args.push('--json-schema', JSON.stringify(options.outputSchema));
+  if (options.outputSchema) {
+    // Claude Code's validator rejects the draft 2020-12 meta-schema reference that zod writes.
+    const { $schema: _, ...schema } = options.outputSchema as Record<string, unknown>;
+    args.push('--json-schema', JSON.stringify(schema));
+  }
   const permissions = options.permissions ?? 'auto';
   const additionalDirectories = options.additionalDirectories ?? [];
   const readOnlyAllowedTools =
@@ -690,7 +698,7 @@ export async function runClaudeTurn(
     const child = spawn(options.executable ?? 'claude', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      ...(options.env ? { env: { ...process.env, ...options.env } } : {}),
+      env: engineEnvironment({ ...process.env, ...options.env }),
     });
     let buffer = '';
     let stderr = '';

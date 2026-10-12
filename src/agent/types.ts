@@ -8,7 +8,7 @@ export const PRESETS: Preset[] = ['observe', 'comment', 'write'];
 
 export type { RunnerKind } from '../client/types';
 
-/** Per-integration wiring in a definition. `triggers` list = default behavior, map = event -> flow. */
+/** Per-integration wiring in a definition. `events` list = default behavior, map = event -> flow. */
 /** Event value in a definition map: a flow name, or options. */
 export interface AgentEventOptions {
   /** Flow to run; omit for the default agent. */
@@ -22,7 +22,7 @@ export interface AgentEventOptions {
 }
 
 export interface AgentDefinitionIntegration {
-  triggers?: string[] | Record<string, string | true | AgentEventOptions>;
+  events?: string[] | Record<string, string | true | AgentEventOptions>;
   /** Platform tools the agent uses: a preset or an explicit tool list. */
   tools?: Preset | string[];
 }
@@ -55,6 +55,10 @@ export interface AgentUsage {
   effort?: Effort;
   permissions?: Permission;
   integrations?: Record<string, AgentUsageIntegration>;
+  /** Connections its tasks may use, by id; absent allows every connection the task is granted. */
+  connections?: string[];
+  /** Off in this workspace; the other settings stay for when it is enabled again. */
+  disabled?: boolean;
 }
 
 export interface Agent {
@@ -84,6 +88,8 @@ export interface AgentEvent {
   text: string;
   /** What the platform tells an agent about where the event happened, such as a Linear issue; bounded. */
   promptContext?: string;
+  /** The covered account it happened in, for an installation that covers several. */
+  within?: string;
   /** The Chat SDK thread and message it happened in, without raw platform payloads; replies go to this thread. */
   chat?: { thread: SerializedThread; message?: SerializedMessage };
   repo?: {
@@ -112,17 +118,46 @@ export interface AgentApp {
   branch?: string;
   /** A server-level app shared by every workspace, made by `coder server app create`. */
   builtin?: boolean;
+  /** The server's shared app whose credentials this app reads; it keeps no copy of its own. */
+  shared?: string;
   /** Encrypted JSON (`encryptSecret`) of `GithubAppCredentials` or `SlackAppCredentials`. */
   credentials: string;
   createdAt: number;
 }
 
+/** A handle on another integration, linked to this installation at install time. */
+export type InstallationLink = { kind: 'installation'; id: string };
+
 /**
- * A token source for one integration, attached to an installation: another installation of the same
- * agent on that platform (linked at install time), or a user OAuth token from the SaaS login.
+ * Access to a service with no handle: an MCP server, or a native integration's token. It wakes nothing.
+ * Store kind `connection`; id is the slug, or `<user id>:<slug>` for a member's own.
  */
-export type Connection =
-  { kind: 'installation'; id: string } | { kind: 'oauth'; token: string; account?: string };
+export interface Connection {
+  id: string;
+  name: string;
+  /** `mcp`, or the integration id whose API the token reaches (`github`, `linear`). */
+  provider: 'mcp' | (string & {});
+  /** The member it belongs to; absent for the workspace's. */
+  owner?: string;
+  access: 'observe' | 'write';
+  /** Where the secret goes, without secret values; repository entries can name the connection but never change it. */
+  endpoint?: McpConfigEntry;
+  auth: 'none' | 'key' | 'oauth';
+  /** Where a key goes: a header (`Authorization` gets `Bearer `), or an env name for a stdio server. */
+  keyIn?: { header: string } | { env: string };
+  /** Encrypted JSON: `{ key }`, or the OAuth client, endpoints and tokens. */
+  secret?: string;
+  /** The credential whose `keyIn.env` value an `env` connection injects; rotating it rotates the connection. */
+  credential?: string;
+  /** Platform account or login that authorized it, for display. */
+  account?: string;
+  /** The client that issued a personal native OAuth token. */
+  oauthApp?: string;
+  /** A refresh or call proved the secret dead; tasks skip it until it is reconnected. */
+  broken?: { at: number; reason: string };
+  createdAt: number;
+  updatedAt?: number;
+}
 
 /** Per-installation settings a user sets from the platform (`/setup` in Slack). */
 export interface InstallationSettings {
@@ -143,8 +178,10 @@ export interface Installation {
   token?: string;
   /** Platform user who installed (Slack user id); used for the welcome DM. */
   installer?: string;
+  /** Accounts an install spanning several covers (Slack workspaces of an org install). */
+  covers?: string[];
   /** Other integrations this install can act on, keyed by integration id. */
-  connections?: Record<string, Connection>;
+  connections?: Record<string, InstallationLink>;
   settings?: InstallationSettings;
   createdAt: number;
   deletedAt?: number;
@@ -174,6 +211,8 @@ export interface AgentTask {
   args?: Record<string, unknown>;
   /** Workspace MCP servers the task attaches, by name. */
   mcp?: string[];
+  /** Connection ids granted when the task was made; secrets are resolved only when it starts. */
+  connections?: string[];
   /** Handle the task posts as (GitHub `slug[bot]`, Slack bot user), so flows can trust only their own comments. */
   author?: string;
   definition: AgentDefinition;
@@ -193,6 +232,7 @@ export interface AgentTask {
       repo?: { owner: string; name: string };
       /** Chat SDK thread id. */
       thread?: string;
+      within?: string;
     }
   >;
   /** Conversation context gathered by the receiver: recent thread messages and the stored note. */

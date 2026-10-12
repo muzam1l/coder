@@ -32,7 +32,7 @@ export interface Backend {
   /** Chat SDK state shared by every app; `appChatState` gives each its own keys. */
   chatState: StateAdapter;
   defaultOrganizationId: string;
-  /** An app record and the organization owning it, in one lookup; webhooks find their tenant and secret this way. */
+  /** An app record and the organization owning it, in one lookup; webhooks find their tenant and secret this way. An installation of an app sharing its platform client (`<app>/<id>`) routes to that app. */
   webhookTarget(
     appKey: string,
     installationKey?: string,
@@ -77,6 +77,19 @@ export async function createBackend(
         const installation = installationKey
           ? await store.get('installation', installationKey)
           : undefined;
+        if (app && installationKey && (!installation || installation.deletedAt))
+          for (const { value: sharing } of await store.list('app', { prefix: `${key}/` })) {
+            const bound = await store.get(
+              'installation',
+              `${sharing.id}${installationKey.slice(key.length)}`,
+            );
+            if (bound && !bound.deletedAt)
+              return {
+                organizationId: DEFAULT_ORGANIZATION,
+                app: sharing,
+                bound: { organizationId: DEFAULT_ORGANIZATION, installation: bound },
+              };
+          }
 
         return (
           app && {

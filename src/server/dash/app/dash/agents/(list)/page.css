@@ -6,6 +6,7 @@
 }
 .agent-card {
   position: relative;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -64,9 +65,15 @@
 }
 .pfs {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: 6px 14px;
   min-width: 0;
+  overflow: hidden;
   font-size: 12px;
+}
+/* above the card's cover link, so +n opens its list */
+.pfs .more {
+  position: relative;
+  z-index: 1;
 }

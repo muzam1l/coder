@@ -1,7 +1,13 @@
 /** GitHub App creation from a manifest, installs bound by user authorization, and user OAuth for linking. */
-import { escapeHtml, htmlResponse } from '../../utils/html';
-import { PRESETS, type AgentApp, type Preset } from '../../agent/types';
-import type { IntegrationApp, IntegrationUserAuth, PlatformUser } from '../types';
+import {
+  IntegrationError,
+  PRESETS,
+  type AgentApp,
+  type IntegrationApp,
+  type IntegrationUserAuth,
+  type PlatformUser,
+  type Preset,
+} from '../types';
 import { API, githubHeaders, type Fetcher } from './api';
 import { GITHUB_PRESETS } from './tools';
 
@@ -46,13 +52,11 @@ export function buildGithubManifest(
     name,
     permissions,
     events,
-    state,
     isPublic = false,
   }: {
     name: string;
     permissions: Record<string, string>;
     events: string[];
-    state: string;
     isPublic?: boolean;
   },
 ): GithubManifest {
@@ -61,7 +65,7 @@ export function buildGithubManifest(
     name,
     url: base,
     hook_attributes: { url: `${base}/hooks/github`, active: true },
-    redirect_url: `${base}/create/github/callback?state=${encodeURIComponent(state)}`,
+    redirect_url: `${base}/create/github/callback`,
     callback_urls: [`${base}/install/github/callback`, `${base}/connect/github/callback`],
     request_oauth_on_install: true,
     public: isPublic,
@@ -70,16 +74,13 @@ export function buildGithubManifest(
   };
 }
 
-/** Where the manifest is posted: the user's own account, or an organization they admin. */
-export function githubNewAppUrl(owner?: string): string {
-  return owner
+/** Where the manifest is posted: the user's own account, or an organization they admin; GitHub hands `state` back on the redirect. */
+export function githubNewAppUrl(owner?: string, state?: string): string {
+  const base = owner
     ? `https://github.com/organizations/${encodeURIComponent(owner)}/settings/apps/new`
     : 'https://github.com/settings/apps/new';
-}
 
-export function githubManifestForm(manifest: GithubManifest, owner?: string): string {
-  const value = JSON.stringify(manifest).replace(/'/g, '&#39;');
-  return `<form method="post" action="${githubNewAppUrl(owner)}"><input type="hidden" name="manifest" value='${value}'><button type="submit">Create GitHub App</button></form>`;
+  return state ? `${base}?state=${encodeURIComponent(state)}` : base;
 }
 
 export async function convertGithubManifest(
@@ -161,7 +162,11 @@ async function tokenRequest(
     error?: string;
   };
   if (!response.ok || !body.access_token)
-    throw new Error(`GitHub authorization failed: ${body.error ?? response.status}`);
+    throw new IntegrationError(
+      'platform-error',
+      body.error ?? String(response.status),
+      `GitHub authorization failed: ${body.error ?? response.status}`,
+    );
   return {
     accessToken: body.access_token,
     ...(body.refresh_token ? { refreshToken: body.refresh_token } : {}),
@@ -217,7 +222,7 @@ async function verifiedUser(
   request: Fetcher,
 ): Promise<PlatformUser & { accessToken: string }> {
   const code = new URL(req.url).searchParams.get('code');
-  if (!code) throw new Error('GitHub sent no authorization code');
+  if (!code) throw new IntegrationError('missing-code');
   const token = await tokenRequest(
     credentials,
     { code, ...(redirectUri ? { redirect_uri: redirectUri } : {}) },
@@ -287,34 +292,34 @@ const APP_EVENTS: Record<string, string> = {
   comment: 'issue_comment',
   mention: 'issue_comment',
 };
-/** GitHub App manifest webhook events for catalog event names. */
+/** GitHub App manifest webhook events for catalog event names; GitHub sends installation events to every app unasked. */
 export function githubAppEvents(events: string[]): string[] {
   const names = events
     .map(event => APP_EVENTS[event])
     .filter((name): name is string => Boolean(name));
-  return [...new Set([...names, 'push', 'installation', 'installation_repositories'])];
+  return [...new Set([...names, 'push'])];
 }
 
 export const githubApp: IntegrationApp = {
-  createPage({ publicUrl, state, definition, encodedState }) {
+  builtin: 'shared',
+  postOrigins: ['https://github.com'],
+  createPost({ publicUrl, state, definition, encodedState }) {
     const wiring = definition.integrations.github ?? {};
-    const events = Array.isArray(wiring.triggers)
-      ? wiring.triggers
-      : Object.keys(wiring.triggers ?? {});
+    const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
     const manifest = buildGithubManifest(publicUrl, {
       name: definition.name ?? state.agent,
       permissions: githubAppPermissions(wiring.tools),
       events: githubAppEvents(events),
-      state: encodedState,
       isPublic: state.public === true,
     });
-    return htmlResponse(
-      `<title>Create GitHub App</title><p>Creating the GitHub App for <b>${escapeHtml(manifest.name)}</b>…</p>${githubManifestForm(manifest, state.owner)}<script>document.forms[0].submit()</script>`,
-    );
+    return {
+      url: githubNewAppUrl(state.owner, encodedState),
+      fields: { manifest: JSON.stringify(manifest) },
+    };
   },
   async createCallback(req, { fetch: request }) {
     const code = new URL(req.url).searchParams.get('code');
-    if (!code) throw new Error('Missing GitHub manifest code');
+    if (!code) throw new IntegrationError('missing-code');
     const created = await convertGithubManifest(code, request);
     const credentials: GithubAppCredentials = {
       appId: created.appId,
@@ -333,7 +338,7 @@ export const githubApp: IntegrationApp = {
   // The installer authorized the app; the installation counts only when their own token can see it.
   async installCallback(req, { credentials, fetch: request }) {
     const id = new URL(req.url).searchParams.get('installation_id');
-    if (!id) throw new Error('Missing installation_id');
+    if (!id) throw new IntegrationError('missing-code');
     const { accessToken, ...user } = await verifiedUser(req, credentials, undefined, request);
     const account = await userInstallation(
       accessToken,
@@ -341,15 +346,12 @@ export const githubApp: IntegrationApp = {
       id,
       request,
     );
-    if (!account) throw new Error('That installation is not one of yours on GitHub');
+    if (!account) throw new IntegrationError('not-yours');
     return {
       platformInstallId: id,
       account,
       installer: user.id,
       user,
-      response: htmlResponse(
-        "<title>Connected</title><p>GitHub connected. The agent now runs on the repositories you picked; manage them from the app's settings page on GitHub.</p>",
-      ),
     };
   },
 };

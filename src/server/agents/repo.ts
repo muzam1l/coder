@@ -155,7 +155,7 @@ export function remoteAgentLoader(
       usage && typeof usage === 'object'
         ? (usage as Record<string, unknown>)[app.agent]
         : undefined;
-    if (entry === false)
+    if (entry === false || (entry as AgentUsage | undefined)?.disabled)
       throw new Error(
         `Agent "${app.agent}" is disabled in ${eventRepo(event) ?? installation.settings?.configRepo ?? app.agentsRepo}.`,
       );

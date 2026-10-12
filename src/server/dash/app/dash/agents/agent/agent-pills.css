@@ -25,3 +25,27 @@
   width: 100%;
   height: 100%;
 }
+.more-list:has(.pf-row) {
+  min-width: 180px;
+  gap: 0;
+}
+/* spaced like a dropdown's items */
+.pf-row {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+}
+/* a link to the agent's platforms: the same quiet backdrop inline and in the +n list */
+:is(.pfs > a, a.pf-row):hover {
+  background: var(--wash);
+}
+.pfs > a {
+  position: relative;
+  z-index: 1;
+  margin: -3px -6px;
+  padding: 3px 6px;
+}
+.pf-row .pf {
+  gap: 12px;
+  color: var(--fg);
+}

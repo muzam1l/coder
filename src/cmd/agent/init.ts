@@ -103,7 +103,7 @@ export const commandAgentInit = command({
   name: 'agent init',
   help: {
     usage:
-      'coder agent init [id] [--integrations a,b] [--triggers a,b] [--tools <preset>] [--name <text>] [--description <text>] [--permissions <mode>] [--yes]',
+      'coder agent init [id] [--integrations a,b] [--events a,b] [--tools <preset>] [--name <text>] [--description <text>] [--permissions <mode>] [--yes]',
     summary:
       'Create .coder/agents/<id>/ with an agent.json built from the integration catalog, a system.md to write the prompt in, and one sample event per integration for `coder agent run`. Asks for the id, integrations, events, and tools when run in a terminal without them.',
     flags: [
@@ -112,7 +112,7 @@ export const commandAgentInit = command({
         'platforms the agent listens to (see coder agent integrations list)',
       ],
       [
-        '--triggers <a,b>',
+        '--events <a,b>',
         'events that start tasks, applied to each integration that has them (default: mention)',
       ],
       ['--tools <preset>', 'observe, comment, or write (default: comment)'],
@@ -124,7 +124,7 @@ export const commandAgentInit = command({
     examples: [
       ['coder agent init', 'answer the questions, id included'],
       [
-        'coder agent init triage --integrations github --triggers issue,mention --tools comment',
+        'coder agent init triage --integrations github --events issue,mention --tools comment',
         'no questions',
       ],
     ],
@@ -134,7 +134,7 @@ export const commandAgentInit = command({
     name: str,
     description: str,
     integrations: str,
-    triggers: str,
+    events: str,
     tools: str,
     permissions: str,
     match: str,

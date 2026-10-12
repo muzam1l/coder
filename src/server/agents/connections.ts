@@ -1,53 +1,20 @@
-import * as z from 'zod/mini';
-import { decryptSecret, encryptSecret } from '../store/secrets';
+import { decryptSecret } from '../store/secrets';
 import { type Params } from '../routes/match';
-import { type Connection } from '../../agent/types';
 import { encodeJson } from '../../utils/base64url';
 import { issueNonce } from '../auth/nonce';
 import { type ServerContext } from '../context';
-import { updateMetadata } from '../store';
+import { sharedApps } from './apps';
+import { nativeApp } from '../connections/records';
+import { getAgent } from './records';
 import { json } from '../routes/http';
-
-const connectionSchema = z.object({
-  installation: z.string().check(z.minLength(1)),
-  integration: z.string().check(z.minLength(1)),
-  token: z.string().check(z.minLength(1)),
-  account: z.optional(z.string()),
-});
-
-export async function adminConnection(req: Request, ctx: ServerContext): Promise<Response> {
-  let body: unknown;
-  try {
-    body = await req.json();
-  } catch {
-    return new Response('Invalid JSON', { status: 400 });
-  }
-  const parsed = connectionSchema.safeParse(body);
-  if (!parsed.success) return new Response('Invalid connection', { status: 400 });
-
-  const { installation: id, integration, token, account } = parsed.data;
-  const installation = await ctx.store.get('installation', id);
-  if (!installation || installation.deletedAt)
-    return new Response('Unknown installation', { status: 404 });
-
-  const connection: Connection = {
-    kind: 'oauth',
-    token: encryptSecret(ctx.config, token),
-    ...(account ? { account } : {}),
-  };
-
-  await updateMetadata(ctx.store, 'installation', id, {
-    connections: { ...installation.connections, [integration]: connection },
-  });
-
-  return json({ ok: true });
-}
+import { LOOPBACK } from '../routes/guards';
 
 export async function adminInstallLink(
   req: Request,
   ctx: ServerContext,
   appId: string,
   back: string | null,
+  link: string | null,
 ): Promise<Response> {
   const app = await ctx.store.get('app', appId);
   if (!app) return json({ error: 'Unknown app' }, 404);
@@ -56,11 +23,36 @@ export async function adminInstallLink(
   if (!publicUrl) return json({ error: 'PUBLIC_URL is not set on this server' }, 400);
 
   const tx = await issueNonce(ctx, 'install', ctx.session?.user.id ?? 'anonymous', app.id);
-  const state = encodeJson({ tx, ...(back ? { back } : {}) });
+  const state = encodeJson({ tx, ...(back ? { back } : {}), ...(link ? { link } : {}) });
 
   return json({
     url: `${publicUrl.replace(/\/$/, '')}/install/${app.integration}?app=${encodeURIComponent(app.id)}&state=${state}`,
   });
+}
+
+/** This workspace's apps and the server's shared ones, for one agent or all. */
+export async function agentApps(ctx: ServerContext, agent?: string | null) {
+  const server = ctx.serverOrganizationId;
+  const [own, shared] = await Promise.all([
+    ctx.store.list('app'),
+    server !== undefined && server !== ctx.organizationId && ctx.scope
+      ? ctx
+          .scope(server)
+          .store.list('app')
+          .then(rows =>
+            rows.filter(
+              ({ value }) =>
+                value.builtin && ctx.integrations[value.integration]?.app.builtin === 'shared',
+            ),
+          )
+      : [],
+  ]);
+
+  return [...own, ...shared].filter(
+    ({ value }) =>
+      (!value.builtin || ctx.integrations[value.integration]?.app.builtin === 'shared') &&
+      (!agent || value.agent === agent),
+  );
 }
 
 export async function listApps(
@@ -69,27 +61,14 @@ export async function listApps(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const agent = url.searchParams.get('agent');
-  const server = ctx.serverOrganizationId;
-  const [own, shared] = await Promise.all([
-    ctx.store.list('app'),
-    server !== undefined && server !== ctx.organizationId && ctx.scope
-      ? ctx
-          .scope(server)
-          .store.list('app')
-          .then(rows => rows.map(({ id, value }) => ({ id, value: { ...value, builtin: true } })))
-      : [],
-  ]);
-  const rows = [...own, ...shared];
+  const rows = await agentApps(ctx, url.searchParams.get('agent'));
 
   return json(
-    rows
-      .filter(({ value }) => !agent || value.agent === agent)
-      .map(({ id, value }) => {
-        const { credentials: _credentials, ...safe } = value;
+    rows.map(({ id, value }) => {
+      const { credentials: _credentials, ...safe } = value;
 
-        return { id, value: safe };
-      }),
+      return { id, value: safe };
+    }),
   );
 }
 
@@ -117,24 +96,58 @@ export async function listInstallations(
   );
 }
 
-export function integrationCatalog(ctx: ServerContext): Response {
+/** `?agent=` fills that agent's name into create steps that prefill the platform's form. */
+export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<Response> {
+  const publicUrl = ctx.config.publicUrl;
+  const unreachable = publicUrl ? LOOPBACK.has(new URL(publicUrl).hostname) : false;
+  // Platforms cannot call a loopback address, so create steps never offer one to copy.
+  const base = unreachable ? 'https://<public address>' : publicUrl;
+  const agent = url.searchParams.get('agent');
+  const [record, apps, own] = await Promise.all([
+    agent ? getAgent(ctx.store, agent) : undefined,
+    sharedApps(ctx),
+    ctx.store.list('app'),
+  ]);
+  const shared = new Set(apps.map(app => app.integration));
+
   return json(
-    Object.values(ctx.integrations).map(integration => ({
-      id: integration.id,
-      name: integration.name,
-      brand: integration.brand,
-      description: integration.description,
-      installLabel: integration.installLabel ?? `Connect ${integration.id}`,
-      organizationApps: integration.organizationApps === true,
-      events: Object.fromEntries(
-        Object.entries(integration.events).map(([name, { description, noisy, addressed }]) => [
-          name,
-          { description, ...(noisy ? { noisy } : {}), ...(addressed ? { addressed } : {}) },
-        ]),
-      ),
-      presets: integration.tools.presets,
-      repositories: Boolean(integration.repos),
-    })),
+    await Promise.all(
+      Object.values(ctx.integrations).map(async integration => ({
+        id: integration.id,
+        name: integration.name,
+        brand: integration.brand,
+        description: integration.description,
+        installLabel: integration.installLabel ?? `Connect ${integration.id}`,
+        ...(integration.covered ? { covered: integration.covered } : {}),
+        ...(integration.featured ? { featured: true } : {}),
+        builtinApp: integration.app.builtin,
+        ...(integration.auth.user ? { personal: true } : {}),
+        ...((await nativeApp(ctx, integration.id, undefined, [
+          ...apps,
+          ...own.map(row => row.value),
+        ]))
+          ? { connectable: true }
+          : {}),
+        organizationApps: integration.organizationApps === true,
+        events: Object.fromEntries(
+          Object.entries(integration.events).map(([name, { description, noisy, addressed }]) => [
+            name,
+            { description, ...(noisy ? { noisy } : {}), ...(addressed ? { addressed } : {}) },
+          ]),
+        ),
+        presets: integration.tools.presets,
+        repositories: Boolean(integration.repos),
+        ...(integration.app.createStep && base
+          ? {
+              create: integration.app.createStep(base, {
+                name: record?.name,
+                shared: shared.has(integration.id),
+              }),
+            }
+          : {}),
+        ...(unreachable ? { unreachable: true } : {}),
+      })),
+    ),
   );
 }
 

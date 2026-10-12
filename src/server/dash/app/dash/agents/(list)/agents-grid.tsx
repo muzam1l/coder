@@ -8,7 +8,7 @@ import { usePaged } from '@/utils/paged';
 import type { AgentCardRow, IntegrationInfo, Paged } from '@coder/client/types';
 import { Empty } from '@/comps/ui/card';
 import { initial } from '@/utils/format';
-import { AgentPills, BrandIcon, Platform } from '@/app/dash/agents/agent/agent-pills';
+import { AgentPills, BrandIcon, PlatformLine } from '@/app/dash/agents/agent/agent-pills';
 import { Filter } from '@/comps/ui/filter';
 import { NewAgentMenu } from './agent-menu';
 import { Search, Toolbar, queryOf, useFilters } from '@/comps/ui/toolbar';
@@ -36,18 +36,9 @@ function AgentCard({ agent, catalog }: { agent: AgentCardRow; catalog: Integrati
         <span>{agent.description ?? 'No description yet.'}</span>
       </div>
       {agent.platforms.length ? (
-        <span class="pfs">
-          {agent.platforms.map(platform => (
-            <Platform
-              key={platform.id}
-              id={platform.id}
-              info={catalog.find(entry => entry.id === platform.id)}
-              state={platform.state}
-            />
-          ))}
-        </span>
+        <PlatformLine platforms={agent.platforms} catalog={catalog} agent={agent.id} />
       ) : (
-        <span class="pfs muted">Listens nowhere yet</span>
+        <span class="pfs muted">No handles yet</span>
       )}
     </li>
   );

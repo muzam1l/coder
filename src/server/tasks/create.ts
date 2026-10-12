@@ -1,9 +1,12 @@
+import { connectionGrants } from '../connections/grants';
+import { narrowConnections } from '../../core/connections';
 import { checkFolder } from '../settings/folders';
 import { getApps } from '../store';
 /** Tasks started from the dashboard, the CLI, or a schedule: a prompt or a flow, optionally on a workspace repo. */
 import { randomBytes } from 'node:crypto';
 
 import { effectiveSettings } from '../../agent/definition';
+import { defaultAgent } from '../../agent/load';
 import type { Integration } from '../../integrations/types';
 import type {
   AgentApp,
@@ -14,7 +17,7 @@ import type {
   TaskSource,
 } from '../../agent/types';
 import type { TaskTurn } from '../../client/types';
-import type { TaskStatus } from '../store/types';
+import type { AgentRecord, TaskStatus } from '../store/types';
 import { PERMISSION_MODES, type Permission } from '../../core/config';
 import { agentWithVersion, seedBuiltinAgent, toAgent } from '../agents/records';
 import type { ServerContext } from '../context';
@@ -42,6 +45,8 @@ export interface NewTask {
   permissions?: string;
   runner?: string;
   mcp?: string[];
+  /** Narrows the connections the task is granted. */
+  connections?: string[];
 }
 
 /** A request the server refuses; `fix` is the one-click link that resolves it. */
@@ -53,6 +58,16 @@ export class TaskInputError extends Error {
   ) {
     super(message);
   }
+}
+
+/** Refuses tasks for an agent disabled in this workspace. */
+export function assertEnabled(ctx: ServerContext, slug: string, record?: AgentRecord): void {
+  if (!record?.settings?.disabled) return;
+  throw new TaskInputError(
+    `Agent "${slug}" is disabled in this workspace. Enable it in its settings to start tasks.`,
+    409,
+    `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}/dash/agents/${encodeURIComponent(slug)}/settings`,
+  );
 }
 
 export function taskCwd(ctx: ServerContext, input: { cwd?: string }): string | undefined {
@@ -91,6 +106,12 @@ export function check(input: NewTask): void {
     (!Array.isArray(input.mcp) || !input.mcp.every(name => SLUG.test(name)))
   )
     throw new TaskInputError('mcp must list server names');
+  if (
+    input.connections !== undefined &&
+    (!Array.isArray(input.connections) ||
+      !input.connections.every(id => typeof id === 'string' && id.length > 0))
+  )
+    throw new TaskInputError('connections must list connection ids');
   if (
     input.outputSchema !== undefined &&
     (!input.outputSchema ||
@@ -172,7 +193,8 @@ export async function createTask(
   const cwd = taskCwd(ctx, input);
   const now = (ctx.now ?? Date.now)();
   const requester = ctx.session?.user.id;
-  const slug = input.agent ?? 'coder';
+  const slug = input.agent || defaultAgent();
+  if (!slug) throw new TaskInputError('Name an agent: this server has no default agent.');
   if (ctx.local) await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
   const inputs = () =>
     ctx.store.taskInputs
@@ -190,6 +212,7 @@ export async function createTask(
     throw new TaskInputError(error.message);
   });
   if (!record || !version) throw new TaskInputError(`No agent "${slug}"`, 404);
+  assertEnabled(ctx, slug, record);
   const usage: AgentUsage = {
     ...(input.engine ? { engine: input.engine } : {}),
     ...(input.model ? { model: input.model } : {}),
@@ -230,6 +253,11 @@ export async function createTask(
     ...(agent.files ? { files: agent.files } : {}),
     ...(agent.usage ? { usage: agent.usage } : {}),
     tools: {},
+    connections: await connectionGrants(
+      ctx,
+      requester,
+      narrowConnections(agent.usage?.connections, input.connections),
+    ),
     ...(ctx.session || input.outputSchema
       ? {
           context: {

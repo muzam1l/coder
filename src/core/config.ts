@@ -10,6 +10,7 @@ import * as z from 'zod/mini';
 
 import { DEFAULT_CONFIG } from './defaults';
 import { coderHome, resolveWorkspaceRoot } from './state';
+import { markRepositoryMcp } from './mcp';
 
 export { DEFAULT_CONFIG };
 
@@ -275,11 +276,14 @@ const agentUsageSchema = z.union([
     permissions: z.optional(permissionSchema),
     runner: z.optional(z.enum(['local', 'local-docker', 'vercel-sandbox', 'github-actions'])),
     integrations: z.optional(z.record(z.string(), agentUsageIntegrationSchema)),
+    connections: z.optional(z.array(z.string())),
+    disabled: z.optional(z.boolean()),
   }),
 ]);
 /** The merged, effective shape (everything present after DEFAULT_CONFIG). */
 export const mcpEntrySchema = z
   .strictObject({
+    connection: z.optional(z.string().check(z.minLength(1))),
     command: z.optional(z.string().check(z.minLength(1))),
     args: z.optional(z.array(z.string())),
     env: z.optional(z.record(z.string(), z.string())),
@@ -289,7 +293,17 @@ export const mcpEntrySchema = z
     tools: z.optional(z.array(z.string())),
     description: z.optional(z.string()),
   })
-  .check(z.refine(entry => Boolean(entry.command) !== Boolean(entry.url), 'one of command or url'));
+  .check(
+    z.refine(
+      entry =>
+        entry.connection
+          ? [entry.url, entry.command, entry.args, entry.env, entry.headers, entry.type].every(
+              value => value === undefined,
+            )
+          : Boolean(entry.command) !== Boolean(entry.url),
+      'Use a connection alone, without url, command, args, env, headers or type; otherwise supply one of command or url',
+    ),
+  );
 const effectiveConfigSchema = z.strictObject({
   chain: z.array(engineSchema).check(z.minLength(1)),
   engines: z.partial(
@@ -313,7 +327,7 @@ const effectiveConfigSchema = z.strictObject({
   mcp: z.optional(z.record(agentNameSchema, mcpEntrySchema)),
   approvals: approvalsSchema,
 });
-export type McpConfigEntry = z.infer<typeof mcpEntrySchema>;
+export type McpConfigEntry = z.infer<typeof mcpEntrySchema> & { repository?: boolean };
 /** What a single config file may contain: any strict subset. */
 const configSchema = z.partial(
   z.extend(effectiveConfigSchema, { approvals: z.partial(approvalsSchema) }),
@@ -490,6 +504,7 @@ function narrowed(base: CoderConfig, repo: Partial<CoderConfig>): Partial<CoderC
   );
   const disabled = Object.entries(repo.models ?? {}).filter(([, entry]) => entry.disabled === true);
   return {
+    ...(repo.mcp ? { mcp: repo.mcp } : {}),
     ...(repo.chain ? { chain: repo.chain.filter(engine => base.chain.includes(engine)) } : {}),
     engines,
     models: Object.fromEntries(disabled.map(([name]) => [name, { disabled: true }])),
@@ -507,6 +522,7 @@ export function loadConfig(cwd: string): CoderConfig {
   const repoFile = resolveWorkspaceConfigFile(workspaceRoot);
   layers.push([repoFile, readJsonIfExists(repoFile)]);
   let config: CoderConfig = DEFAULT_CONFIG;
+  const repositoryMcp = new Set<string>();
   for (const [source, value] of layers) {
     if (!value) {
       continue;
@@ -515,12 +531,22 @@ export function loadConfig(cwd: string): CoderConfig {
     if (errors.length) {
       throw new Error(`Invalid config in ${source}:\n  ${errors.join('\n  ')}`);
     }
-    config = deepMerge(config, server && source === repoFile ? narrowed(config, value) : value);
+    const layer =
+      server && source === repoFile ? narrowed(config, value) : (value as Partial<CoderConfig>);
+    const mcp = { ...config.mcp, ...layer.mcp };
+    for (const name of Object.keys(layer.mcp ?? {})) {
+      if (source === repoFile) repositoryMcp.add(name);
+      else repositoryMcp.delete(name);
+    }
+    config = { ...deepMerge(config, layer), ...(Object.keys(mcp).length ? { mcp } : {}) };
   }
   const errors = validateConfig(config);
   if (errors.length) {
     throw new Error(`Invalid merged config:\n  ${errors.join('\n  ')}`);
   }
+  for (const [name, entry] of Object.entries(config.mcp ?? {}))
+    markRepositoryMcp({ [name]: entry }, repositoryMcp.has(name));
+
   return config;
 }
 
@@ -812,119 +838,4 @@ export function writeConfigFile(targetFile: string, mutate: (config: Record<stri
   }
   fs.mkdirSync(path.dirname(targetFile), { recursive: true });
   fs.writeFileSync(targetFile, `${JSON.stringify(current, null, 2)}\n`, 'utf8');
-}
-
-const MCP_ADD_USAGE =
-  'Usage: coder mcp add <name> [--tools a,b] [--user] (--url <url> [--header K=V] | -- <command> [args...])';
-
-/** Flags of `coder mcp add`: a remote `url` or a stdio `command`; env, header and tools are comma lists. */
-export interface McpAddOptions {
-  url?: string;
-  transport?: string;
-  header?: string;
-  env?: string;
-  tools?: string;
-  command?: string[];
-  user?: boolean;
-}
-
-// The workspace config, or the user one with `user`.
-function mcpConfigFile(cwd: string, user?: boolean): string {
-  return user ? resolveUserConfigFile() : resolveWorkspaceConfigFile(resolveWorkspaceRoot(cwd));
-}
-
-function pairs(value: string | undefined, flagName: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const pair of (value ?? '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean)) {
-    const eq = pair.indexOf('=');
-    if (eq < 1)
-      throw new Error(`Invalid ${flagName} "${pair}": use KEY=VALUE (values may hold \${VAR}).`);
-    out[pair.slice(0, eq)] = pair.slice(eq + 1);
-  }
-  return out;
-}
-
-function saveMcp(cwd: string, name: string, entry: Record<string, unknown>, user?: boolean) {
-  const file = mcpConfigFile(cwd, user);
-  writeConfigFile(file, current => {
-    current.mcp = { ...current.mcp, [name]: entry };
-  });
-  return { name, file };
-}
-
-/** Print-free core of `coder mcp add`: save a stdio or remote server entry. */
-export function mcpAdd(cwd: string, name: string | undefined, opts: McpAddOptions = {}) {
-  const [command, ...args] = opts.command ?? [];
-  if (!name) throw new Error(MCP_ADD_USAGE);
-  if (!command && !opts.url) throw new Error('Give a remote --url, or a command after `--`.');
-  if (command && opts.url) throw new Error('Use either --url or a command, not both.');
-  const tools = opts.tools
-    ? {
-        tools: opts.tools
-          .split(',')
-          .map(s => s.trim())
-          .filter(Boolean),
-      }
-    : {};
-  const env = pairs(opts.env, '--env');
-  const headers = pairs(opts.header, '--header');
-  return saveMcp(
-    cwd,
-    name,
-    opts.url
-      ? {
-          url: opts.url,
-          ...(opts.transport ? { type: opts.transport } : {}),
-          ...(Object.keys(headers).length ? { headers } : {}),
-          ...tools,
-        }
-      : {
-          command,
-          ...(args.length ? { args } : {}),
-          ...(Object.keys(env).length ? { env } : {}),
-          ...tools,
-        },
-    opts.user,
-  );
-}
-
-/** Print-free core of `coder mcp add-json`: save an entry from any `.mcp.json`, as JSON text or an object. */
-export function mcpAddJson(
-  cwd: string,
-  name: string | undefined,
-  json: string | Record<string, unknown> | undefined,
-  opts: { user?: boolean } = {},
-) {
-  if (!name || !json) throw new Error("Usage: coder mcp add-json <name> '<json entry>' [--user]");
-  let entry: unknown = json;
-  if (typeof json === 'string') {
-    try {
-      entry = JSON.parse(json);
-    } catch (error) {
-      throw new Error(`Invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
-    }
-  }
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry))
-    throw new Error('The entry must be a JSON object.');
-  return saveMcp(cwd, name, entry as Record<string, unknown>, opts.user);
-}
-
-/** Print-free core of `coder mcp list`: the effective `mcp` map. */
-export function mcpList(cwd: string): Record<string, McpConfigEntry> {
-  return loadConfig(cwd).mcp ?? {};
-}
-
-/** Print-free core of `coder mcp rm`. */
-export function mcpRemove(cwd: string, name: string | undefined, opts: { user?: boolean } = {}) {
-  if (!name) throw new Error('Usage: coder mcp rm <name> [--user]');
-  const file = mcpConfigFile(cwd, opts.user);
-  writeConfigFile(file, current => {
-    if (!current.mcp?.[name]) throw new Error(`No MCP server "${name}" in ${file}.`);
-    delete current.mcp[name];
-    if (!Object.keys(current.mcp).length) delete current.mcp;
-  });
-  return { name, file };
 }

@@ -1,4 +1,4 @@
-/** `coder agent show <id>`: one agent's settings, triggers and tools. */
+/** `coder agent show <id>`: one agent's settings, events and tools. */
 import path from 'node:path';
 import process from 'node:process';
 
@@ -53,9 +53,7 @@ function printAgentDetail(detail: ReturnType<typeof agentDetail>): void {
   type Row = { id: string; events: string; tools: string };
   const rows: Row[] = Object.entries(def.integrations).map(([integrationId, wiring]) => {
     const cap = usage?.integrations?.[integrationId];
-    const events = Array.isArray(wiring.triggers)
-      ? wiring.triggers
-      : Object.keys(wiring.triggers ?? {});
+    const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
     const allowed = cap?.allowedEvents
       ? events.filter(e => cap.allowedEvents!.includes(e))
       : events;
@@ -85,7 +83,7 @@ export const commandAgentShow = command({
   help: {
     usage: 'coder agent show <id> [--server [url]] [--json] [--cwd <dir>]',
     summary:
-      'Describe one agent as it will run here, or its active version on a server: its settings and per-integration triggers and tools.',
+      'Describe one agent as it will run here, or its active version on a server: its settings and per-integration events and tools.',
     flags: [SERVER_FLAG],
     examples: [['coder agent show coder', 'what the built-in agent listens to and may do']],
   },

@@ -9,7 +9,7 @@
   flex-direction: column;
   gap: 20px;
 }
-.agent-new .btn[aria-pressed="true"] {
+.agent-new .btn[aria-pressed='true'] {
   border-color: var(--deep);
   background: var(--accbg);
 }
@@ -28,7 +28,7 @@
   color: inherit;
   cursor: pointer;
 }
-.tile[aria-checked="true"] {
+.tile[aria-checked='true'] {
   border-color: var(--deep);
   box-shadow: inset 3px 0 0 var(--deep);
 }
@@ -88,7 +88,7 @@
   background: var(--field);
 }
 
-/* where it listens: one row per platform, its triggers as chips once on */
+/* where it listens: one row per platform, its events as chips once on */
 .listen {
   border: 1px solid var(--line2);
 }
@@ -136,7 +136,7 @@
   background: var(--wash2);
 }
 .listen input.switch::after {
-  content: "";
+  content: '';
   position: absolute;
   top: 2px;
   left: 2px;
@@ -157,12 +157,12 @@
   outline: 2px solid var(--acc);
   outline-offset: 2px;
 }
-.triggers {
+.events {
   display: grid;
   gap: 8px;
   padding: 0 12px 12px 52px;
 }
-.triggers .chips {
+.events .chips {
   gap: 6px;
 }
 .match {
@@ -221,6 +221,7 @@
   position: sticky;
   top: calc(var(--stuck) + 16px);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
 }
 .side-label {
@@ -236,9 +237,6 @@
 .agent-card.preview::before {
   background: var(--deep);
 }
-.summary {
-  color: var(--muted);
-}
 
 @media (max-width: 760px) {
   .templates,
@@ -248,16 +246,20 @@
   .agent-side {
     position: static;
   }
-  .triggers {
+  .events {
     padding-left: 12px;
   }
   .run-body .seg-btns > button {
     padding: 0 8px;
   }
-  .page .agent-new .stuck .actions > :not(:last-child, [role="alert"]) {
+  .page .agent-new .stuck .actions > :not(:last-child, [role='alert']) {
     display: none;
   }
   .page .agent-new .stuck .actions > :last-child {
     display: inline-flex;
   }
+}
+
+.form-part .semi {
+  font-weight: 600;
 }

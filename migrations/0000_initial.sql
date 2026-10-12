@@ -84,6 +84,7 @@ CREATE TABLE "coder"."integration_app_installation" (
 	"account" jsonb NOT NULL,
 	"token_secret_id" bigint,
 	"installer" text,
+	"covers" jsonb,
 	"connections" jsonb,
 	"settings" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,

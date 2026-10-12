@@ -1,5 +1,6 @@
 import type { Integration } from '../types';
 import { linearApp, linearToken, linearUserAuth } from './app';
+import { LINEAR_PRESETS, LINEAR_TOOLS } from './tools';
 
 const PROMPT_CONTEXT_LIMIT = 16 * 1024;
 
@@ -26,7 +27,7 @@ export const linear: Integration = {
       steers: true,
     },
   },
-  tools: { presets: { observe: [], comment: [], write: [] } },
+  tools: { presets: LINEAR_PRESETS, serve: LINEAR_TOOLS },
   get app() {
     return linearApp;
   },

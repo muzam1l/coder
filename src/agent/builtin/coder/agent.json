@@ -1,22 +1,43 @@
 {
   "name": "Coder",
+  "default": true,
   "description": "Answers engineering questions, reviews pull requests, and makes requested changes.",
   "permissions": "workspace-write",
   "integrations": {
     "github": {
-      "triggers": {
+      "events": {
         "pull_request": {
           "flow": "review",
           "permissions": "read-only"
         },
-        "mention": true
+        "mention": true,
+        "issue": true,
+        "comment": {
+          "match": "[Cc]oder"
+        }
       },
       "tools": "write"
     },
     "slack": {
-      "triggers": {
+      "events": {
         "mention": true,
-        "message": true
+        "command": true,
+        "reaction": true,
+        "message": {
+          "match": "[Cc]oder"
+        }
+      },
+      "tools": "comment"
+    },
+    "gmail": {
+      "events": {
+        "mail": true
+      },
+      "tools": "comment"
+    },
+    "linear": {
+      "events": {
+        "mention": true
       },
       "tools": "comment"
     }

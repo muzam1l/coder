@@ -1,32 +1,5 @@
-/** App setup the Gmail, Linear and Teams integrations share: the credentials form and OAuth token endpoint calls. */
-import { escapeHtml, htmlResponse } from '../utils/html';
-import type { CreateState } from './types';
-
-/** The page that asks for an app's credentials and posts them, with the creation state, to `/create/<id>/callback`. */
-export function credentialsPage(
-  publicUrl: string,
-  id: string,
-  state: CreateState,
-  input: { title: string; steps: string[]; fields: Array<[name: string, label: string]> },
-): Response {
-  const hidden = Object.entries(state)
-    .filter(([, value]) => value !== undefined)
-    .map(
-      ([key, value]) => `<input type="hidden" name="${key}" value="${escapeHtml(String(value))}">`,
-    )
-    .join('');
-  const steps = input.steps.map(step => `<li>${escapeHtml(step)}</li>`).join('');
-  const fields = input.fields
-    .map(
-      ([name, label]) =>
-        `<p><label>${escapeHtml(label)}<br><input name="${name}" size="60" required></label></p>`,
-    )
-    .join('');
-  return htmlResponse(
-    `<title>${escapeHtml(input.title)}</title><ol>${steps}</ol>` +
-      `<form method="post" action="${publicUrl.replace(/\/$/, '')}/create/${id}/callback">${hidden}${fields}<button type="submit">${escapeHtml(input.title)}</button></form>`,
-  );
-}
+/** App setup the Gmail, Linear and Teams integrations share: the posted credentials and OAuth token endpoint calls. */
+import { IntegrationError } from './types';
 
 /** The posted credentials form, every named field present and trimmed. */
 export async function postedFields<K extends string>(
@@ -38,7 +11,8 @@ export async function postedFields<K extends string>(
     names.map(name => [name, form.get(name)?.trim() ?? '']),
   ) as Record<K, string>;
   const missing = names.filter(name => !values[name]);
-  if (missing.length) throw new Error(`Missing ${missing.join(', ')}`);
+  if (missing.length)
+    throw new IntegrationError('invalid-field', missing[0], `Missing ${missing.join(', ')}`);
   return values;
 }
 
@@ -70,7 +44,9 @@ export async function tokenGrant(
     error_description?: string;
   };
   if (!response.ok || !body.access_token)
-    throw new Error(
+    throw new IntegrationError(
+      'platform-error',
+      body.error ?? String(response.status),
       `${new URL(url).host} refused the token request: ${body.error_description ?? body.error ?? response.status}`,
     );
   return {

@@ -14,6 +14,20 @@ import {
 import { secretKeyVersion } from '../../secrets';
 import type { DrizzleStore } from '../store';
 
+export function storedTaskContext(value: TaskStatus['task']) {
+  return value.connections === undefined
+    ? value.context
+    : { ...value.context, connections: value.connections };
+}
+
+export function readTaskContext(value: TaskStatus['task']['context'] | null) {
+  const { connections, ...context } = (value ?? {}) as NonNullable<
+    TaskStatus['task']['context']
+  > & { connections?: string[] };
+
+  return { connections, context: Object.keys(context).length ? context : undefined };
+}
+
 /** Postgres requests acquire their organization from a session, app, or task. */
 export const UNSCOPED_ORGANIZATION = '';
 
@@ -103,6 +117,8 @@ export const versionSummary = (
 
 /** A `task` row as the `TaskStatus` record the rest of the server reads. */
 export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
+  const context = readTaskContext(r.context);
+
   return defined({
     task: defined({
       id: r.publicId,
@@ -115,6 +131,7 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
       prompt: r.prompt,
       args: r.args,
       mcp: r.mcp,
+      connections: context.connections,
       author: r.author,
       definition: r.definition,
       credential: r.credential,
@@ -123,7 +140,7 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
       usage: r.usage,
       tools: r.tools,
       toolScopes: r.toolScopes,
-      context: r.context,
+      context: context.context,
       files: r.files,
     }),
     status: r.status,

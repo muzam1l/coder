@@ -50,6 +50,7 @@ import {
   credentialLock,
   credentialValue,
   installations,
+  checkBinding,
   lockCredentials,
   lockInstallation,
   writeCredential,
@@ -114,6 +115,7 @@ export class DrizzleStore implements Store {
       config: state(this, 'config'),
       runner: runners(this),
       snapshot: state(this, 'snapshot'),
+      connection: state(this, 'connection'),
     };
   }
 
@@ -141,6 +143,35 @@ export class DrizzleStore implements Store {
           ),
         ),
     );
+    if (row && !row.installation && installationKey) {
+      const prefix = `${row.app.platformAppId}/`;
+      const [sharing] = await readQuery(db, () =>
+        db
+          .select({ app, credentials: secret, installation: install, token })
+          .from(install)
+          .innerJoin(app, eq(app.id, install.appId))
+          .innerJoin(secret, eq(secret.id, app.credentialsSecretId))
+          .leftJoin(token, eq(token.id, install.tokenSecretId))
+          .where(
+            and(
+              eq(app.integration, row.app.integration),
+              sql`left(${app.platformAppId}, ${prefix.length}) = ${prefix}`,
+              eq(install.platformInstallId, installationKey.slice(key.length + 1)),
+              isNull(install.deletedAt),
+            ),
+          )
+          .limit(1),
+      );
+      if (sharing)
+        return {
+          organizationId: sharing.app.organizationId,
+          app: appValue(sharing.app, sharing.credentials),
+          bound: {
+            organizationId: sharing.installation.organizationId,
+            installation: installationValue(sharing.installation, sharing.app, sharing.token),
+          },
+        };
+    }
     return (
       row && {
         organizationId: row.app.organizationId,
@@ -264,12 +295,30 @@ export class DrizzleStore implements Store {
     id: string,
     fields: Record<string, unknown>,
   ): Promise<boolean> {
+    if (kind === 'installation' && ('covers' in fields || 'deletedAt' in fields))
+      return this.transaction(`installation:${id}`, async store => {
+        const current = await store.get('installation', id);
+        if (!current) return false;
+        const next = { ...current, ...fields };
+        if (next.deletedAt === undefined) await checkBinding(store, id, next);
+
+        return store.writeMetadata(kind, id, fields);
+      });
+
+    return this.writeMetadata(kind, id, fields);
+  }
+
+  private async writeMetadata(
+    kind: MetadataKind,
+    id: string,
+    fields: Record<string, unknown>,
+  ): Promise<boolean> {
     const table = kind === 'app' ? app : kind === 'installation' ? install : runner;
     const allowed =
       kind === 'app'
         ? ['name', 'agentsRepo', 'branch']
         : kind === 'installation'
-          ? ['account', 'connections', 'settings', 'deletedAt']
+          ? ['account', 'covers', 'connections', 'settings', 'deletedAt']
           : ['name', 'config', 'lastSeen', 'updatedAt'];
     if (Object.keys(fields).some(key => !allowed.includes(key)))
       throw new Error('Invalid metadata fields');
@@ -296,7 +345,9 @@ export class DrizzleStore implements Store {
   }
 
   withAppLock<T>(id: string, work: (store: Store) => Promise<T>): Promise<T> {
-    return this.transaction(`app:${id}`, work);
+    const scoped = /^connections?[:-]/.test(id) ? `${this.organizationId}:${id}` : id;
+
+    return this.transaction(`app:${scoped}`, work);
   }
 
   withConfigLock<T>(work: (store: Store) => Promise<T>): Promise<T> {
@@ -682,7 +733,8 @@ export class DrizzleStore implements Store {
     opts: { ttlMs?: number } = {},
   ): Promise<boolean> {
     if (kind === 'agentversion') return insertVersion(this, id, value as AgentVersionRecord);
-    if (kind !== 'delivery') throw new Error(`Atomic create is not supported for ${kind}`);
+    if (kind !== 'delivery' && kind !== 'connection')
+      throw new Error(`Atomic create is not supported for ${kind}`);
 
     const expiresAt = opts.ttlMs === undefined ? null : date(this.now() + opts.ttlMs);
 

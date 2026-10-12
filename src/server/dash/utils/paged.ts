@@ -84,6 +84,7 @@ export function usePaged<T>({
         setError('');
         failed.current = undefined;
         setState(current => {
+          if (append && (current.query !== forQuery || current.next !== cursor)) return current;
           const next =
             append && current.query === forQuery
               ? {

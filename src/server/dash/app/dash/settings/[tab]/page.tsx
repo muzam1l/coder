@@ -1,8 +1,9 @@
 import './runners-list.css';
-import './mcp-list.css';
+import './connections-list.css';
 import './engines-list.css';
 import './credentials-list.css';
 import './list.css';
+import '@/app/dash/setup/outcome.css';
 import { dynamic } from '@wular/pnext/dynamic';
 import { notFound } from '@wular/pnext/navigation';
 import { DEFAULT_CONFIG } from '@coder/core/defaults';
@@ -12,12 +13,21 @@ import { Settle, Stream } from '@/comps/frame/stream';
 import { Loading } from '@/comps/ui/card';
 import { SETTINGS } from '@/app/dash/settings/settings-head';
 import { localServer } from '@/api/types';
+import { Outcome, readOutcome } from '@/app/dash/setup/outcome';
 import { Credentials } from './credentials';
 
 const ADMIN_ROLES = new Set(['owner', 'admin']);
 
+/** What a connection's sign-in says when it comes back with `outcome`. */
+const SIGN_IN: Record<string, string> = {
+  connected: 'Signed in. New tasks can use the connection.',
+  denied: 'The sign-in was declined, so nothing changed.',
+  failed: 'The sign-in did not finish. Try Reconnect.',
+  'invalid-state': 'This sign-in link expired or was already used. Try Reconnect.',
+};
+
 const ModelsList = dynamic(() => import('./models-list').then(m => m.ModelsList));
-const McpList = dynamic(() => import('./mcp-list').then(m => m.McpList));
+const ConnectionsList = dynamic(() => import('./connections-list').then(m => m.ConnectionsList));
 const EnginesList = dynamic(() => import('./engines-list').then(m => m.EnginesList));
 const RunnersList = dynamic(() => import('./runners-list').then(m => m.RunnersList));
 
@@ -57,9 +67,41 @@ export default async function SettingsTabPage({
     );
   }
 
-  if (tab === 'mcp') {
-    const rows = load(request).mcp.list();
-    return <Settle load={() => rows.then(first => <McpList first={first} />)} />;
+  if (tab === 'connections') {
+    const rows = load(request).connections.list();
+    const catalog = load(request)
+      .integrations.list()
+      .catch(() => []);
+    const me = load(request).me();
+    const search = new URL(request.url).searchParams;
+    const outcome = readOutcome(search);
+    const signIn = search.get('outcome');
+    return (
+      <Settle
+        load={async () => {
+          const [first, integrations, who] = await Promise.all([rows, catalog, me]);
+          return (
+            <>
+              {outcome ? <Outcome outcome={outcome} catalog={integrations} /> : null}
+              {signIn ? (
+                <div class="outcome">
+                  <p class={signIn === 'connected' ? 'flash' : 'flash err'} role="status">
+                    {SIGN_IN[signIn] ?? SIGN_IN.failed}
+                  </p>
+                </div>
+              ) : null}
+              <ConnectionsList
+                first={first}
+                catalog={integrations}
+                local={localServer(who)}
+                admin={!who.user || ADMIN_ROLES.has(who.organization?.role ?? '')}
+                operator={who.operator === true}
+              />
+            </>
+          );
+        }}
+      />
+    );
   }
 
   if (tab === 'engines') {

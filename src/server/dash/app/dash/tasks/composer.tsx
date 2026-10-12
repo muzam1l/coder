@@ -27,7 +27,7 @@ import {
 } from '@/app/dash/settings/model-options';
 import { folderName } from '@/app/dash/tasks/list/task';
 import { watchTask } from '@/comps/frame/task-toasts';
-import { CHOICE, PLACEHOLDER, loadComposer, savedChoice } from './composer-data';
+import { CHOICE, PLACEHOLDER, loadComposer, savedChoice, usableAgent } from './composer-data';
 
 /** What the composer runs with; the last one used comes back through the `compose` cookie. */
 export interface Choice {
@@ -51,6 +51,10 @@ export interface Defaults {
 type Pull = { number: number; title: string; author?: string; createdAt?: string };
 export type Lists = {
   agents: [string, string][];
+  /** The agent tasks run when they name none, when enabled here. */
+  defaultAgent?: string;
+  /** Every agent in this workspace is disabled. */
+  agentsOff?: true;
   repos: string[];
   models: Record<string, string[]>;
   runners: Option[];
@@ -83,12 +87,6 @@ const COMMAND = /^\/(review|flow)(?:\s+(\S+))?\s*([\s\S]*)$/;
 const optionsOf = (fallback: string, value: string, values: string[]): Option[] => [
   ['', fallback],
   ...[...new Set([value, ...values])].filter(Boolean).map((each): Option => [each, each]),
-];
-// Named choices; a value the list lacks still shows, as itself.
-const named = (fallback: string, value: string, values: Option[]): Option[] => [
-  ['', fallback],
-  ...(value && !values.some(([id]) => id === value) ? [[value, value] as Option] : []),
-  ...values,
 ];
 
 /** Unset runs in the server's own folder; then recent and chosen ones, then the machine's dialog or a path box, then a repository URL box. A saved folder the list lacks still shows. */
@@ -270,7 +268,7 @@ export function Composer({
   tz: string;
 }) {
   const nav = useRouter();
-  const [choice, setChoice] = useState({ ...CHOICE, ...initial });
+  const [choice, setChoice] = useState(() => usableAgent({ ...CHOICE, ...initial }, data));
   const [lists, setLists] = useState(data);
   const [pulls, setPulls] = useState<{ repo: string; items?: Pull[] }>();
   const [busy, setBusy] = useState(false);
@@ -389,7 +387,7 @@ export function Composer({
 
   const start = async (pr?: number) => {
     const text = box.current?.value.trim() ?? '';
-    if (busy || cloning || !(text || pr)) return;
+    if (busy || cloning || lists.agentsOff || !(text || pr)) return;
     const [, command, name = '', args = ''] = COMMAND.exec(text) ?? [];
     if (!pr && command && !(command === 'flow' ? name : /^#?\d+$/.test(name)))
       return void setDismissed(false);
@@ -529,10 +527,12 @@ export function Composer({
 
   const engine = choice.engine || defaults.engine;
   const own = defaults.engines[engine] ?? {};
-  const agents = lists.agents.filter(([id]) => id !== 'coder');
+  const agents: Option[] = lists.agents.some(([id]) => id === choice.agent)
+    ? lists.agents
+    : [...lists.agents, [choice.agent, choice.agent]];
   // Only the settings that differ from the workspace's defaults.
   const changed = [
-    choice.agent !== 'coder' && choice.agent,
+    choice.agent !== lists.defaultAgent && choice.agent,
     choice.engine !== defaults.engine && choice.engine,
     ...(['model', 'effort', 'permissions'] as const).map(
       key => choice[key] !== own[key] && choice[key],
@@ -659,7 +659,7 @@ export function Composer({
           </button>
           <button
             class="btn sm send"
-            disabled={busy || !text.trim()}
+            disabled={busy || !text.trim() || lists.agentsOff}
             aria-busy={busy}
             aria-label={busy ? 'Starting task' : 'Start task'}
             title="Start task (Enter)"
@@ -667,6 +667,11 @@ export function Composer({
             <Icon d={iSteer} />
           </button>
         </div>
+        {lists.agentsOff ? (
+          <small class="folder-hint">
+            Every agent here is disabled. Enable one in its settings to start tasks.
+          </small>
+        ) : null}
         {typing === 'url' ? (
           <small class="folder-hint">Uses this machine's git logins</small>
         ) : null}
@@ -764,13 +769,13 @@ export function Composer({
               </MenuRadio>
             ))}
           </div>
-          {agents.length || choice.agent !== 'coder' ? (
+          {agents.length > 1 ? (
             <>
               <p class="pop-label">Agent</p>
               <Select
                 label="Agent"
                 value={choice.agent}
-                options={named('coder', choice.agent, agents)}
+                options={agents}
                 onChange={value => apply({ agent: value })}
               />
             </>

@@ -8,6 +8,7 @@ import { moveDirectory, readJsonFile } from '../utils/fsx';
 import { archiveCodexSession } from './engines/codex/sessions';
 import { type Task, type TurnResult, ACTIVE_STATUSES, TERMINAL_STATUSES } from './types';
 import type { TaskLogEntry } from './task/log-view';
+import { redactConnectionSecrets } from './connections';
 export type { TaskLogEntry } from './task/log-view';
 
 const CODER_HOME_ENV = 'CODER_HOME';
@@ -224,7 +225,11 @@ export function writeTask(
     ...patch,
     updatedAt: opts.touch === false ? existing.updatedAt : new Date().toISOString(),
   };
-  fs.writeFileSync(taskFile, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(
+    taskFile,
+    `${JSON.stringify(JSON.parse(redactConnectionSecrets(next)), null, 2)}\n`,
+    'utf8',
+  );
   return next;
 }
 
@@ -633,7 +638,7 @@ export function appendTaskLog(cwd: string, taskId: string, entry: TaskLogEntry):
   fs.mkdirSync(taskDir, { recursive: true });
   fs.appendFileSync(
     path.join(taskDir, 'log.jsonl'),
-    `${JSON.stringify({ at: new Date().toISOString(), ...entry })}\n`,
+    `${redactConnectionSecrets({ at: new Date().toISOString(), ...entry })}\n`,
     'utf8',
   );
 }

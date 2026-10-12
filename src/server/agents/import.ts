@@ -11,6 +11,7 @@ import {
 } from './repo';
 import { json } from '../routes/http';
 import { decryptSecret } from '../store/secrets';
+import { mcpWarnings } from '../../core/mcp';
 
 async function access(ctx: ServerContext, repo: string): Promise<RepositoryAccess | undefined> {
   const installations = (await ctx.store.list('installation')).filter(
@@ -55,16 +56,23 @@ async function preview(ctx: ServerContext, repo: string, ref: string): Promise<R
         .readFile(repo, `${AGENTS_DIR}/${id}/agent.json`, reach.token, ref)
         .catch(() => undefined);
       if (raw === undefined) return undefined;
-      let definition: { name?: unknown; description?: unknown } = {};
+      let definition: { name?: unknown; description?: unknown; mcp?: unknown } = {};
       try {
-        definition = JSON.parse(raw);
+        const value = JSON.parse(raw);
+        if (value && typeof value === 'object') definition = value;
       } catch {}
+      const warnings = Object.entries(
+        definition.mcp && typeof definition.mcp === 'object' && !Array.isArray(definition.mcp)
+          ? definition.mcp
+          : {},
+      ).flatMap(([name, entry]) => mcpWarnings(name, entry));
       const record = await getAgent(ctx.store, id);
       const tracked = record?.source === 'repo' && record.repo === repo;
       const version = tracked ? await getVersion(ctx.store, id) : undefined;
       return {
         id,
         name: typeof definition.name === 'string' ? definition.name : id,
+        ...(warnings.length ? { warnings } : {}),
         ...(typeof definition.description === 'string'
           ? { description: definition.description }
           : {}),

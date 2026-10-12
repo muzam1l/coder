@@ -16,7 +16,6 @@ import {
   secretKeyVersion,
   type EncryptedCredential,
 } from '../store/secrets';
-import { resealConfig } from './config';
 
 /** Engine credentials stored for a workspace or a member; every row change goes through `store.withCredential`. */
 
@@ -201,6 +200,8 @@ export async function addCredential(
   config: Pick<ServerConfig, 'encryptionKey'>,
   input: {
     label?: string;
+    /** The automatic label's base when `label` is absent. */
+    base?: string;
     owner?: string;
     credential: EngineCredential;
     account?: CredentialAccount;
@@ -212,7 +213,9 @@ export async function addCredential(
   const engine = input.credential.engine;
   const chosen = input.label?.trim();
   let label =
-    chosen || (input.credential.env.CLAUDE_CODE_OAUTH_TOKEN ? 'claude-token' : `${engine}-key`);
+    chosen ||
+    input.base ||
+    (input.credential.env.CLAUDE_CODE_OAUTH_TOKEN ? 'claude-token' : `${engine}-key`);
 
   await store.withCredential('credential', credentialId(owner, label), async (_, rows) => {
     if (!chosen) label = availableLabel(rows, label);
@@ -381,6 +384,7 @@ function encryptedVersion(
 export async function reseal(
   store: Store,
   config: Pick<ServerConfig, 'encryptionKey' | 'previousEncryptionKey'>,
+  now: () => number = Date.now,
 ): Promise<number> {
   if (!config.encryptionKey) throw new Error('SERVER_ENCRYPTION_KEY is required to rotate keys');
   const current = keyVersion(config.encryptionKey);
@@ -389,25 +393,9 @@ export async function reseal(
     stale(sealed) ? encryptSecret(config, decryptSecret(config, sealed)) : sealed;
   const resealed = (value: Installation): Installation | undefined => {
     const token = value.token && renew(value.token);
-    const connections =
-      value.connections &&
-      Object.fromEntries(
-        Object.entries(value.connections).map(([key, connection]) => [
-          key,
-          connection.kind === 'oauth' && stale(connection.token)
-            ? { ...connection, token: renew(connection.token) }
-            : connection,
-        ]),
-      );
-    if (
-      token === value.token &&
-      !Object.entries(connections ?? {}).some(
-        ([key, connection]) => connection !== value.connections![key],
-      )
-    )
-      return;
+    if (token === value.token) return;
 
-    return { ...value, ...(token ? { token } : {}), ...(connections ? { connections } : {}) };
+    return { ...value, token };
   };
   let moved = 0;
   for (const { id } of await store.list('app')) {
@@ -425,6 +413,57 @@ export async function reseal(
       const next = value && resealed(value);
 
       return next && [{ id, value: next }];
+    });
+    if (written) moved++;
+  }
+  for (const { id } of await store.list('connection')) {
+    const written = await store.withAppLock(`connection:${id}`, async locked => {
+      const value = await locked.get('connection', id);
+      if (!value?.secret || !stale(value.secret)) return false;
+      await locked.put('connection', id, { ...value, secret: renew(value.secret) });
+
+      return true;
+    });
+    if (written) moved++;
+  }
+  for (const { id } of await store.list('snapshot')) {
+    const taskId = id.startsWith('connection-secrets:')
+      ? id.slice('connection-secrets:'.length)
+      : id.startsWith('connections:')
+        ? id.slice('connections:'.length).replace(/:\d+:\d+:[a-f0-9]{12}$/, '')
+        : undefined;
+    const written = await store.withAppLock(taskId ? `connections:${taskId}` : id, async locked => {
+      const value = await locked.get('snapshot', id);
+      if (!value) return false;
+      const field =
+        'resolvedConnections' in value
+          ? 'resolvedConnections'
+          : 'connectionSecrets' in value
+            ? 'connectionSecrets'
+            : undefined;
+      if (!field) return false;
+      const status = taskId ? await locked.get('task', taskId) : undefined;
+      if (!status || ['completed', 'failed', 'cancelled'].includes(status.status)) {
+        await locked.delete('snapshot', id);
+        return false;
+      }
+      const sealed = (value as { resolvedConnections?: string; connectionSecrets?: string })[
+        field
+      ]!;
+      if (!stale(sealed)) return false;
+      await locked.put(
+        'snapshot',
+        id,
+        { ...value, [field]: renew(sealed) },
+        {
+          ttlMs:
+            'expiresAt' in value && typeof value.expiresAt === 'number'
+              ? Math.max(1, value.expiresAt - now())
+              : 60 * 60 * 1000,
+        },
+      );
+
+      return true;
     });
     if (written) moved++;
   }
@@ -453,7 +492,7 @@ export async function reseal(
     if (written) moved++;
   }
 
-  return moved + (await resealConfig(store, config));
+  return moved;
 }
 
 /** The one-click fix for a missing credential: the Credentials page, open at that engine. */

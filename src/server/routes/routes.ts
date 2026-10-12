@@ -4,6 +4,7 @@ import {
   adminOnly,
   apiAllowed,
   completedTaskGuard,
+  connectionOAuthAllowed,
   createAllowed,
   credentialAllowed,
   dashboardAllowed,
@@ -16,6 +17,8 @@ import {
   loginGuard,
   metadataAllowed,
   oauthAllowed,
+  operatorOnly,
+  operatorPageAllowed,
   organizationAllowed,
   pageSession,
   requireWorkspaceAdmin,
@@ -54,9 +57,16 @@ import {
   registerRunner,
   updateRunner,
 } from '../settings/runners';
-import { completeCreate, completeCreateForm, createPage } from '../agents/create';
+import {
+  adminCreateTransaction,
+  completeCreate,
+  completeCreateForm,
+  createPage,
+  createStart,
+} from '../agents/create';
 import { completeInstall, installPage } from '../agents/install';
 import { completeOAuth, confirmTokenLink, startOAuth, startTokenLink } from '../auth/connect';
+import { MCP_CLIENT_PATH, oauthCallback, oauthClientDocument } from '../connections/oauth';
 import { hook, listFlows, listPulls, review, runFlow } from '../tasks/flows';
 import { type ServerContext } from '../context';
 import { readUsage, readUsageTotals } from '../tasks/usage';
@@ -71,7 +81,6 @@ import {
   signOutEngine,
 } from '../settings/credentials';
 import {
-  adminConnection,
   adminInstallLink,
   adminRepositories,
   integrationCatalog,
@@ -104,7 +113,16 @@ import {
   listModels,
   probe,
 } from '../settings/models';
-import { createMcp, deleteMcp, listMcp, mcpRegistry } from '../settings/mcp';
+import { mcpRegistry } from '../settings/mcp';
+import {
+  listConnections,
+  createConnection,
+  updateConnection,
+  deleteConnection,
+  authorizeConnection,
+  connectionAllowed,
+} from '../connections/records';
+import { auditLog, operatorApps, setUpApp } from '../operator';
 import {
   CLI_CLIENT_PATH,
   RESOURCE_PATH,
@@ -115,6 +133,7 @@ import {
 } from '../auth/metadata';
 
 const pagesRoutes = [
+  route('GET', MCP_CLIENT_PATH, oauthClientDocument),
   route('GET', WEB_CLIENT_PATH, webDocument, metadataAllowed),
   route('GET', CLI_CLIENT_PATH, cliDocument, metadataAllowed),
   route('GET', RESOURCE_PATH, resourceDocument, metadataAllowed),
@@ -123,6 +142,7 @@ const pagesRoutes = [
   route('GET', '/login', signIn, signInAllowed),
   ...mount('/login', loginPage, signInAllowed).filter(entry => entry.method !== 'GET'),
   route('POST', '/dash/token', dashboardToken, dashboardTokenAllowed),
+  ...mount('/dash/operator', dashboard, operatorPageAllowed),
   ...mount('/dash', dashboard, dashboardAllowed),
 ];
 
@@ -153,7 +173,7 @@ const callbacksRoutes = [
 const provisionRoutes = [
   ...group('/create', [
     route('GET', '/:id', createPage, createAllowed),
-    route('POST', '/:id', createPage, createAllowed),
+    route('POST', '/:id', createStart, createAllowed),
     route('GET', '/:id/callback', completeCreate, createAllowed),
     route('POST', '/:id/callback', completeCreateForm, createAllowed),
   ]),
@@ -221,12 +241,23 @@ const enginesRoutes = group(
 
 const appsRoutes = [
   route('POST', '/apps/:id/install', (req, ctx, params, url) =>
-    adminInstallLink(req, ctx, params.id!, url.searchParams.get('back')),
+    adminInstallLink(
+      req,
+      ctx,
+      params.id!,
+      url.searchParams.get('back'),
+      url.searchParams.get('link'),
+    ),
   ),
+  route('POST', '/apps/create/:integration', adminCreateTransaction),
   route('GET', '/apps', listApps),
   route('GET', '/installations', listInstallations),
-  route('POST', '/connections', (req, ctx) => adminConnection(req, ctx)),
-  route('GET', '/integrations', (req, ctx) => integrationCatalog(ctx)),
+  route('GET', '/connections', listConnections, connectionAllowed),
+  route('POST', '/connections', createConnection, connectionAllowed),
+  route('PATCH', '/connections/:id', updateConnection, connectionAllowed),
+  route('DELETE', '/connections/:id', deleteConnection, connectionAllowed),
+  route('POST', '/connections/:id/authorize', authorizeConnection, connectionAllowed),
+  route('GET', '/integrations', (req, ctx, params, url) => integrationCatalog(ctx, url)),
   route('GET', '/repositories', (req, ctx) => adminRepositories(ctx)),
 ];
 
@@ -296,11 +327,18 @@ const modelsRoutes = [
 ];
 
 const mcpRoutes = [
-  route('GET', '/mcp', listMcp),
-  route('POST', '/mcp', createMcp),
-  route('DELETE', '/mcp/:name', deleteMcp),
   route('GET', '/mcp-registry', (req, ctx, params, url) => mcpRegistry(req, ctx, url)),
 ];
+
+const operatorRoutes = group(
+  '/operator',
+  [
+    route('GET', '/apps', operatorApps),
+    route('POST', '/apps/:integration', setUpApp),
+    route('GET', '/audit', auditLog),
+  ],
+  operatorOnly,
+);
 
 const flowsRoutes = [
   route('GET', '/flows', listFlows),
@@ -323,10 +361,17 @@ export const adminTable = group('/admin', [
   ...modelsRoutes,
   ...mcpRoutes,
   ...flowsRoutes,
+  ...operatorRoutes,
 ]);
 const adminRoutes = adminTable.map(entry => ({ ...entry, guard: adminGuard(entry.guard) }));
 
 export const routes = [
+  route(
+    'GET',
+    '/connections/oauth/callback',
+    (req, ctx, params, url) => oauthCallback(req, ctx, url),
+    connectionOAuthAllowed,
+  ),
   ...callbacksRoutes,
   ...adminRoutes,
   ...authRoutes,

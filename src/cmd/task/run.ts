@@ -139,6 +139,7 @@ export const commandTask = command({
     name: str,
     system: str,
     mcp: str,
+    connections: str,
     'add-dir': strList,
     background: flag,
     wait: flag,
@@ -170,6 +171,10 @@ export const commandTask = command({
       name: options.name,
       system: options.system,
       mcp: options.mcp,
+      connections: options.connections
+        ?.split(',')
+        .map(id => id.trim())
+        .filter(Boolean),
       addDirs: options['add-dir'],
       // A server task is followed until it ends unless --background; a local one only with --wait.
       wait: options.server !== undefined ? !options.background : options.wait,

@@ -1,4 +1,4 @@
-/** `coder mcp serve <task-id>` - the coder MCP server (stdio), spawned by engines that need a callback into coder. */
+/** `coder task mcp <task-id>`: the coder MCP server (stdio), spawned by engines that need a callback into coder. */
 import { decidePermission } from '../../core/engines/claude/permission';
 import { readVersion } from '../../core/runtime';
 import { str } from '../../utils/args';
@@ -17,8 +17,8 @@ const TOOLS: Record<string, McpTool<{ cwd: string; taskId: string }>> = {
   },
 };
 
-export const commandMcp = command({
-  name: 'mcp serve',
+export const commandTaskMcp = command({
+  name: 'task mcp',
   options: { cwd: str },
   args: 1,
   run: ({ args, cwd }) =>

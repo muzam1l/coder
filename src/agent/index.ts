@@ -63,7 +63,7 @@ export interface AgentInitOptions {
   description?: string;
   permissions?: AgentDefinition['permissions'];
   integrations?: string | string[];
-  triggers?: string | string[];
+  events?: string | string[];
   tools?: string;
   /** `event=regex` pairs. */
   match?: string | string[];
@@ -133,7 +133,7 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
     );
 
   const integrations: AgentDefinition['integrations'] = {};
-  const wanted = list(opts.triggers);
+  const wanted = list(opts.events);
   const known = (id: string) => Object.keys(INTEGRATIONS[id]?.events ?? {});
   for (const integrationId of picks.integrations)
     if (!INTEGRATIONS[integrationId])
@@ -161,7 +161,7 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
   );
   for (const integrationId of picks.integrations) {
     const names = known(integrationId);
-    // --triggers applies to every integration that has the event; otherwise mention or the first.
+    // --events applies to every integration that has the event; otherwise mention or the first.
     const events =
       picks.events[integrationId] ??
       (wanted.length
@@ -177,7 +177,7 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
     const filtered = events.filter(e => match[e]);
     if (events.length)
       integrations[integrationId] = {
-        triggers: filtered.length
+        events: filtered.length
           ? Object.fromEntries(events.map(e => [e, match[e] ? { match: match[e]! } : true]))
           : events,
         tools: picks.tools,
@@ -199,7 +199,7 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
   const samples: string[] = [];
   for (const [integrationId, wiring] of Object.entries(integrations)) {
     const type = (
-      Array.isArray(wiring.triggers) ? wiring.triggers : Object.keys(wiring.triggers ?? {})
+      Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {})
     )[0]!;
     await fsp.mkdir(sampleDir, { recursive: true });
     const file = path.join(sampleDir, `sample-${integrationId}-${type}.json`);

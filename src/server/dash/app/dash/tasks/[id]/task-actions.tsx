@@ -42,6 +42,7 @@ const DONE = {
 export function useAction(taskId: string) {
   const [error, setError] = useState('');
   const [outcome, setOutcome] = useState('');
+  const [pending, setPending] = useState<keyof typeof DONE>();
   const run = async (
     name: keyof typeof DONE,
     body: {
@@ -53,6 +54,7 @@ export function useAction(taskId: string) {
   ) => {
     setError('');
     setOutcome('');
+    setPending(name);
     try {
       if (name === 'approve')
         await client.tasks.approve(taskId, body.approvalId ?? '', body.decision ?? 'decline');
@@ -65,9 +67,11 @@ export function useAction(taskId: string) {
     } catch (reason) {
       setError(reasonText(reason));
       return false;
+    } finally {
+      setPending(undefined);
     }
   };
-  return { error, outcome, setError, run };
+  return { error, outcome, pending, setError, run };
 }
 
 export function Flash({ error, outcome }: { error: string; outcome: string }) {
@@ -105,11 +109,23 @@ export function TaskActions({ task, live }: { task: TaskRow; live: boolean }) {
     <>
       <Flash {...action} />
       {live ? (
-        <button type="button" class="btn outline" onClick={() => void action.run('cancel')}>
+        <button
+          type="button"
+          class="btn outline"
+          disabled={Boolean(action.pending)}
+          aria-busy={action.pending === 'cancel'}
+          onClick={() => void action.run('cancel')}
+        >
           Stop
         </button>
       ) : archived ? null : (
-        <button type="button" class="btn outline archive" onClick={archive}>
+        <button
+          type="button"
+          class="btn outline archive"
+          disabled={Boolean(action.pending)}
+          aria-busy={action.pending === 'archive'}
+          onClick={archive}
+        >
           Archive
         </button>
       )}

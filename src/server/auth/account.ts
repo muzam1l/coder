@@ -1,6 +1,6 @@
 import { type Params } from '../routes/match';
 import { type ServerContext } from '../context';
-import { serverMode } from '../routes/guards';
+import { operator, serverMode } from '../routes/guards';
 import { json, redirect } from '../routes/http';
 
 export async function meRoute(
@@ -14,6 +14,7 @@ export async function meRoute(
       mode: serverMode(ctx),
       organization: { id: ctx.organizationId },
       server: serverInfo(ctx),
+      operator: operator(ctx),
     });
   }
 
@@ -27,6 +28,7 @@ export async function meRoute(
     organizations: session.organizations,
     manageMembersUrl: `${ctx.auth.issuer}/auth/onboarding`,
     server: serverInfo(ctx),
+    operator: operator(ctx, session),
   });
 }
 

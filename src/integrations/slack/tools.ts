@@ -43,8 +43,10 @@ export async function slackApi(
     if (!thread || !field || args[field] !== thread || args.reply_broadcast)
       throw new Error('This task may only write to its triggering thread.');
   }
+  // An org-wide token acts only in the workspace the task's event came from.
+  const within = ctx.scope?.within;
   const { callSlackApi } = await import('@chat-adapter/slack/api');
-  const data = await callSlackApi(method, args, {
+  const data = await callSlackApi(method, within ? { ...args, team_id: within } : args, {
     token: ctx.token,
     fetch: ctx.fetch,
     contentType: 'json',

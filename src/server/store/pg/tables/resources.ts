@@ -13,13 +13,13 @@ import {
   opaque,
   setSecret,
   statePrefix,
+  stateKey,
   type Kind,
 } from './shared';
 
-export function state<K extends 'delivery' | 'note' | 'login' | 'snapshot' | 'config'>(
-  s: DrizzleStore,
-  kind: K,
-): Kind<StoreRecords[K]> {
+export function state<
+  K extends 'delivery' | 'note' | 'login' | 'snapshot' | 'config' | 'connection',
+>(s: DrizzleStore, kind: K): Kind<StoreRecords[K]> {
   const t = chatState;
   const prefix = statePrefix(s.organizationId, kind);
   const key = t.key;
@@ -144,4 +144,11 @@ export function runners(s: DrizzleStore): Kind<RunnerRecord> {
         if (existing) await s.db.delete(secret).where(eq(secret.id, existing.secretId));
       }),
   };
+}
+
+export function connectionSnapshots(organizationId: string, taskId: string) {
+  const key = stateKey(organizationId, 'snapshot', `connection-secrets:${taskId}`);
+  const prefix = stateKey(organizationId, 'snapshot', `connections:${taskId}:`);
+
+  return sql`(${chatState.key} = ${key} or ${chatState.key} like ${`${escapeLike(prefix)}%`})`;
 }

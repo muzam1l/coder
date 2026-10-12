@@ -14,6 +14,7 @@ import * as z from 'zod/mini';
 import {
   generateTaskId,
   loadTask,
+  appendTaskLog,
   readTaskLog,
   readTurnResults,
   resolveTaskDir,
@@ -57,6 +58,7 @@ import {
   TERMINAL_STATUSES,
 } from './types';
 import { listPendingApprovals } from './approvals';
+import { mcpApproved, mcpWarnings } from './mcp';
 
 const STARTUP_ERROR_PATTERN =
   /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|not available|ENOENT/i;
@@ -264,26 +266,88 @@ export function parseMcpServers(
         throw new CoderError('invalid-option', `Unknown MCP server "${name}".`, {
           hint: `configured: ${Object.keys(configured).join(', ') || 'none'}; or pass a JSON array`,
         });
-      return { name, ...entry };
+      return { name, ...entry, ...(entry.repository ? { repository: true } : {}) };
     });
   }
   return parseMcpJson(text);
 }
 
-/** Native MCP is included only by an explicit `all` selection. */
+/** Native MCP is included only by an explicit `all` selection; `connections` are the task's granted, resolved connections by id. */
 export function selectMcpServers(
   value?: string | McpServerSpec[],
   configured: Record<string, McpConfigEntry> = {},
   declared: Record<string, McpConfigEntry> = {},
-): { mcp: McpServerSpec[]; nativeMcp: boolean } {
+  connections: Record<string, McpServerSpec> = {},
+): {
+  mcp: McpServerSpec[];
+  mcpBindings?: Task['mcpBindings'];
+  nativeMcp: boolean;
+  warnings?: string[];
+} {
   if (typeof value === 'string' && !value.trim()) value = undefined;
 
+  const selected: McpServerSpec[] =
+    typeof value === 'string'
+      ? parseMcpServers(value, { ...configured, ...declared })
+      : (value ??
+        Object.entries(declared).map(([name, entry]) => ({
+          name,
+          ...entry,
+          ...(entry.repository ? { repository: true } : {}),
+        })));
+  const warnings: string[] = [];
+  const mcpBindings = selected
+    .filter(server => server.connection)
+    .map(({ name, connection, tools }) => ({ name, connection, ...(tools ? { tools } : {}) }));
+  const bound = new Set<string>();
+  const mcp: McpServerSpec[] = [];
+  for (const server of selected) {
+    if (!server.connection || server.resolved) {
+      if (server.connection) bound.add(server.connection);
+      if (server.repository) warnings.push(...mcpWarnings(server.name, server));
+      mcp.push(server);
+      continue;
+    }
+    const connection = Object.hasOwn(connections, server.connection)
+      ? connections[server.connection]
+      : undefined;
+    if (!connection) {
+      warnings.push(
+        `MCP server "${server.name}" skipped because connection "${server.connection}" was not granted to this task.`,
+      );
+      continue;
+    }
+    if (bound.has(server.connection)) continue;
+    bound.add(server.connection);
+    const tools = server.tools?.length
+      ? server.tools.filter(tool => !connection.tools?.length || connection.tools.includes(tool))
+      : connection.tools;
+    if (server.tools?.length && !tools?.length) {
+      warnings.push(
+        `MCP server "${server.name}" skipped because its tools are not granted by connection "${server.connection}".`,
+      );
+      continue;
+    }
+    mcp.push({
+      ...connection,
+      name: server.name,
+      connection: server.connection,
+      resolved: true,
+      ...(tools ? { tools } : {}),
+    });
+  }
+  for (const [id, server] of Object.entries(connections)) {
+    if (bound.has(id)) continue;
+    const collision = mcp.findIndex(entry => entry.name === server.name);
+    if (collision >= 0) mcp.splice(collision, 1);
+    mcp.push({ ...server, resolved: true });
+  }
+
   return {
-    mcp:
-      typeof value === 'string'
-        ? parseMcpServers(value, { ...configured, ...declared })
-        : (value ?? Object.entries(declared).map(([name, entry]) => ({ name, ...entry }))),
+    mcp,
+    ...(mcpBindings.length ? { mcpBindings } : {}),
     nativeMcp: typeof value === 'string' && value.trim() === 'all',
+    ...(warnings.length ? { warnings } : {}),
   };
 }
 
@@ -315,24 +379,67 @@ export function resolveMcpServers(
   servers: McpServerSpec[] | undefined,
   env: NodeJS.ProcessEnv = process.env,
   cwd?: string,
+  options: {
+    cloud?: boolean;
+    connectionEnv?: Record<string, string | null>;
+    onWarning?: (message: string) => void;
+  } = {},
 ): McpServerSpec[] {
-  const expand = (value: string) =>
-    value.replace(
-      /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
-      (_, name, fallback) => env[name] ?? fallback ?? '',
-    );
-  const map = (record: Record<string, string>) =>
-    Object.fromEntries(Object.entries(record).map(([k, v]) => [k, expand(v)]));
-  return (servers ?? []).map(server => {
+  const cloud = options.cloud ?? env.CODER_MCP_MODE === 'cloud';
+  const connectionEnv =
+    options.connectionEnv ??
+    (JSON.parse(env.CODER_MCP_CONNECTION_ENV ?? '{}') as Record<string, string | null>);
+  const warn = options.onWarning ?? (message => process.stderr.write(`coder: ${message}\n`));
+  return (servers ?? []).flatMap(server => {
+    const repository = server.repository && !server.resolved;
+    if (repository) {
+      for (const warning of mcpWarnings(server.name, server)) warn(warning);
+      if (!cloud && !mcpApproved(server)) {
+        warn(
+          `MCP server "${server.name}" skipped pending local approval. Run coder connection approve ${server.name} in its repository.`,
+        );
+        return [];
+      }
+    }
+    const missing = new Set<string>();
+    const ambiguous = new Set<string>();
+    const expand = (value: string) =>
+      server.resolved
+        ? value.replace(/^\$\{(CODER_CONNECTION_[A-F0-9]{24})\}$/, (_, name) => env[name] ?? '')
+        : value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g, (_, name, fallback) => {
+            if (repository && cloud) {
+              if (connectionEnv[name] === null) {
+                ambiguous.add(name);
+                return '';
+              }
+              if (Object.hasOwn(connectionEnv, name)) return connectionEnv[name];
+              missing.add(name);
+              return '';
+            }
+            return env[name] ?? fallback ?? '';
+          });
+    const map = (record: Record<string, string>) =>
+      Object.fromEntries(Object.entries(record).map(([k, v]) => [k, expand(v)]));
+    const remote = repository && Boolean(server.url);
     const resolved = {
       ...server,
       ...(server.command ? { command: expand(server.command) } : {}),
       ...(server.args ? { args: server.args.map(expand) } : {}),
-      ...(server.url ? { url: expand(server.url) } : {}),
+      ...(server.url ? { url: remote ? server.url : expand(server.url) } : {}),
       ...(server.env ? { env: map(server.env) } : {}),
-      ...(server.headers ? { headers: map(server.headers) } : {}),
+      ...(server.headers ? { headers: remote ? server.headers : map(server.headers) } : {}),
     };
-    if (!cwd || !resolved.command) return resolved;
+    if (ambiguous.size) {
+      warn(
+        `MCP server "${server.name}" skipped because connection variables ${[...ambiguous].join(', ')} are ambiguous.`,
+      );
+      return [];
+    }
+    if (missing.size)
+      warn(
+        `MCP server "${server.name}" has unresolved connection variables ${[...missing].join(', ')}; expanded to empty.`,
+      );
+    if (!cwd || !resolved.command) return [resolved];
 
     const candidates = resolved.command.includes(path.sep)
       ? [path.resolve(cwd, resolved.command)]
@@ -364,7 +471,7 @@ export function resolveMcpServers(
       return exists ? fs.realpathSync(file) : file;
     });
 
-    return resolved;
+    return [resolved];
   });
 }
 
@@ -409,7 +516,12 @@ export interface DispatchOptions {
   repo?: string;
   /** Extra MCP servers the task's engine may call, with their tool allowlists. */
   mcp?: string | McpServerSpec[];
+  mcpWarnings?: string[];
   nativeMcp?: boolean;
+  connectionEnv?: Record<string, string>;
+  connections?: string[];
+  mcpBindings?: Task['mcpBindings'];
+  connectionSource?: Task['connectionSource'];
   /** Extra directories the task may reach, resolved against cwd. */
   addDirs?: string[];
   /** Called with (engine, detail, next) when an engine falls through the chain. */
@@ -447,14 +559,18 @@ export interface DispatchResult {
 }
 
 /** Spawn a task's detached worker (also used by steer to resume a stopped task in place). */
-export function spawnWorker(cwd: string, taskId: string): void {
+export function spawnWorker(
+  cwd: string,
+  taskId: string,
+  connectionEnv: Record<string, string> = {},
+): void {
   const taskDir = resolveTaskDir(cwd, taskId);
   const logFd = fs.openSync(path.join(taskDir, 'worker.log'), 'a');
   const child = spawn(process.execPath, [CLI_PATH, 'task', 'worker', taskId, '--cwd', cwd], {
     cwd,
     detached: true,
     stdio: ['ignore', logFd, logFd],
-    env: { ...process.env, [WORKER_ENV]: '1' },
+    env: { ...process.env, ...connectionEnv, [WORKER_ENV]: '1' },
   });
   child.unref();
   fs.closeSync(logFd);
@@ -518,13 +634,18 @@ async function attemptOnce(
     ...(opts.author ? { author: opts.author } : {}),
     ...(opts.repo ? { repo: opts.repo } : {}),
     ...(opts.mcp?.length ? { mcp: opts.mcp } : {}),
+    ...(opts.mcpBindings ? { mcpBindings: opts.mcpBindings } : {}),
+    ...(opts.connections ? { connections: opts.connections } : {}),
+    ...(opts.connectionSource ? { connectionSource: opts.connectionSource } : {}),
     nativeMcp: opts.nativeMcp ?? false,
     ...(addDirs.length ? { addDirs } : {}),
   });
 
   // Always run the task in a detached worker, so interrupting the caller never
   // kills the task.
-  spawnWorker(cwd, taskId);
+  for (const message of new Set(opts.mcpWarnings ?? []))
+    appendTaskLog(cwd, taskId, { kind: 'warning', message });
+  spawnWorker(cwd, taskId, opts.connectionEnv);
 
   if (!waitForStartup)
     return {
@@ -645,7 +766,13 @@ export async function dispatchTask(
   opts = { ...opts, addDirs: resolveAddDirs(opts.cwd, opts.addDirs) };
   const config = loadConfig(opts.cwd);
   const mcp = selectMcpServers(opts.mcp, config.mcp);
-  const dispatchOpts = { ...opts, mcp: mcp.mcp, nativeMcp: opts.nativeMcp ?? mcp.nativeMcp };
+  const dispatchOpts = {
+    ...opts,
+    mcp: mcp.mcp,
+    mcpBindings: opts.mcpBindings ?? mcp.mcpBindings,
+    mcpWarnings: [...(opts.mcpWarnings ?? []), ...(mcp.warnings ?? [])],
+    nativeMcp: opts.nativeMcp ?? mcp.nativeMcp,
+  };
 
   // First attempt uses the full request (model/effort/name/simulate).
   // A chain fallback re-resolves fresh for the next engine, deliberately dropping

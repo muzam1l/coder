@@ -13,7 +13,14 @@ import { Status, STATUS_LABEL } from '@/app/dash/tasks/list/status';
 
 type Watched = { title: string; status: TaskState; at: number };
 type Live = Pick<TaskRow, 'status' | 'result' | 'error' | 'approval'>;
-type Toast = { key: string; id?: string; title: string; status?: TaskState; line: string; err?: boolean };
+type Toast = {
+  key: string;
+  id?: string;
+  title: string;
+  status?: TaskState;
+  line: string;
+  err?: boolean;
+};
 
 const WATCHED = 'coder:watched';
 export const NOTIFY = 'coder:notify';
@@ -295,6 +302,14 @@ export function TaskToasts() {
     return () => removeEventListener('keydown', onKey);
   }, [toasts.length]);
 
+  // The top layer keeps toasts above an open modal; reopening raises them over a newer one.
+  const stack = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const el = stack.current!;
+    if (el.matches(':popover-open')) el.hidePopover();
+    if (toasts.length) el.showPopover();
+  }, [toasts[0]?.key]);
+
   const dismiss = (key: string) => setToasts(list => list.filter(toast => toast.key !== key));
 
   useTaskEvents(event => {
@@ -351,7 +366,13 @@ export function TaskToasts() {
   );
 
   return (
-    <section class="toasts" aria-label="Task updates" aria-live="polite">
+    <section
+      ref={stack}
+      class="toasts"
+      popover="manual"
+      aria-label="Task updates"
+      aria-live="polite"
+    >
       {toasts.map(toast => (
         <Item key={toast.key} toast={toast} dismiss={dismiss} />
       ))}

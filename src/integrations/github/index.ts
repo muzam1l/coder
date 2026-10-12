@@ -3,8 +3,7 @@ import { createHmac } from 'node:crypto';
 import { safeEqual } from '../../utils/crypto';
 import type { SerializedThread } from 'chat';
 
-import type { AgentApp, AgentEvent, Installation } from '../../agent/types';
-import type { Integration, TokenBound } from '../types';
+import type { AgentApp, AgentEvent, Installation, Integration, TokenBound } from '../types';
 import {
   canWriteGithub,
   githubCommit,
@@ -309,6 +308,7 @@ export const github: Integration = {
   id: 'github',
   brand: { color: '#000000', icon: GITHUB_ICON, dark: '#fff', svg: GITHUB_MARK },
   name: 'GitHub',
+  featured: true,
   description: 'Pull requests, issues, and comments on GitHub repositories',
   installLabel: 'Connect GitHub',
   organizationApps: true,
@@ -355,6 +355,7 @@ export const github: Integration = {
   },
   repos: {
     cloneHosts: ['github.com'],
+    credentialUsername: 'x-access-token',
     readFile: readGithubFile,
     listDir: listGithubDir,
     commit: githubCommit,

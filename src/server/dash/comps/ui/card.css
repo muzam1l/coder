@@ -14,6 +14,44 @@
   border-color: var(--bad);
 }
 
+/* a folded card: the bar opens it */
+.fold > summary {
+  list-style: none;
+  cursor: pointer;
+}
+.fold > summary::-webkit-details-marker {
+  display: none;
+}
+.fold:not([open]) > summary {
+  border-bottom: 0;
+}
+.fold > summary h2 {
+  flex: 0 0 auto;
+}
+.fold-note {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+}
+.fold > summary:hover {
+  background: var(--wash);
+}
+.fold > summary:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: -2px;
+}
+.fold > summary .btn {
+  pointer-events: none;
+}
+.fold[open] > summary .fold-open,
+.fold:not([open]) > summary .fold-close {
+  display: none;
+}
+
 /* empty states */
 .empty {
   display: grid;

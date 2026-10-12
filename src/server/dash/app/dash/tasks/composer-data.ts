@@ -10,13 +10,21 @@ export const PLACEHOLDER = 'What should the agent do? Type / for flows and revie
 export const CHOICE: Choice = {
   repo: '',
   cwd: '',
-  agent: 'coder',
+  agent: '',
   engine: '',
   model: '',
   effort: '',
   permissions: '',
   runner: '',
 };
+
+/** No agent picked yet, or one this workspace no longer runs, falls back to the server's default agent, else the first. */
+export function usableAgent(choice: Choice, lists: Pick<Lists, 'agents' | 'defaultAgent'>): Choice {
+  const ids = lists.agents.map(([id]) => id);
+  if (!ids.length || ids.includes(choice.agent)) return choice;
+
+  return { ...choice, agent: lists.defaultAgent ?? ids[0]! };
+}
 
 /** The composer's last choice, from its cookie. */
 export function savedChoice(cookie: string): Partial<Choice> {
@@ -43,15 +51,23 @@ export const runnerOptions = (rows: RunnerRow[]): [string, string][] => {
   ];
 };
 
-/** Every agent as [id, name]; a failed read leaves the list empty. */
-export const agentChoices = (api: ServerClient): Promise<[string, string][]> =>
+/** Every enabled agent as [id, name] with the server's default first; undefined when the read failed. */
+export const agentChoices = (
+  api: ServerClient,
+): Promise<{ agents: [string, string][]; defaultAgent?: string } | undefined> =>
   api.agents.list().then(
-    (rows: AgentRow[] | { items: AgentRow[] }) =>
-      (Array.isArray(rows) ? rows : rows.items).map((agent): [string, string] => [
-        agent.id,
-        agent.name,
-      ]),
-    () => [],
+    (rows: AgentRow[] | { items: AgentRow[] }) => {
+      const enabled = (Array.isArray(rows) ? rows : rows.items)
+        .filter(agent => !agent.settings?.disabled)
+        .sort((a, b) => Number(b.default === true) - Number(a.default === true));
+      const preferred = enabled.find(agent => agent.default)?.id;
+
+      return {
+        agents: enabled.map((agent): [string, string] => [agent.id, agent.name]),
+        ...(preferred ? { defaultAgent: preferred } : {}),
+      };
+    },
+    () => undefined,
   );
 
 /** No credential can run a task yet; a local server runs on the machine's own sign-ins. */
@@ -77,7 +93,10 @@ export async function loadComposer(api: ServerClient, agents = agentChoices(api)
     api.folders.list().catch(() => undefined),
   ]);
   const data: Lists = {
-    agents: ids,
+    agents: ids?.agents ?? [],
+    ...(ids?.defaultAgent ? { defaultAgent: ids.defaultAgent } : {}),
+    // Built-in agents always exist, so an empty read means every agent is disabled.
+    ...(ids && !ids.agents.length ? { agentsOff: true as const } : {}),
     repos: repos.map(entry => entry.repo),
     models: modelsByEngine(models),
     runners: runnerOptions(runners),

@@ -65,6 +65,11 @@ export default async function AccountPage({ request }: { request?: Request }) {
               <span class="muted">
                 {me.user ? me.user.email : local ? 'Local server' : 'Local memory server'}
               </span>
+              {me.user ? (
+                <span class="muted">
+                  ID <code>{me.user.id}</code>
+                </span>
+              ) : null}
             </div>
           </Row>
           {local ? null : (

@@ -18,6 +18,7 @@ export const TASK_FLAGS: HelpRow[] = [
     '--mcp <names|all|json>',
     'attach MCP servers from `mcp` in .coder/config.json by name (or all), or an inline JSON array [{"name","command","args","env","tools"}]; none by default, all adds your engine\'s own MCP servers',
   ],
+  ['--connections <ids>', "use only these connections (coder connection list), within the agent's"],
   [
     '--add-dir <dir>',
     'give the task another directory beyond --cwd (repeatable); read-only can only read it, other modes can also write',
@@ -92,6 +93,7 @@ export const commandTaskGroup = group(
   {
     'archive-sweep': async () => (await import('./archive-sweep')).commandArchiveSweep,
     worker: async () => (await import('./worker')).commandWorker,
+    mcp: async () => (await import('./mcp')).commandTaskMcp,
     run: async () => (await import('./run')).commandTask,
     list: async () => (await import('./list')).commandTasks,
     ls: async () => (await import('./list')).commandTasks,

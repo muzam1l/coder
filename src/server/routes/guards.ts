@@ -11,6 +11,7 @@ import { taskClaims, taskTokenHash } from '../tasks/token';
 import { decryptSecret } from '../store/secrets';
 import { safeEqual } from '../../utils/crypto';
 import { scoped, type ServerContext } from '../context';
+import { MCP_CLIENT_PATH } from '../connections/oauth';
 
 export async function signedIn(
   req: Request,
@@ -70,7 +71,11 @@ export function socketAllowed(address: string | undefined, path: string): boolea
   if (LOOPBACK.has(host) || host.startsWith('127.')) return true;
   // Parsed as the handler parses it, so dot segments cannot climb out of a platform path.
   const pathname = URL.parse(`http://localhost${path}`)?.pathname ?? '';
-  return runnerCallback(pathname) || PLATFORM_PATHS.some(prefix => pathname.startsWith(prefix));
+  return (
+    pathname === MCP_CLIENT_PATH ||
+    runnerCallback(pathname) ||
+    PLATFORM_PATHS.some(prefix => pathname.startsWith(prefix))
+  );
 }
 
 export function localHostAllowed(req: Request, ctx: ServerContext): boolean {
@@ -84,7 +89,9 @@ export function localHostAllowed(req: Request, ctx: ServerContext): boolean {
   return (
     (forwarded ?? host) === tunnel &&
     !loopbackRequest(req) &&
-    (runnerCallback(url.pathname) || PLATFORM_PATHS.some(prefix => url.pathname.startsWith(prefix)))
+    (url.pathname === MCP_CLIENT_PATH ||
+      runnerCallback(url.pathname) ||
+      PLATFORM_PATHS.some(prefix => url.pathname.startsWith(prefix)))
   );
 }
 
@@ -156,7 +163,13 @@ export async function authorize(
     !sameOriginProof(req, ctx.config.publicUrl)
   )
     return forbidden();
-  return { ...scoped(ctx, session.organizationId), session, authorizedRequest: req };
+  // The request's own auth keeps collecting the cookies its response carries.
+  return {
+    ...scoped(ctx, session.organizationId),
+    auth: ctx.auth,
+    session,
+    authorizedRequest: req,
+  };
 }
 
 export async function provisioningAdmin(
@@ -301,8 +314,50 @@ export async function oauthAllowed(req: Request, ctx: ServerContext, params: Par
   return signed?.session ? { ...ctx, linkContext: signed } : toLogin(url);
 }
 
+export async function connectionOAuthAllowed(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+  url: URL,
+) {
+  if (ctx.local && !ctx.auth) return localOnly(req, ctx);
+  if (!ctx.auth) return notFound();
+  const signed = await signedIn(req, ctx);
+
+  return signed?.session ? signed : toLogin(url);
+}
+
 export function adminOnly(req: Request, ctx: ServerContext) {
   return requireWorkspaceAdmin(ctx, 'Workspace admin access is required.');
+}
+
+/** `SERVER_OPERATORS` with a signed-in session; on a server without sign-in, whoever holds the admin token. */
+export const operator = (ctx: ServerContext, session = ctx.session) =>
+  !ctx.auth || Boolean(session && ctx.config.operators?.includes(session.user.id));
+
+/** Operator routes answer 404 to everyone else, and 401 once the operator session ends. */
+export async function operatorOnly(req: Request, ctx: ServerContext) {
+  if (!operator(ctx)) return notFound();
+  if (ctx.auth && (await ctx.auth.operator(req.headers)) !== ctx.session!.user.id)
+    return json({ error: 'Operator mode ended. Sign in again to continue.' }, 401);
+
+  return ctx;
+}
+
+export async function operatorPageAllowed(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+  url: URL,
+) {
+  const allowed = await dashboardAllowed(req, ctx, params, url);
+  if (allowed instanceof Response || !ctx.auth) return allowed;
+  if (!operator(ctx, await ctx.auth.session(req.headers))) return notFound();
+
+  // Renews the operator cookie before the page streams.
+  await ctx.auth.operator(req.headers);
+
+  return allowed;
 }
 
 export function localOnly(req: Request, ctx: ServerContext) {

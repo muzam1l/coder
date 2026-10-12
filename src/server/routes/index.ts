@@ -29,11 +29,15 @@ export const REQUEST_SCOPE_HEADER = 'x-coder-request-scope';
 
 export type RequestScope = {
   sessions: Map<string, Promise<SessionInfo | undefined>>;
+  operators: Map<string, Promise<string | undefined>>;
   /** Refreshed or cleared session cookies the response carries. */
   cookies: string[];
 };
 
-function shareSessions(ctx: ServerContext, { sessions, cookies }: RequestScope): ServerContext {
+function shareSessions(
+  ctx: ServerContext,
+  { sessions, operators, cookies }: RequestScope,
+): ServerContext {
   const auth = ctx.auth;
   if (!auth) return ctx;
   return {
@@ -52,6 +56,15 @@ function shareSessions(ctx: ServerContext, { sessions, cookies }: RequestScope):
         }
         return found;
       },
+      operator(headers) {
+        const key = headers.get('cookie') ?? '';
+        let found = operators.get(key);
+        if (!found) {
+          found = auth.operator(headers, cookies);
+          operators.set(key, found);
+        }
+        return found;
+      },
     },
   };
 }
@@ -65,7 +78,7 @@ function requestScope(req: Request, ctx: ServerContext, inProcess: boolean) {
   headers.delete(REQUEST_SCOPE_HEADER);
   if (!ctx.auth) return { req: given ? new Request(req, { headers }) : req, ctx, end() {} };
   const id = randomUUID();
-  const scope: RequestScope = { sessions: new Map(), cookies: [] };
+  const scope: RequestScope = { sessions: new Map(), operators: new Map(), cookies: [] };
   scopes.set(id, scope);
   headers.set(REQUEST_SCOPE_HEADER, id);
   return {

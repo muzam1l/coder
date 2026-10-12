@@ -363,6 +363,7 @@ const GROUP_HELP = new Set([
   'runner',
   'auth',
   'credentials',
+  'connection',
 ]);
 
 async function route(): Promise<void> {
@@ -403,7 +404,7 @@ async function route(): Promise<void> {
     ![
       'task worker',
       'task archive-sweep',
-      'mcp serve',
+      'task mcp',
       'agent tools',
       'upgrade refresh',
       'update refresh',

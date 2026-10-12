@@ -34,7 +34,8 @@ import {
   TERMINAL_STATUSES,
 } from '../types';
 import { byListKey, listRank } from '../defaults';
-import { CoderError, spawnWorker } from '../dispatch';
+import { CoderError, selectMcpServers, spawnWorker } from '../dispatch';
+import { localConnections } from '../connections';
 import { isEndpointModel, loadConfig, resolveCodexModel, resolveCustomModel } from '../config';
 import { startChatBridge } from '../engines/codex/chat-bridge';
 import { listPendingApprovals } from '../approvals';
@@ -44,6 +45,10 @@ import { mailboxId, type MailboxKey } from '../mailbox';
 import { CLI_PATH } from '../runtime';
 import { deleteCodexSession } from '../engines/codex/sessions';
 import { deleteClaudeSession } from '../engines/claude/sessions';
+
+type ConnectionResolver = (
+  granted: string[],
+) => Promise<Pick<Awaited<ReturnType<typeof localConnections>>, 'mcp' | 'env' | 'warnings'>>;
 
 /** How a steer was applied to a task. */
 export type SteerOutcome = 'live' | 'queued' | 'resumed';
@@ -114,6 +119,7 @@ export async function steerTask(
     permissions?: string;
     outputSchema?: object;
     command?: MailboxKey;
+    resolveConnections?: ConnectionResolver;
   } = {},
   adapters: {
     codex?: typeof steerTurn;
@@ -135,20 +141,52 @@ export async function steerTask(
     if (current.archived) unarchiveTask(cwd, current);
     return running;
   }
-  resumeInPlace(cwd, task, text, opts);
+  await resumeInPlace(cwd, task, text, opts);
   return { taskId: task.id, steered: 'resumed' };
 }
 
 // A stopped task resumes on the SAME task record (never a stray new task id),
 // in the task's own cwd: claude finds session transcripts per project dir.
-function resumeInPlace(
+async function resumeInPlace(
   cwd: string,
   task: Task,
   text: string,
-  opts: { model?: string; effort?: string; permissions?: string; outputSchema?: object },
-): void {
+  opts: {
+    model?: string;
+    effort?: string;
+    permissions?: string;
+    outputSchema?: object;
+    resolveConnections?: ConnectionResolver;
+  },
+): Promise<void> {
+  if (task.connectionSource === 'server' && !opts.resolveConnections)
+    throw new Error('Server connection resolver is required to resume this task');
+  const connected = opts.resolveConnections
+    ? await opts.resolveConnections(task.connections ?? [])
+    : await localConnections(undefined, task.connections ?? []);
+  const servers =
+    task.mcp?.map(server => {
+      const connection =
+        server.connection ??
+        (server.resolved && task.connections?.includes(server.name) ? server.name : undefined);
+      return connection ? { ...server, connection, resolved: false } : server;
+    }) ?? [];
+  const bindings =
+    task.mcpBindings ??
+    servers
+      .filter(server => server.connection)
+      .map(({ name, connection, tools }) => ({ name, connection, ...(tools ? { tools } : {}) }));
+  const declared = new Set(bindings.map(server => server.connection));
+  const selected = selectMcpServers(
+    [...bindings, ...servers.filter(server => !declared.has(server.connection))],
+    {},
+    {},
+    connected.mcp,
+  );
   if (task.archived) unarchiveTask(cwd, task);
   writeTask(cwd, task.id, {
+    mcp: selected.mcp,
+    mcpBindings: bindings,
     status: 'queued',
     resumedAt: new Date().toISOString(),
     currentPrompt: text,
@@ -164,7 +202,9 @@ function resumeInPlace(
     kind: 'steer',
     message: `Resuming with steer:\n${text}`,
   });
-  spawnWorker(task.cwd ?? cwd, task.id);
+  for (const warning of [...connected.warnings, ...(selected.warnings ?? [])])
+    appendTaskLog(cwd, task.id, { kind: 'status', message: warning });
+  spawnWorker(task.cwd ?? cwd, task.id, connected.env);
 }
 
 const CLAUDE_SIDECAR_INSPECTION_TOOLS = ['Read', 'Glob', 'Grep'];

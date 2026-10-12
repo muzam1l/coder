@@ -3,9 +3,10 @@ import type {
   AgentTask,
   AgentUsage,
   AgentApp,
+  Connection,
   Installation,
 } from '../../agent/types';
-import type { TaskTurn } from '../../client/types';
+import type { AuditRow, TaskTurn } from '../../client/types';
 import { type EngineLogin } from '../settings/logins';
 import type { StoredCredential } from '../settings/credentials';
 import type { StoredConfig } from '../settings/config';
@@ -25,13 +26,22 @@ export interface StoreRecords {
   login: EngineLogin;
   runner: RunnerRecord;
   snapshot:
-    SnapshotState | PairingRecord | LocalStart | LocalCompletion | SessionBinding | DeliveryLease;
+    | { connectionSecrets: string; expiresAt?: number }
+    | { resolvedConnections: string; expiresAt?: number }
+    | SnapshotState
+    | PairingRecord
+    | LocalStart
+    | LocalCompletion
+    | SessionBinding
+    | DeliveryLease
+    | AuditRow;
   task: TaskStatus;
   tasklog: Omit<TaskLogLine, 'seq'>;
   inbox: InboxEntry;
   delivery: DeliveryRecord;
   usage: UsageRecord;
   config: StoredConfig;
+  connection: Connection;
 }
 
 export type StoreKind = keyof StoreRecords;
@@ -40,6 +50,8 @@ export type DeliveryRecord =
   | (DeliveryLease & { pending?: never })
   | {
       at?: number;
+      /** What a browser transaction is bound to. */
+      target?: string;
       owner?: string;
       pid?: number;
       posted?: boolean;
@@ -79,6 +91,10 @@ export interface UsageTotalRow extends UsageAmount {
 }
 
 export type MetadataKind = 'app' | 'installation' | 'runner';
+
+/** Another live app on the same platform client (`<app>` or `<app>/<id>`) already holds this installation's account. */
+export class InstallationBoundError extends Error {}
+
 export type AgentVersionSummary = Omit<AgentVersionRecord, 'systemPrompt' | 'files'>;
 export type LoginPatch = Partial<
   Pick<EngineLogin, 'state' | 'handle' | 'url' | 'code' | 'error' | 'label'>
@@ -112,6 +128,11 @@ export interface DeliveryLease {
 }
 
 export interface Store {
+  connectionContexts?: Map<
+    string,
+    Awaited<ReturnType<typeof import('../connections/resolve').resolveConnections>>
+  >;
+  connectionSecrets?: Map<string, string[]>;
   localFlows?: Map<string, { stop(): Promise<void>; work: Promise<void> }>;
   completionWatches?: Map<string, { stopped: boolean; work: Promise<void> }>;
   handoffs?: Map<string, Promise<unknown>>;

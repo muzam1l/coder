@@ -44,7 +44,7 @@ Archiving hides a task from the default list. A running task keeps running, and 
   - **Local**: this machine's `claude` and `codex` logins, with Sign in and Sign out running each CLI's own commands here.
   - **Cloud**: encrypted personal and workspace [credentials](self-host.md#credentials).
 - **Engines**, **Models** and **MCP**: engine defaults, models and MCP servers.
-  - **Local**: the user config, as `coder config`, `coder model` and `coder mcp add --user` edit it.
+  - **Local**: the user config, as `coder config` and `coder model` edit it.
   - **Cloud**: the workspace's config, which a repo's own `.coder/config.json` can only narrow.
 - **Runners**: where tasks run, each with its own engine logins.
   - **Local**: this machine.

@@ -10,6 +10,7 @@ import readline from 'node:readline';
 import { parseBrokerEndpoint } from '../../broker/endpoint';
 import { ensureBrokerSession, loadBrokerSession } from '../../broker/session';
 import { runCommand, terminateProcessTree } from '../../../utils/process';
+import { connectionEnvironmentKey, engineEnvironment } from '../../connections';
 
 export const BROKER_ENDPOINT_ENV = 'CODER_APP_SERVER_ENDPOINT';
 export const BROKER_BUSY_RPC_CODE = -32001;
@@ -21,7 +22,7 @@ export const BROKER_RECYCLE_METHOD = 'broker/recycle';
 
 const FALLBACK_CODEX_VERSION = '0.144.1';
 function detectCodexVersion() {
-  const result = runCommand('codex', ['--version']);
+  const result = runCommand('codex', ['--version'], { env: engineEnvironment() });
   const match = /(\d+\.\d+\.\d+(?:-[\w.]+)?)/.exec(`${result.stdout} ${result.stderr}`);
   return match ? match[1] : FALLBACK_CODEX_VERSION;
 }
@@ -280,7 +281,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     const networkAccess = this.options.networkAccess ?? false;
     this.proc = spawn('codex', codexAppServerArgs(networkAccess, this.options.nativeMcp), {
       cwd: this.cwd,
-      env: this.options.env ?? process.env,
+      env: engineEnvironment(this.options.env ?? process.env),
       stdio: ['pipe', 'pipe', 'pipe'],
       shell: process.platform === 'win32' ? process.env.SHELL || true : false,
       windowsHide: true,
@@ -441,21 +442,26 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
 
 export class CodexAppServerClient {
   static async connect(cwd: string, options: ClientOptions = {}) {
+    const env = options.env ?? process.env;
+    const connectionKey = connectionEnvironmentKey(env);
+    options = { ...options, env: engineEnvironment(env) };
     const networkAccess = options.networkAccess ?? false;
     let brokerEndpoint = null;
     if (!options.disableBroker && !options.nativeMcp) {
-      brokerEndpoint =
-        options.brokerEndpoint ??
-        options.env?.[BROKER_ENDPOINT_ENV] ??
-        process.env[BROKER_ENDPOINT_ENV] ??
-        null;
+      brokerEndpoint = connectionKey
+        ? null
+        : (options.brokerEndpoint ??
+          options.env?.[BROKER_ENDPOINT_ENV] ??
+          process.env[BROKER_ENDPOINT_ENV] ??
+          null);
       if (!brokerEndpoint && options.reuseExistingBroker) {
-        brokerEndpoint = loadBrokerSession(cwd, networkAccess)?.endpoint ?? null;
+        brokerEndpoint = loadBrokerSession(cwd, networkAccess, connectionKey)?.endpoint ?? null;
       }
       if (!brokerEndpoint && !options.reuseExistingBroker) {
         const brokerSession = await ensureBrokerSession(cwd, {
-          env: options.env,
+          env,
           networkAccess,
+          connectionKey,
         });
         brokerEndpoint = brokerSession?.endpoint ?? null;
       }

@@ -1,55 +1,6 @@
-import { MemoryCache } from '../context/cache';
-import { type Params } from '../routes/match';
 import { type Found } from '../../client/types';
 import { type ServerContext } from '../context';
-import { type CoderConfig } from '../../core/config';
-import { ConfigError, shownConfig, body, change } from './config';
 import { json } from '../routes/http';
-
-const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
-
-export async function listMcp(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  return json((await shownConfig(ctx)).mcp ?? {});
-}
-
-export async function createMcp(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  const { name: added = '', ...entry } = await body<
-    {
-      name?: string;
-    } & NonNullable<CoderConfig['mcp']>[string]
-  >(req);
-  if (!SLUG.test(added)) return json({ error: `Invalid server name "${added}"` }, 400);
-
-  return change(ctx, config => {
-    config.mcp = { ...config.mcp, [added]: entry };
-  });
-}
-
-export async function deleteMcp(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  const name = params.name!;
-
-  return change(ctx, config => {
-    if (!config.mcp?.[name]) throw new ConfigError(`No MCP server "${name}"`);
-    delete config.mcp[name];
-  });
-}
-
-const REGISTRY = 'https://registry.modelcontextprotocol.io/v0.1/servers';
 
 const RUNNERS: Record<string, [string, ...string[]]> = {
   npm: ['npx', '-y'],
@@ -95,10 +46,13 @@ type Package = {
 
 type Detail = {
   name: string;
+  version?: string;
   title?: string;
   description?: string;
   remotes?: Remote[];
   packages?: Package[];
+  /** GitHub's registry adds the repository's own display name. */
+  _meta?: Record<string, { github?: { displayName?: string } } | undefined>;
 };
 
 const inputs = (list: Input[] = []) =>
@@ -166,43 +120,220 @@ function entryOf(server: Detail) {
   };
 }
 
-export async function mcpRegistry(req: Request, ctx: ServerContext, url: URL): Promise<Response> {
-  const search = url.searchParams.get('q')?.trim() ?? '';
-  const settings = (ctx.settings ??= {});
-  const cache = (settings.registry ??= new MemoryCache<Found[]>({
-    ttlMs: 600_000,
-    max: 100,
-    now: ctx.now,
-  }));
-  const found = await cache.get(search, () => registrySearch(ctx, search));
-  if (found) return json(found);
-  return json({ error: 'The MCP registry did not answer. Try again.' }, 502);
+type RegistryRow = {
+  version: string;
+  latest: boolean;
+  found?: Found;
+};
+
+type RegistrySource = {
+  url: string;
+  curated: boolean;
+  rows: Map<string, RegistryRow>;
+  ready: boolean;
+  failed: boolean;
+};
+
+function compareVersions(a: string, b: string): number {
+  const [ac = '', ap] = a.replace(/^v/, '').split('+')[0]!.split(/-(.*)/);
+  const [bc = '', bp] = b.replace(/^v/, '').split('+')[0]!.split(/-(.*)/);
+  const core = ac.localeCompare(bc, 'en', { numeric: true });
+  if (core) return core;
+  if (ap === undefined || bp === undefined)
+    return Number(ap === undefined) - Number(bp === undefined);
+  const aa = ap.split('.');
+  const bb = bp.split('.');
+  for (let i = 0; i < Math.max(aa.length, bb.length); i++) {
+    const av = aa[i];
+    const bv = bb[i];
+    if (av === undefined || bv === undefined)
+      return Number(av !== undefined) - Number(bv !== undefined);
+    const an = /^\d+$/.test(av);
+    const bn = /^\d+$/.test(bv);
+    const order = an !== bn ? Number(bn) - Number(an) : av.localeCompare(bv, 'en', { numeric: an });
+    if (order) return order;
+  }
+
+  return 0;
 }
 
-async function registrySearch(ctx: ServerContext, search: string): Promise<Found[] | undefined> {
-  const query = new URLSearchParams({ version: 'latest', limit: '30' });
-  if (search) query.set('search', search);
-  try {
-    const response = await (ctx.fetch ?? fetch)(`${REGISTRY}?${query}`, {
-      headers: { accept: 'application/json' },
-      signal: AbortSignal.timeout(20_000),
-    });
-    if (!response.ok) return undefined;
-    const { servers = [] } = (await response.json()) as { servers?: Array<{ server: Detail }> };
-    return servers.flatMap(({ server }) => {
-      const entry = entryOf(server);
-      return entry
-        ? [
-            {
-              name: server.name,
-              title: server.title ?? server.name.split('/').pop() ?? server.name,
-              description: server.description ?? '',
-              ...entry,
-            },
-          ]
-        : [];
-    });
-  } catch {
-    return undefined;
+export class RegistryIndex {
+  private sources: RegistrySource[] = [
+    {
+      url: 'https://api.mcp.github.com/v0.1/servers',
+      curated: true,
+      rows: new Map(),
+      ready: false,
+      failed: false,
+    },
+    {
+      url: 'https://registry.modelcontextprotocol.io/v0.1/servers',
+      curated: false,
+      rows: new Map(),
+      ready: false,
+      failed: false,
+    },
+  ];
+  private refreshAt = 0;
+  private timer?: ReturnType<typeof setTimeout>;
+  private controller?: AbortController;
+  private closed = false;
+  inFlight?: Promise<void>;
+
+  response(ctx: ServerContext, search: string): Response {
+    if ((ctx.now ?? Date.now)() >= this.refreshAt) this.refresh(ctx);
+    if (
+      !this.inFlight &&
+      this.sources.some(source => source.failed) &&
+      !this.sources.some(source => [...source.rows.values()].some(row => row.found))
+    )
+      return json({ error: 'The MCP registry did not answer. Try again.' }, 502);
+    const q = search.trim().toLowerCase();
+    const seen = new Set<string>();
+    const found = this.sources.flatMap(source =>
+      [...source.rows].flatMap(([name, { found }], order) => {
+        if (seen.has(name)) return [];
+        seen.add(name);
+        if (!found) return [];
+        // The server's own name and title, never its namespace, which is often io.github.<user>.
+        const names = [found.name.split('/').pop()!, found.title].map(value => value.toLowerCase());
+        const quality =
+          !q || names.includes(q)
+            ? 0
+            : names.some(value => value.startsWith(q))
+              ? 1
+              : names.some(value => value.includes(q))
+                ? 2
+                : found.description.toLowerCase().includes(q)
+                  ? 3
+                  : 4;
+        if (quality === 4) return [];
+        const vendor = q && found.verified && quality < 3 ? 0 : 1;
+
+        return [{ found, curated: source.curated, order, vendor, quality }];
+      }),
+    );
+    // Name or title matches before description-only ones; within each, GitHub's curated order, then vendors.
+    const tier = (quality: number) => Number(quality === 3);
+    found.sort(
+      (a, b) =>
+        tier(a.quality) - tier(b.quality) ||
+        Number(b.curated) - Number(a.curated) ||
+        (a.curated
+          ? a.order - b.order
+          : a.vendor - b.vendor ||
+            a.quality - b.quality ||
+            a.found.name.localeCompare(b.found.name)),
+    );
+
+    return json(
+      found.slice(0, 30).map(({ found }) => found),
+      200,
+      this.sources.every(source => source.ready) ? {} : { partial: 'true' },
+    );
   }
+
+  private refresh(ctx: ServerContext): void {
+    if (this.inFlight || this.closed) return;
+    if (this.timer) clearTimeout(this.timer);
+    const controller = (this.controller = new AbortController());
+    this.inFlight = Promise.all(
+      this.sources.map(source => this.fill(ctx, source, controller.signal)),
+    )
+      .then(() => {})
+      .finally(() => {
+        this.inFlight = undefined;
+        this.refreshAt = (ctx.now ?? Date.now)() + 3_600_000;
+        if (!this.closed) {
+          this.timer = setTimeout(() => this.refresh(ctx), 3_600_000);
+          this.timer.unref();
+        }
+      });
+    ctx.waitUntil?.(this.inFlight);
+  }
+
+  private async fill(
+    ctx: ServerContext,
+    source: RegistrySource,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const rows = new Map<string, RegistryRow>();
+    const cursors = new Set<string>();
+    let cursor: string | undefined;
+    try {
+      do {
+        const query = new URLSearchParams({ limit: '100' });
+        if (cursor) query.set('cursor', cursor);
+        const response = await (ctx.fetch ?? fetch)(`${source.url}?${query}`, {
+          headers: { accept: 'application/json' },
+          signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]),
+        });
+        if (!response.ok) throw new Error('Registry unavailable');
+        const { servers, metadata } = (await response.json()) as {
+          servers: Array<{
+            server: Detail;
+            _meta?: { 'io.modelcontextprotocol.registry/official'?: { isLatest?: boolean } };
+          }>;
+          metadata?: { nextCursor?: string };
+        };
+        for (const { server, _meta } of servers) {
+          const latest = _meta?.['io.modelcontextprotocol.registry/official']?.isLatest === true;
+          const version = server.version ?? '';
+          const previous = rows.get(server.name);
+          if (
+            previous &&
+            (previous.latest !== latest
+              ? previous.latest
+              : compareVersions(previous.version, version) >= 0)
+          )
+            continue;
+          const entry = entryOf(server);
+          const verified =
+            /^[a-z0-9-]+(?:\.[a-z0-9-]+)+\//i.test(server.name) &&
+            !/^io\.github(?:\.|\/)/i.test(server.name);
+          rows.set(server.name, {
+            version,
+            latest,
+            found: entry
+              ? {
+                  name: server.name,
+                  title:
+                    server._meta?.['io.modelcontextprotocol.registry/publisher-provided']?.github
+                      ?.displayName ??
+                    server.title ??
+                    server.name.split('/').pop() ??
+                    server.name,
+                  description: server.description ?? '',
+                  ...(verified ? { verified: true } : {}),
+                  ...(source.curated ? { curated: true } : {}),
+                  ...entry,
+                }
+              : undefined,
+          });
+        }
+        if (!source.ready) source.rows = new Map(rows);
+        cursor = metadata?.nextCursor;
+        if (cursor && cursors.has(cursor)) throw new Error('Registry cursor repeated');
+        if (cursor) cursors.add(cursor);
+      } while (cursor);
+      source.rows = rows;
+      source.ready = true;
+      source.failed = false;
+    } catch {
+      source.failed = true;
+    }
+  }
+
+  close(): void {
+    this.closed = true;
+    if (this.timer) clearTimeout(this.timer);
+    this.controller?.abort();
+  }
+}
+
+export async function mcpRegistry(req: Request, ctx: ServerContext, url: URL): Promise<Response> {
+  const settings = (ctx.settings ??= {});
+  const index = (settings.registry ??= new RegistryIndex());
+
+  return index.response(ctx, url.searchParams.get('q') ?? '');
 }

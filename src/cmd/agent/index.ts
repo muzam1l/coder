@@ -5,7 +5,7 @@ const AGENT_MENU: { usage: string; blurb: string }[] = [
   { usage: 'list', blurb: 'list local or server-owned agents' },
   {
     usage: 'show <id>',
-    blurb: 'one agent in full: settings, integrations, triggers, tools',
+    blurb: 'one agent in full: settings, integrations, events, tools',
   },
   { usage: 'init [id]', blurb: 'scaffold an agent folder in .coder/agents' },
   { usage: 'push [id]', blurb: 'upload workspace agents to a Coder server' },

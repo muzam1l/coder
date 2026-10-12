@@ -21,6 +21,7 @@ import { describeUnsupportedModel, errorText, isStaleAuthError } from './errors'
 import type { MailboxKey } from '../../mailbox';
 import { requestCodexControl, startCodexControlServer } from './control';
 import { binaryAvailable } from '../../../utils/process';
+import { engineEnvironment } from '../../connections';
 import { isCodexSessionArchived, unarchiveCodexSession } from './sessions';
 import type { Availability, AuthStatus, Effort, McpServerSpec, TurnResult } from '../../types';
 import {
@@ -202,11 +203,14 @@ export function getCodexAvailability(cwd: string): Availability {
       }
     }
   }
-  const versionStatus = binaryAvailable('codex', ['--version'], { cwd });
+  const versionStatus = binaryAvailable('codex', ['--version'], { cwd, env: engineEnvironment() });
   if (!versionStatus.available) {
     return versionStatus;
   }
-  const appServerStatus = binaryAvailable('codex', ['app-server', '--help'], { cwd });
+  const appServerStatus = binaryAvailable('codex', ['app-server', '--help'], {
+    cwd,
+    env: engineEnvironment(),
+  });
   if (!appServerStatus.available) {
     return {
       available: false,
@@ -252,7 +256,10 @@ export async function getCodexAuthStatus(
   } catch (error) {
     // No live broker to ask (ENOENT on the socket) or transport failure: fall
     // back to the codex CLI's own answer instead of surfacing the error.
-    const probe = spawnSync('codex', ['login', 'status'], { encoding: 'utf8' });
+    const probe = spawnSync('codex', ['login', 'status'], {
+      encoding: 'utf8',
+      env: engineEnvironment(),
+    });
     const output = `${probe.stdout ?? ''}${probe.stderr ?? ''}`.trim();
     if (probe.status === 0) {
       return { available: true, loggedIn: true, detail: output || 'Logged in' };

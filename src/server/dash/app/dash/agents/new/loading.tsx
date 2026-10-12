@@ -1,6 +1,8 @@
 import { HEADS } from '@/comps/frame/heads';
-import { LoadingCard } from '@/comps/frame/loading-card';
 import { Back, Page, PageHead } from '@/comps/frame/page-head';
+import { Loading } from '@/comps/ui/card';
+import { Icon } from '@/comps/ui/icon';
+import { iPlus } from '@/comps/ui/icons';
 
 export default function NewAgentLoading() {
   return (
@@ -14,12 +16,13 @@ export default function NewAgentLoading() {
               Import from repo
             </button>
             <button type="button" class="btn" disabled>
+              <Icon d={iPlus} />
               Create agent
             </button>
           </>
         }
       />
-      <LoadingCard label="Loading editor" h={640} />
+      <Loading label="Loading editor" h={640} />
     </Page>
   );
 }

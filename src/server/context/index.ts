@@ -37,6 +37,8 @@ export interface ServerConfig {
   auth?: { wular: { url: string } };
   /** `SERVER_INTEGRATIONS`: the platforms this host offers, by id; every one when unset. */
   integrations?: string[];
+  /** `SERVER_OPERATORS`: the Wular user ids that may enter operator mode. */
+  operators?: string[];
 }
 
 export interface OrganizationInfo {
@@ -76,6 +78,8 @@ export interface AuthApi {
   handler(req: Request): Promise<Response>;
   /** `fresh` demands roles at most 60 seconds old, refreshing them from Wular first; `cookies` receives the Set-Cookie values the response must carry. */
   session(headers: Headers, fresh?: boolean, cookies?: string[]): Promise<SessionInfo | undefined>;
+  /** The user of a live operator session, whose idle timer restarts; `cookies` receives its renewed or cleared cookie. */
+  operator(headers: Headers, cookies?: string[]): Promise<string | undefined>;
   /** Switches the session's organization; `cookies` store the session for the response. */
   setOrganization(
     headers: Headers,
@@ -87,7 +91,23 @@ export interface AuthApi {
     platform: string,
     platformUserId: string,
     extra?: LinkExtra,
+    store?: Store,
   ): Promise<'linked' | 'taken'>;
+  linkedAccounts?(
+    userId: string,
+    store?: Store,
+  ): Promise<
+    Array<{ platform: string; platformUserId: string; name: string; email: string } & LinkExtra>
+  >;
+  unlink?(userId: string, platform: string, platformUserId: string, store?: Store): Promise<void>;
+  refreshLinkedToken?(
+    userId: string,
+    platform: string,
+    platformUserId: string,
+    previous: string,
+    next: string,
+    store?: Store,
+  ): Promise<boolean>;
   linkedUser(
     platform: string,
     platformUserId: string,
@@ -162,7 +182,7 @@ export interface ServerContext {
 export interface ServerSettings {
   runnerInstances?: Map<string, { signature: string; runner: Runner }>;
   configUpdate?: Promise<unknown>;
-  registry?: import('./cache').MemoryCache<import('../../client/types').Found[]>;
+  registry?: import('../settings/mcp').RegistryIndex;
   probes?: import('./cache').MemoryCache<import('../../client/types').ProbeResult>;
 }
 

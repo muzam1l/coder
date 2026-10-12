@@ -1,5 +1,5 @@
 import { type Params } from '../routes/match';
-import { builtinDefinitions } from '../../agent/load';
+import { builtinDefinitions, defaultAgent } from '../../agent/load';
 import { type AgentApp } from '../../agent/types';
 import {
   type AgentRecord,
@@ -17,6 +17,7 @@ import {
   versionKey,
 } from './records';
 import { syncLocalAgents } from '../store/local';
+import { agentApps } from './connections';
 import { decodeCursor, json, notFound, page, pageLimit, paged } from '../routes/http';
 
 export async function sourceUrl(
@@ -96,11 +97,13 @@ export async function listAgents(
 
   let apps:
     | Promise<
-      Array<{
-        value: AgentApp;
-      }>
-    >
+        Array<{
+          value: AgentApp;
+        }>
+      >
     | undefined;
+
+  const preferred = defaultAgent();
 
   return json(
     await Promise.all(
@@ -111,6 +114,7 @@ export async function listAgents(
 
         return {
           ...record,
+          ...(record.id === preferred ? { default: true } : {}),
           definition: version?.definition,
           ...(source ? { sourceUrl: source } : {}),
         };
@@ -176,11 +180,12 @@ export async function readAgent(
   const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
   const withVersions = url.searchParams.get('versions') !== '0';
   const withContent = url.searchParams.get('content') !== '0';
-  const [{ record, version: current }, rows] = await Promise.all([
+  const withHandles = url.searchParams.get('handles') === '1';
+  const [{ record, version: current }, rows, apps] = await Promise.all([
     !withContent && !local && ctx.store.listAgentSummaries && !builtinDefinitions()[slug]
       ? ctx.store
-        .listAgentSummaries({ slug })
-        .then((rows): { record?: AgentRecord; version?: AgentVersionSummary } => rows[0] ?? {})
+          .listAgentSummaries({ slug })
+          .then((rows): { record?: AgentRecord; version?: AgentVersionSummary } => rows[0] ?? {})
       : loadCurrent(),
     withVersions
       ? local
@@ -189,8 +194,25 @@ export async function readAgent(
           ? ctx.store.listVersions(slug)
           : ctx.store.list('agentversion', { prefix: `${slug}:` })
       : [],
+    withHandles ? agentApps(ctx, slug) : [],
   ]);
   if (!record) return json({ error: `No agent named "${slug}"` }, 404);
+
+  // The names its apps answer to, once each, where the agent wakes on a mention.
+  const wired = current?.definition.integrations ?? {};
+  const mentions = (id: string) => {
+    const events = wired[id]?.events;
+    return Array.isArray(events)
+      ? events.includes('mention')
+      : Boolean(events && 'mention' in events);
+  };
+  const handles: string[] = [];
+  for (const { value } of apps)
+    if (
+      mentions(value.integration) &&
+      !handles.some(name => name.toLowerCase() === value.name.toLowerCase())
+    )
+      handles.push(value.name);
 
   const versions = rows.map(({ value }) => {
     const { systemPrompt, files, ...metadata } = value as AgentVersionRecord;
@@ -203,19 +225,20 @@ export async function readAgent(
     ...record,
     ...(current
       ? {
-        definition: current.definition,
-        ...(withContent && 'systemPrompt' in current
-          ? {
-            systemPrompt: current.systemPrompt,
-            ...((current as AgentVersionRecord).files
-              ? { files: (current as AgentVersionRecord).files }
-              : {}),
-          }
-          : {}),
-      }
+          definition: current.definition,
+          ...(withContent && 'systemPrompt' in current
+            ? {
+                systemPrompt: current.systemPrompt,
+                ...((current as AgentVersionRecord).files
+                  ? { files: (current as AgentVersionRecord).files }
+                  : {}),
+              }
+            : {}),
+        }
       : {}),
     ...(source ? { sourceUrl: source } : {}),
     ...(withVersions ? { versions } : {}),
+    ...(handles.length ? { handles } : {}),
   });
 }
 
@@ -248,21 +271,21 @@ export async function agentsPage(
       : [],
     all
       ? all.filter(
-        ({ record }) =>
-          (!after || record.id > after) &&
-          (!source || record.source === source) &&
-          (!q ||
-            [record.id, record.name, record.description, record.repo].some(value =>
-              value?.toLowerCase().includes(q),
-            )),
-      )
+          ({ record }) =>
+            (!after || record.id > after) &&
+            (!source || record.source === source) &&
+            (!q ||
+              [record.id, record.name, record.description, record.repo].some(value =>
+                value?.toLowerCase().includes(q),
+              )),
+        )
       : ctx.store.listAgentSummaries!({
-        after,
-        source,
-        q,
-        platform: platform ?? undefined,
-        limit: limit + 1,
-      }),
+          after,
+          source,
+          q,
+          platform: platform ?? undefined,
+          limit: limit + 1,
+        }),
   ]);
   const live = new Set(
     installations.filter(({ value }) => !value.deletedAt).map(({ value }) => value.app),
@@ -283,24 +306,32 @@ export async function agentsPage(
     if (rows.length > limit) break;
   }
   const result = page(rows, limit, last => last.record.id);
+  const preferred = defaultAgent();
 
   return {
     ...result,
     ...(connect
       ? {
-        connectable: [
-          ...appRows,
-          ...shared.map(row => ({ ...row, value: { ...row.value, builtin: true } })),
-        ]
-          .filter(({ value }) => value.builtin && !live.has(value.id))
-          .map(({ value }) => ({ id: value.id, integration: value.integration })),
-      }
+          connectable: [...appRows, ...shared]
+            .filter(
+              ({ value }) =>
+                value.builtin &&
+                ctx.integrations[value.integration]?.app.builtin === 'shared' &&
+                !live.has(value.id),
+            )
+            .map(({ value }) => ({
+              id: value.id,
+              integration: value.integration,
+              agent: value.agent,
+            })),
+        }
       : {}),
     items: await Promise.all(
       result.items.map(async ({ record, version, ids }) => {
         const source = await sourceUrl(ctx, record, version, apps);
         return {
           ...record,
+          ...(record.id === preferred ? { default: true } : {}),
           definition: version?.definition,
           ...(source ? { sourceUrl: source } : {}),
           platforms: ids.map(id => ({ id, state: reach(record.id, id) })),

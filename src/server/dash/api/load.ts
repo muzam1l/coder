@@ -58,5 +58,5 @@ export const unwrap = <T>(rows: Array<StoredRow<T>>) => rows.map(row => row.valu
 export function loadAgent(request: Request, slug: string) {
   const path = new URL(request.url).pathname;
   const content = path === `/dash/agents/${encodeURIComponent(slug)}` || path.endsWith('/edit');
-  return load(request).agents.get(slug, { versions: false, content });
+  return load(request).agents.get(slug, { versions: false, content, handles: true });
 }

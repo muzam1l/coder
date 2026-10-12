@@ -1,0 +1,109 @@
+.conns .reach {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.conn-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* the kind picker and its help line sit above the kind's own form */
+.conn-add {
+  display: grid;
+  gap: 10px;
+  padding: 16px 16px 0;
+}
+.conn-add .seg-btns {
+  width: max-content;
+  max-width: 100%;
+}
+.conn-add + .add-form {
+  padding-top: 8px;
+}
+/* text fields share the row evenly; a picker keeps its width but never past the card */
+.conn-add + .add-form .add-grid > .field {
+  flex: 1 1 260px;
+}
+.conn-add + .add-form .add-grid > div.field {
+  flex: none;
+  max-width: 100%;
+}
+.conn-add + .add-form .add-grid > .field:has(> .select) {
+  max-width: min(100%, 420px);
+}
+/* platform and access get room for their names; scope sits at the row's right end */
+.conn-add + .add-form .add-grid > div.field:has([aria-label='Platform']),
+.conn-add + .add-form .add-grid > div.field:has([aria-label='Authentication']),
+.conn-add + .add-form .add-grid > div.field:has([aria-label='Access']) {
+  flex: 1 1 220px;
+  max-width: 360px;
+}
+.conn-add + .add-form .add-grid > div.field:has([aria-label='Platform']) > .select,
+.conn-add + .add-form .add-grid > div.field:has([aria-label='Authentication']) > .select,
+.conn-add + .add-form .add-grid > div.field:has([aria-label='Access']) > .select {
+  width: 100%;
+}
+.conn-add + .add-form .add-grid > div.field:has([aria-label='Scope']) {
+  margin-left: auto;
+}
+.add-foot > p {
+  flex: 1 1 240px;
+  align-self: center;
+  font-size: 12px;
+}
+.add-form .select:has([aria-label='Platform']) {
+  min-width: 160px;
+}
+
+/* registry results float under the search, so the form under it never moves */
+.registry {
+  position: relative;
+  max-width: 560px;
+}
+.registry-pop {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  width: 100%;
+  max-height: 300px;
+  overflow-y: auto;
+  padding: 6px;
+  border: 1px solid var(--line2);
+  background: var(--tile);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+}
+.registry-pop .pop-item b {
+  font-weight: 500;
+}
+.registry-pop .badge {
+  margin-left: 6px;
+}
+.registry-note {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.registry-note > :first-child {
+  flex: 1;
+}
+.registry-picked {
+  margin-top: 8px;
+  font-size: 12px;
+}
+.registry-note.err {
+  color: var(--bad);
+}
+
+.conn-key input {
+  flex: 1 1 200px;
+}
+
+.add-form > .notice {
+  margin-top: 12px;
+}

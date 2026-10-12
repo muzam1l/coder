@@ -4,13 +4,13 @@ import { decodeJson, encodeJson } from '../../utils/base64url';
 import { safeEqual, sha256 } from '../../utils/crypto';
 import type { ServerContext } from '../context';
 
-export type NonceKind = 'create' | 'install' | 'link-start' | 'link' | 'link-oauth';
+export type NonceKind =
+  'create' | 'install' | 'link-start' | 'link' | 'link-oauth' | 'connection-oauth' | 'native-oauth';
 
 interface NonceClaim {
   kind: NonceKind;
   user: string;
   organization: string;
-  target: string;
   nonce: string;
   exp: number;
 }
@@ -40,13 +40,12 @@ export async function issueNonce(
     kind,
     user,
     organization: ctx.organizationId,
-    target,
     nonce: randomBytes(18).toString('base64url'),
     exp: now + ttlMs,
   };
   const payload = encodeJson(claim);
   const token = `${payload}.${sign(ctx, payload)}`;
-  await ctx.store.put('delivery', keyOf(token), { at: now }, { ttlMs });
+  await ctx.store.put('delivery', keyOf(token), { at: now, target }, { ttlMs });
   return token;
 }
 
@@ -59,6 +58,11 @@ function read(ctx: ServerContext, token: string): NonceClaim | undefined {
   } catch {
     return undefined;
   }
+}
+
+async function storedTarget(ctx: ServerContext, token: string): Promise<string | undefined> {
+  const record = await ctx.store.get('delivery', keyOf(token));
+  return record && 'target' in record ? record.target : undefined;
 }
 
 /** The organization a transaction was issued in, from its signed claim. */
@@ -86,8 +90,8 @@ export async function consumeNonce(
     claim.kind !== kind ||
     claim.user !== user ||
     claim.organization !== ctx.organizationId ||
-    claim.target !== target ||
-    claim.exp < now
+    claim.exp < now ||
+    (await storedTarget(ctx, token)) !== target
   )
     return false;
   return ctx.store.take('delivery', keyOf(token));
@@ -106,11 +110,14 @@ export async function consumeBoundNonce(
     claim.kind !== kind ||
     (claim.user !== '*' && claim.user !== user) ||
     claim.organization !== ctx.organizationId ||
-    claim.exp < now ||
-    !(await ctx.store.take('delivery', keyOf(token)))
+    claim.exp < now
   )
     return undefined;
-  return claim.target;
+
+  const target = await storedTarget(ctx, token);
+  return target !== undefined && (await ctx.store.take('delivery', keyOf(token)))
+    ? target
+    : undefined;
 }
 
 export async function inspectNonce(
@@ -126,9 +133,8 @@ export async function inspectNonce(
     claim.kind !== kind ||
     (claim.user !== '*' && claim.user !== user) ||
     claim.organization !== ctx.organizationId ||
-    claim.exp < now ||
-    !(await ctx.store.get('delivery', keyOf(token)))
+    claim.exp < now
   )
     return undefined;
-  return claim.target;
+  return storedTarget(ctx, token);
 }

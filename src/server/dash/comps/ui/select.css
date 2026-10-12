@@ -29,11 +29,11 @@
   color: var(--dim);
   transition: transform 0.15s;
 }
-.select > button[aria-expanded="true"] .ic {
+.select > button[aria-expanded='true'] .ic {
   transform: rotate(180deg);
 }
 .select > button:focus-visible,
-.select > button[aria-expanded="true"] {
+.select > button[aria-expanded='true'] {
   outline: none;
   border-color: var(--acc);
   box-shadow: 0 0 0 3px var(--accbg);
@@ -62,7 +62,7 @@
 .select-pop .pop-item > .ic {
   visibility: hidden;
 }
-.select-pop .pop-item[aria-selected="true"] > .ic {
+.select-pop .pop-item[aria-selected='true'] > .ic {
   visibility: visible;
   color: var(--acc);
 }
@@ -100,4 +100,12 @@
 }
 .select-pop .pop-item.action.on {
   color: var(--fg);
+}
+
+/* an option's mark, like a platform logo, before its label */
+.select .brand-icon,
+.select-pop .brand-icon {
+  flex: none;
+  width: 14px;
+  height: 14px;
 }

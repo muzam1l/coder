@@ -27,6 +27,15 @@ export default async function AgentSettingsPage({
   const config = load(request)
     .config.get()
     .catch(() => undefined);
+  const catalog = load(request)
+    .integrations.list()
+    .catch(() => []);
+  const connections = load(request)
+    .connections.list()
+    .then(
+      rows => rows.filter(row => !row.owner),
+      () => [],
+    );
   const runners = load(request)
     .runners.list()
     .then(
@@ -37,17 +46,21 @@ export default async function AgentSettingsPage({
   return (
     <Settle
       load={() =>
-        Promise.all([agent, models, config, runners]).then(([row, shape, shown, rows]) => (
-          <AgentSettingsForm
-            agent={row}
-            models={modelsByEngine(shape)}
-            defaults={{
-              engine: shown?.effective.chain?.[0] ?? 'claude',
-              engines: shown?.effective.engines ?? {},
-            }}
-            runners={runnerOptions(rows)}
-          />
-        ))
+        Promise.all([agent, models, config, runners, catalog, connections]).then(
+          ([row, shape, shown, rows, integrations, workspace]) => (
+            <AgentSettingsForm
+              agent={row}
+              catalog={integrations}
+              models={modelsByEngine(shape)}
+              defaults={{
+                engine: shown?.effective.chain?.[0] ?? 'claude',
+                engines: shown?.effective.engines ?? {},
+              }}
+              runners={runnerOptions(rows)}
+              connections={workspace}
+            />
+          ),
+        )
       }
     />
   );

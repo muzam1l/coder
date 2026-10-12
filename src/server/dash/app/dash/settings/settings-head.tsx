@@ -3,10 +3,10 @@ import type { ComponentChildren } from 'preact';
 import { PageHead } from '@/comps/frame/page-head';
 
 export const SETTINGS = [
+  { tab: 'connections', label: 'Connections' },
   { tab: 'credentials', label: 'Credentials' },
   { tab: 'models', label: 'Models' },
   { tab: 'engines', label: 'Engines' },
-  { tab: 'mcp', label: 'MCP' },
   { tab: 'runners', label: 'Runners' },
 ] as const;
 

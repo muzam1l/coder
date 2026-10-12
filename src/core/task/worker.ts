@@ -29,8 +29,10 @@ import {
 } from '../config';
 import { detectWireApi } from '../engines/codex/wire';
 import { resolveMcpServers } from '../dispatch';
+import { injectedConnectionEnvironment, redactConnectionSecrets } from '../connections';
 import type { Task, ProgressUpdate, TurnResult } from '../types';
 import { agentMailboxDir, MAILBOX_ENV } from '../mailbox';
+import { gitToolEnvironment } from '../../agent/mcp';
 
 // Prepended to the initial turn only; resumed turns inherit it from the thread.
 const WORKER_SYSTEM_PROMPT = `
@@ -71,19 +73,29 @@ function buildHeartbeat(cwd: string, taskId: string) {
 }
 
 function buildProgressLogger(cwd: string, taskId: string, { echo }: { echo: boolean }) {
-  return (update: ProgressUpdate) => {
-    const entry = typeof update === 'string' ? { message: update } : update;
+  const log = (update: ProgressUpdate) => {
+    const entry = JSON.parse(
+      redactConnectionSecrets(typeof update === 'string' ? { message: update } : update),
+    );
     appendTaskLog(cwd, taskId, entry);
     if (echo && entry.message) {
       process.stderr.write(`[coder] ${entry.message}\n`);
     }
   };
+  for (const name of Object.keys(injectedConnectionEnvironment()))
+    if (process.env[name] !== undefined)
+      log({
+        kind: 'warning',
+        message: `${name} is temporarily unavailable; skipped for this task.`,
+      });
+
+  return log;
 }
 
 async function executeCodexTurn(
   cwd: string,
   task: Task,
-  { echo }: { echo: boolean },
+  { echo, env = {} }: { echo: boolean; env?: Record<string, string> },
 ): Promise<TurnResult> {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const taskDir = resolveTaskDir(cwd, task.id);
@@ -100,12 +112,7 @@ async function executeCodexTurn(
           mode: mode.approvalMode,
           escalationTimeoutMs: config.approvals.escalationTimeoutMs,
           allowedNetworkHosts: config.approvals.allowedNetworkHosts,
-          onEvent: event => {
-            appendTaskLog(cwd, task.id, event as TaskLogEntry);
-            if (echo && event.message) {
-              process.stderr.write(`[coder] ${event.message}\n`);
-            }
-          },
+          onEvent: event => onProgress(event as TaskLogEntry),
         });
 
   // A custom-model alias runs on codex pointed at the user's endpoint; the
@@ -149,9 +156,16 @@ async function executeCodexTurn(
       model: custom?.model ?? resolveCodexModel(task.model),
       modelProvider: custom?.modelProvider ?? null,
       // The mailbox path reaches the sandboxed shell per thread, not through the shared app-server's env.
-      configOverrides: mailbox
-        ? { ...custom?.configOverrides, 'shell_environment_policy.set': { [MAILBOX_ENV]: mailbox } }
-        : (custom?.configOverrides ?? null),
+      configOverrides:
+        mailbox || Object.keys(env).length
+          ? {
+              ...custom?.configOverrides,
+              'shell_environment_policy.set': {
+                ...env,
+                ...(mailbox ? { [MAILBOX_ENV]: mailbox } : {}),
+              },
+            }
+          : (custom?.configOverrides ?? null),
       effort: task.effort,
       sandbox: mode.sandbox,
       approvalPolicy: mode.approvalPolicy,
@@ -160,7 +174,9 @@ async function executeCodexTurn(
         config.engines.codex?.network,
       ),
       approvalsReviewer: mode.approvalMode === 'auto' ? 'auto_review' : null,
-      mcpServers: resolveMcpServers(task.mcp),
+      mcpServers: resolveMcpServers(task.mcp, process.env, undefined, {
+        onWarning: message => onProgress({ kind: 'warning', message }),
+      }),
       nativeMcp: task.nativeMcp ?? false,
       // Read-only: the mailbox is the one writable path; extra directories stay read-only.
       writableRoots: [
@@ -207,7 +223,7 @@ async function executeCodexTurn(
 async function executeClaudeTurn(
   cwd: string,
   task: Task,
-  { echo }: { echo: boolean },
+  { echo, env = {} }: { echo: boolean; env?: Record<string, string> },
 ): Promise<TurnResult> {
   const taskDir = resolveTaskDir(cwd, task.id);
   const config = loadConfig(cwd);
@@ -217,6 +233,7 @@ async function executeClaudeTurn(
   const mailbox = agentMailboxDir(cwd, task);
   try {
     const result = await runClaudeTurn(cwd, {
+      env: { ...env, ...(mailbox ? { [MAILBOX_ENV]: mailbox } : {}) },
       prompt: taskPrompt(task),
       outputSchema: task.outputSchema,
       model: task.model,
@@ -225,8 +242,10 @@ async function executeClaudeTurn(
       approvalTaskId: mode.approvalMode === 'auto' ? task.id : null,
       allowedNetworkHosts: config.approvals.allowedNetworkHosts,
       additionalDirectories: task.addDirs,
-      ...(mailbox ? { writableDirectories: [mailbox], env: { [MAILBOX_ENV]: mailbox } } : {}),
-      mcpServers: resolveMcpServers(task.mcp),
+      ...(mailbox ? { writableDirectories: [mailbox] } : {}),
+      mcpServers: resolveMcpServers(task.mcp, process.env, undefined, {
+        onWarning: message => onProgress({ kind: 'warning', message }),
+      }),
       nativeMcp: task.nativeMcp ?? false,
       taskRoot: taskDir,
       resumeSessionId: task.resumeThreadId ?? null,
@@ -260,18 +279,38 @@ async function executeClaudeTurn(
 // result.json holds the LATEST turn; results.jsonl accretes every turn so a
 // follow-up never displaces the original deliverable (`result --turns`).
 function recordTurnResult(cwd: string, task: Task, taskDir: string, result: TurnResult): void {
-  writeJsonFileAtomic(path.join(taskDir, 'result.json'), result);
+  writeJsonFileAtomic(
+    path.join(taskDir, 'result.json'),
+    JSON.parse(redactConnectionSecrets(result)),
+  );
   const entry = {
     at: new Date().toISOString(),
     prompt: task.currentPrompt ?? task.prompt ?? null,
     ...result,
   };
-  fs.appendFileSync(path.join(taskDir, 'results.jsonl'), `${JSON.stringify(entry)}\n`, 'utf8');
+  fs.appendFileSync(
+    path.join(taskDir, 'results.jsonl'),
+    `${redactConnectionSecrets(entry)}\n`,
+    'utf8',
+  );
 }
 
 // The turn executor for a task's engine. Exported so the detached worker can run it.
 export function executeTurnFor(task: Task) {
-  return task.engine === 'claude' ? executeClaudeTurn : executeCodexTurn;
+  return async (cwd: string, current: Task, options: { echo: boolean }) => {
+    const git = await gitToolEnvironment(
+      resolveMcpServers(current.mcp, process.env, undefined, {
+        onWarning: () => {},
+      }),
+    );
+    try {
+      const execute = current.engine === 'claude' ? executeClaudeTurn : executeCodexTurn;
+
+      return await execute(cwd, current, { ...options, env: git.env });
+    } finally {
+      await git.close();
+    }
+  };
 }
 
 // After a turn completes, run any follow-ups that were queued by `coder task

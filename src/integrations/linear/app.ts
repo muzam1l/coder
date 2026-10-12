@@ -1,8 +1,13 @@
 /** Linear apps: the user's own OAuth application, workspaces bound by installing it as an app actor. */
-import { escapeHtml, htmlResponse } from '../../utils/html';
-import { credentialsPage, freshToken, postedFields, tokenGrant } from '../setup';
-import type { Installation } from '../../agent/types';
-import type { IntegrationApp, IntegrationUserAuth } from '../types';
+import { randomUUID } from 'node:crypto';
+
+import { freshToken, postedFields, tokenGrant } from '../setup';
+import {
+  IntegrationError,
+  type Installation,
+  type IntegrationApp,
+  type IntegrationUserAuth,
+} from '../types';
 
 export interface LinearAppCredentials {
   clientId: string;
@@ -29,12 +34,18 @@ async function linearQuery<T>(token: string, query: string, request: typeof fetc
   return body.data;
 }
 
-function authorizeUrl(credentials: unknown, redirect: string, state: string, app: boolean): string {
+function authorizeUrl(
+  credentials: unknown,
+  redirect: string,
+  state: string,
+  app: boolean,
+  access = false,
+): string {
   const params = new URLSearchParams({
     client_id: (credentials as LinearAppCredentials).clientId,
     redirect_uri: redirect,
     response_type: 'code',
-    scope: app ? 'read,write,app:mentionable,app:assignable' : 'read',
+    scope: app ? 'read,write,app:mentionable,app:assignable' : access ? 'read,write' : 'read',
     state,
     ...(app ? { actor: 'app' } : {}),
   });
@@ -43,7 +54,7 @@ function authorizeUrl(credentials: unknown, redirect: string, state: string, app
 
 function exchange(req: Request, credentials: unknown, redirect: string, request: typeof fetch) {
   const code = new URL(req.url).searchParams.get('code');
-  if (!code) throw new Error('Linear sent no authorization code');
+  if (!code) throw new IntegrationError('missing-code');
   const { clientId, clientSecret } = credentials as LinearAppCredentials;
   return tokenGrant(
     TOKEN,
@@ -58,30 +69,66 @@ function exchange(req: Request, credentials: unknown, redirect: string, request:
   );
 }
 
+/** Linear's prefilled OAuth application form: name, callback URLs and the agent session webhook. */
+function creationLink(publicUrl: string, key: string, name?: string): string {
+  const params = new URLSearchParams(name ? { 'oauth.client_name': name } : {});
+  params.append('oauth.redirect_uris', `${base(publicUrl)}/install/linear/callback`);
+  params.append('oauth.redirect_uris', `${base(publicUrl)}/connect/linear/callback`);
+  params.set('webhook.enabled', 'true');
+  params.set('webhook.url', `${base(publicUrl)}/hooks/linear?app=${key}`);
+  params.set('webhook.resourceTypes', 'AgentSessionEvent');
+  return `https://linear.app/settings/api/applications/new?${params}`;
+}
+
 export const linearApp: IntegrationApp = {
-  createPage({ publicUrl, state }) {
-    return credentialsPage(publicUrl, 'linear', state, {
-      title: 'Connect Linear',
-      steps: [
-        'In Linear, open Settings, then API, and create a new OAuth application.',
-        `Add the callback URLs ${base(publicUrl)}/install/linear/callback and ${base(publicUrl)}/connect/linear/callback.`,
-        `Turn on webhooks with the URL ${base(publicUrl)}/hooks/linear?app= followed by the client ID, and select Agent session events.`,
-        'Fill in the client ID, the client secret, and the webhook signing secret.',
-      ],
-      fields: [
-        ['clientId', 'Client ID'],
-        ['clientSecret', 'Client secret'],
-        ['webhookSecret', 'Webhook signing secret'],
-      ],
-    });
-  },
+  builtin: 'shared',
+  createStep: (publicUrl, { name } = {}, key = randomUUID()) => ({
+    intro: 'Linear runs the agent as an app of your own OAuth application.',
+    link: creationLink(publicUrl, key, name),
+    steps: [
+      {
+        text: 'Open the link signed in to Linear. The name, callback URLs and webhook are filled in.',
+      },
+      { text: 'Review the form and click **Create**.' },
+      {
+        text: 'Copy the client ID, the client secret and the webhook signing secret into the fields below.',
+      },
+    ],
+    notes: [
+      'To install the app in other Linear workspaces, make it public in its Linear settings.',
+    ],
+    hidden: { key },
+    fields: [
+      {
+        name: 'clientId',
+        label: 'Client ID',
+        placeholder: '9f3c2a7d1e8b4c6a0d5e7f1a2b3c4d5e',
+        required: true,
+      },
+      {
+        name: 'clientSecret',
+        label: 'Client secret',
+        placeholder: '4b1e9c7a2d0f8e3c5a6b9d1f0e2c4a7b',
+        required: true,
+      },
+      {
+        name: 'webhookSecret',
+        label: 'Webhook signing secret',
+        hint: 'shown with the webhook settings',
+        placeholder: 'lin_wh_…',
+        required: true,
+      },
+    ],
+    submit: 'Create Linear app',
+  }),
+  // The webhook URL in the prefilled form names the app by `key`, chosen before Linear knows the client ID.
   async createCallback(req, { state, definition }) {
-    const credentials: LinearAppCredentials = await postedFields(req, FIELDS);
-    return {
-      platformAppId: credentials.clientId,
-      name: definition.name ?? state.agent,
-      credentials,
-    };
+    const { key, ...credentials }: LinearAppCredentials & { key: string } = await postedFields(
+      req,
+      [...FIELDS, 'key'],
+    );
+    if (!/^[0-9a-f-]{36}$/.test(key)) throw new IntegrationError('invalid-field', 'key');
+    return { platformAppId: key, name: definition.name ?? state.agent, credentials };
   },
   installUrl(_app, credentials, { publicUrl, state }) {
     return authorizeUrl(credentials, `${base(publicUrl)}/install/linear/callback`, state, true);
@@ -101,19 +148,16 @@ export const linearApp: IntegrationApp = {
       platformInstallId: organization.id,
       account: { login: organization.urlKey },
       token: JSON.stringify(token),
-      response: htmlResponse(
-        `<title>Connected</title><p>Connected the ${escapeHtml(organization.name)} Linear workspace.</p>`,
-      ),
     };
   },
 };
 
 /** Linking proves a Linear user by signing in to Linear. */
 export const linearUserAuth: IntegrationUserAuth = {
-  authorizeUrl: (credentials, { publicUrl, state }) =>
-    authorizeUrl(credentials, `${base(publicUrl)}/connect/linear/callback`, state, false),
-  async exchange(req, credentials, { publicUrl, fetch: request }) {
-    const token = await exchange(
+  authorizeUrl: (credentials, { publicUrl, state, access }) =>
+    authorizeUrl(credentials, `${base(publicUrl)}/connect/linear/callback`, state, false, !!access),
+  async exchange(req, credentials, { publicUrl, fetch: request, access }) {
+    const { idToken: _idToken, ...token } = await exchange(
       req,
       credentials,
       `${base(publicUrl)}/connect/linear/callback`,
@@ -124,9 +168,37 @@ export const linearUserAuth: IntegrationUserAuth = {
       'query { viewer { id displayName } }',
       request,
     );
-    return { id: viewer.id, login: viewer.displayName };
+    return {
+      id: viewer.id,
+      login: viewer.displayName,
+      ...(access ? { token: JSON.stringify(token) } : {}),
+    };
   },
-  access: async token => ({ accessToken: token }),
+  async access(stored, credentials, { fetch: request, now }) {
+    const { clientId, clientSecret } = credentials as LinearAppCredentials;
+    let refreshed: string | undefined;
+    const accessToken = await freshToken(
+      stored,
+      refreshToken =>
+        tokenGrant(
+          TOKEN,
+          {
+            grant_type: 'refresh_token',
+            refresh_token: refreshToken,
+            client_id: clientId,
+            client_secret: clientSecret,
+          },
+          request,
+          now,
+        ),
+      async token => {
+        refreshed = token;
+      },
+      now,
+    );
+
+    return { accessToken, ...(refreshed ? { refreshed } : {}) };
+  },
 };
 
 /** The workspace's app token; Linear rotates the refresh token, so each refresh is saved. */

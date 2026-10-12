@@ -5,24 +5,26 @@ import { useState } from 'preact/hooks';
 import { client } from '@/utils/client';
 import { iPlus } from '@/comps/ui/icons';
 import { reasonText } from '@/utils/format';
-import { ErrorText } from '@/comps/ui/field';
+import { toastError } from '@/comps/frame/task-toasts';
 import { Icon } from '@/comps/ui/icon';
 
-/** One click per built-in app not yet installed here; the platform returns to this page. */
-export function ConnectApps({ apps }: { apps: Array<{ id: string; label: string }> }) {
-  const [error, setError] = useState('');
+/** One click per built-in app not yet installed here; the platform returns to that app's agent's Platforms tab, which words the outcome. */
+export function ConnectApps({
+  apps,
+}: {
+  apps: Array<{ id: string; agent: string; label: string }>;
+}) {
   const [busy, setBusy] = useState('');
-  const connect = (app: string) => {
+  const connect = ({ id: app, agent }: { id: string; agent: string }) => {
     setBusy(app);
-    setError('');
     void client.apps
-      .install(app, location.pathname)
+      .install(app, `/dash/agents/${encodeURIComponent(agent)}/platforms`)
       .then(({ url }) => {
         location.href = url;
       })
       .catch(reason => {
         setBusy('');
-        setError(reasonText(reason));
+        toastError('Not installed', reasonText(reason));
       });
   };
   return (
@@ -35,12 +37,12 @@ export function ConnectApps({ apps }: { apps: Array<{ id: string; label: string 
           type="button"
           class="btn outline sm"
           disabled={busy !== ''}
-          onClick={() => connect(app.id)}
+          aria-busy={busy === app.id}
+          onClick={() => connect(app)}
         >
           {app.label}
         </button>
       ))}
-      <ErrorText value={error} />
     </div>
   );
 }

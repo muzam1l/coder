@@ -1,7 +1,5 @@
 /** Slack app creation from a manifest plus the OAuth install dance for that app. */
-import { escapeHtml, htmlResponse } from '../../utils/html';
-import type { AgentDefinition, Preset } from '../../agent/types';
-import type { IntegrationApp } from '../types';
+import { IntegrationError, type AgentDefinition, type IntegrationApp, type Preset } from '../types';
 import { SLACK_READ_METHODS } from './tools';
 
 type Fetcher = typeof fetch;
@@ -14,6 +12,8 @@ export interface SlackAppCredentials {
   /** App configuration tokens, rotated via `tooling.tokens.rotate`. */
   configToken?: string;
   configRefreshToken?: string;
+  /** When `configToken` expires, in epoch milliseconds. */
+  configTokenExpires?: number;
 }
 
 function baseUrl(publicUrl: string): string {
@@ -44,6 +44,7 @@ export function slackManifest(
       scopes: { bot: scopes },
     },
     settings: {
+      org_deploy_enabled: true,
       event_subscriptions: {
         request_url: `${base}/hooks/slack`,
         bot_events: events,
@@ -70,7 +71,7 @@ async function createSlackApp(
   configToken: string,
   manifest: Record<string, unknown>,
   request: Fetcher = fetch,
-): Promise<Omit<SlackAppCredentials, 'configToken' | 'configRefreshToken'>> {
+): Promise<Omit<SlackAppCredentials, 'configToken' | 'configRefreshToken' | 'configTokenExpires'>> {
   const value = await slackApi<{
     app_id: string;
     credentials: { client_id: string; client_secret: string; signing_secret: string };
@@ -86,9 +87,7 @@ async function createSlackApp(
 /** The manifest an agent's definition asks for. */
 function agentManifest(publicUrl: string, name: string, definition: AgentDefinition) {
   const wiring = definition.integrations.slack ?? {};
-  const events = Array.isArray(wiring.triggers)
-    ? wiring.triggers
-    : Object.keys(wiring.triggers ?? {});
+  const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
   return slackManifest(publicUrl, {
     name,
     scopes: slackAppScopes(wiring.tools),
@@ -101,7 +100,9 @@ function agentManifest(publicUrl: string, name: string, definition: AgentDefinit
 async function rotateConfigToken(
   refreshToken: string,
   request: Fetcher = fetch,
-): Promise<{ token: string; refreshToken: string }> {
+): Promise<
+  Required<Pick<SlackAppCredentials, 'configToken' | 'configRefreshToken' | 'configTokenExpires'>>
+> {
   const response = await request('https://slack.com/api/tooling.tokens.rotate', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -112,10 +113,15 @@ async function rotateConfigToken(
     error?: string;
     token?: string;
     refresh_token?: string;
+    exp?: number;
   };
   if (!response.ok || !value.ok || !value.token || !value.refresh_token)
     throw new Error(`Slack token rotation failed: ${value.error ?? response.statusText}`);
-  return { token: value.token, refreshToken: value.refresh_token };
+  return {
+    configToken: value.token,
+    configRefreshToken: value.refresh_token,
+    configTokenExpires: (value.exp ?? 0) * 1000,
+  };
 }
 
 export function oauthInstallUrl(
@@ -139,8 +145,10 @@ async function oauthCallback(
   publicUrl: string,
   request: Fetcher = fetch,
 ): Promise<{
-  teamId: string;
-  teamName: string;
+  /** The workspace, or the Enterprise Grid org of an org-wide install. */
+  id: string;
+  name: string;
+  org: boolean;
   accessToken: string;
   /** Slack user who installed; receives the welcome DM. */
   installer?: string;
@@ -159,17 +167,38 @@ async function oauthCallback(
     ok?: boolean;
     error?: string;
     access_token?: string;
-    team?: { id?: string; name?: string };
+    team?: { id?: string; name?: string } | null;
+    enterprise?: { id?: string; name?: string } | null;
+    is_enterprise_install?: boolean;
     authed_user?: { id?: string };
   };
-  if (!response.ok || !value.ok || !value.access_token || !value.team?.id || !value.team.name)
-    throw new Error(`Slack OAuth failed: ${value.error ?? response.statusText}`);
+  const org = value.is_enterprise_install === true;
+  const owner = org ? value.enterprise : value.team;
+  if (!response.ok || !value.ok || !value.access_token || !owner?.id || !owner.name)
+    throw new IntegrationError('platform-error', value.error ?? String(response.status));
   return {
-    teamId: value.team.id,
-    teamName: value.team.name,
+    id: owner.id,
+    name: owner.name,
+    org,
     accessToken: value.access_token,
     ...(value.authed_user?.id ? { installer: value.authed_user.id } : {}),
   };
+}
+
+/** Workspaces an org-wide token reaches, through every `auth.teams.list` page. */
+async function grantedTeams(token: string, request: Fetcher): Promise<string[]> {
+  const teams: string[] = [];
+  let cursor = '';
+  do {
+    const page = await slackApi<{
+      teams: Array<{ id: string }>;
+      response_metadata?: { next_cursor?: string };
+    }>('auth.teams.list', { limit: 1000, ...(cursor ? { cursor } : {}) }, token, request);
+    teams.push(...page.teams.map(team => team.id));
+    cursor = page.response_metadata?.next_cursor ?? '';
+  } while (cursor);
+
+  return teams;
 }
 
 /** DM sent to the installer right after a Slack install. */
@@ -182,56 +211,53 @@ export function welcomeMessage(agentName: string, connect: Record<string, string
 }
 
 export const slackApp: IntegrationApp = {
-  createPage({ publicUrl, state }) {
-    const base = baseUrl(publicUrl);
-    const hidden = Object.entries(state)
-      .filter(([, value]) => value !== undefined)
-      .map(
-        ([key, value]) =>
-          `<input type="hidden" name="${key}" value="${escapeHtml(String(value))}">`,
-      )
-      .join('');
-    return htmlResponse(
-      `<title>Create Slack app</title><p>Slack creates apps only with an app configuration token. Open <a href="https://api.slack.com/apps" target="_blank">api.slack.com/apps</a>, scroll to “Your App Configuration Tokens”, click Generate, and paste the access token below. Tokens expire after 12 hours; paste the refresh token too so the receiver can keep the app's manifest updated when this agent changes.</p>` +
-        `<form method="post" action="${base}/create/slack/callback">${hidden}<p><input name="token" size="60" placeholder="xoxe.xoxp-..." required></p><p><input name="refreshToken" size="60" placeholder="xoxe-... refresh token (recommended)"></p><button type="submit">Create Slack app</button></form>`,
-    );
-  },
+  builtin: 'own',
+  createStep: () => ({
+    intro:
+      "Coder creates the Slack app with a configuration token and installs its bot in the token's whole workspace.",
+    link: 'https://api.slack.com/apps',
+    steps: [
+      {
+        text: 'Under **Your App Configuration Tokens**, click **Generate Token** and pick the workspace the agent should join.',
+      },
+      { text: 'Paste the refresh token below, then approve the install when Slack asks.' },
+    ],
+    notes: [
+      'A workspace that requires app approval sends the install to its admins first. In Enterprise Grid, only an org admin can install org-wide.',
+      "To install the app in other Slack workspaces, click **Activate Public Distribution** under the app's **Manage Distribution**.",
+    ],
+    fields: [
+      { name: 'refreshToken', label: 'Refresh token', placeholder: 'xoxe-1-…', required: true },
+    ],
+    submit: 'Create Slack app',
+  }),
   async createCallback(req, { publicUrl, state, definition, fetch: request }) {
-    const form = new URLSearchParams(await req.text());
-    const token = form.get('token');
-    if (!token) throw new Error('Missing configuration token');
+    const refreshToken = new URLSearchParams(await req.text()).get('refreshToken');
+    if (!refreshToken) throw new Error('Missing refresh token');
+    const rotated = await rotateConfigToken(refreshToken, request);
     const name = definition.name ?? state.agent;
     const created = await createSlackApp(
-      token,
+      rotated.configToken,
       agentManifest(publicUrl, name, definition),
       request,
     );
-    const refreshToken = form.get('refreshToken');
-    const rotated = refreshToken ? await rotateConfigToken(refreshToken, request) : undefined;
-    const credentials: SlackAppCredentials = {
-      ...created,
-      configToken: rotated?.token ?? token,
-      configRefreshToken: rotated?.refreshToken ?? refreshToken ?? undefined,
-    };
-    return { platformAppId: created.appId, name, credentials };
+    return { platformAppId: created.appId, name, credentials: { ...created, ...rotated } };
   },
-  // Configuration tokens last 12 hours, so every update saves a fresh pair first.
+  // Configuration tokens last 12 hours; an expired one is rotated and the new pair saved first.
   async update(app, credentials, { publicUrl, definition, fetch: request, saveCredentials }) {
-    const current = credentials as SlackAppCredentials;
+    let current = credentials as SlackAppCredentials;
     if (!current.configRefreshToken) return undefined;
-    const rotated = await rotateConfigToken(current.configRefreshToken, request);
-    await saveCredentials({
-      ...current,
-      configToken: rotated.token,
-      configRefreshToken: rotated.refreshToken,
-    });
+    if (!current.configToken || (current.configTokenExpires ?? 0) <= Date.now() + 60_000) {
+      current = { ...current, ...(await rotateConfigToken(current.configRefreshToken, request)) };
+      await saveCredentials(current);
+    }
     await slackApi(
       'apps.manifest.update',
       {
         app_id: current.appId,
         manifest: JSON.stringify(agentManifest(publicUrl, app.name, definition)),
       },
-      rotated.token,
+      current.configToken!,
       request,
     );
   },
@@ -240,14 +266,14 @@ export const slackApp: IntegrationApp = {
   },
   async installCallback(req, { app, credentials, publicUrl, fetch: request, connect }) {
     const code = new URL(req.url).searchParams.get('code');
-    if (!code) throw new Error('Missing Slack OAuth code');
+    if (!code) throw new IntegrationError('missing-code');
     const result = await oauthCallback(
       code,
       credentials as SlackAppCredentials,
       publicUrl,
       request,
     );
-    const links = await connect(`${app.id}:${result.teamId}`);
+    const links = await connect(`${app.id}:${result.id}`);
     if (result.installer)
       await slackApi(
         'chat.postMessage',
@@ -255,21 +281,18 @@ export const slackApp: IntegrationApp = {
         result.accessToken,
         request,
       ).catch(() => undefined);
-    const connectHtml = Object.entries(links)
-      .map(
-        ([id, url]) =>
-          `<p><a href="${escapeHtml(url)}">Connect ${escapeHtml(id)}</a> so the agent can act there.</p>`,
-      )
-      .join('');
+    // Workspaces the org admin grants later arrive as `team_access_granted`.
+    const covers = result.org
+      ? await grantedTeams(result.accessToken, request).catch(() => null)
+      : undefined;
     return {
-      platformInstallId: result.teamId,
-      account: { login: result.teamName },
+      platformInstallId: result.id,
+      account: { login: result.name, ...(result.org ? { type: 'Organization' } : {}) },
       token: result.accessToken,
+      ...(result.org ? { covers } : {}),
       installer: result.installer,
       ...(result.installer ? { user: { id: result.installer } } : {}),
-      response: htmlResponse(
-        `<title>Connected</title><p>Connected ${escapeHtml(result.teamName)}.</p>${connectHtml}`,
-      ),
+      ...(Object.keys(links).length ? { connect: links } : {}),
     };
   },
 };
@@ -299,9 +322,13 @@ const APP_EVENTS: Record<string, string[]> = {
   message: ['message.channels', 'message.groups', 'message.im'],
   reaction: ['reaction_added'],
 };
-/** Slack manifest agent events for catalog event names. */
+/** Slack manifest agent events for catalog event names, plus the workspace grants of an org install. */
 export function slackAppEvents(events: string[]): string[] {
-  return [...new Set(events.flatMap(event => APP_EVENTS[event] ?? []))];
+  return [
+    ...new Set(events.flatMap(event => APP_EVENTS[event] ?? [])),
+    'team_access_granted',
+    'team_access_revoked',
+  ];
 }
 
 /** Manifest pieces beyond scopes and events: the `/setup` slash command and the assistant view. */

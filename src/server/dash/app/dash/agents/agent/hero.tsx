@@ -5,6 +5,7 @@ import { BLANK } from '@/comps/frame/loading-card';
 import type { AgentRow } from '@coder/client/types';
 import { initial } from '@/utils/format';
 import { AgentPills } from '@/app/dash/agents/agent/agent-pills';
+import { AgentToggle } from '@/app/dash/agents/agent/agent-toggle';
 import { Sentinel } from '@/comps/ui/sentinel';
 
 /** An agent's hero before its record arrives: the same lines, blank, so what it shows lands in place. */
@@ -50,6 +51,12 @@ export function Hero({
           <div class="title-row">
             <h1>{agent.name}</h1>
             <AgentPills agent={agent} />
+            {agent.settings?.disabled ? <AgentToggle agent={agent} class="link" /> : null}
+            {agent.handles?.length ? (
+              <span class="handles" title="Mention it on its platforms by these names">
+                {agent.handles.map(handle => `@${handle}`).join(' · ')}
+              </span>
+            ) : null}
           </div>
           <p class="lead">{agent.description ?? 'No description yet.'}</p>
         </div>

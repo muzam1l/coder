@@ -97,6 +97,7 @@ const schema = z.object({
   CLAUDE_SUBSCRIPTIONS: flag,
   CODEX_SUBSCRIPTIONS: flag,
   SERVER_INTEGRATIONS: emptyAsUnset(z.optional(z.string())),
+  SERVER_OPERATORS: emptyAsUnset(z.optional(z.string())),
 });
 
 function parse<T>(target: z.ZodMiniType<T>, env: Record<string, string | undefined>): T {
@@ -167,6 +168,13 @@ export function loadServerConfig(
     ...(values.SERVER_INTEGRATIONS
       ? {
           integrations: values.SERVER_INTEGRATIONS.split(',')
+            .map(id => id.trim())
+            .filter(Boolean),
+        }
+      : {}),
+    ...(values.SERVER_OPERATORS
+      ? {
+          operators: values.SERVER_OPERATORS.split(',')
             .map(id => id.trim())
             .filter(Boolean),
         }

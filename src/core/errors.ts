@@ -46,6 +46,7 @@ export class CoderError extends Error {
   runId?: string;
   /** server: the HTTP status the server answered with. */
   status?: number;
+  needs?: 'key';
   constructor(
     code: CoderErrorCode,
     message: string,
@@ -62,6 +63,7 @@ export class CoderError extends Error {
       result?: unknown;
       runId?: string;
       status?: number;
+      needs?: 'key';
     } = {},
   ) {
     super(message);

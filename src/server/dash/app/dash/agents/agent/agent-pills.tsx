@@ -2,14 +2,10 @@ import './agent-pills.css';
 import { useId } from 'preact/hooks';
 import { iGit } from '@/comps/ui/icons';
 import type { IntegrationInfo, Reach } from '@coder/client/types';
-import { Badge } from '@/comps/ui/badge';
+import { Badge, COLLAPSE_FROM, COLLAPSED } from '@/comps/ui/badge';
 import { Icon } from '@/comps/ui/icon';
-
-const REACH_TEXT: Record<Reach, string> = {
-  installed: 'installed',
-  created: 'app created, not installed yet',
-  none: 'no app yet',
-};
+import { MoreList } from '@/comps/ui/menu';
+import { Link } from '@wular/pnext/link';
 
 /** Official marks carry gradient ids; each copy on a page gets its own so they never shadow one another. */
 const scoped = (svg: string, suffix: string) =>
@@ -55,9 +51,46 @@ export function Platform({
 }) {
   const name = info?.name ?? id;
   return (
-    <span class={`pf ${state}`} title={`${name}, ${REACH_TEXT[state]}`} data-s={REACH_TEXT[state]}>
+    <span class={`pf ${state}`}>
       {info ? <BrandIcon brand={info.brand} /> : null}
       {name}
+    </span>
+  );
+}
+
+/** A card's platforms on one line: from five on, the first few, then +n opening every one; with `agent` each opens its platforms tab. */
+export function PlatformLine({
+  platforms,
+  catalog,
+  agent,
+}: {
+  platforms: Array<{ id: string; state: Reach }>;
+  catalog: IntegrationInfo[];
+  agent?: string;
+}) {
+  const shown = platforms.length >= COLLAPSE_FROM ? COLLAPSED : platforms.length;
+  const pill = ({ id, state }: { id: string; state: Reach }, cls?: string) => {
+    const mark = <Platform id={id} info={catalog.find(entry => entry.id === id)} state={state} />;
+
+    return agent ? (
+      <Link key={id} class={cls} href="/dash/agents/[slug]/platforms" params={{ slug: agent }}>
+        {mark}
+      </Link>
+    ) : (
+      <span key={id} class={cls}>
+        {mark}
+      </span>
+    );
+  };
+
+  return (
+    <span class="pfs">
+      {platforms.slice(0, shown).map(platform => pill(platform))}
+      {platforms.length > shown ? (
+        <MoreList label={`+${platforms.length - shown}`}>
+          {platforms.map(platform => pill(platform, 'pf-row'))}
+        </MoreList>
+      ) : null}
     </span>
   );
 }
@@ -69,7 +102,15 @@ const AGENT_KIND: Record<string, string> = {
   home: 'local',
 };
 
-/** Built-in, dashboard, or the repository it comes from, plus the version. */
+export function DisabledBadge() {
+  return (
+    <Badge tone="warn" title="Disabled in this workspace">
+      disabled
+    </Badge>
+  );
+}
+
+/** Built-in, dashboard, or the repository it comes from, plus the version and whether it is disabled. */
 export function AgentPills({
   agent,
 }: {
@@ -80,6 +121,7 @@ export function AgentPills({
     currentVersion: number;
     local?: true;
     commit?: string;
+    settings?: { disabled?: boolean };
   };
 }) {
   return (
@@ -104,6 +146,7 @@ export function AgentPills({
         )
       ) : (
         <Badge
+          tone={agent.source === 'builtin' ? 'acc' : undefined}
           title={
             agent.local && agent.source === 'repo'
               ? 'Repo agent, a folder in this repository'
@@ -128,6 +171,7 @@ export function AgentPills({
       ) : (
         <Badge>v{agent.currentVersion}</Badge>
       )}
+      {agent.settings?.disabled ? <DisabledBadge /> : null}
     </>
   );
 }

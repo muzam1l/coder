@@ -21,11 +21,12 @@ const ConnectApps = dynamic(() => import('./connect-apps').then(m => m.ConnectAp
 
 /** Built-in apps this workspace has not installed, labelled in each platform's words. */
 function connectable(
-  apps: Array<{ id: string; integration: string }>,
+  apps: Array<{ id: string; integration: string; agent: string }>,
   integrations: IntegrationInfo[],
 ) {
   return apps.map(value => ({
     id: value.id,
+    agent: value.agent,
     label:
       integrations.find(entry => entry.id === value.integration)?.installLabel ??
       `Connect ${value.integration}`,

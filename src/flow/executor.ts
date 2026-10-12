@@ -43,6 +43,7 @@ export interface RunOptions {
   cwd?: string;
   /** Platform credential for built-in integrations; never persisted with the run. */
   integrationToken?: string;
+  connections?: RunContext['connections'];
   /** The agent whose permissions cap every task this run starts. */
   ceiling?: { agent: string; permissions: string };
 }
@@ -373,6 +374,7 @@ function beginRun(
     stopping: false,
     hooks,
     ...(opts.integrationToken ? { integrationToken: opts.integrationToken } : {}),
+    ...(opts.connections ? { connections: opts.connections } : {}),
     ...(opts.ceiling ? { ceiling: opts.ceiling } : {}),
   };
 

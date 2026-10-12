@@ -6,15 +6,8 @@ import { agents } from './agent';
 import { sessions } from './client/auth/sign-in';
 import type { Session } from './client/auth/session';
 import { addCredential, loginCredential, connect, type ServerOptions } from './core/remote';
-import {
-  configGet,
-  configSet,
-  mcpAdd,
-  mcpAddJson,
-  mcpList,
-  mcpRemove,
-  type McpAddOptions,
-} from './core/config';
+import { configGet, configSet } from './core/config';
+import { connection as connections } from './core/connection';
 import { CoderError, type TaskResult } from './core/dispatch';
 import { docsCore } from './core/docs';
 import { setupHostCore, upgradeCore } from './core/hosts';
@@ -93,23 +86,8 @@ export const config = {
     configSet(resolveCwd(opts.cwd), key, value, opts),
 };
 
-/** Configure MCP servers in `.coder/config.json`, or the user file with `user`. Mirrors `coder mcp`. */
-export const mcp = {
-  /** Save a stdio (`command`) or remote (`url`) server; `env`, `header` and `tools` are comma lists. */
-  add: (name: string, opts: McpAddOptions & { cwd?: string }) =>
-    mcpAdd(resolveCwd(opts.cwd), name, opts),
-  /** Save an entry from any `.mcp.json`, as an object or JSON text. */
-  addJson: (
-    name: string,
-    entry: string | Record<string, unknown>,
-    opts: { user?: boolean; cwd?: string } = {},
-  ) => mcpAddJson(resolveCwd(opts.cwd), name, entry, opts),
-  /** The configured servers by name. */
-  list: (opts: { cwd?: string } = {}) => mcpList(resolveCwd(opts.cwd)),
-  /** Remove a server. */
-  remove: (name: string, opts: { user?: boolean; cwd?: string } = {}) =>
-    mcpRemove(resolveCwd(opts.cwd), name, opts),
-};
+/** Platform accounts, API keys and MCP servers tasks use, on this machine or a Coder server. Mirrors `coder connection`. */
+export const connection = connections;
 
 /** Probe engines, seed the chain, install requested host plugins. */
 export function setupHost(hosts: string[] = [], opts: { cwd?: string } = {}) {
@@ -200,7 +178,8 @@ export type {
 };
 export type { ReviewResult, ReviewArgs };
 export type { Session };
-export type { LocalFolder, LocalFolders } from './client/types';
+export type { LocalFolder, LocalFolders, ConnectionRow } from './client/types';
+export type { ConnectionAddOptions, ConnectionOptions, DeclaredServer } from './core/connection';
 export type {
   RunnerKind,
   RunnerSpec,
@@ -217,7 +196,7 @@ export default {
   flow,
   model,
   config,
-  mcp,
+  connection,
   setupHost,
   upgrade,
   docs,

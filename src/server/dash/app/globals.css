@@ -290,11 +290,11 @@ th,
   cursor: not-allowed;
   filter: none;
 }
-.btn[aria-busy="true"] {
+.btn[aria-busy="true"]:not(:has(> .ic:first-child)) {
   position: relative;
   -webkit-text-fill-color: transparent;
 }
-.btn[aria-busy="true"]::after {
+.btn[aria-busy="true"]:not(:has(> .ic:first-child))::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -305,6 +305,19 @@ th,
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+/* with an icon, the label stays and the icon turns into the spinner */
+.btn[aria-busy="true"] > .ic:first-child {
+  width: 12px;
+  height: 12px;
+  margin: 2px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+.btn[aria-busy="true"] > .ic:first-child > * {
+  display: none;
 }
 .icon-btn {
   display: inline-grid;
@@ -447,6 +460,21 @@ h1 {
 .notice.soft {
   border-color: var(--line);
   background: none;
+}
+/* a one-line notice, as beside the composer or in a form */
+.notice.slim {
+  flex-wrap: nowrap;
+  gap: 10px;
+  padding: 8px 8px 8px 14px;
+  font-size: 12px;
+}
+.notice.slim .grow {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.card > .notice.slim {
+  margin: 12px 16px 0;
 }
 .notice.soft .ic {
   color: var(--dim);

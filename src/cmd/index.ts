@@ -20,7 +20,7 @@ export const COMMANDS: Record<string, Load> = {
   'host-setup': setupHost, // alias for setup-host
   setup: setupHost, // back-compat alias for setup-host
   model: async () => (await import('./model')).commandModel,
-  mcp: async () => (await import('./mcp')).commandMcpConfig,
+  connection: async () => (await import('./connection')).commandConnection,
   docs: async () => (await import('./docs')).commandDocs,
   review: async () => (await import('./review')).commandReview,
   agent: async () => (await import('./agent')).commandAgent,
@@ -66,8 +66,8 @@ export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
       blurb: 'manage models: built-ins, aliases, custom endpoints',
     },
     {
-      usage: 'mcp <add|add-json|list|rm>',
-      blurb: 'MCP servers tasks can attach by name (--mcp <name>)',
+      usage: 'connection <cmd>',
+      blurb: 'platform accounts, API keys and MCP servers tasks use: add, list, rm, ...',
     },
     { usage: 'docs [topic]', blurb: 'print bundled documentation (for agents to read)' },
     {

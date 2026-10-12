@@ -57,18 +57,6 @@
   display: grid;
   gap: 10px;
 }
-.runner-cmd {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.runner-cmd > code {
-  flex: 1;
-  padding: 8px 10px;
-  background: var(--wash2);
-  font: 12px/1.5 var(--mono);
-  overflow-wrap: anywhere;
-}
 .runner-wait {
   display: flex;
   flex-wrap: wrap;
@@ -104,7 +92,7 @@
   display: none;
 }
 .runner-step > summary::before {
-  content: "";
+  content: '';
   width: 5px;
   height: 5px;
   border: solid currentColor;

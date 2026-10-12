@@ -21,6 +21,7 @@ export function Select({
   disabled,
   headings,
   subs,
+  icons,
   action,
 }: {
   label: string;
@@ -29,6 +30,8 @@ export function Select({
   headings?: Record<string, string>;
   /** A second, muted line under an option, clipped from the start, for paths. */
   subs?: Record<string, string>;
+  /** A mark before an option's label, like a platform's logo; the button shows the picked one's. */
+  icons?: Record<string, ComponentChildren>;
   /** One last row that acts instead of selecting, like "Add models"; it joins hover and keyboard like an option. */
   action?: { label: string; icon?: string; onPick: () => void };
   value?: string;
@@ -179,6 +182,7 @@ export function Select({
         }}
         onKeyDown={onKeyDown}
       >
+        {icons?.[current] ?? null}
         <span class="grow">{options[selected]?.[1] ?? ''}</span>
         <Icon d={iDown} />
       </button>
@@ -210,6 +214,7 @@ export function Select({
                   pick(index);
                 }}
               >
+                {icons?.[key] ?? null}
                 <span class="grow">
                   {text}
                   {subs?.[key] ? (

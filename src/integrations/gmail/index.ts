@@ -2,6 +2,7 @@ import type { GmailAdapter, GmailRawMessage } from '@chat-adapter/gmail';
 
 import type { Integration } from '../types';
 import { gmailApp, gmailToken, gmailUserAuth } from './app';
+import { GMAIL_PRESETS, GMAIL_TOOLS } from './tools';
 
 /** The mailbox a Pub/Sub push names, read unverified. */
 function mailbox(raw: string): string | undefined {
@@ -46,7 +47,7 @@ export const gmail: Integration = {
       addressed: true,
     },
   },
-  tools: { presets: { observe: [], comment: [], write: [] } },
+  tools: { presets: GMAIL_PRESETS, serve: GMAIL_TOOLS },
   get app() {
     return gmailApp;
   },

@@ -30,6 +30,7 @@ Every command, grouped by what it acts on. Run `coder <command> --help` for the 
 | `--agent <id>`                     | Run as a repo agent: its instructions, engine settings, MCP servers and flows.   |
 | `--system <text>`                  | Standing instructions prepended to the task.                                     |
 | `--mcp <names\|all\|json>`         | Attach MCP servers by name, or inline.                                           |
+| `--connections <ids>`              | Use only these connections, within the agent's.                                  |
 | `--add-dir <dir>`                  | Give the task another directory beyond `--cwd`. Repeatable.                      |
 | `--output-schema <json>`           | JSON Schema the answer must match.                                               |
 | `--name <name>`                    | Label the task in `list` and `result`.                                           |
@@ -71,25 +72,36 @@ Narrow it with `--base`, `--head`, `--since <sha>`, `--path` and `--exclude`. `-
 | `coder model alias <name> <spec>`                      | Name a shortcut, like `fast codex:luna`. `unalias` removes it.             |
 | `coder model disable <name>`                           | Take a model out of rotation. `enable` brings it back.                     |
 
-## Configuration and MCP
+## Configuration
 
-| Command                              | What it does                                                             |
-| ------------------------------------ | ------------------------------------------------------------------------ |
-| `coder config list`                  | The effective configuration.                                             |
-| `coder config get <key>`             | Read one value, like `engines.codex.model`.                              |
-| `coder config set <key> <value>`     | Write a value. `--workspace` writes to this repo's `.coder/config.json`. |
-| `coder config unset <key>`           | Remove a value.                                                          |
-| `coder mcp add <name> -- <command>`  | Add a stdio MCP server. `--url <url>` adds a remote one.                 |
-| `coder mcp add-json <name> '<json>'` | Add an entry in `.mcp.json` shape.                                       |
-| `coder mcp list`                     | Configured MCP servers.                                                  |
-| `coder mcp rm <name>`                | Remove one.                                                              |
+| Command                          | What it does                                                             |
+| -------------------------------- | ------------------------------------------------------------------------ |
+| `coder config list`              | The effective configuration.                                             |
+| `coder config get <key>`         | Read one value, like `engines.codex.model`.                              |
+| `coder config set <key> <value>` | Write a value. `--workspace` writes to this repo's `.coder/config.json`. |
+| `coder config unset <key>`       | Remove a value.                                                          |
+
+## Connections
+
+| Command                                    | What it does                                                                                             |
+| ------------------------------------------ | -------------------------------------------------------------------------------------------------------- |
+| `coder connection add <platform>`          | Connect a platform account, such as `github`, by signing in in the browser. Needs `--server`.            |
+| `coder connection add <name> --env <NAME>` | An API key tasks read from `NAME`, kept as a credential. One already holding `NAME` is used, else a new one. |
+| `coder connection add <name> --url <url>`  | A remote MCP server, with OAuth sign-in. `--key` reads a key from stdin or a prompt instead.             |
+| `coder connection add <name> -- <command>` | A stdio MCP server. `--key --env <NAME>` gives it a key.                                                 |
+| `coder connection list`                    | Connections, and the MCP servers this repository declares with whether each is approved here.           |
+| `coder connection reconnect <name>`        | A new key from stdin or a prompt, or sign in again.                                                      |
+| `coder connection rm <name>`               | Remove one.                                                                                              |
+| `coder connection approve <name>`          | Approve a repository MCP server on this machine. `--agent <id>` selects an agent definition.            |
+
+Connections live in `~/.coder`, or on your Coder server with `--server`; `--access read|write` and `--me` set what they allow and whose they are. A repository MCP server needs approval again when its URL, command, arguments or header and environment names change.
 
 ## Agents
 
 | Command                                | What it does                                                   |
 | -------------------------------------- | -------------------------------------------------------------- |
 | `coder agent list`                     | Agents in this workspace, or on your server.                   |
-| `coder agent show <id>`                | One agent in full: settings, integrations, triggers, tools.    |
+| `coder agent show <id>`                | One agent in full: settings, integrations, events, tools.      |
 | `coder agent init [id]`                | Scaffold an agent in `.coder/agents/`.                         |
 | `coder agent run <agent> <event.json>` | Run a recorded event through an agent, offline or on a server. |
 | `coder agent push [id]`                | Upload workspace agents to your server.                        |

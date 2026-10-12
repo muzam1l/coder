@@ -57,12 +57,16 @@ export function rotateKey(options: MaintenanceOptions = {}): Promise<{ moved: nu
       const organizationIds = new Set<string>([backend.defaultOrganizationId]);
       if (backend.connection) {
         const db = backend.connection.db;
-        const [secrets, configs] = await Promise.all([
+        const [secrets, configs, connections] = await Promise.all([
           db.selectDistinct({ id: secret.organizationId }).from(secret),
           db
             .select({ key: chatState.key })
             .from(chatState)
             .where(like(chatState.key, 'o:%,"config"]:workspace')),
+          db
+            .select({ key: chatState.key })
+            .from(chatState)
+            .where(like(chatState.key, 'o:%,"connection"]:%')),
         ]);
         for (const row of secrets) organizationIds.add(row.id);
         for (const row of configs) {
@@ -80,6 +84,19 @@ export function rotateKey(options: MaintenanceOptions = {}): Promise<{ moved: nu
             row.key === stateKey(scope[0], 'config', 'workspace')
           )
             organizationIds.add(scope[0]);
+        }
+        for (const row of connections) {
+          const end = row.key.lastIndexOf(',"connection"]:');
+          try {
+            const scope: unknown = JSON.parse(row.key.slice(2, end + ',"connection"]'.length));
+            if (
+              Array.isArray(scope) &&
+              scope.length === 2 &&
+              typeof scope[0] === 'string' &&
+              scope[1] === 'connection'
+            )
+              organizationIds.add(scope[0]);
+          } catch {}
         }
       }
       let moved = 0;

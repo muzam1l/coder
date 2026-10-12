@@ -1,10 +1,11 @@
-/** A local server's records in the CLI's own home: apps, installations and runners in `apps.json`, notes and deliveries under `state/global`. */
+/** A local server's records in the CLI's own home: apps, installations and runners in `apps.json`, connections and API key credentials with their secrets in the keychain, notes and deliveries under `state/global`. */
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
 
+import { LocalConnections } from '../../core/connections';
 import { coderHome, resolveStateDir, resolveRunnerUsageFile } from '../../core/state';
-import { credentialLock, MemoryStore, writeCredentials } from './memory';
+import { checkBinding, credentialLock, MemoryStore, writeCredentials } from './memory';
 import type {
   CredentialScope,
   CredentialWork,
@@ -14,6 +15,7 @@ import type {
   StoreRecords,
 } from './types';
 import { loadAgents } from '../../agent/load';
+import type { AgentApp, Installation } from '../../agent/types';
 import type { Integration } from '../../integrations/types';
 import type { AgentRecord, AgentVersionRecord } from './types';
 import { agentWithVersion, diskFiles, listAgents, versionKey } from '../agents/records';
@@ -23,6 +25,7 @@ type Deliveries = Record<string, { value: unknown; expiresAt?: number }>;
 
 const APPS = new Set<StoreKind>(['app', 'installation', 'runner']);
 const QUEUED = new Set<StoreKind>(['task', 'tasklog', 'inbox', 'usage']);
+const KEYCHAIN = new Set<StoreKind>(['connection', 'credential']);
 // Rebuilt from agent folders and CLI tasks on each request, never the only copy.
 const DERIVED = new Set<StoreKind>(['agent', 'agentversion']);
 
@@ -47,12 +50,19 @@ function writeAtomic(file: string, content: string): void {
 }
 
 export class LocalStore implements Store {
+  connectionContexts?: Store['connectionContexts'];
+  connectionSecrets?: Store['connectionSecrets'];
   private readonly derived = new MemoryStore();
   private writes: Promise<unknown> = Promise.resolve();
 
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly connections = () => new LocalConnections(),
+  ) {}
 
   withAppLock<T>(id: string, work: (store: Store) => Promise<T>): Promise<T> {
+    if (id.startsWith('connection:') || id.startsWith('connection-import:'))
+      return this.connections().withLock(() => work(this), id.replace(/^connection:/, ''));
     return this.derived.withAppLock(id, () => work(this));
   }
 
@@ -65,9 +75,11 @@ export class LocalStore implements Store {
     id: string,
     work: CredentialWork<K>,
   ): Promise<boolean> {
-    return this.derived.withAppLock(credentialLock(scope, id), () =>
-      writeCredentials(this, scope, id, work),
-    );
+    const write = () => writeCredentials(this, scope, id, work);
+
+    return scope === 'credential'
+      ? this.connections().withLock(write, credentialLock(scope, id))
+      : this.derived.withAppLock(credentialLock(scope, id), write);
   }
 
   private get appsFile() {
@@ -87,8 +99,10 @@ export class LocalStore implements Store {
   }
 
   /** One write at a time inside this process; the server is the only writer of these files. */
-  private serial<T>(work: () => T): Promise<T> {
-    const next = this.writes.then(work);
+  private serial<T>(work: () => T, connection = false): Promise<T> {
+    const next = this.writes.then(() =>
+      connection ? this.connections().withLock(async () => work()) : work(),
+    );
     this.writes = next.catch(() => {});
     return next;
   }
@@ -114,7 +128,27 @@ export class LocalStore implements Store {
   }
 
   private entries(kind: StoreKind): Array<[string, unknown]> {
-    if (APPS.has(kind)) return Object.entries(this.apps()[kind as keyof Records] ?? {});
+    if (kind === 'connection') {
+      const local = this.connections();
+      return local.list().map(record => [record.id, record]);
+    }
+    if (kind === 'credential')
+      return this.connections()
+        .credentials()
+        .map(row => [row.id, row.value]);
+    if (APPS.has(kind)) {
+      const records = this.apps();
+      const rows = Object.entries(records[kind as keyof Records] ?? {});
+      if (kind !== 'app') return rows;
+
+      // An app on a shared app's credentials reads them from that app.
+      return rows.map(([id, value]) => {
+        const app = value as AgentApp;
+        const shared = app.shared ? (records.app?.[app.shared] as AgentApp | undefined) : undefined;
+
+        return [id, app.shared ? { ...app, credentials: shared?.credentials ?? '' } : app];
+      });
+    }
     if (kind === 'delivery' || kind === 'snapshot' || QUEUED.has(kind))
       return Object.entries(this.deliveries(kind)).map(([id, entry]) => [id, entry.value]);
     if (kind === 'note') {
@@ -138,6 +172,7 @@ export class LocalStore implements Store {
   get<T extends StoreRecords['snapshot']>(kind: 'snapshot', id: string): Promise<T | undefined>;
   get<T extends StoreRecords['delivery']>(kind: 'delivery', id: string): Promise<T | undefined>;
   async get(kind: StoreKind, id: string): Promise<StoreRecords[StoreKind] | undefined> {
+    if (kind === 'connection') return this.connections().get(id);
     if (DERIVED.has(kind)) return this.derived.get(kind, id);
     if (kind === 'note') {
       try {
@@ -167,12 +202,26 @@ export class LocalStore implements Store {
   ): Promise<void> {
     if (DERIVED.has(kind)) return this.derived.put(kind, id, value, options);
 
-    await this.serial(() => this.write(kind, id, value, options.ttlMs));
+    await this.serial(() => this.write(kind, id, value, options.ttlMs), KEYCHAIN.has(kind));
   }
 
   private write(kind: StoreKind, id: string, value: unknown, ttlMs?: number): void {
+    if (kind === 'connection') {
+      this.connections().put(value as StoreRecords['connection']);
+      return;
+    }
+    // Only API key connections keep credentials here; engines use this machine's own sign-in.
+    if (kind === 'credential' && (value as StoreRecords['credential']).engine === 'custom') {
+      this.connections().putCredential(id, value as StoreRecords['credential']);
+      return;
+    }
     if (APPS.has(kind)) {
       const records = this.apps();
+      if (kind === 'installation')
+        checkBinding(Object.entries(records.installation ?? {}), id, value as Installation);
+      // An app on a shared app's credentials keeps no copy of them.
+      if (kind === 'app' && (value as AgentApp).shared)
+        value = { ...(value as AgentApp), credentials: '' };
       records[kind as keyof Records] = { ...records[kind as keyof Records], [id]: value };
       writeAtomic(this.appsFile, `${JSON.stringify(records, null, 2)}\n`);
     } else if (kind === 'delivery' || kind === 'snapshot' || QUEUED.has(kind)) {
@@ -184,6 +233,18 @@ export class LocalStore implements Store {
   }
 
   private remove(kind: StoreKind, id: string): boolean {
+    if (kind === 'connection') {
+      const local = this.connections();
+      const found = !!local.get(id);
+      local.delete(id);
+      return found;
+    }
+    if (kind === 'credential') {
+      const local = this.connections();
+      const found = local.credentials().some(row => row.id === id);
+      local.deleteCredential(id);
+      return found;
+    }
     if (APPS.has(kind)) {
       const records = this.apps();
       const bucket = records[kind as keyof Records];
@@ -246,7 +307,7 @@ export class LocalStore implements Store {
 
   async delete(kind: StoreKind, id: string): Promise<void> {
     if (DERIVED.has(kind)) return this.derived.delete(kind, id);
-    await this.serial(() => this.remove(kind, id));
+    await this.serial(() => this.remove(kind, id), KEYCHAIN.has(kind));
   }
 
   async create<K extends StoreKind>(
@@ -261,7 +322,7 @@ export class LocalStore implements Store {
       if (this.entries(kind).some(([key]) => key === id)) return false;
       this.write(kind, id, value, options.ttlMs);
       return true;
-    });
+    }, KEYCHAIN.has(kind));
   }
 
   claimDeliveryLease(id: string, owner: string, ttlMs: number): Promise<number | undefined> {
@@ -314,7 +375,7 @@ export class LocalStore implements Store {
 
   async take(kind: StoreKind, id: string): Promise<boolean> {
     if (DERIVED.has(kind)) return this.derived.take(kind, id);
-    return this.serial(() => this.remove(kind, id));
+    return this.serial(() => this.remove(kind, id), KEYCHAIN.has(kind));
   }
 }
 
@@ -340,7 +401,7 @@ export async function syncLocalAgents(
   integrations: Record<string, Integration>,
   slug?: string,
 ): Promise<Array<{ record: AgentRecord; version?: AgentVersionRecord }>> {
-  const agents = await loadAgents(cwd, integrations);
+  const agents = await loadAgents(cwd, integrations, { includeDisabled: true });
   const loaded = await Promise.all(
     agents
       .filter(agent => !slug || agent.id === slug)
@@ -410,7 +471,7 @@ export async function writeLocalAgent(
   id: string,
   body: { definition: unknown; systemPrompt: string; files?: Record<string, string> },
 ): Promise<void> {
-  const existing = (await loadAgents(cwd, integrations)).find(
+  const existing = (await loadAgents(cwd, integrations, { includeDisabled: true })).find(
     agent => agent.id === id && !agent.builtin,
   );
   const dir = existing?.dir ?? coderHome('agents', id);
@@ -431,7 +492,7 @@ export async function deleteLocalAgent(
   integrations: Record<string, Integration>,
   id: string,
 ): Promise<boolean> {
-  const existing = (await loadAgents(cwd, integrations)).find(
+  const existing = (await loadAgents(cwd, integrations, { includeDisabled: true })).find(
     agent => agent.id === id && !agent.builtin,
   );
   if (!existing?.dir) throw new Error(`No local agent named "${id}".`);

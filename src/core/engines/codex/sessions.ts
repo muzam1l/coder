@@ -9,22 +9,22 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { loadBrokerSession } from '../../broker/session';
+import { listBrokerSessions } from '../../broker/session';
 import { CodexAppServerClient } from './app-server';
+import { engineEnvironment } from '../../connections';
 
 // A finished thread stays loaded in the broker's app-server (rollout
 // write-locked) for ~30 min, so `codex archive`/`codex delete` from any other
 // process fail with "already has an active writer." This is the same error Codex
 // app shows. Ask the owning app-server instead: it unloads the thread first.
 async function requestViaBroker(cwd: string, method: string, threadId: string): Promise<boolean> {
-  for (const networkAccess of [false, true]) {
-    if (!loadBrokerSession(cwd, networkAccess)) {
-      continue;
-    }
+  for (const session of listBrokerSessions(cwd)) {
     let client: Awaited<ReturnType<typeof CodexAppServerClient.connect>> | null = null;
     try {
       client = await CodexAppServerClient.connect(cwd, {
-        networkAccess,
+        env: engineEnvironment(),
+        brokerEndpoint: session.endpoint,
+        networkAccess: session.networkAccess ?? false,
         reuseExistingBroker: true,
       });
       await client.request(method, { threadId });
@@ -41,7 +41,11 @@ async function requestViaBroker(cwd: string, method: string, threadId: string): 
 // Fire-and-forget (detached) so a sweep over many tasks never blocks the CLI.
 function spawnCodexCli(args: string[]): void {
   try {
-    const child = spawn('codex', args, { detached: true, stdio: 'ignore' });
+    const child = spawn('codex', args, {
+      detached: true,
+      stdio: 'ignore',
+      env: engineEnvironment(),
+    });
     child.on('error', () => {});
     child.unref();
   } catch {
@@ -76,7 +80,10 @@ export function isCodexSessionArchived(sessionId: string): boolean {
 export function unarchiveCodexSession(sessionId: string): Promise<boolean> {
   return new Promise(resolve => {
     try {
-      const child = spawn('codex', ['unarchive', sessionId], { stdio: 'ignore' });
+      const child = spawn('codex', ['unarchive', sessionId], {
+        stdio: 'ignore',
+        env: engineEnvironment(),
+      });
       child.on('error', () => resolve(false));
       child.on('close', code => resolve(code === 0));
     } catch {
@@ -90,5 +97,10 @@ export async function deleteCodexSession(cwd: string, sessionId: string): Promis
   if (await requestViaBroker(cwd, 'thread/delete', sessionId)) {
     return true;
   }
-  return spawnSync('codex', ['delete', '--force', sessionId], { encoding: 'utf8' }).status === 0;
+  return (
+    spawnSync('codex', ['delete', '--force', sessionId], {
+      encoding: 'utf8',
+      env: engineEnvironment(),
+    }).status === 0
+  );
 }

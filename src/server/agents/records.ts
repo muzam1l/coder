@@ -264,6 +264,14 @@ function mergedUsage(
     ...second,
     permissions,
     ...(ids.size ? { integrations: integrationUsage } : {}),
+    ...(first.connections !== undefined || second.connections !== undefined
+      ? {
+          connections:
+            first.connections && second.connections
+              ? first.connections.filter(id => second.connections!.includes(id))
+              : (second.connections ?? first.connections),
+        }
+      : {}),
   };
 }
 

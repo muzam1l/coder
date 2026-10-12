@@ -21,10 +21,7 @@ export const commandServerAppCreate = command({
       ['DATABASE_URL', "the server's Postgres"],
       ['PUBLIC_URL', "the server's address, which goes into the app"],
     ],
-    examples: [
-      ['coder server app create github --name wular-coder', 'the hosted GitHub App'],
-      ['coder server app create slack', 'the Slack app'],
-    ],
+    examples: [['coder server app create github --name wular-coder', 'the hosted GitHub App']],
   },
   options: { org: str, name: str, json: flag },
   args: 1,
@@ -32,7 +29,7 @@ export const commandServerAppCreate = command({
     const { serverAppLink } = await import('../../../server/agents/apps');
 
     if (!integration)
-      throw new CoderError('invalid-option', 'Missing integration, such as github or slack.');
+      throw new CoderError('invalid-option', 'Missing integration, such as github or linear.');
     return serverAppLink(integration, { owner: options.org, name: options.name });
   },
   json: ({ url }) => ({ ok: true, url }),

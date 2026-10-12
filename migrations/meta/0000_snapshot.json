@@ -1,5 +1,5 @@
 {
-  "id": "457fd83b-7007-422f-a78d-04d4303e33ba",
+  "id": "e811e72d-c7e0-467c-a266-03e23ba36de5",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -589,6 +589,12 @@
         "installer": {
           "name": "installer",
           "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "covers": {
+          "name": "covers",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": false
         },

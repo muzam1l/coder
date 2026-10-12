@@ -1,27 +1,19 @@
 # MCP
 
-Give tasks tools of your own: an MCP server is saved once under `mcp` in `.coder/config.json`, then attached to a task by name. Nothing attaches unless asked, so the default run stays lean. `--mcp all` also loads your engine's own MCP servers and connectors.
+Give tasks tools of your own: an MCP server is a [connection](agents/index.md#connections), or an entry under `mcp` in a config file you edit, attached to a task by name. Nothing from a config file attaches unless asked, so the default run stays lean. `--mcp all` also loads your engine's own MCP servers and connectors.
 
 ```sh
-coder mcp add docs -- npx -y docs-mcp                       # stdio server: the command after --
-coder mcp add linear --url https://mcp.linear.app/mcp        # remote server; OAuth login happens in the engine on first use
-coder run --mcp docs,linear "why do uploads fail after a rename?"
+coder connection add docs --access write -- npx -y docs-mcp           # stdio server: the command after --
+coder connection add linear --url https://mcp.linear.app/mcp --server  # remote server; signs in with OAuth
+coder connection approve docs                                         # approve a repository server locally
+coder run --mcp docs "why do uploads fail after a rename?"
 ```
 
-## Adding servers
-
-| Command                                    | Does                                                                                         |
-| ------------------------------------------ | -------------------------------------------------------------------------------------------- |
-| `coder mcp add <name> -- <command> [args]` | Stdio server. `--env K=V,...` sets its environment                                           |
-| `coder mcp add <name> --url <url>`         | Remote server. `--header K=V,...` adds request headers, `--transport sse` for legacy servers |
-| `coder mcp add-json <name> '<entry>'`      | Paste an entry from any `.mcp.json`, Cursor `mcp.json`, or a vendor README as is             |
-| `coder mcp list`, `coder mcp rm <name>`    | List and remove                                                                              |
-
-`add` takes `--tools a,b` to cap what the agent may call; `add-json` accepts a `tools` array in the entry. `add`, `add-json` and `rm` take `--user` to write `~/.coder` instead of the repo. Repo and user maps merge, repo wins on a name.
+For a remote URL, Coder detects OAuth, open access or a required key; OAuth needs `--server`, and a required key is read from stdin or a prompt. `--key` reads a server's key directly; it goes in `--header` (default `Authorization`) or, for a stdio server, `--env`, and `--auth` overrides detection. `--access read` keeps only read-only tools, and a read-only stdio server needs `--tools a,b`.
 
 ## Config shape
 
-The entries are the `.mcp.json` convention shared by Claude Code, Cursor, Windsurf and Codex, so anything written for them drops in:
+Entries in `.coder/config.json`, `~/.coder/config.json` and an agent's `agent.json` use the `.mcp.json` convention shared by Claude Code, Cursor, Windsurf and Codex, so anything written for them drops in. Repo and user maps merge, repo wins on a name:
 
 ```json
 {
@@ -47,7 +39,7 @@ The entries are the `.mcp.json` convention shared by Claude Code, Cursor, Windsu
 | `tools`                  | Allowlist of tool names; omit for every tool the server offers      |
 | `description`            | What the server is for                                              |
 
-`${VAR}` and `${VAR:-default}` in any value expand from the environment when the server starts, so tokens never sit in the file.
+Repository servers need local approval with `coder connection approve <name>`; `coder connection list` shows which are approved. `${VAR}` and `${VAR:-default}` expand from the environment, except in a repository remote entry's URL and headers, where they stay literal; use a connection for credentials.
 
 ## Attaching to a task
 

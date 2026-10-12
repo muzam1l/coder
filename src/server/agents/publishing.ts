@@ -1,6 +1,6 @@
 import { type Params } from '../routes/match';
 import { isDeepStrictEqual } from 'node:util';
-import { assertNotReserved, agentsFromSources } from '../../agent/load';
+import { assertNotReserved, agentsFromSources, repoAgentOverride } from '../../agent/load';
 import { parseAgentsUsage } from '../../agent/definition';
 import { type ServerContext } from '../context';
 import { getAgent, getVersion, publishAgent, setAgentSettings, toAgent } from './records';
@@ -51,20 +51,31 @@ export async function updateSettings(
   try {
     const parsed = parseAgentsUsage({ [slug]: body })[slug];
     if (!parsed || typeof parsed !== 'object') throw new Error('settings must be an object');
+    const { disabled, ...usage } = parsed;
+    const settings = disabled ? { ...usage, disabled } : usage;
 
     const { record, version } = await loadCurrent();
     if (!record || !version) throw new Error(`No agent named "${slug}".`);
-    toAgent({ ...record, settings: undefined }, version, parsed, ctx.integrations);
+    toAgent({ ...record, settings: undefined }, version, usage, ctx.integrations);
     if (ctx.local) {
+      const file = repoAgentOverride(ctx.local.cwd, slug, !!disabled);
+      if (file)
+        return json(
+          {
+            error: `Agent "${slug}" is ${disabled ? 'enabled' : 'disabled'} by agents.${slug} in ${file}. Change it there.`,
+          },
+          409,
+        );
+
       await updateConfig(ctx, config => {
-        config.agents = { ...config.agents, [slug]: parsed };
+        config.agents = { ...config.agents, [slug]: settings };
       });
       await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
 
       return json(await getAgent(ctx.store, slug));
     }
 
-    return json(await setAgentSettings(ctx.store, slug, parsed, (ctx.now ?? Date.now)()));
+    return json(await setAgentSettings(ctx.store, slug, settings, (ctx.now ?? Date.now)()));
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : String(error) }, 400);
   }

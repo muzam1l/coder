@@ -52,7 +52,7 @@ function printAgents(rows: ReturnType<typeof agentRows>, server: boolean): void 
   process.stdout.write(
     `\n${formatHints(
       [
-        "An agent's settings, triggers, and tools: coder agent show <id>",
+        "An agent's settings, events, and tools: coder agent show <id>",
         'Scaffold a new agent in this repo: coder agent init <id>',
       ],
       s,

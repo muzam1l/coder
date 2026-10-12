@@ -1,9 +1,12 @@
 /** The contract every integration implements: a Chat SDK adapter, apps, tools, tokens and repository reads. */
-import type { Adapter, Message, ReactionEvent, SerializedThread, Thread } from 'chat';
+import type { Adapter, Message, ReactionEvent, SerializedThread, StateAdapter, Thread } from 'chat';
 
 import type { McpServerSpec } from '../core/types';
 import type { McpTool } from '../utils/mcp-server';
 import type { AgentApp, AgentDefinition, AgentEvent, Installation, Preset } from '../agent/types';
+
+export type { McpServerSpec, AgentApp, AgentDefinition, AgentEvent, Installation, Preset };
+export { PRESETS } from '../agent/types';
 
 export interface ToolContext {
   token: string;
@@ -14,6 +17,8 @@ export interface ToolContext {
   scope?: {
     repo?: { owner: string; name: string };
     thread?: string;
+    /** The covered account the task's event happened in. */
+    within?: string;
   };
 }
 
@@ -30,7 +35,7 @@ export interface IntegrationTools {
   server?(tools: string[], event: AgentEvent | undefined, token: string): McpServerSpec;
 }
 
-/** What the dashboard's app creation puts in the URL and what comes back through the platform's `state`. */
+/** What the dashboard's app creation puts in the URL; only `tx` goes to the platform and back. */
 export interface CreateState {
   agent: string;
   repo?: string;
@@ -45,16 +50,72 @@ export interface CreateState {
   public?: boolean;
 }
 
+/** One input of a create form. */
+export interface CreateField {
+  name: string;
+  label: string;
+  hint?: string;
+  placeholder?: string;
+  required?: true;
+}
+
+/** A create form as data: the dashboard renders it and posts the fields with `tx` to `/create/<id>/callback`. */
+export interface CreateStep {
+  /** One line on what creating the app does. */
+  intro: string;
+  /** Where the user gets the values. */
+  link: string;
+  /** Numbered steps; `link` is the platform page the step happens on, `copy` holds values to paste there. `text` marks the platform's own UI names **like this**. */
+  steps: Array<{ text: string; link?: string; copy?: string[] }>;
+  /** Advanced notes, shown collapsed under the steps; UI names marked **like this**. */
+  notes?: string[];
+  fields: CreateField[];
+  /** Values posted with the fields as they are. */
+  hidden?: Record<string, string>;
+  submit: string;
+}
+
+export type IntegrationErrorCode =
+  | 'platform-error'
+  | 'missing-code'
+  | 'invalid-field'
+  | 'not-yours'
+  | 'wrong-account'
+  | 'no-refresh-token';
+
+/** A platform step that failed in a way the person can act on; `error` is the platform's short error code or the field name. */
+export class IntegrationError extends Error {
+  constructor(
+    readonly code: IntegrationErrorCode,
+    readonly error?: string,
+    message?: string,
+  ) {
+    super(message ?? (error ? `${code} (${error})` : code));
+  }
+}
+
+/** A form the browser posts to the platform, such as GitHub's app manifest. */
+export interface PlatformPost {
+  url: string;
+  fields: Record<string, string>;
+}
+
 /** Creating one app per agent on the user's account, then installing it; all browser-driven. */
 export interface IntegrationApp {
-  /** `GET /create/<id>`: the page that starts creation (auto-submits a manifest, or asks for a token). */
-  createPage(input: {
+  /** Built-in agents install the server's one shared app (`shared`), or create their own in each workspace like any agent (`own`). */
+  builtin: 'shared' | 'own';
+  /** Origins `createPost` forms go to; the dashboard lets forms post only there. */
+  postOrigins?: string[];
+  /** The form that starts creation on the platform itself, posted by the browser. */
+  createPost?(input: {
     publicUrl: string;
     state: CreateState;
     definition: AgentDefinition;
     encodedState: string;
-  }): Response;
-  /** `/create/<id>/callback`: finish creation; credentials are stored encrypted by the caller. */
+  }): PlatformPost;
+  /** The form that creates the app from values the user copies from the platform; used when there is no `createPost`. */
+  createStep?(publicUrl: string, input?: { name?: string; shared?: boolean }): CreateStep;
+  /** `/create/<id>/callback`: finish creation; credentials are stored encrypted by the caller, or `shared` keeps the shared app's. */
   createCallback(
     req: Request,
     input: {
@@ -62,8 +123,12 @@ export interface IntegrationApp {
       state: CreateState;
       definition: AgentDefinition;
       fetch: typeof fetch;
+      /** Credentials of this server's shared app on the platform, when one exists. */
+      shared?: unknown;
     },
-  ): Promise<{ platformAppId: string; name: string; credentials: unknown }>;
+  ): Promise<
+    { platformAppId: string; name: string } & ({ credentials: unknown } | { shared: true })
+  >;
   /** Bring the platform's copy of the app in line with a new definition; returns credentials to store when they rotated. */
   update?(
     app: AgentApp,
@@ -98,9 +163,12 @@ export interface IntegrationApp {
     /** Plaintext platform token to store encrypted (Slack bot token). */
     token?: string;
     installer?: string;
+    /** Accounts an install spans; null keeps known grants when reading them failed. */
+    covers?: string[] | null;
     /** The installer's verified platform identity, linked to the signed-in user. */
     user?: PlatformUser;
-    response: Response;
+    /** The `connect` links offered to the installer, by integration id. */
+    connect?: Record<string, string>;
   }>;
 }
 
@@ -113,12 +181,15 @@ export interface PlatformUser {
 
 /** The app's user OAuth, the proof used to link a platform user where messages are public. */
 export interface IntegrationUserAuth {
-  authorizeUrl(credentials: unknown, input: { publicUrl: string; state: string }): string;
+  authorizeUrl(
+    credentials: unknown,
+    input: { publicUrl: string; state: string; access?: 'observe' | 'write' },
+  ): string;
   /** Exchange the callback's code for the user and their token. */
   exchange(
     req: Request,
     credentials: unknown,
-    input: { publicUrl: string; fetch: typeof fetch },
+    input: { publicUrl: string; fetch: typeof fetch; access?: 'observe' | 'write' },
   ): Promise<PlatformUser>;
   /** A usable access token from the stored token JSON, and the JSON to store when it was refreshed. */
   access(
@@ -145,6 +216,8 @@ export interface AdapterContext {
   token(installationId: string, bound?: TokenBound): Promise<string>;
   /** Check a webhook's installation without minting a platform token. */
   isBound?(installationId: string): Promise<boolean>;
+  /** A fresh in-memory Chat SDK state for caches the adapter must not share. */
+  privateState?(): StateAdapter;
 }
 
 /** Chat SDK handlers that raise Coder events. */
@@ -168,6 +241,7 @@ export type OwnEvent =
   | { invalid: true }
   | { events: AgentEvent[] }
   | { installation: { op: 'upsert' | 'delete'; installation: Installation } }
+  | { covers: { installation: string; add?: string[]; remove?: string[] } }
   | { changes: { repo: string; ref: string; branch: string; paths?: string[] } };
 
 /** What an unverified webhook names: the app whose secret verifies it, and the installation whose token is minted once it has. */
@@ -175,6 +249,8 @@ export interface WebhookTarget {
   /** Platform app id (GitHub `X-GitHub-Hook-Installation-Target-ID`, Slack `api_app_id`). */
   app: string;
   installation?: string;
+  /** The covered account it happened in, for an installation that covers several. */
+  within?: string;
   /** The repository it happened in, as a task checks it out. */
   repo?: NonNullable<AgentEvent['repo']>;
   /** The app's own platform user, so mentions of it are recognized. */
@@ -200,6 +276,7 @@ export interface IntegrationAuth {
 export interface Repositories {
   /** HTTPS clone hosts it may place in a verified event. */
   readonly cloneHosts: readonly string[];
+  readonly credentialUsername?: string;
   /** One file; `undefined` when it does not exist. */
   readFile(repo: string, path: string, token: string, ref?: string): Promise<string | undefined>;
   /** Entry names in a directory; `[]` when it does not exist. */
@@ -230,8 +307,12 @@ export interface Integration {
   readonly description: string;
   /** The button that installs an app, in the platform's own words. */
   readonly installLabel?: string;
+  /** What one account an installation covers is called, such as a Slack workspace of an org install. */
+  readonly covered?: string;
   /** Apps may live under an organization instead of the creator's own account. */
   readonly organizationApps?: boolean;
+  /** Listed first among an agent's handles. */
+  readonly featured?: true;
   /** How an agent should write for this platform, added to its prompt for events from it. */
   readonly hint?: string;
   readonly events: Record<string, EventSpec>;

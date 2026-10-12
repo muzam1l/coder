@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
+import { engineEnvironment } from '../connections';
 import { fileURLToPath } from 'node:url';
 import { createBrokerEndpoint, parseBrokerEndpoint } from './endpoint';
 import { resolveStateDir } from '../state';
@@ -93,7 +94,12 @@ export function spawnBrokerProcess({
     ],
     {
       cwd,
-      env,
+      env: {
+        ...engineEnvironment(env),
+        ...(env.CODER_CONNECTION_ENV_VALUES
+          ? { CODER_CONNECTION_ENV_VALUES: env.CODER_CONNECTION_ENV_VALUES }
+          : {}),
+      },
       detached: true,
       stdio: ['ignore', logFd, logFd],
     },
@@ -121,12 +127,21 @@ function resolveBrokerScript(): string {
   );
 }
 
-function resolveBrokerStateFile(cwd: string, networkAccess = false) {
-  return path.join(resolveStateDir(cwd), BROKER_STATE_FILES[networkAccess ? 'true' : 'false']);
+function resolveBrokerStateFile(cwd: string, networkAccess = false, connectionKey?: string) {
+  const file = BROKER_STATE_FILES[networkAccess ? 'true' : 'false'];
+
+  return path.join(
+    resolveStateDir(cwd),
+    connectionKey ? file.replace('.json', `-${connectionKey}.json`) : file,
+  );
 }
 
-export function loadBrokerSession(cwd: string, networkAccess = false): BrokerSession | null {
-  const stateFile = resolveBrokerStateFile(cwd, networkAccess);
+export function loadBrokerSession(
+  cwd: string,
+  networkAccess = false,
+  connectionKey?: string,
+): BrokerSession | null {
+  const stateFile = resolveBrokerStateFile(cwd, networkAccess, connectionKey);
   if (!fs.existsSync(stateFile)) {
     return null;
   }
@@ -139,22 +154,46 @@ export function loadBrokerSession(cwd: string, networkAccess = false): BrokerSes
   }
 }
 
+export function listBrokerSessions(cwd: string): BrokerSession[] {
+  const stateDir = resolveStateDir(cwd);
+  let files: string[];
+  try {
+    files = fs.readdirSync(stateDir);
+  } catch {
+    return [];
+  }
+
+  return files.flatMap(file => {
+    if (!/^broker(?:-network)?(?:-[a-f0-9]{64})?\.json$/.test(file)) return [];
+    try {
+      const session = JSON.parse(
+        fs.readFileSync(path.join(stateDir, file), 'utf8'),
+      ) as BrokerSession;
+
+      return typeof session.endpoint === 'string' ? [session] : [];
+    } catch {
+      return [];
+    }
+  });
+}
+
 export function saveBrokerSession(
   cwd: string,
   session: BrokerSession,
   networkAccess = session.networkAccess ?? false,
+  connectionKey?: string,
 ) {
   const stateDir = resolveStateDir(cwd);
   fs.mkdirSync(stateDir, { recursive: true });
   fs.writeFileSync(
-    resolveBrokerStateFile(cwd, networkAccess),
+    resolveBrokerStateFile(cwd, networkAccess, connectionKey),
     `${JSON.stringify(session, null, 2)}\n`,
     'utf8',
   );
 }
 
-export function clearBrokerSession(cwd: string, networkAccess = false) {
-  const stateFile = resolveBrokerStateFile(cwd, networkAccess);
+export function clearBrokerSession(cwd: string, networkAccess = false, connectionKey?: string) {
+  const stateFile = resolveBrokerStateFile(cwd, networkAccess, connectionKey);
   if (fs.existsSync(stateFile)) {
     fs.unlinkSync(stateFile);
   }
@@ -173,6 +212,7 @@ async function isBrokerEndpointReady(endpoint: string | null | undefined) {
 
 export interface EnsureBrokerSessionOptions {
   env?: NodeJS.ProcessEnv;
+  connectionKey?: string;
   networkAccess?: boolean;
   killProcess?: KillProcess | null;
   createBrokerEndpoint?: (sessionDir: string, platform?: NodeJS.Platform) => string;
@@ -189,7 +229,7 @@ export async function ensureBrokerSession(
   const version = readVersion();
   const networkAccess = options.networkAccess ?? false;
 
-  const existing = loadBrokerSession(cwd, networkAccess);
+  const existing = loadBrokerSession(cwd, networkAccess, options.connectionKey);
   // Only reuse a broker this exact build spawned. A session left by a different
   // coder (version or script path) may speak an incompatible protocol; reusing
   // it hangs on thread creation, so tear it down and spawn our own instead.
@@ -210,7 +250,7 @@ export async function ensureBrokerSession(
       pid: existing.pid ?? null,
       killProcess: options.killProcess ?? null,
     });
-    clearBrokerSession(cwd, networkAccess);
+    clearBrokerSession(cwd, networkAccess, options.connectionKey);
   }
 
   const sessionDir = createBrokerSessionDir();
@@ -252,7 +292,7 @@ export async function ensureBrokerSession(
     version,
     scriptPath,
   };
-  saveBrokerSession(cwd, session, networkAccess);
+  saveBrokerSession(cwd, session, networkAccess, options.connectionKey);
   return session;
 }
 

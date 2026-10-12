@@ -12,6 +12,7 @@ import {
   inflateSync,
 } from 'node:zlib';
 import { type ServerContext } from '../context';
+import { INTEGRATIONS } from '../../integrations';
 import { sameToken, serverMode } from '../routes/guards';
 import { notFound, redirect } from '../routes/http';
 import { safeReturnPath } from '../auth/sign-in';
@@ -42,7 +43,8 @@ const CSP = [
   "object-src 'none'",
   "base-uri 'none'",
   "frame-ancestors 'none'",
-  "form-action 'self'",
+  // Create forms post to the platforms themselves, such as GitHub's app manifest.
+  `form-action ${["'self'", ...new Set(Object.values(INTEGRATIONS).flatMap(each => each.app.postOrigins ?? []))].join(' ')}`,
 ];
 
 function packageRoot(moduleUrl: string): string {

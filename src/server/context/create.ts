@@ -13,6 +13,7 @@ import { loadServerConfig } from '../env';
 import { handleRequest } from '../routes';
 import { DashboardHosts } from '../dash/serve';
 import { ServerLimits } from '../limits';
+import { RegistryIndex } from '../settings/mcp';
 import { sql } from 'drizzle-orm';
 import { createBackend } from '../store';
 import { recoverLocalTasks, stopLocalTasks, syncLocalUsage } from '../tasks/local';
@@ -145,6 +146,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
 
     const dashboardHosts = new DashboardHosts();
     const limits = new ServerLimits();
+    const registry = new RegistryIndex();
     const contexts = new Map<string, ServerContext>();
     const requestScopes = new Map<string, import('../routes').RequestScope>();
     const taskWatcher = new TaskWatcher();
@@ -164,7 +166,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
             }
           : {}),
         config,
-        settings: {},
+        settings: { registry },
         organizationId,
         integrations,
         runners,
@@ -214,6 +216,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
       ...(mintedToken ? { mintedToken } : {}),
       sweep: backend.sweep,
       close: async () => {
+        registry.close();
         taskWatcher.close();
         logWatcher.close();
         if (usageStart) clearImmediate(usageStart);

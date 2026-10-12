@@ -19,7 +19,10 @@ import type {
   TasksPage,
   VersionRow,
   IntegrationInfo,
+  CreateStart,
   AppRow,
+  AuditRow,
+  OperatorApps,
   InstallationRow,
   StoredRow,
   Me,
@@ -30,7 +33,8 @@ import type {
   ConfigShape,
   ModelsShape,
   ProbeResult,
-  McpRows,
+  ConnectionInput,
+  ConnectionRow,
   Found,
   UsageQuery,
   UsageReport,
@@ -45,6 +49,7 @@ export class ClientError extends CoderError {
     message: string,
     readonly authenticate = '',
     hint?: string,
+    readonly needs?: 'key',
   ) {
     super('server', message, { status, ...(hint ? { hint } : {}) });
   }
@@ -150,7 +155,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       response = await this.send(path, init);
     }
     const text = await response.text().catch(() => '');
-    let body = {} as T & { error?: string; message?: string; hint?: string };
+    let body = {} as T & { error?: string; message?: string; hint?: string; needs?: 'key' };
     let plain: string | undefined;
     try {
       if (text && response.status !== 204) body = JSON.parse(text);
@@ -168,6 +173,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         body.error ?? body.message ?? plain ?? `The server answered ${response.status}.`,
         response.headers.get('www-authenticate') ?? '',
         body.hint,
+        body.needs === 'key' ? body.needs : undefined,
       );
       this.onError?.(error);
       throw error;
@@ -222,7 +228,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     ): Promise<
       Q extends { cursor: string }
         ? Paged<AgentCardRow> & {
-            connectable?: Array<{ id: string; integration: string }>;
+            connectable?: Array<{ id: string; integration: string; agent: string }>;
           }
         : D['agent'][]
     > =>
@@ -232,7 +238,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
           ...(options?.connect ? { connect: 1 } : {}),
         }),
       ),
-    get: <Q extends { versions?: boolean; content?: boolean } = {}>(
+    get: <Q extends { versions?: boolean; content?: boolean; handles?: boolean } = {}>(
       slug: string,
       options?: Q,
     ): Promise<Q extends { versions: false } ? AgentRow : D['detail']> =>
@@ -240,6 +246,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         queryPath(`/admin/agents/${encodeURIComponent(slug)}`, {
           ...(options?.versions === false ? { versions: 0 } : {}),
           ...(options?.content === false ? { content: 0 } : {}),
+          ...(options?.handles ? { handles: 1 } : {}),
         }),
       ),
     versions: (slug: string, options: PageQuery = {}): Promise<Paged<VersionRow>> =>
@@ -339,7 +346,12 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     steer: (
       id: string,
       text: string,
-      options: { model?: string; effort?: string; permissions?: string; outputSchema?: object } = {},
+      options: {
+        model?: string;
+        effort?: string;
+        permissions?: string;
+        outputSchema?: object;
+      } = {},
     ) => this.post(`/admin/tasks/${encodeURIComponent(id)}/steer`, { text, ...options }),
     ask: (id: string, question: string) =>
       this.post(`/admin/tasks/${encodeURIComponent(id)}/ask`, { question }),
@@ -436,7 +448,9 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   };
 
   readonly integrations = {
-    list: (): Promise<IntegrationInfo[]> => this.request('/admin/integrations'),
+    /** With `agent`, create steps prefill the platform's form with its name. */
+    list: (agent?: string): Promise<IntegrationInfo[]> =>
+      this.request(queryPath('/admin/integrations', { agent })),
   };
   readonly repositories = {
     list: (): Promise<Array<{ repo: string; integration: string }>> =>
@@ -452,20 +466,59 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   readonly apps = {
     list: (agent?: string): Promise<Array<StoredRow<AppRow>>> =>
       this.request(queryPath('/admin/apps', { agent })),
-    install: (id: string, back?: string): Promise<{ url: string }> =>
-      this.post(queryPath(`/admin/apps/${encodeURIComponent(id)}/install`, { back })),
+    /** `link` is the installation the new one connects to. */
+    install: (id: string, back?: string, link?: string): Promise<{ url: string }> =>
+      this.post(queryPath(`/admin/apps/${encodeURIComponent(id)}/install`, { back, link })),
+    /** The transaction a create form posts with to `/create/<integration>/callback`, or the platform's own form to post. */
+    create: (integration: string, state: Record<string, string>): Promise<CreateStart> =>
+      this.post(`/admin/apps/create/${encodeURIComponent(integration)}`, state),
+    /** The same for a create link, whose own transaction may authorize it. */
+    start: (integration: string, state: Record<string, string>): Promise<CreateStart> =>
+      this.post(queryPath(`/create/${encodeURIComponent(integration)}`, state)),
+    /** Posts a create form's values with its transaction; answers where the browser goes next. */
+    finish: (integration: string, fields: Record<string, string>): Promise<{ url: string }> =>
+      this.request(`/create/${encodeURIComponent(integration)}/callback`, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json',
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams(fields),
+      }),
+  };
+  readonly operator = {
+    apps: (): Promise<OperatorApps> => this.request('/admin/operator/apps'),
+    /** The create page for `integration`'s built-in app; `name` is what the platform shows. */
+    setUp: (
+      integration: string,
+      body: { name?: string; owner?: string },
+    ): Promise<{ url: string }> =>
+      this.post(`/admin/operator/apps/${encodeURIComponent(integration)}`, body),
+    audit: (): Promise<AuditRow[]> => this.request('/admin/operator/audit'),
   };
   readonly installations = {
     list: (agent?: string): Promise<Array<StoredRow<InstallationRow>>> =>
       this.request(queryPath('/admin/installations', { agent })),
   };
   readonly connections = {
-    add: (body: {
-      installation: string;
-      integration: string;
-      token: string;
-      account?: string;
-    }): Promise<{ ok: true }> => this.post('/admin/connections', body),
+    list: (authorization?: string): Promise<ConnectionRow[]> =>
+      this.request(queryPath('/admin/connections', { authorization })),
+    /** `authorize` is where the browser goes next for an OAuth connection. */
+    add: (body: ConnectionInput): Promise<ConnectionRow & { authorize?: string }> =>
+      this.post('/admin/connections', body),
+    update: (
+      id: string,
+      body: Partial<Pick<ConnectionInput, 'name' | 'access' | 'key'>>,
+    ): Promise<ConnectionRow> =>
+      this.request(`/admin/connections/${encodeURIComponent(id)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
+      }),
+    remove: (id: string): Promise<{ ok: true }> =>
+      this.request(`/admin/connections/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    /** Start OAuth again for a connection that needs reconnecting. */
+    authorize: (id: string): Promise<{ url: string }> =>
+      this.post(`/admin/connections/${encodeURIComponent(id)}/authorize`),
   };
   readonly config = {
     get: (): Promise<ConfigShape> => this.request('/admin/config'),
@@ -503,13 +556,6 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       this.post(`/admin/models/${encodeURIComponent(name)}/disable`),
   };
   readonly mcp = {
-    list: (): Promise<McpRows> => this.request('/admin/mcp'),
-    add: (body: { name: string } & McpRows[string]): Promise<Config> =>
-      this.post('/admin/mcp', body),
-    remove: (name: string): Promise<Config> =>
-      this.request(`/admin/mcp/${encodeURIComponent(name)}`, {
-        method: 'DELETE',
-      }),
     search: (q: string): Promise<Found[]> => this.request(queryPath('/admin/mcp-registry', { q })),
   };
   readonly flows = {

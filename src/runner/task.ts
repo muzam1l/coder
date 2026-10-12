@@ -18,9 +18,11 @@ import { answerApproval } from '../core/approvals';
 import { WORKSPACE_CONFIG_ENV, type CoderConfig } from '../core/config';
 import { loadTask, resolveTaskDir, coderCache, enqueueSteer, readTaskLog } from '../core/state';
 import { askTask, steerTask, stopTask } from '../core/task/actions';
+import { connectionVariables } from '../core/connections';
 import type { InboxEntry, InboxAck } from '../server/tasks/queue';
 import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mailbox';
 import type { Task } from '../core/types';
+import type { McpServerSpec } from '../core/types';
 import { readJsonFile, writeJsonFileAtomic } from '../utils/fsx';
 
 const exec = promisify(execFile);
@@ -28,8 +30,11 @@ type RemoteTask = {
   task: AgentTask;
   generation: number;
   tokens: Record<string, string>;
+  nativeTokens?: Record<string, string>;
   credential: EngineCredential;
   config?: Partial<CoderConfig>;
+  connections?: Record<string, McpServerSpec>;
+  connectionEnv?: Record<string, string>;
 };
 
 /** The server and attempt token a runner process was started with. */
@@ -257,6 +262,10 @@ async function applyEnvironment(remote: RemoteTask, root: string): Promise<strin
   const { CODEX_AUTH_JSON: authJson, ...env } = remote.credential.env;
   Object.assign(process.env, env);
   process.env[WORKSPACE_CONFIG_ENV] = JSON.stringify(remote.config ?? {});
+  process.env.CODER_MCP_MODE = 'cloud';
+  process.env.CODER_MCP_CONNECTION_ENV = JSON.stringify(
+    connectionVariables(remote.connections ?? {}),
+  );
   if (!authJson) return undefined;
   const home = await fs.mkdtemp(path.join(root, '.codex-'));
   await fs.writeFile(path.join(home, 'auth.json'), authJson, { mode: 0o600 });
@@ -428,6 +437,8 @@ export async function runTask(id: string, root: string): Promise<unknown> {
     } finally {
       await writeBack(auth, id, remote, codexHome);
       delete process.env[WORKSPACE_CONFIG_ENV];
+      delete process.env.CODER_MCP_MODE;
+      delete process.env.CODER_MCP_CONNECTION_ENV;
     }
   }
 }
@@ -527,7 +538,9 @@ async function runCheckedOutTask(
       agent: remote.task.agent,
       flow: remote.task.flow,
       task: remote.task,
-      toolEnvironment: { tokens: remote.tokens },
+      toolEnvironment: { tokens: { ...remote.tokens, ...remote.nativeTokens } },
+      connections: remote.connections,
+      connectionEnv: remote.connectionEnv,
       post: remote.task.source === event?.integration,
       ...(eventToken ? { postToken: eventToken } : {}),
       async onTask(started) {

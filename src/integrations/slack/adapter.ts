@@ -1,8 +1,6 @@
 /** Slack through Chat SDK: the app's signing secret verifies, Coder's bound installations hold the bot tokens. */
 import { SlackAdapter, type SlackAdapterConfig } from '@chat-adapter/slack';
-import { type Adapter, type ChatInstance, ConsoleLogger } from 'chat';
-
-import { LocalChatState } from '../../server/store/chat';
+import { type Adapter, type ChatInstance, ConsoleLogger, type StateAdapter } from 'chat';
 
 import type { AdapterContext } from '../types';
 import type { SlackAppCredentials } from './app';
@@ -51,13 +49,14 @@ class BoundSlackAdapter extends SlackAdapter {
   constructor(
     config: SlackAdapterConfig,
     private readonly outbound?: () => Promise<string>,
+    private readonly privateState?: () => StateAdapter,
   ) {
     super(config);
   }
 
   override async initialize(chat: ChatInstance): Promise<void> {
-    const local = new LocalChatState();
     const shared = chat.getState();
+    const local = this.privateState?.() ?? shared;
     const state = new Proxy(shared, {
       get(target, key) {
         const method = Reflect.get(target, key);
@@ -134,5 +133,6 @@ export function slackAdapter(ctx: AdapterContext): Adapter {
       logger: new ConsoleLogger('error'),
     },
     signingSecret && installationId ? () => mint(installationId) : undefined,
+    ctx.privateState,
   );
 }

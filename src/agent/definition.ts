@@ -2,6 +2,7 @@
 import * as z from 'zod/mini';
 
 import { mcpEntrySchema, type Permission } from '../core/config';
+import { markRepositoryMcp } from '../core/mcp';
 import type { Integration } from '../integrations/types';
 import {
   PRESETS,
@@ -27,7 +28,7 @@ const eventOptionsSchema = z.strictObject({
 });
 
 const definitionIntegrationSchema = z.strictObject({
-  triggers: z.optional(
+  events: z.optional(
     z.union([
       z.array(z.string()),
       z.record(z.string(), z.union([slug, eventOptionsSchema, z.literal(true)])),
@@ -56,11 +57,13 @@ const usageIntegrationSchema = z.strictObject({
 });
 
 const agentUsageSchema = z.strictObject({
+  connections: z.optional(z.array(z.string())),
   engine: z.optional(z.string()),
   model: z.optional(z.string()),
   effort: z.optional(effort),
   permissions: z.optional(permissions),
   integrations: z.optional(z.record(z.string(), usageIntegrationSchema)),
+  disabled: z.optional(z.boolean()),
 });
 
 const agentsUsageSchema = z.record(slug, z.union([z.boolean(), agentUsageSchema]));
@@ -73,10 +76,15 @@ function issues(error: {
     .join('; ');
 }
 
-export function parseAgentDefinition(id: string, json: unknown): AgentDefinition {
+export function parseAgentDefinition(
+  id: string,
+  json: unknown,
+  repository = true,
+): AgentDefinition {
   const parsed = agentDefinitionSchema.safeParse(json);
   if (!parsed.success) throw new Error(`Invalid agent definition "${id}": ${issues(parsed.error)}`);
   const { $schema: _ignored, ...definition } = parsed.data;
+  markRepositoryMcp(definition.mcp, repository);
   return definition as AgentDefinition;
 }
 
@@ -89,8 +97,8 @@ export function parseAgentsUsage(json: unknown): Record<string, boolean | AgentU
 
 /** Event names a definition wires for one integration. */
 function definitionEvents(wiring: AgentDefinitionIntegration | undefined): string[] {
-  if (!wiring?.triggers) return [];
-  return Array.isArray(wiring.triggers) ? wiring.triggers : Object.keys(wiring.triggers);
+  if (!wiring?.events) return [];
+  return Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events);
 }
 
 /** Options for one wired event; `undefined` when the definition does not wire it. */
@@ -98,10 +106,10 @@ export function eventOptions(
   wiring: AgentDefinitionIntegration | undefined,
   type: string,
 ): AgentEventOptions | undefined {
-  if (!wiring?.triggers) return undefined;
-  if (Array.isArray(wiring.triggers)) return wiring.triggers.includes(type) ? {} : undefined;
-  if (!Object.prototype.hasOwnProperty.call(wiring.triggers, type)) return undefined;
-  const value = wiring.triggers[type]!;
+  if (!wiring?.events) return undefined;
+  if (Array.isArray(wiring.events)) return wiring.events.includes(type) ? {} : undefined;
+  if (!Object.prototype.hasOwnProperty.call(wiring.events, type)) return undefined;
+  const value = wiring.events[type]!;
   return value === true ? {} : typeof value === 'string' ? { flow: value } : value;
 }
 
@@ -122,13 +130,13 @@ export function validateAgents(
       const valid = Object.keys(integration.events).sort().join(', ') || 'none';
       for (const event of definitionEvents(wiring)) {
         if (!(event in integration.events))
-          errors.push(`${prefix}.triggers.${event}: unknown event; valid: ${valid}`);
+          errors.push(`${prefix}.events.${event}: unknown event; valid: ${valid}`);
         const match = eventOptions(wiring, event)?.match;
         if (match !== undefined) {
           try {
             new RegExp(match);
           } catch {
-            errors.push(`${prefix}.triggers.${event}.match: invalid regex`);
+            errors.push(`${prefix}.events.${event}.match: invalid regex`);
           }
         }
       }

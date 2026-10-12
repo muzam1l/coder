@@ -18,6 +18,7 @@
 }
 /* section tabs stay in view beside a long panel */
 .page .tabs.vertical {
+  position: sticky;
   top: var(--stuck);
   align-self: start;
   height: auto;
@@ -77,9 +78,51 @@
   font-size: 16px;
   font-weight: 700;
 }
-.save {
-  padding-top: 16px;
+.vplatform {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+  padding-top: 32px;
   border-top: 1px solid var(--line);
+}
+.vplatform h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+}
+.vplatform h3 .brand-icon {
+  width: 14px;
+  height: 14px;
+}
+/* a label on the left, its one action on the right */
+.vpanel .row-action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 20px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.vpanel .row-action + .row-action {
+  border-top: 0;
+}
+.vpanel .row-action > span:first-child {
+  display: grid;
+  gap: 4px;
+}
+/* stays in view at the bottom of a long panel */
+.save {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  padding: 16px 0;
+  margin-bottom: -24px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  justify-content: flex-end;
 }
 
 @media (max-width: 760px) {
@@ -111,4 +154,7 @@
   .vsearch {
     position: static;
   }
+}
+.fields > .picked {
+  grid-column: 1 / -1;
 }

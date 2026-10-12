@@ -42,7 +42,7 @@ const NAV: Array<To & { within: string; label: string; icon: string }> = [
   { href: '/dash/usage', params: {}, within: '/dash/usage', label: 'Usage', icon: iChart },
   {
     href: '/dash/settings/[tab]',
-    params: { tab: 'credentials' },
+    params: { tab: 'connections' },
     within: '/dash/settings',
     label: 'Settings',
     icon: iSliders,
@@ -146,6 +146,12 @@ function AccountMenu({ me }: { me: Me }) {
         <Icon d={iUser} />
         Account
       </Link>
+      {me.operator ? (
+        <Link class="pop-item" href="/dash/operator">
+          <Icon d={iKey} />
+          Operator
+        </Link>
+      ) : null}
       <hr />
       {tokenMode ? (
         <form action="/dash/token" method="post">

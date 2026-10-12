@@ -143,6 +143,26 @@
   border-color: var(--acc);
   color: var(--acc);
 }
+.more.info > button {
+  display: inline-flex;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  vertical-align: middle;
+}
+.more.info .ic {
+  width: 14px;
+  height: 14px;
+}
+.more.info > .more-list {
+  max-width: 280px;
+  padding: 10px 12px;
+  gap: 6px;
+  color: var(--fg);
+  font-size: 13px;
+  letter-spacing: normal;
+  text-align: left;
+}
 .more-list {
   --max: 220px;
   z-index: 45;

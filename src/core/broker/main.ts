@@ -27,6 +27,7 @@ import {
 import { codexAuthFingerprint, errorText } from '../engines/codex/errors';
 import { parseBrokerEndpoint } from './endpoint';
 import { loadBrokerSession } from './session';
+import { connectionEnvironmentKey, redactConnectionSecrets } from '../connections';
 
 /** A JSON-RPC frame passing through the broker (request, response, or notification). */
 interface JsonRpcMessage {
@@ -136,7 +137,7 @@ async function main() {
   >();
 
   function log(line: string) {
-    process.stderr.write(`[coder broker] ${line}\n`);
+    process.stderr.write(`[coder broker] ${JSON.parse(redactConnectionSecrets(line))}\n`);
   }
 
   function failPendingServerRequests(socket: Socket) {
@@ -478,7 +479,10 @@ async function main() {
   // orphaned broker would otherwise live forever, keeping every thread its
   // app-server loaded write-locked so nothing else can archive or resume them.
   setInterval(async () => {
-    if (sockets.size === 0 && loadBrokerSession(cwd, networkAccess)?.endpoint !== endpoint) {
+    if (
+      sockets.size === 0 &&
+      loadBrokerSession(cwd, networkAccess, connectionEnvironmentKey())?.endpoint !== endpoint
+    ) {
       await shutdown(server);
       process.exit(0);
     }
@@ -488,6 +492,8 @@ async function main() {
 }
 
 main().catch(error => {
-  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(
+    `${JSON.parse(redactConnectionSecrets(error instanceof Error ? error.message : String(error)))}\n`,
+  );
   process.exit(1);
 });

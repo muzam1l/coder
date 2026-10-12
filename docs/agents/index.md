@@ -2,9 +2,13 @@
 
 An agent is a reusable teammate. Its `system.md` holds the standing instructions every task starts from: who it is, what it knows, how it answers. Its definition adds engine, model, effort and permissions defaults, the MCP servers it attaches and the [flows](../flows.md) it may run. Run it from the CLI with `coder task run --agent <id> "…"`, where flags override the defaults, from the [dashboard](../dash.md), or from platform events like a Slack DM or a GitHub pull request.
 
-Connected to a platform, an agent listens for the events its triggers name. Each event runs as a task with a fresh checkout, the agent's instructions, the event as its request, and only the platform tools the agent declared; the reply goes back to the thread. A bigger task can run a flow instead, with the event as its `args`.
+Connected to a platform, an agent listens for the events it names. Each event runs as a task with a fresh checkout, the agent's instructions, the event as its request, and only the platform tools the agent declared; the reply goes back to the thread. A bigger task can run a flow instead, with the event as its `args`.
 
 On each platform an agent is its own app, a GitHub App or a Slack app for example, so it has its own handle and permissions and runs only where it is installed. Agents run on a Coder server: the hosted one, [your own](../self-host.md), or this machine's [dashboard](../dash.md).
+
+## Connections
+
+A connection gives tasks access to an MCP service, your own account on an integration, or an API key passed as one environment variable, such as `GROQ_API_KEY`. Add one under Settings → Connections or with `coder connection add`; an API key is kept as a credential, so rotating the credential rotates the connection. Tasks started by members receive workspace connections and that member’s own connections, narrowed by the agent’s Connections setting and `coder task run --connections`; outsider events receive none.
 
 ## Built-in agent
 
@@ -15,7 +19,7 @@ On each platform an agent is its own app, a GitHub App or a Slack app for exampl
 An agent comes from one of two sources:
 
 - **Dashboard**: made in the agent editor on the [dashboard](../dash.md).
-- **Repository**: `coder agent init` scaffolds one, asking its id, platforms, triggers and tools. It is a folder `.coder/agents/<id>/` with an `agent.json` and a `system.md`. A folder in `$CODER_HOME/agents/<id>/` (default `~/.coder/agents`) is yours in every repo, and a repo's folder of the same id wins.
+- **Repository**: `coder agent init` scaffolds one, asking its id, platforms, events and tools. It is a folder `.coder/agents/<id>/` with an `agent.json` and a `system.md`. A folder in `$CODER_HOME/agents/<id>/` (default `~/.coder/agents`) is yours in every repo, and a repo's folder of the same id wins.
 
 Here is a helper that answers in Slack and on GitHub issues:
 
@@ -28,10 +32,10 @@ Here is a helper that answers in Slack and on GitHub issues:
   "permissions": "read-only",
   "integrations": {
     "slack": {
-      "triggers": { "mention": true, "message": { "match": "^help\\b" } },
+      "events": { "mention": true, "message": { "match": "^help\\b" } },
       "tools": "comment"
     },
-    "github": { "triggers": ["mention"], "tools": "observe" }
+    "github": { "events": ["mention"], "tools": "observe" }
   }
 }
 ```
@@ -55,16 +59,16 @@ Only pushes to the agents repo's configured branch are imported. An app created 
 
 `agent.json`. The folder name is the id; the built-in id `coder` is reserved.
 
-| Key                          | Values                                                                                                                                                                                                  | Purpose                                                                                                                                                                                                                    |
-| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `name`, `description`        | Text                                                                                                                                                                                                    | App name and handle; the description is added to the prompt                                                                                                                                                                |
-| `engine`, `model`, `effort`  | As in `coder task run`                                                                                                                                                                                  | Engine defaults                                                                                                                                                                                                            |
-| `permissions`                | `read-only` (default), `workspace-write`, `auto`                                                                                                                                                        | Agent sandbox mode inside the checkout                                                                                                                                                                                     |
-| `integrations.<id>.triggers` | Event names from the [integration](#integrations): a list, or a map of event → `true`, a flow name (repo `.coder/flows` or built-in such as `review`), or `{ "flow", "match", "permissions", "actAs" }` | A list or `true` runs the agent, a flow name runs that flow, `match` is a regex the event text must pass, `permissions` overrides the agent's for this event, `"actAs": "requester"` uses the requester's own GitHub token |
-| `integrations.<id>.tools`    | `observe` (default), `comment`, `write`, or tool names from the [integration](#integrations)                                                                                                            | Platform actions the agent uses; also the app's permissions                                                                                                                                                                |
-| `mcp`                        | A map of MCP servers in the `.mcp.json` entry shape, as in `coder mcp`                                                                                                                                  | Servers every task of the agent attaches                                                                                                                                                                                   |
+| Key                         | Values                                                                                                                                                                                                  | Purpose                                                                                                                                                                                                                    |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`, `description`       | Text                                                                                                                                                                                                    | App name and handle; the description is added to the prompt                                                                                                                                                                |
+| `engine`, `model`, `effort` | As in `coder task run`                                                                                                                                                                                  | Engine defaults                                                                                                                                                                                                            |
+| `permissions`               | `read-only` (default), `workspace-write`, `auto`                                                                                                                                                        | Agent sandbox mode inside the checkout                                                                                                                                                                                     |
+| `integrations.<id>.events`  | Event names from the [integration](#integrations): a list, or a map of event → `true`, a flow name (repo `.coder/flows` or built-in such as `review`), or `{ "flow", "match", "permissions", "actAs" }` | A list or `true` runs the agent, a flow name runs that flow, `match` is a regex the event text must pass, `permissions` overrides the agent's for this event, `"actAs": "requester"` uses the requester's own GitHub token |
+| `integrations.<id>.tools`   | `observe` (default), `comment`, `write`, or tool names from the [integration](#integrations)                                                                                                            | Platform actions the agent uses; also the app's permissions                                                                                                                                                                |
+| `mcp`                       | A map of MCP servers in the `.mcp.json` entry shape, as in [MCP](../mcp.md)                                                                                                                             | Servers every task of the agent attaches                                                                                                                                                                                   |
 
-`permissions` is about the checkout, `tools` is about the platform. An agent can run any [flow](../flows.md#flows-run-by-an-agent), and the tasks it starts never exceed the agent's `permissions`. The server versions imported definitions and activates a new version when their content changes; recreate the app only when `triggers` or `tools` change.
+`permissions` is about the checkout, `tools` is about the platform. An agent can run any [flow](../flows.md#flows-run-by-an-agent), and the tasks it starts never exceed the agent's `permissions`. The server versions imported definitions and activates a new version when their content changes; recreate the app only when `events` or `tools` change.
 
 ## Usage
 
@@ -82,17 +86,21 @@ How a repo runs an agent goes under `agents` in its `.coder/config.json` ([Confi
 | Key                                        | Values              | Purpose                                                    |
 | ------------------------------------------ | ------------------- | ---------------------------------------------------------- |
 | `engine`, `model`, `effort`, `permissions` | As above            | Override the definition                                    |
+| `connections` | Connection id list | Narrow `agents.<id>.connections`; omit for all granted connections |
 | `integrations.<id>.allowedTools`           | Preset or tool list | Cap the definition's tools; omit to allow all it asks for  |
 | `integrations.<id>.allowedEvents`          | Event names         | Cap the definition's events; omit to allow all it asks for |
+| `disabled`                                 | `true`              | Disable the agent and keep its other settings              |
 
 Unknown ids, integrations, events, tools, and keys fail validation. Usage is read from the repo the event came from.
+
+Disable or Enable any agent, built-in ones included, in its Settings › Manage in the dashboard. A disabled agent answers no platform events and starts no tasks in that workspace; its apps, versions, settings and past tasks stay, and other workspaces are unaffected.
 
 ## CLI
 
 | Command                                                             | Purpose                                                                |
 | ------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `coder agent list [--server [url]]`                                 | List agents, with active versions on a server                          |
-| `coder agent show <id> [--server [url]]`                            | One agent in full: settings, integrations, triggers, tools             |
+| `coder agent show <id> [--server [url]]`                            | One agent in full: settings, integrations, events, tools               |
 | `coder agent init [id]`                                             | Scaffold an agent folder; interactive without flags                    |
 | `coder agent push [id] [--server [url]]`                            | Upload one agent, or all of them, without a source repo                |
 | `coder agent run <agent> <event.json> [--server [url] [--wait]]`    | Run a recorded event through an agent, on a server or offline          |
