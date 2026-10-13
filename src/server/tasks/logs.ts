@@ -124,11 +124,83 @@ export async function copyRunnerLogs(
   limit?: number,
 ): Promise<TaskLogLine[]> {
   if (!status.handle) return readLog(ctx.store, status.task.id, after, limit);
+  if (status.task.runner !== 'github-actions') return pullRunnerLogs(ctx, status, after, limit);
+  if (
+    status.logsComplete ||
+    (status.logsPulledAt !== undefined &&
+      (ctx.now ?? Date.now)() - status.logsPulledAt < RUNNER_LOG_PULL_MS)
+  )
+    return readLog(ctx.store, status.task.id, after, limit);
 
+  const current = await ctx.store.withAppLock(
+    `runner-logs:${ctx.organizationId}:${status.task.id}`,
+    async store => {
+      const queue = store instanceof DrizzleStore ? new DrizzleQueue(store.db) : ctx.queue;
+      const current = await store.get('task', status.task.id);
+      if (!current || current.logsComplete || !current.handle) return;
+      const now = (ctx.now ?? Date.now)();
+      if (current.logsPulledAt !== undefined && now - current.logsPulledAt < RUNNER_LOG_PULL_MS)
+        return;
+      const fence = {
+        attempts: current.attempts,
+        tokenHash: current.tokenHash ?? null,
+        handle: current.handle,
+        generation: current.generation ?? 0,
+      };
+      if (
+        !(await queue.patchTask(
+          ctx.organizationId,
+          current.task.id,
+          { logsPulledAt: now },
+          now,
+          fence,
+        ))
+      )
+        return;
+      return current;
+    },
+  );
+  if (current)
+    await pullRunnerLogs(ctx, current).catch(error =>
+      console.error(`coder server: runner logs for ${status.task.id} failed`, error),
+    );
+
+  return readLog(ctx.store, status.task.id, after, limit);
+}
+
+export const RUNNER_LOG_PULL_MS = 15_000;
+
+async function pullRunnerLogs(
+  ctx: ServerContext,
+  status: TaskStatus,
+  after = -1,
+  limit?: number,
+): Promise<TaskLogLine[]> {
+  const fence = {
+    attempts: status.attempts,
+    tokenHash: status.tokenHash ?? null,
+    handle: status.handle,
+    generation: status.generation ?? 0,
+  };
   const runner = await taskRunner(ctx, status.task);
-  if (!runner) return readLog(ctx.store, status.task.id, after, limit);
+  if (!runner) {
+    // A deleted runner has no more logs to give.
+    if (['completed', 'failed', 'cancelled'].includes(status.status) && !status.logsComplete)
+      await ctx.queue.patchTask(
+        ctx.organizationId,
+        status.task.id,
+        { logsComplete: true },
+        (ctx.now ?? Date.now)(),
+        fence,
+      );
 
-  const secrets = await taskLogSecrets(ctx, status).catch(() => undefined);
+    return readLog(ctx.store, status.task.id, after, limit);
+  }
+
+  const secrets = await taskLogSecrets(ctx, status).catch(error => {
+    console.error(`coder server: log secrets for ${status.task.id} failed`, error);
+    return undefined;
+  });
   const current = await ctx.store.get('task', status.task.id);
   if (!secrets) return readLog(ctx.store, status.task.id, after, limit);
 
@@ -142,7 +214,12 @@ export async function copyRunnerLogs(
   const cursor = state.logCursor ?? -1;
   const seq = state.logSeq ?? 0;
   const bytes = state.logBytes ?? 0;
-  const fetched = await runner.logs(status.handle, cursor);
+  const completed =
+    status.task.runner === 'github-actions' &&
+    ['completed', 'failed', 'cancelled'].includes(state.status)
+      ? (await runner.status(status.handle!)).state === 'exited'
+      : false;
+  const fetched = await runner.logs(status.handle!, cursor);
   const now = (ctx.now ?? Date.now)();
   const redacted = (line: string) =>
     secrets.reduce(
@@ -169,7 +246,7 @@ export async function copyRunnerLogs(
     bytes,
   );
 
-  await ctx.queue.appendLogs(
+  const saved = await ctx.queue.appendLogs(
     ctx.organizationId,
     status.task.id,
     appended.lines,
@@ -180,13 +257,17 @@ export async function copyRunnerLogs(
       bytes: appended.bytes,
     },
     now,
-    {
-      attempts: status.attempts,
-      tokenHash: status.tokenHash ?? null,
-      handle: status.handle,
-      generation: status.generation ?? 0,
-    },
+    fence,
   );
+
+  if (saved && completed && fetched.complete !== false)
+    await ctx.queue.patchTask(
+      ctx.organizationId,
+      status.task.id,
+      { logsComplete: true },
+      now,
+      fence,
+    );
 
   return readLog(ctx.store, status.task.id, after, limit);
 }

@@ -395,6 +395,7 @@ export async function runTurn(
     let threadId: string;
     const effective = await client.request('config/read', { cwd, includeLayers: false });
     const threadConfig = {
+      ...(!options.modelProvider ? { model_reasoning_summary: 'auto' } : {}),
       ...configOverrides,
       ...buildCodexMcpOverrides(
         options.mcpServers,

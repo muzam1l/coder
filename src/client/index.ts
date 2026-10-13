@@ -13,6 +13,7 @@ import type {
   AgentQuery,
   TaskQuery,
   PageQuery,
+  CredentialQuery,
   ImportAgent,
   Paged,
   TaskRow,
@@ -29,6 +30,7 @@ import type {
   EngineStatus,
   LocalFolder,
   LocalFolders,
+  ComposerOptions,
   Config,
   ConfigShape,
   ModelsShape,
@@ -227,10 +229,20 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       options?: Q,
     ): Promise<
       Q extends { cursor: string }
-        ? Paged<AgentCardRow> & {
+        ? Paged<
+            Q extends { fields: 'id' }
+              ? Pick<AgentRow, 'id'>
+              : Q extends { fields: 'id,name' }
+                ? Pick<AgentRow, 'id' | 'name'>
+                : AgentCardRow
+          > & {
             connectable?: Array<{ id: string; integration: string; agent: string }>;
           }
-        : D['agent'][]
+        : Q extends { fields: 'id' }
+          ? Array<Pick<AgentRow, 'id'>>
+          : Q extends { fields: 'id,name' }
+            ? Array<Pick<AgentRow, 'id' | 'name'>>
+            : D['agent'][]
     > =>
       this.request(
         queryPath('/admin/agents', {
@@ -290,6 +302,11 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         ...(agents ? { agents } : {}),
       }),
   };
+
+  /** `GET /admin/composer`: everything the New task composer offers, in one read. */
+  composer(): Promise<ComposerOptions> {
+    return this.request('/admin/composer');
+  }
 
   readonly folders = {
     list: (): Promise<LocalFolders> => this.request('/admin/folders'),
@@ -400,10 +417,15 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   };
 
   readonly credentials = {
-    list: <Q extends PageQuery = PageQuery>(
+    list: <Q extends CredentialQuery = CredentialQuery>(
       options?: Q,
-    ): Promise<Q extends { cursor: string } ? Paged<D['credential']> : D['credential'][]> =>
-      this.request(queryPath('/admin/credentials', options ?? {})),
+    ): Promise<
+      Q extends { cursor: string }
+        ? Paged<Q extends { fields: 'id' } ? { id: string } : D['credential']>
+        : Q extends { fields: 'id' }
+          ? Array<{ id: string }>
+          : D['credential'][]
+    > => this.request(queryPath('/admin/credentials', options ?? {})),
     add: (input: {
       label?: string;
       env: Record<string, string>;
@@ -455,6 +477,8 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   readonly repositories = {
     list: (): Promise<Array<{ repo: string; integration: string }>> =>
       this.request('/admin/repositories'),
+    refresh: (): Promise<Array<{ repo: string; integration: string }>> =>
+      this.post('/admin/repositories/refresh', {}),
   };
   readonly engines = {
     status: (): Promise<EngineStatus> => this.request('/admin/engines/status'),
@@ -469,6 +493,9 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     /** `link` is the installation the new one connects to. */
     install: (id: string, back?: string, link?: string): Promise<{ url: string }> =>
       this.post(queryPath(`/admin/apps/${encodeURIComponent(id)}/install`, { back, link })),
+    /** Forgets a workspace app and its installs; the app itself stays on the platform. */
+    remove: (id: string): Promise<{ ok: true }> =>
+      this.request(`/admin/apps/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     /** The transaction a create form posts with to `/create/<integration>/callback`, or the platform's own form to post. */
     create: (integration: string, state: Record<string, string>): Promise<CreateStart> =>
       this.post(`/admin/apps/create/${encodeURIComponent(integration)}`, state),
@@ -497,8 +524,17 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     audit: (): Promise<AuditRow[]> => this.request('/admin/operator/audit'),
   };
   readonly installations = {
-    list: (agent?: string): Promise<Array<StoredRow<InstallationRow>>> =>
-      this.request(queryPath('/admin/installations', { agent })),
+    list: (
+      agent?: string,
+      options: { limit?: number; active?: boolean } = {},
+    ): Promise<Array<StoredRow<InstallationRow>>> =>
+      this.request(
+        queryPath('/admin/installations', {
+          agent,
+          limit: options.limit,
+          ...(options.active ? { active: 1 } : {}),
+        }),
+      ),
   };
   readonly connections = {
     list: (authorization?: string): Promise<ConnectionRow[]> =>

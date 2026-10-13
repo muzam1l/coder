@@ -41,7 +41,7 @@ export default function UsagePage({ request }: { request?: Request }) {
     limit: TOP_AGENTS,
     sort,
   });
-  const agents = load(request).agents.list();
+  const agents = load(request).agents.list({ fields: 'id' });
   const days = load(request).usage({
     by: 'day',
     since: range.since,

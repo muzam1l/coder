@@ -120,6 +120,8 @@ export interface AgentApp {
   builtin?: boolean;
   /** The server's shared app whose credentials this app reads; it keeps no copy of its own. */
   shared?: string;
+  /** Any account may install it; only installs bound through Coder act. */
+  public?: true;
   /** Encrypted JSON (`encryptSecret`) of `GithubAppCredentials` or `SlackAppCredentials`. */
   credentials: string;
   createdAt: number;
@@ -178,8 +180,11 @@ export interface Installation {
   token?: string;
   /** Platform user who installed (Slack user id); used for the welcome DM. */
   installer?: string;
+  /** The app's own platform user here, as the platform named it at install (Linear's app user). */
+  self?: string;
   /** Accounts an install spanning several covers (Slack workspaces of an org install). */
   covers?: string[];
+  repos?: string[];
   /** Other integrations this install can act on, keyed by integration id. */
   connections?: Record<string, InstallationLink>;
   settings?: InstallationSettings;

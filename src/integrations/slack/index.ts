@@ -4,6 +4,7 @@ import * as z from 'zod/mini';
 
 import { safeEqual } from '../../utils/crypto';
 import type { Integration } from '../types';
+import { canWriteSlack } from './api';
 import { slackApp, type SlackAppCredentials } from './app';
 import { SLACK_READ_METHODS, SLACK_TOOLS, SLACK_WRITE_METHODS } from './tools';
 
@@ -144,6 +145,7 @@ export const slack: Integration = {
   adapter: async ctx => (await import('./adapter')).slackAdapter(ctx),
   reactionId: reaction => (reaction.raw as { event_ts?: string }).event_ts,
   auth: {
+    canWrite: canWriteSlack,
     async token(installation) {
       if (!installation.token)
         throw new Error(`Slack installation ${installation.id} has no bot token`);

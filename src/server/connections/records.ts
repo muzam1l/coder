@@ -172,9 +172,10 @@ export async function nativeConnections(
 export async function visibleConnections(
   ctx: ConnectionContext,
   owner?: string,
+  secrets?: 'oauth' | 'all',
 ): Promise<Connection[]> {
   const native = await nativeConnections(ctx, owner);
-  const records = (await ctx.store.list('connection'))
+  const records = (await ctx.store.list('connection', { visibleTo: owner, secrets }))
     .map(row => row.value)
     .filter(connection => !connection.owner || connection.owner === owner)
     .map(record => {
@@ -363,17 +364,14 @@ export async function connectionRows(
   authorization?: string,
 ): Promise<ConnectionRow[]> {
   const owner = ctx.session?.user.id;
-  const records = await visibleConnections(ctx, owner);
+  const records = await visibleConnections(ctx, owner, 'oauth');
   const receipt = authorization
     ? await ctx.store.get('delivery', `connection-authorized:${authorization}`)
     : undefined;
 
   return Promise.all(
     records.map(async record => {
-      const connection =
-        record.provider === 'mcp' && record.auth === 'oauth' && !record.secret
-          ? ((await ctx.store.get('connection', record.id)) ?? record)
-          : record;
+      const connection = record;
 
       const row = connectionRow(connection, owner, ctx.config);
       if (

@@ -12,7 +12,8 @@ import { requireWorkspaceAdmin } from '../routes/guards';
 import type { Connection } from '../../agent/types';
 import { completeAuthorization } from '../connections/oauth';
 
-function memberOf(
+/** The session's context in `organization`, when they belong to it. */
+export function memberOf(
   ctx: ServerContext,
   session: SessionInfo,
   organization: string | undefined,
@@ -230,7 +231,9 @@ export async function completeOAuth(
               signal: AbortSignal.timeout(5000),
             })) as typeof fetch,
         })
-        .catch(() => undefined);
+        .catch((error: unknown) => {
+          console.error(`coder server: ${integration.id} connection sign-in failed`, error);
+        });
       if (!user?.token) return outcome(ctx, 'failed', { platform: integration.id });
       if (current.owner) {
         const result = await ctx.auth!.link(
@@ -274,7 +277,11 @@ export async function completeOAuth(
     .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
   if (user instanceof IntegrationError)
     return outcome(ctx, user.code, { platform: integration.id, error: user.error });
-  if (user instanceof Error) return outcome(ctx, 'failed', { platform: integration.id });
+  if (user instanceof Error) {
+    console.error(`coder server: ${integration.id} sign-in failed`, user);
+
+    return outcome(ctx, 'failed', { platform: integration.id });
+  }
 
   const result = await ctx.auth!.link(session.user, integration.id, user.id, {
     organizations: session.organizations.map(entry => entry.id),

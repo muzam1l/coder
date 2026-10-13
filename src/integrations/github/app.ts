@@ -19,6 +19,8 @@ export interface GithubAppCredentials {
   /** The app's OAuth client, for user authorization during install and linking. */
   clientId?: string;
   clientSecret?: string;
+  /** The account the app lives on. */
+  owner?: { login: string; type?: string };
 }
 
 export interface GithubManifest {
@@ -42,8 +44,7 @@ export interface GithubAppCreated {
   webhookSecret: string;
   clientId: string;
   clientSecret: string;
-  htmlUrl: string;
-  installUrl: string;
+  owner?: { login: string; type?: string };
 }
 
 export function buildGithubManifest(
@@ -70,7 +71,7 @@ export function buildGithubManifest(
     request_oauth_on_install: true,
     public: isPublic,
     default_permissions: permissions,
-    default_events: events,
+    default_events: [...new Set([...events, 'repository'])],
   };
 }
 
@@ -100,8 +101,7 @@ export async function convertGithubManifest(
     webhook_secret?: string;
     client_id?: string;
     client_secret?: string;
-    html_url?: string;
-    install_url?: string;
+    owner?: { login?: string; type?: string };
   };
   const appId = body.app_id ?? body.id;
   if (
@@ -110,9 +110,7 @@ export async function convertGithubManifest(
     !body.pem ||
     !body.webhook_secret ||
     !body.client_id ||
-    !body.client_secret ||
-    !body.html_url ||
-    !body.install_url
+    !body.client_secret
   )
     throw new Error('GitHub App manifest conversion response was incomplete');
   return {
@@ -122,12 +120,15 @@ export async function convertGithubManifest(
     webhookSecret: body.webhook_secret,
     clientId: body.client_id,
     clientSecret: body.client_secret,
-    htmlUrl: body.html_url,
-    installUrl: body.install_url,
+    ...(body.owner?.login ? { owner: { login: body.owner.login, type: body.owner.type } } : {}),
   };
 }
 
 const OAUTH = 'https://github.com/login/oauth';
+
+/** The app's first callback URL; GitHub allows no extra parameters on a `redirect_uri`. */
+const installRedirect = (publicUrl: string) =>
+  `${publicUrl.replace(/\/$/, '')}/install/github/callback`;
 
 /** The user token as stored: JSON of the access token, its refresh token, and when each expires. */
 interface UserToken {
@@ -213,6 +214,25 @@ export async function userInstallation(
     if (batch.length < 100) return undefined;
   }
   return undefined;
+}
+
+/** Whether this app owns the installation, from `GET /app/installations/{id}` as the app itself; GitHub answers 404 for another app's. */
+export async function appInstallation(
+  credentials: GithubAppCredentials,
+  installationId: string,
+  request: Fetcher = fetch,
+): Promise<boolean> {
+  const { createAppAuth } = await import('@octokit/auth-app');
+  const { token } = await createAppAuth({
+    appId: credentials.appId,
+    privateKey: credentials.privateKey,
+  })({ type: 'app' });
+  const response = await request(`${API}/app/installations/${encodeURIComponent(installationId)}`, {
+    headers: githubHeaders(token),
+  });
+  if (response.status === 404) return false;
+  if (!response.ok) throw new Error(`GitHub installation lookup failed: ${response.status}`);
+  return true;
 }
 
 async function verifiedUser(
@@ -328,18 +348,58 @@ export const githubApp: IntegrationApp = {
       webhookSecret: created.webhookSecret,
       clientId: created.clientId,
       clientSecret: created.clientSecret,
+      ...(created.owner ? { owner: created.owner } : {}),
     };
     return { platformAppId: created.appId, name: created.slug, credentials };
   },
-  installUrl(_app: AgentApp, credentials, { state }) {
+  settingsUrl(_app, credentials) {
+    const { slug, owner } = credentials as GithubAppCredentials;
+    if (!owner) return undefined;
+    return owner.type === 'Organization'
+      ? `https://github.com/organizations/${encodeURIComponent(owner.login)}/settings/apps/${slug}`
+      : `https://github.com/settings/apps/${slug}`;
+  },
+  installUrl(_app: AgentApp, credentials, { publicUrl, state, installation }) {
     const { slug } = credentials as GithubAppCredentials;
-    return `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}`;
+    if (!installation)
+      return `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}`;
+    // Verifying an install GitHub started: a fresh user authorization, back to the install callback with only Coder's state.
+    const params = new URLSearchParams({
+      client_id: oauthClient(credentials).clientId,
+      redirect_uri: installRedirect(publicUrl),
+      state,
+    });
+    return `${OAUTH}/authorize?${params}`;
+  },
+  // The callback's installation id is not trusted; each candidate app asks GitHub whether the installation is its own.
+  async installedApp(req, { apps, fetch: request }) {
+    const id = new URL(req.url).searchParams.get('installation_id');
+    if (!id || !/^\d+$/.test(id)) return undefined;
+    for (const { app, credentials } of apps) {
+      // One app's revoked key never hides another app's installation.
+      const owns = await appInstallation(credentials as GithubAppCredentials, id, request).catch(
+        (error: unknown) => {
+          console.error(
+            `coder server: asking GitHub whether ${app.id} owns installation ${id} failed`,
+            error,
+          );
+          return false;
+        },
+      );
+      if (owns) return { app, installation: id };
+    }
+    return undefined;
   },
   // The installer authorized the app; the installation counts only when their own token can see it.
-  async installCallback(req, { credentials, fetch: request }) {
-    const id = new URL(req.url).searchParams.get('installation_id');
+  async installCallback(req, { credentials, publicUrl, fetch: request, installation }) {
+    const id = installation ?? new URL(req.url).searchParams.get('installation_id');
     if (!id) throw new IntegrationError('missing-code');
-    const { accessToken, ...user } = await verifiedUser(req, credentials, undefined, request);
+    const { accessToken, ...user } = await verifiedUser(
+      req,
+      credentials,
+      installation ? installRedirect(publicUrl) : undefined,
+      request,
+    );
     const account = await userInstallation(
       accessToken,
       (credentials as GithubAppCredentials).appId,

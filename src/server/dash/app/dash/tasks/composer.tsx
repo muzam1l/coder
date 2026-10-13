@@ -55,7 +55,8 @@ export type Lists = {
   defaultAgent?: string;
   /** Every agent in this workspace is disabled. */
   agentsOff?: true;
-  repos: string[];
+  /** Read once the Repository field or a review needs it. */
+  repos?: string[];
   models: Record<string, string[]>;
   runners: Option[];
   flows: string[];
@@ -77,6 +78,7 @@ const PERMISSIONS: Option[] = [
 ];
 const DRAFT = 'coder:draft';
 const CONNECT = '+connect';
+const REFRESH = '+refresh';
 const OTHER = '+other';
 const PICK = '+pick';
 const CLONE = '+clone';
@@ -320,10 +322,39 @@ export function Composer({
       .catch(() => {});
   }, [commanding, choice.repo]);
 
+  const reposRead = useRef(Boolean(data.repos));
+  const readRepos = () => {
+    if (reposRead.current) return;
+    reposRead.current = true;
+    void client.repositories
+      .list()
+      .catch(reason => {
+        console.error('coder dashboard: repositories', reason);
+        return [];
+      })
+      .then(rows => setLists(current => ({ ...current, repos: rows.map(row => row.repo) })));
+  };
+  // Repositories the saved list misses, such as ones created since the platform was connected.
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshRepos = () => {
+    reposRead.current = true;
+    setRefreshing(true);
+    void client.repositories
+      .refresh()
+      .then(
+        rows => setLists(current => ({ ...current, repos: rows.map(row => row.repo) })),
+        reason => setError(reasonText(reason)),
+      )
+      .finally(() => setRefreshing(false));
+  };
+  const choosingRepo = !choice.repo && /^\/review\s/.test(text);
+  useEffect(() => void (choosingRepo && readRepos()), [choosingRepo]);
+
   const pick = (key: keyof Choice, value: string) => {
     if (value === OTHER) return setTyping('path');
     if (value === CLONE) return setTyping('url');
     if (value === PICK) return void pickFolder();
+    if (value === REFRESH) return refreshing ? undefined : refreshRepos();
     if (value === CONNECT)
       return void connectRepositories('/dash/tasks').catch(reason => setError(reasonText(reason)));
     apply({ [key]: value });
@@ -460,7 +491,7 @@ export function Composer({
       return {
         label: 'Pick a repository',
         entries: [
-          ...lists.repos
+          ...(lists.repos ?? [])
             .filter(repo => repo.includes(number))
             .map(repo => ({ key: repo, label: repo, pick: () => pick('repo', repo) })),
           { key: CONNECT, label: connectLabel, pick: () => pick('repo', CONNECT) },
@@ -599,10 +630,12 @@ export function Composer({
               label="Repository"
               value={choice.repo}
               options={[
-                ...optionsOf('No repository', choice.repo, lists.repos),
+                ...optionsOf('No repository', choice.repo, lists.repos ?? []),
+                [REFRESH, refreshing ? 'Refreshing repositories…' : 'Refresh repositories'],
                 [CONNECT, connectLabel],
               ]}
               onChange={value => pick('repo', value)}
+              onFocus={readRepos}
             />
           ) : typing ? (
             <>
@@ -837,26 +870,15 @@ export function NewTaskButton({ agent }: { agent?: string }) {
 
   const loading = useRef<Promise<unknown>>();
 
-  // Hovering the button already loads what the composer needs.
-  const prepare = () =>
-    (loading.current ??= loadComposer(client).then(setSetup, reason =>
-      setError(reasonText(reason)),
-    ));
   const open = () => {
     setShown(true);
     dialog.current?.showModal();
-    void prepare();
+    loading.current ??= loadComposer(client).then(setSetup, reason => setError(reasonText(reason)));
   };
 
   return (
     <>
-      <button
-        type="button"
-        class="btn new-task"
-        onClick={open}
-        onPointerEnter={prepare}
-        onFocus={prepare}
-      >
+      <button type="button" class="btn new-task" onClick={open}>
         <Icon d={iPlus} />
         New task
       </button>

@@ -1,9 +1,37 @@
+import type { StoreListOptions } from './types';
 import type { AgentApp, Installation } from '../../agent/types';
 import { completeLogin, parseCredentialId, type StoredCredential } from '../settings/credentials';
 import { InstallationBoundError } from './types';
 import type { CredentialScope, CredentialWork, DeliveryLease, TaskStatus } from './types';
 import type { Store, StoreKind, StoreRecords, LoginPatch, LoginFence } from './types';
 import { type EngineLogin } from '../settings/logins';
+
+export function matchesStoreRow(
+  id: string,
+  value: unknown,
+  options: StoreListOptions,
+  agent?: string,
+): boolean {
+  const row = value as {
+    agent?: string;
+    owner?: string;
+    deletedAt?: number;
+    app?: string;
+    installationId?: string;
+    name?: string;
+    default?: boolean;
+  };
+  return (
+    (!options.runner || options.runner === id || options.runner === row.name) &&
+    (!options.defaults || !!row.default) &&
+    (!options.ids || options.ids.includes(id)) &&
+    (!options.agent || (agent ?? row.agent) === options.agent) &&
+    (!Object.hasOwn(options, 'visibleTo') || !row.owner || row.owner === options.visibleTo) &&
+    (!options.active || row.deletedAt === undefined) &&
+    (!options.installation || row.installationId === options.installation) &&
+    (!options.apps || (!!row.app && options.apps.includes(row.app)))
+  );
+}
 
 interface Entry {
   value: unknown;
@@ -223,23 +251,35 @@ export class MemoryStore implements Store {
 
   list<K extends StoreKind>(
     kind: K,
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: StoreRecords[K] }>>;
   list<T extends StoreRecords['snapshot']>(
     kind: 'snapshot',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: T }>>;
   list<T extends StoreRecords['delivery']>(
     kind: 'delivery',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: T }>>;
   async list(
     kind: StoreKind,
-    options: { prefix?: string; after?: string; limit?: number } = {},
+    options: StoreListOptions = {},
   ): Promise<Array<{ id: string; value: StoreRecords[StoreKind] }>> {
+    const apps = kind === 'installation' && options.agent ? this.live('app') : undefined;
+
     return [...this.live(kind).entries()]
       .filter(([id]) => !options.prefix || id.startsWith(options.prefix))
       .filter(([id]) => !options.after || id > options.after)
+      .filter(([id, entry]) =>
+        matchesStoreRow(
+          id,
+          entry.value,
+          options,
+          kind === 'agent'
+            ? id
+            : (apps?.get((entry.value as Installation).app)?.value as AgentApp | undefined)?.agent,
+        ),
+      )
       .sort(([left], [right]) => left.localeCompare(right))
       .slice(0, options.limit)
       .map(([id, entry]) => ({ id, value: this.read(kind, entry.value) }));

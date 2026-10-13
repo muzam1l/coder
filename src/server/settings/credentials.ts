@@ -140,10 +140,11 @@ export async function resolveCredential(
 export async function visibleCredentials(
   store: Store,
   user: string | undefined,
+  limit?: number,
 ): Promise<Array<{ id: string; value: StoredCredential }>> {
   return (
     store.listCredentials
-      ? await store.listCredentials({ owner: user })
+      ? await store.listCredentials({ owner: user, limit })
       : await store.list('credential')
   ).filter(row => !row.value.owner || row.value.owner === user);
 }
@@ -527,10 +528,25 @@ export async function listCredentials(
   const user = ctx.session?.user.id;
   const key = (row: CredentialSummary) => `${row.engine}/${row.scope}/${row.label}`;
   const compare = (a: string, b: string) => a.localeCompare(b) || (a < b ? -1 : a > b ? 1 : 0);
-  const rows = (await visibleCredentials(ctx.store, user))
+  const fields = url.searchParams.get('fields');
+  if (fields && fields !== 'id') return json({ error: 'Invalid fields' }, 400);
+  if (fields === 'id') {
+    const after = decodeCursor<string>(url);
+    const limit = pageLimit(url, 200);
+    const records = await ctx.store.list('credential', {
+      visibleTo: user,
+      ...(after ? { after } : {}),
+      limit: paged(url) ? limit + 1 : limit,
+    });
+    const ids = records.map(({ id }) => ({ id }));
+    return json(paged(url) ? page(ids, limit, row => row.id) : ids);
+  }
+  const rows = (
+    await visibleCredentials(ctx.store, user, paged(url) ? undefined : pageLimit(url, 200))
+  )
     .map(row => credentialSummary(ctx.config, row.id, row.value))
     .sort((a, b) => compare(key(a), key(b)));
-  if (!paged(url)) return json(rows);
+  if (!paged(url)) return json(rows.slice(0, pageLimit(url, 200)));
 
   const after = decodeCursor<string>(url);
   const q = url.searchParams.get('q')?.trim().toLowerCase();

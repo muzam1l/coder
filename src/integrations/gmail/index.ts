@@ -52,7 +52,8 @@ export const gmail: Integration = {
     return gmailApp;
   },
   auth: {
-    token: (installation, credentials, _bound, save) => gmailToken(installation, credentials, save),
+    token: (installation, credentials, _bound, { save, fetch: request } = {}) =>
+      gmailToken(installation, credentials, save, request),
     get user() {
       return gmailUserAuth;
     },
@@ -63,11 +64,8 @@ export const gmail: Integration = {
     return app && installation ? { app, installation } : undefined;
   },
   adapter: async ctx => (await import('./adapter')).gmailAdapter(ctx),
-  // Watches last 7 days; renewing also catches up on mail whose notification was lost.
-  async renew(adapter) {
-    await (adapter as GmailAdapter).watch();
-    await (adapter as GmailAdapter).sync();
-  },
+  // Watches last 7 days; the daily reconcile catches up on mail whose notification was lost.
+  renew: async adapter => Number((await (adapter as GmailAdapter).watch()).expiration),
   sync: adapter => (adapter as GmailAdapter).sync(),
   event(type, _thread, message) {
     return authenticated(message.raw as GmailRawMessage)

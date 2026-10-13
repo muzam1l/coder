@@ -1,4 +1,4 @@
-import type { AgentTask, Connection } from '../../agent/types';
+import type { AgentApp, AgentTask, Connection } from '../../agent/types';
 import {
   ConnectionRefused,
   connectionMcp,
@@ -9,7 +9,14 @@ import {
 } from '../../core/connections';
 import type { McpServerSpec } from '../../core/types';
 import { encryptSecret, decryptSecret } from '../store/secrets';
-import { findConnection, nativeApp, nativeCredential, type ConnectionContext } from './records';
+import {
+  findConnection,
+  nativeApp,
+  nativeConnections,
+  nativeCredential,
+  type ConnectionContext,
+} from './records';
+import { sharedApps } from '../agents/apps';
 import { IntegrationError } from '../../integrations/types';
 import { OAuthRevoked } from './oauth';
 import { oauthAccessToken, type OAuthSecret } from './oauth';
@@ -55,12 +62,30 @@ export async function resolveConnections(
   const nativeTokens: Record<string, string> = {};
   const warnings: string[] = [];
   const secrets: string[] = [];
+  const ids = [...new Set(task.connections ?? [])];
+  const stored = ids.length
+    ? await ctx.store.list('connection', { ids, visibleTo: task.requester, secrets: 'all' })
+    : [];
+  const saved = new Set(stored.map(row => row.id));
+  let nativeError: unknown;
+  const native = ids.some(id => !saved.has(id))
+    ? await nativeConnections(ctx, task.requester).catch(error => {
+        console.error('coder server: native connection lookup failed', error);
+        nativeError = error;
+        return [];
+      })
+    : [];
+  const available = new Map([
+    ...native.map(value => [value.id, value] as const),
+    ...stored.map(({ id, value }) => [id, value] as const),
+  ]);
   const rows = await Promise.allSettled(
-    [...new Set(task.connections ?? [])].map(async id => ({
-      id,
-      value: await findConnection(ctx, id, task.requester),
-    })),
+    ids.map(async id => {
+      if (!available.has(id) && nativeError) throw nativeError;
+      return { id, value: available.get(id) };
+    }),
   );
+  let apps: Promise<AgentApp[]> | undefined;
   const connections = rows.sort(
     (a, b) =>
       Number(b.status === 'fulfilled' && !!b.value.value?.owner) -
@@ -125,6 +150,9 @@ export async function resolveConnections(
           (account?.token ? nativeCredential(ctx.config, account.token).app : undefined) ??
             selected.oauthApp ??
             selectedSecret?.app,
+          await (apps ??= Promise.all([sharedApps(ctx), ctx.store.list('app')]).then(
+            ([shared, own]) => [...shared, ...own.map(row => row.value)],
+          )),
         );
         if (!app) throw new Error('Missing integration credentials');
         const accountId = selected.owner

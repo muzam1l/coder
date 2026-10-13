@@ -12,7 +12,7 @@ import { formatDate, formatDuration, reasonText } from '@/utils/format';
 import { Link } from '@wular/pnext/link';
 import { useSearchParams } from '@wular/pnext/navigation/client';
 import type { TaskLog, TaskRow } from '@coder/client/types';
-import { iAgent, iCheck, iClock, iDown, iFolder, iPlug, iTerminal } from '@/comps/ui/icons';
+import { iAgent, iCheck, iClock, iDown, iFolder, iPlug, iRight, iTerminal } from '@/comps/ui/icons';
 import { Badge } from '@/comps/ui/badge';
 import { Card, Loading } from '@/comps/ui/card';
 import { Collapse } from '@/comps/ui/collapse';
@@ -24,7 +24,7 @@ import { markdown } from '@/app/dash/agents/agent/instructions';
 import { Status } from '@/app/dash/tasks/list/status';
 import { folderName, sourceLabel, taskActive, taskTitle } from '@/app/dash/tasks/list/task';
 import { Approval, TaskActions, useAction } from './task-actions';
-import { Activity } from './activity';
+import { Activity, RunPreview, runSummary } from './activity';
 import { toastError, useTaskEvents, watchTask } from '@/comps/frame/task-toasts';
 
 const TABS = ['Conversation', 'Activity'];
@@ -184,6 +184,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
   const [lines, setLines] = useState(initial.logs ?? []);
   const [complete, setComplete] = useState((initial.logs?.length ?? 0) < LOG_CHUNK);
   const [tab, setTab] = useState<Tab>('conversation');
+  const [at, setAt] = useState<number | 'end'>();
   const [sent, setSent] = useState<Array<{ kind: string; text: string; turn: number }>>([]);
   const [sending, setSending] = useState(false);
   const [asking, setAsking] = useState(0);
@@ -312,7 +313,6 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
     },
     // Missed events: refetch the task and catch up its logs from the cursor.
     catchUp,
-    () => document.visibilityState === 'visible' && catchUp(),
   );
 
   // Older lines a chunk at a time, then the stream follows the run.
@@ -406,9 +406,28 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       }));
     } else {
       setSent(value => [...value, { kind, text, turn: turns.length - 1 }]);
-      setTab('activity');
+      openActivity();
     }
   };
+
+  const openActivity = (to?: number | 'end') => {
+    setAt(to);
+    setTab('activity');
+  };
+  const activityLink = (
+    <button type="button" class="btn ghost sm" onClick={() => openActivity('end')}>
+      Activity
+      <Icon d={iRight} />
+    </button>
+  );
+  const run = rows.filter(row => row.at >= (task.startedAt ?? 0));
+  const foot =
+    !live && task.startedAt && task.finishedAt ? (
+      <p class="run-foot">
+        {runSummary(run, task.finishedAt - task.startedAt)}
+        {activityLink}
+      </p>
+    ) : null;
 
   // The menu hands focus back to its button as it closes, so the box takes it after.
   const pickMode = (next: boolean) => {
@@ -425,7 +444,6 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
           {fallback.engine} was unavailable. {fallback.detail} This task is using {fallback.next}.
         </p>
       ))}
-      {task.approval ? <Approval task={task} /> : null}
       <nav class="tabs" role="tablist" aria-label="Task">
         {TABS.map(label => {
           const key = label.toLowerCase() as Tab;
@@ -436,7 +454,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
               role="tab"
               aria-selected={tab === key}
               aria-current={tab === key ? 'page' : undefined}
-              onClick={() => setTab(key)}
+              onClick={() => (key === 'activity' ? openActivity() : setTab(key))}
             >
               {label}
             </button>
@@ -449,7 +467,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
         </p>
       ) : null}
       {tab === 'activity' ? (
-        <Activity rows={rows} live={live} tz={tz} />
+        <Activity rows={rows} live={live} tz={tz} at={at} />
       ) : (
         <div class="convo">
           {turns.map((turn, index) => {
@@ -501,21 +519,17 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
                 {turn.result ? (
                   <Card title="Result">
                     <ResultBody value={turn.result} />
+                    {last ? foot : null}
                   </Card>
                 ) : last && live ? (
-                  <Card title="Result">
-                    <div class="body waiting">
-                      <Loading
-                        inline
-                        dots
-                        label="The result appears here when the task finishes."
-                      />
-                    </div>
+                  <Card title="Result" actions={activityLink}>
+                    <RunPreview rows={run} startedAt={task.startedAt} onOpen={openActivity} />
                   </Card>
                 ) : null}
                 {turn.error ? (
                   <Card tone="danger" title="Error">
                     <div class="body prose">{turn.error}</div>
+                    {last && !turn.result ? foot : null}
                   </Card>
                 ) : null}
               </Fragment>
@@ -598,6 +612,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       ) : (
         <p class="muted no-reply">This flow takes no follow-ups.</p>
       )}
+      <div class="approval-dock">{task.approval ? <Approval task={task} /> : null}</div>
     </>
   );
 }

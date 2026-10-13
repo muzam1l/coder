@@ -27,7 +27,7 @@ import {
 import { readJsonFile } from '../utils/fsx';
 import { getCodexAvailability } from './engines/codex';
 import { isUnsupportedModelError } from './engines/codex/errors';
-import { getClaudeAvailability } from './engines/claude';
+import { claudeVersionEnvironment, getClaudeAvailability } from './engines/claude';
 import { ensureCodexInstalled, modelVersionWarning } from './hosts';
 import {
   CLAUDE_EFFORTS,
@@ -566,11 +566,12 @@ export function spawnWorker(
 ): void {
   const taskDir = resolveTaskDir(cwd, taskId);
   const logFd = fs.openSync(path.join(taskDir, 'worker.log'), 'a');
+  const env = { ...process.env, ...connectionEnv };
   const child = spawn(process.execPath, [CLI_PATH, 'task', 'worker', taskId, '--cwd', cwd], {
     cwd,
     detached: true,
     stdio: ['ignore', logFd, logFd],
-    env: { ...process.env, ...connectionEnv, [WORKER_ENV]: '1' },
+    env: { ...env, ...claudeVersionEnvironment(env, cwd), [WORKER_ENV]: '1' },
   });
   child.unref();
   fs.closeSync(logFd);
@@ -592,7 +593,9 @@ async function attemptOnce(
 
   // Startup gate: cheap checks before creating a task.
   let availability =
-    resolved.engine !== 'claude' ? getCodexAvailability(cwd) : getClaudeAvailability();
+    resolved.engine !== 'claude'
+      ? getCodexAvailability(cwd)
+      : getClaudeAvailability('claude', { ...process.env, ...opts.connectionEnv }, cwd);
   const resolvedEntry = resolved.model ? config.models?.[resolved.model] : undefined;
   if (!availability.available && resolvedEntry && isEndpointModel(resolvedEntry)) {
     const install = ensureCodexInstalled(availability);

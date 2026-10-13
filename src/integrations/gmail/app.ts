@@ -268,18 +268,23 @@ export const gmailUserAuth: IntegrationUserAuth = {
 export function gmailToken(
   installation: Installation,
   credentials: unknown,
-  save?: (token: string) => Promise<void>,
+  save?: (token: string) => Promise<string | void>,
+  request?: typeof fetch,
 ): Promise<string> {
   const { clientId, clientSecret } = credentials as GmailAppCredentials;
   return freshToken(
     installation.token,
     refreshToken =>
-      tokenGrant(TOKEN, {
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }),
+      tokenGrant(
+        TOKEN,
+        {
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+          client_id: clientId,
+          client_secret: clientSecret,
+        },
+        request,
+      ),
     save,
   );
 }

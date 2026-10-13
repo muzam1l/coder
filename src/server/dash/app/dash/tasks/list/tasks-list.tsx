@@ -38,7 +38,13 @@ import { reasonText } from '@/utils/format';
 import { Status } from './status';
 import { Icon } from '@/comps/ui/icon';
 import { Filter, type Facet } from '@/comps/ui/filter';
-import { addRows, listOrder, taskActive, withAdded } from '@/app/dash/tasks/list/task';
+import {
+  addRows,
+  readDelta,
+  taskActive,
+  withAdded,
+  type DeltaCursor,
+} from '@/app/dash/tasks/list/task';
 import { taskTitle } from '@/app/dash/tasks/list/task';
 import { LIST_PAGE } from '@/utils/paged';
 import { Search, Toolbar, queryOf, useFilters } from '@/comps/ui/toolbar';
@@ -74,6 +80,8 @@ const SOURCE_ICONS: Record<string, string> = {
   schedule: iClock,
 };
 const sourceIcon = (source: string) => SOURCE_ICONS[source] ?? iPlug;
+
+const DELTA_ROWS = 200;
 
 /** How long ago, under a day; the date after that. */
 function ago(value: number, now: number, tz: string) {
@@ -319,45 +327,15 @@ export function TasksList({
   const era = useRef(0);
   // When each row last took an event, so an older page never undoes it.
   const touched = useRef<Record<string, number>>({});
-  // The minute's resync reads every loaded row, not just the first page.
-  const deep = useRef(false);
-  const refresh = (all = false) => {
-    deep.current ||= all;
+  const refresh = () => {
     if (document.visibilityState === 'hidden') return void (hidden.current = true);
     if (refetching.current) return void (again.current = true);
     const started = (refetching.current = Date.now());
     const before = era.current;
-    const loaded = deep.current ? rows : [];
-    deep.current = false;
-    // Pages of up to 200 until every loaded row is covered.
-    const read = async () => {
-      const first = await client.tasks.list({
-        ...options,
-        limit: Math.min(200, Math.max(LIST_PAGE, loaded.length)),
-        cursor: '',
-      });
-      let page = first;
-      const items = [...first.items];
-      while (page.next && items.length < loaded.length) {
-        page = await client.tasks.list({ ...options, limit: 200, cursor: page.next });
-        items.push(...page.items);
-      }
-
-      return { ...page, items, counts: first.counts };
-    };
-    void read()
+    void client.tasks
+      .list({ ...options, cursor: '' })
       .then(page => {
         if (era.current !== before) return;
-        // A loaded row the read covers but no longer lists has left this view.
-        const last = page.items.at(-1);
-        const fetched = new Set(page.items.map(row => row.task.id));
-        const left = loaded.filter(
-          row =>
-            !fetched.has(row.task.id) &&
-            (touched.current[row.task.id] ?? 0) <= started &&
-            (!page.next || (last && listOrder(row, last) < 0)),
-        );
-        if (left.length) setGone(current => [...current, ...left.map(row => row.task.id)]);
         setFresh(current => ({
           rows: {
             ...current.rows,
@@ -419,57 +397,91 @@ export function TasksList({
   };
 
   // Rows follow the events stream at once; counts, and tasks the list lacks, come with its first page again.
-  useTaskEvents(
-    (event: TaskEvent) => {
-      const row = rows.find(task => task.task.id === event.id);
-      if (!row) {
-        // A deleted or archived task stays out even if a read from before it brings it; an unarchived one comes back.
-        if (event.deleted || (event.archivedAt && values.status !== 'archived'))
-          setGone(current => [...current, event.id]);
-        else
-          setGone(current =>
-            current.includes(event.id) ? current.filter(id => id !== event.id) : current,
-          );
-        // A row kept from another view would outlive this change, so it goes.
-        setFresh(current => {
-          const { [event.id]: _kept, ...rows } = current.rows;
-          return _kept ? { ...current, rows } : current;
-        });
-        if (event.deleted || (agent || values.agent || event.agent) === event.agent) refresh();
-        return;
-      }
-      touched.current[event.id] = Date.now();
-      if (refetching.current) again.current = true;
-      // A change that moves the counts asks the server; a continued task also brings its new prompt.
-      if (
-        event.deleted ||
-        event.status !== row.status ||
-        Boolean(event.archivedAt) !== Boolean(row.archivedAt)
-      )
-        refresh();
+  const heard = (event: TaskEvent) => {
+    const row = rows.find(task => task.task.id === event.id);
+    if (!row) {
+      // A deleted or archived task stays out even if a read from before it brings it; an unarchived one comes back.
       if (event.deleted || (event.archivedAt && values.status !== 'archived'))
-        return setGone(current => [...current, event.id]);
+        setGone(current => [...current, event.id]);
+      else
+        setGone(current =>
+          current.includes(event.id) ? current.filter(id => id !== event.id) : current,
+        );
+      // A row kept from another view would outlive this change, so it goes.
       setFresh(current => {
-        const was = current.rows[event.id] ?? row;
-        return {
-          ...current,
-          rows: {
-            ...current.rows,
-            [event.id]: {
-              ...was,
-              status: event.status,
-              approval: event.approval ?? undefined,
-              archivedAt: event.archivedAt,
-              startedAt: event.startedAt,
-              finishedAt: event.finishedAt,
-            },
-          },
-        };
+        const { [event.id]: _kept, ...rows } = current.rows;
+        return _kept ? { ...current, rows } : current;
       });
-    },
-    reset,
-    () => refresh(true),
-  );
+      if (event.deleted || (agent || values.agent || event.agent) === event.agent) refresh();
+      return;
+    }
+    touched.current[event.id] = Date.now();
+    if (refetching.current) again.current = true;
+    // A change that moves the counts asks the server; a continued task also brings its new prompt.
+    if (
+      event.deleted ||
+      event.status !== row.status ||
+      Boolean(event.archivedAt) !== Boolean(row.archivedAt)
+    )
+      refresh();
+    if (event.deleted || (event.archivedAt && values.status !== 'archived'))
+      return setGone(current => [...current, event.id]);
+    setFresh(current => {
+      const was = current.rows[event.id] ?? row;
+      return {
+        ...current,
+        rows: {
+          ...current.rows,
+          [event.id]: {
+            ...was,
+            status: event.status,
+            approval: event.approval ?? undefined,
+            archivedAt: event.archivedAt,
+            startedAt: event.startedAt,
+            finishedAt: event.finishedAt,
+          },
+        },
+      };
+    });
+  };
+
+  // The minute's resync reads only rows changed since the newest one it has seen, each as an event.
+  const since = useRef<DeltaCursor>({
+    since: first.items.reduce((most, row) => Math.max(most, row.updatedAt), 0) || now,
+  });
+  const resync = () => {
+    if (document.visibilityState === 'hidden') return;
+    const started = Date.now();
+    const before = era.current;
+    void client.tasks
+      .list({
+        ...since.current,
+        limit: DELTA_ROWS,
+        agent: options.agent,
+        source: options.source,
+        archived: options.archived,
+      })
+      .then(changed => {
+        if (era.current !== before) return;
+        const delta = readDelta(changed, since.current, touched.current, started);
+        since.current = delta.cursor;
+        for (const row of delta.rows)
+          heard({
+            id: row.task.id,
+            agent: row.task.agent,
+            status: row.status,
+            approval: row.approval,
+            archivedAt: row.archivedAt,
+            createdAt: row.createdAt,
+            startedAt: row.startedAt,
+            finishedAt: row.finishedAt,
+          });
+        // A full page has more past its cursor.
+        if (changed.length === DELTA_ROWS) resync();
+      })
+      .catch(reason => console.error('coder dashboard: task resync', reason));
+  };
+  useTaskEvents(heard, reset, resync);
 
   return (
     <>

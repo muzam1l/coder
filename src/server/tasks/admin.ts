@@ -19,7 +19,6 @@ import {
   localTask,
   localTaskAction,
   localTasks,
-  sweepLocalQueue,
   startLocalTask,
 } from './local';
 import { scheduleKick } from './kick';
@@ -34,6 +33,8 @@ import {
   afterCursor,
   listCursor,
   type ListCursor,
+  deltaCursor,
+  deltaOrder,
   pushInbox,
   type TaskFilter,
 } from './queue';
@@ -71,9 +72,12 @@ export function summarizeTask(status: TaskStatus) {
     status: status.status,
     ...(status.status === 'queued' ? { statusReason: 'Waiting for a task slot' } : {}),
     attempts: status.attempts,
+    ...(status.approval !== undefined ? { approval: status.approval } : {}),
+    ...(status.archivedAt !== undefined ? { archivedAt: status.archivedAt } : {}),
     createdAt: status.createdAt,
     startedAt: status.startedAt,
     finishedAt: status.finishedAt,
+    updatedAt: status.updatedAt,
   };
 }
 
@@ -565,13 +569,22 @@ export async function listTasks(
   )
     return json({ error: `Unknown source "${source}"` }, 400);
 
+  const since = url.searchParams.has('since') ? Number(url.searchParams.get('since')) : undefined;
+  if (since !== undefined && (!Number.isFinite(since) || since < 0))
+    return json({ error: 'Invalid since' }, 400);
   const agent = url.searchParams.get('agent');
   const q = url.searchParams.get('q')?.trim();
   const filter: TaskFilter = {
     ...(agent ? { agent } : {}),
     ...(source ? { source: source as TaskSource } : {}),
     ...(q ? { q } : {}),
-    archived: url.searchParams.get('archived') === '1',
+    archived: since === undefined ? url.searchParams.get('archived') === '1' : undefined,
+    ...(since !== undefined
+      ? {
+          since,
+          ...(url.searchParams.get('sinceId') ? { sinceId: url.searchParams.get('sinceId')! } : {}),
+        }
+      : {}),
   };
   const states =
     status === 'active'
@@ -579,23 +592,35 @@ export async function listTasks(
       : status
         ? { status: status as TaskStatus['status'] }
         : {};
-  const shape = (rows: TaskStatus[]) =>
-    url.searchParams.get('summary') === '1' ? rows.map(summarizeTask) : rows.map(redactTask);
+  const summary =
+    url.searchParams.get('summary') === '1' ||
+    (since !== undefined && !url.searchParams.has('summary'));
+  const shape = (rows: TaskStatus[]) => (summary ? rows.map(summarizeTask) : rows.map(redactTask));
   if (ctx.local) {
-    await sweepLocalQueue(ctx, ctx.local.cwd);
-    const rows = localRows(
-      ctx.local.cwd,
-      localTasks(ctx.local.cwd, filter.archived!),
-      await ctx.queue.list(ctx.organizationId),
-    )
+    const cli =
+      since === undefined
+        ? localTasks(ctx.local.cwd, filter.archived!)
+        : [
+            // An auto-archive keeps a CLI job's updatedAt, so a delta dates it by its archive.
+            ...localTasks(ctx.local.cwd, true).map(row => ({
+              ...row,
+              updatedAt: Math.max(row.updatedAt, row.archivedAt!),
+            })),
+            ...localTasks(ctx.local.cwd, false),
+          ];
+    const rows = localRows(ctx.local.cwd, cli, await ctx.queue.list(ctx.organizationId))
       .filter(row => matchesTask(row, { ...filter, ...states }))
-      .sort(listOrder);
+      .sort(since === undefined ? listOrder : deltaOrder);
     const limit = pageLimit(url, paged(url) ? undefined : 20);
     if (!paged(url)) return json(shape(rows.slice(0, limit)));
 
     const before = decodeCursor<ListCursor>(url);
     const items = rows.filter(row => afterCursor(row, before));
-    const result = page(items.slice(0, limit + 1), limit, listCursor);
+    const result = page(
+      items.slice(0, limit + 1),
+      limit,
+      since === undefined ? listCursor : deltaCursor,
+    );
 
     return json({
       ...result,
@@ -611,14 +636,13 @@ export async function listTasks(
         : {}),
     });
   }
-  await ctx.queue.archiveStopped(ctx.organizationId, (ctx.now ?? Date.now)());
   if (!paged(url)) {
     const limit = pageLimit(url, 20);
     const rows = await ctx.queue.list(ctx.organizationId, {
       ...filter,
       ...states,
       limit,
-      summary: url.searchParams.get('summary') === '1',
+      summary,
     });
 
     return json(shape(rows));
@@ -631,7 +655,7 @@ export async function listTasks(
       ? await ctx.queue.listWithCounts(ctx.organizationId, {
           ...filter,
           limit: limit + 1,
-          summary: url.searchParams.get('summary') === '1',
+          summary,
         })
       : undefined;
   const [rows, counts] = await Promise.all([
@@ -640,7 +664,7 @@ export async function listTasks(
       : ctx.queue.list(ctx.organizationId, {
           ...filter,
           ...states,
-          summary: url.searchParams.get('summary') === '1',
+          summary,
           ...(before ? { before } : {}),
           limit: limit + 1,
         }),
@@ -650,7 +674,7 @@ export async function listTasks(
         ? ctx.queue.counts(ctx.organizationId, { ...filter, ...states })
         : undefined,
   ]);
-  const result = page(rows, limit, listCursor);
+  const result = page(rows, limit, since === undefined ? listCursor : deltaCursor);
 
   return json({ ...result, items: shape(result.items), ...(counts ? { counts } : {}) });
 }

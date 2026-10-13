@@ -3,15 +3,15 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { type Params } from '../routes/match';
 import { loadTask, resolveTaskDir } from '../../core/state';
-import { type TaskLogLine, type TaskStatus } from '../store/types';
+import { type RunnerRecord, type TaskLogLine, type TaskStatus } from '../store/types';
 import { type ServerContext } from '../context';
 import { start } from './flows';
 import { json, pageLimit } from '../routes/http';
-import { taskRunner } from '../runners';
 import { localLog, localTask, localTasks, sweepLocalQueue } from './local';
 import { copyRunnerLogs, readLog } from './logs';
 import { DONE, localRows } from './admin';
 import { StoreQueue, TOMBSTONE_MS } from './queue';
+import { runnerItems } from '../settings/runners';
 
 export async function taskStream(
   req: Request,
@@ -67,22 +67,20 @@ export async function taskStream(
       if (!current) return undefined;
 
       const archived = current.task.runner === 'github-actions' && current.handle;
-      const pendingLogs =
-        archived && DONE.has(current.status)
-          ? (
-              await (
-                await taskRunner(ctx, current.task)
-              )
-                ?.status(current.handle!)
-                .catch(() => undefined)
-            )?.state === 'running'
-          : false;
       const lines =
-        (['running', 'waiting'].includes(current.status) || archived) && current.handle
-          ? await copyRunnerLogs(ctx, current, after, STREAM_LINES).catch(() =>
-              readLog(ctx.store, taskId, after, STREAM_LINES),
-            )
+        (['running', 'waiting'].includes(current.status) || (archived && !current.logsComplete)) &&
+        current.handle
+          ? await copyRunnerLogs(ctx, current, after, STREAM_LINES).catch(error => {
+              console.error(`coder server: runner logs for ${taskId} failed`, error);
+              return readLog(ctx.store, taskId, after, STREAM_LINES);
+            })
           : await readLog(ctx.store, taskId, after, STREAM_LINES);
+      const pendingLogs = Boolean(
+        archived &&
+        DONE.has(current.status) &&
+        !current.logsComplete &&
+        !(await ctx.store.get('task', taskId))?.logsComplete,
+      );
 
       return { status: current, lines, pendingLogs };
     }),
@@ -93,16 +91,14 @@ export async function taskStream(
 function resultPending(cwd: string, status: TaskStatus, missing = false) {
   if (!DONE.has(status.status) || status.error || status.status === 'cancelled') return false;
   const task = loadTask(cwd, status.task.id);
-  const finished = Math.max(
-    status.finishedAt ?? 0,
-    Date.parse(task?.resumedAt ?? task?.createdAt ?? '') || 0,
-  );
+  // A result written in this turn may land before or after its completed stamp.
+  const started = Date.parse(task?.resumedAt ?? task?.createdAt ?? '') || 0;
 
   return (
     missing ||
     (fs.statSync(path.join(resolveTaskDir(cwd, status.task.id), 'result.json'), {
       throwIfNoEntry: false,
-    })?.mtimeMs ?? 0) < finished
+    })?.mtimeMs ?? 0) < started
   );
 }
 
@@ -125,6 +121,9 @@ const EVENTS_LAG_MS = 30_000;
 
 // A local server scans the CLI's task folders this often, as the list used to poll them.
 const LOCAL_SCAN_MS = 4000;
+
+// A workspace's runners are read this often for their online dots; a runner write on this server reads them at the next poll.
+const RUNNER_SCAN_MS = 15_000;
 
 // The CLI's archive changes rarely and costs more to read, so it is scanned this often.
 const ARCHIVE_SCAN_MS = 15_000;
@@ -155,6 +154,7 @@ export function taskEvents(req: Request, ctx: ServerContext, params: Params, url
         from,
         text => controller.enqueue(encoder.encode(text)),
         () => controller.close(),
+        known,
       );
       // A client that left gets no more reads, and its body ends.
       const leave = () => {
@@ -212,6 +212,9 @@ type Watch = {
   /** Rows updated after this are news to the stream: its last event id, then its last read. */
   from: number;
   fresh: boolean;
+  active?: number;
+  /** The runners this stream last saw; unset on a new stream, which the page's own read is current for. */
+  runners?: string;
   /** This server's generation in each event id, when its delete history is in memory. */
   tag: string;
   beat: number;
@@ -226,6 +229,11 @@ type Watch = {
 export class TaskWatcher {
   private watches = new Set<Watch>();
   private timer?: ReturnType<typeof setInterval>;
+  private counts = new Map<string, { active: number; fingerprint: string }>();
+  private runners = new Map<
+    string,
+    { at: number; records: Array<{ id: string; value: RunnerRecord }> }
+  >();
   private reading = false;
   private closed = false;
   private last = Date.now();
@@ -255,6 +263,7 @@ export class TaskWatcher {
     from: number,
     send: (text: string) => void,
     close: () => void,
+    resumed = false,
   ): () => void {
     if (this.closed) {
       queueMicrotask(close);
@@ -269,6 +278,8 @@ export class TaskWatcher {
       gone: new Set(),
       from,
       fresh: true,
+      // A resumed stream may have missed a runner change, so its first read sends them.
+      ...(resumed ? { runners: '' } : {}),
       tag: this.tag(ctx),
       beat: now,
       marked: now,
@@ -292,6 +303,11 @@ export class TaskWatcher {
     return `-${workspace}${ctx.queue instanceof StoreQueue ? `.${this.generation}` : ''}`;
   }
 
+  /** A runner was added, changed or removed: its workspace's streams hear it at the next poll. */
+  runnersChanged(organizationId: string) {
+    this.runners.delete(organizationId);
+  }
+
   /** Ends every stream and refuses new ones, so a stopping server need not wait out their life. */
   close() {
     this.closed = true;
@@ -305,9 +321,15 @@ export class TaskWatcher {
 
   private drop(watch: Watch) {
     if (!this.watches.delete(watch)) return;
+    if (![...this.watches].some(live => live.ctx.organizationId === watch.ctx.organizationId)) {
+      this.counts.delete(watch.ctx.organizationId);
+      this.runners.delete(watch.ctx.organizationId);
+    }
     if (!this.watches.size) {
       clearInterval(this.timer);
       this.timer = undefined;
+      this.counts.clear();
+      this.runners.clear();
     }
   }
 
@@ -352,15 +374,67 @@ export class TaskWatcher {
     );
     this.reads++;
     // A slow read holds the next one back, so reads never pile up; heartbeats and time limits go on meanwhile.
-    const rows = await this.changes(scopes, since - EVENTS_LAG_MS, at).catch(() => undefined);
+    const rows = await this.changes(scopes, since - EVENTS_LAG_MS, at).catch(error => {
+      console.error('coder server: task events failed', error);
+      return undefined;
+    });
     if (!rows) return;
     this.last = at;
+    try {
+      for (const [organizationId, { ctx }] of scopes) {
+        const cached = this.counts.get(organizationId);
+        const fingerprint = JSON.stringify([
+          [...(rows.rows.get(organizationId) ?? [])]
+            .map(([id, row]) => [id, row.status, row.archivedAt])
+            .sort(),
+          [...(rows.deleted.get(organizationId)?.keys() ?? [])].sort(),
+        ]);
+        const changed = cached?.fingerprint !== fingerprint;
+        const active = ctx.local
+          ? [...(rows.rows.get(organizationId)?.values() ?? [])].filter(
+              row => !row.archivedAt && ['queued', 'running', 'waiting'].includes(row.status),
+            ).length
+          : changed
+            ? (
+                await ctx.queue.counts(organizationId, {
+                  archived: false,
+                  statuses: ['queued', 'running', 'waiting'],
+                })
+              ).active
+            : cached!.active;
+        if ([...this.watches].some(watch => watch.ctx.organizationId === organizationId))
+          this.counts.set(organizationId, { active, fingerprint });
+      }
+    } catch (error) {
+      console.error('coder server: task counts failed', error);
+      return;
+    }
+    await Promise.all(
+      [...scopes]
+        .filter(
+          ([organizationId]) =>
+            at - (this.runners.get(organizationId)?.at ?? -Infinity) >= RUNNER_SCAN_MS,
+        )
+        .map(async ([organizationId, { ctx }]) => {
+          try {
+            this.runners.set(organizationId, { at, records: await ctx.store.list('runner') });
+          } catch (error) {
+            console.error('coder server: runner events failed', error);
+          }
+        }),
+    );
 
     for (const watch of watches) {
       if (!this.watches.has(watch)) continue;
       let out: string[] = [];
       try {
         out = this.news(watch, rows, at);
+        const active = this.counts.get(watch.ctx.organizationId)?.active;
+        if (active !== undefined && active !== watch.active) {
+          watch.active = active;
+          out.push(`id: ${at}${watch.tag}\nevent: counts\ndata: ${JSON.stringify({ active })}\n\n`);
+        }
+        out.push(...this.runnerNews(watch, at));
       } catch {}
       // A quiet stream still moves its resume point.
       if (!out.length && at - watch.marked >= (this.options.heartbeatMs ?? EVENTS_HEARTBEAT_MS))
@@ -369,6 +443,23 @@ export class TaskWatcher {
       watch.marked = at;
       this.send(watch, out.join(''));
     }
+  }
+
+  /** The runners event when what the stream's requester sees changed, online dots included; a new stream only notes them. */
+  private runnerNews(watch: Watch, at: number): string[] {
+    const scan = this.runners.get(watch.ctx.organizationId);
+    if (!scan) return [];
+    const items = runnerItems(watch.ctx, scan.records, at);
+    // An online runner's heartbeat moves its lastSeen every minute without changing what the list shows.
+    const seen = JSON.stringify(
+      items.map(({ lastSeen, ...row }) => (row.online ? row : { ...row, lastSeen })),
+    );
+    const known = watch.runners;
+    watch.runners = seen;
+
+    return known === undefined || known === seen
+      ? []
+      : [`id: ${at}${watch.tag}\nevent: runners\ndata: ${JSON.stringify({ items })}\n\n`];
   }
 
   /** Each workspace's rows and deletes from one queue read, with a local server's CLI tasks merged in. */

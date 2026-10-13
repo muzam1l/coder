@@ -68,6 +68,7 @@ CREATE TABLE "coder"."integration_app" (
 	"name" text NOT NULL,
 	"agents_repo" text,
 	"branch" text,
+	"public" boolean,
 	"credentials_secret_id" bigint NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -79,12 +80,14 @@ CREATE TABLE "coder"."integration_app_installation" (
 	"id" bigserial PRIMARY KEY NOT NULL,
 	"organization_id" text NOT NULL,
 	"key" text NOT NULL,
-	"app_id" bigint NOT NULL,
+	"app_id" bigint,
 	"platform_install_id" text NOT NULL,
 	"account" jsonb NOT NULL,
 	"token_secret_id" bigint,
 	"installer" text,
+	"self" text,
 	"covers" jsonb,
+	"repos" jsonb,
 	"connections" jsonb,
 	"settings" jsonb,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
@@ -237,10 +240,10 @@ CREATE TABLE "coder"."usage" (
 ALTER TABLE "coder"."agent_version" ADD CONSTRAINT "agent_version_agent_id_agent_id_fk" FOREIGN KEY ("agent_id") REFERENCES "coder"."agent"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "coder"."engine_credential" ADD CONSTRAINT "engine_credential_secret_id_secret_id_fk" FOREIGN KEY ("secret_id") REFERENCES "coder"."secret"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "coder"."integration_app" ADD CONSTRAINT "integration_app_credentials_secret_id_secret_id_fk" FOREIGN KEY ("credentials_secret_id") REFERENCES "coder"."secret"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "coder"."integration_app_installation" ADD CONSTRAINT "integration_app_installation_app_id_integration_app_id_fk" FOREIGN KEY ("app_id") REFERENCES "coder"."integration_app"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "coder"."integration_app_installation" ADD CONSTRAINT "integration_app_installation_app_id_integration_app_id_fk" FOREIGN KEY ("app_id") REFERENCES "coder"."integration_app"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "coder"."integration_app_installation" ADD CONSTRAINT "integration_app_installation_token_secret_id_secret_id_fk" FOREIGN KEY ("token_secret_id") REFERENCES "coder"."secret"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "coder"."runner" ADD CONSTRAINT "runner_secret_id_secret_id_fk" FOREIGN KEY ("secret_id") REFERENCES "coder"."secret"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "coder"."task" ADD CONSTRAINT "task_app_id_integration_app_id_fk" FOREIGN KEY ("app_id") REFERENCES "coder"."integration_app"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "coder"."task" ADD CONSTRAINT "task_app_id_integration_app_id_fk" FOREIGN KEY ("app_id") REFERENCES "coder"."integration_app"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "coder"."task" ADD CONSTRAINT "task_installation_id_integration_app_installation_id_fk" FOREIGN KEY ("installation_id") REFERENCES "coder"."integration_app_installation"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "coder"."task_inbox" ADD CONSTRAINT "task_inbox_task_id_task_id_fk" FOREIGN KEY ("task_id") REFERENCES "coder"."task"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "coder"."task_log" ADD CONSTRAINT "task_log_task_id_task_id_fk" FOREIGN KEY ("task_id") REFERENCES "coder"."task"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -248,6 +251,7 @@ ALTER TABLE "coder"."usage" ADD CONSTRAINT "usage_task_id_task_id_fk" FOREIGN KE
 ALTER TABLE "coder"."usage" ADD CONSTRAINT "usage_installation_id_integration_app_installation_id_fk" FOREIGN KEY ("installation_id") REFERENCES "coder"."integration_app_installation"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "chat_item_expires_at_index" ON "coder"."chat_item" USING btree ("expires_at") WHERE "coder"."chat_item"."expires_at" is not null;--> statement-breakpoint
 CREATE INDEX "chat_state_expires_at_index" ON "coder"."chat_state" USING btree ("expires_at") WHERE "coder"."chat_state"."expires_at" is not null;--> statement-breakpoint
+CREATE INDEX "chat_state_key_prefix_index" ON "coder"."chat_state" USING btree ("key" text_pattern_ops);--> statement-breakpoint
 CREATE INDEX "integration_app_installation_organization_id_app_id_index" ON "coder"."integration_app_installation" USING btree ("organization_id","app_id");--> statement-breakpoint
 CREATE INDEX "platform_link_user_id_index" ON "coder"."platform_link" USING btree ("user_id");--> statement-breakpoint
 CREATE INDEX "secret_organization_id_kind_index" ON "coder"."secret" USING btree ("organization_id","kind");--> statement-breakpoint

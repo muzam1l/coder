@@ -5,6 +5,7 @@ import { type Adapter, ConsoleLogger } from 'chat';
 import type { AdapterContext } from '../types';
 import type { GithubAppCredentials } from './app';
 import { verifyGithubWebhook } from '.';
+import { routed } from './api';
 import { GITHUB_PRESETS } from './tools';
 
 export function githubAdapter(ctx: AdapterContext): Adapter {
@@ -12,7 +13,7 @@ export function githubAdapter(ctx: AdapterContext): Adapter {
   const installationId = ctx.installationId;
   // One mint per request: the adapter asks before every API call.
   let minted: Promise<string> | undefined;
-  return createGitHubAdapter({
+  const adapter = createGitHubAdapter({
     userName: ctx.name,
     // Set, so no GITHUB_* variable redirects the token or names a member as the app; no user has id 0.
     apiUrl: 'https://api.github.com',
@@ -26,4 +27,7 @@ export function githubAdapter(ctx: AdapterContext): Adapter {
       verifyGithubWebhook(body, req.headers.get('x-hub-signature-256'), webhookSecret),
     logger: new ConsoleLogger('error'),
   });
+  routed(adapter.octokit, ctx.fetch);
+
+  return adapter;
 }

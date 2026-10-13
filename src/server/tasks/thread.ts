@@ -3,6 +3,8 @@ import { repositoryReader } from '../../integrations';
 import type { Integration } from '../../integrations/types';
 import type { Agent, AgentEvent, AgentTask, Installation, TaskContext } from '../../agent/types';
 import type { ServerContext } from '../context';
+import { cachedFile } from '../agents/repo';
+import type { TokenSource } from './context';
 
 export const NOTE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -11,13 +13,9 @@ export function threadKey(event: AgentEvent): string {
   return `${event.appId}:${event.installationId}:${event.chat?.thread.id ?? event.deliveryId}`;
 }
 
-async function readInstructions(
-  reader: Integration,
-  repo: string,
-  agent: string,
-  token: string,
-): Promise<string | undefined> {
-  return reader.repos!.readFile(repo, `.coder/${agent}.md`, token);
+/** A thread Coder started a task in, so later plain messages there are a conversation. */
+export function conversationKey(appId: string, installationId: string, thread: string): string {
+  return `thread:${appId}:${installationId}:${thread}`;
 }
 
 /** A platform task's note follows its thread; a dashboard or CLI task is its own thread. */
@@ -33,23 +31,25 @@ export async function buildContext(
   integration: Integration,
   installation: Installation,
   event: AgentEvent,
-  tokens: Record<string, string>,
+  tokens: TokenSource,
   agent: Agent,
   recent?: () => Promise<TaskContext['messages']>,
   member?: { name: string; email: string } | null,
 ): Promise<TaskContext> {
   const context: TaskContext = {};
   const reader = repositoryReader(ctx.integrations);
+  const configRepo = installation.settings?.configRepo;
   const [messages, note, instructions] = await Promise.all([
     recent?.().catch(() => undefined),
     ctx.store.get('note', threadKey(event)).catch(() => undefined),
-    reader && installation.settings?.configRepo && tokens[reader.id]
-      ? readInstructions(
-          reader,
-          installation.settings.configRepo,
-          agent.id,
-          tokens[reader.id]!,
-        ).catch(() => undefined)
+    reader && configRepo
+      ? tokens(reader.id)
+          .then(access =>
+            access
+              ? cachedFile(ctx, reader, access, configRepo, `.coder/${agent.id}.md`)
+              : undefined,
+          )
+          .catch(() => undefined)
       : undefined,
   ]);
   if (messages?.length) context.messages = messages;

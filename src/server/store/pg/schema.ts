@@ -126,6 +126,8 @@ export const integrationApp = pgTable(
     name: text().notNull(),
     agentsRepo: text(),
     branch: text(),
+    /** Any account may install it, not only the one that owns it. */
+    public: boolean(),
     credentialsSecretId: bigint({ mode: 'number' })
       .notNull()
       .references(() => secret.id),
@@ -141,14 +143,16 @@ export const integrationAppInstallation = pgTable(
     ...owned,
     /** `<app key>:<platform install id>`. */
     key: text().notNull(),
-    appId: bigint({ mode: 'number' })
-      .notNull()
-      .references(() => integrationApp.id),
+    /** Null once the app is removed; the row stays for history and reads skip it. */
+    appId: bigint({ mode: 'number' }).references(() => integrationApp.id, { onDelete: 'set null' }),
     platformInstallId: text().notNull(),
     account: jsonb().$type<{ login: string; type?: string }>().notNull(),
     tokenSecretId: bigint({ mode: 'number' }).references(() => secret.id),
     installer: text(),
+    /** The app's own platform user in this installation, as the platform named it at install. */
+    self: text(),
     covers: jsonb().$type<string[]>(),
+    repos: jsonb().$type<string[]>(),
     connections: jsonb().$type<Record<string, InstallationLink>>(),
     settings: jsonb().$type<InstallationSettings>(),
     ...timestamps,
@@ -212,7 +216,7 @@ export const task = pgTable(
     flow: text().notNull(),
     runner: text().notNull(),
     permissions: text().$type<AgentDefinition['permissions']>(),
-    appId: bigint({ mode: 'number' }).references(() => integrationApp.id),
+    appId: bigint({ mode: 'number' }).references(() => integrationApp.id, { onDelete: 'set null' }),
     installationId: bigint({ mode: 'number' }).references(() => integrationAppInstallation.id),
     event: jsonb().$type<AgentEvent>(),
     prompt: text(),
@@ -341,6 +345,8 @@ export const chatState = pgTable(
     index()
       .on(t.expiresAt)
       .where(sql`${t.expiresAt} is not null`),
+    // Prefix reads (`like 'prefix%'`) under any database collation.
+    index('chat_state_key_prefix_index').on(t.key.op('text_pattern_ops')),
   ],
 );
 

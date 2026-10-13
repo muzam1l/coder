@@ -1,4 +1,5 @@
 import type { Integration } from '../types';
+import { canWriteLinear } from './api';
 import { linearApp, linearToken, linearUserAuth } from './app';
 import { LINEAR_PRESETS, LINEAR_TOOLS } from './tools';
 
@@ -17,6 +18,7 @@ export const linear: Integration = {
   name: 'Linear',
   description: 'Agent sessions on Linear issues: mentions and assignments',
   installLabel: 'Connect Linear',
+  publicApps: true,
   sample: 'linear:2f1e6a1c-0000-4000-8000-000000000001:s:5b7d3c2a-0000-4000-8000-000000000002',
   hint: "You are working in a Linear issue's agent session. Keep replies short and about the issue; link pull requests you open.",
   events: {
@@ -32,8 +34,9 @@ export const linear: Integration = {
     return linearApp;
   },
   auth: {
-    token: (installation, credentials, _bound, save) =>
-      linearToken(installation, credentials, save),
+    canWrite: canWriteLinear,
+    token: (installation, credentials, _bound, { save, fetch: request } = {}) =>
+      linearToken(installation, credentials, save, request),
     get user() {
       return linearUserAuth;
     },

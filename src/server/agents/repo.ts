@@ -1,13 +1,15 @@
 /** Agents that live in a repository: reading it through an installed app, importing its versions, and loading one app's agent. */
+import { randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { isDeepStrictEqual } from 'node:util';
 
 import { agentsFromSources, assertNotReserved, loadAgents } from '../../agent/load';
 import { INTEGRATIONS, repositoryReader } from '../../integrations';
-import type { Integration } from '../../integrations/types';
+import type { Integration, Pushed } from '../../integrations/types';
 import type { Agent, AgentApp, AgentEvent, AgentUsage, Installation } from '../../agent/types';
 import type { AgentVersionRecord, Store } from '../store/types';
 import type { ServerConfig, ServerContext } from '../context';
+import type { PlatformAccess, TokenSource } from '../tasks/context';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import { agentWithVersion, getVersion, publishVersion, seedBuiltinAgent, toAgent } from './records';
 
@@ -15,19 +17,137 @@ export type Contents = Integration & Required<Pick<Integration, 'repos'>>;
 
 export const AGENTS_DIR = '.coder/agents';
 const CONFIG_FILE = '.coder/config.json';
-const USAGE_TTL_MS = 60_000;
+/** Collects copies no read, revalidation or push renewed for this long. */
+const FILE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** Outlives any read in flight when a push lands. */
+const PUSH_FENCE_TTL_MS = 60 * 60 * 1000;
+/** A branch's copy is revalidated this often even without a push, in case its webhook was lost. */
+const BRANCH_FILE_FRESH_MS = 10 * 60 * 1000;
+const FILE_READ_TIMEOUT_MS = 10_000;
 
 function eventRepo(event: AgentEvent): string | undefined {
   return event.repo ? `${event.repo.owner}/${event.repo.name}` : undefined;
 }
 
-async function readUsage(
-  contents: Contents,
+export interface RepoFile {
+  text?: string;
+  etag?: string;
+  readAt?: number;
+  /** Pushed since it was read; the next read revalidates it. */
+  stale?: true;
+}
+
+/** A branch's latest push, so a read that began before it never lands as fresh. */
+export interface RepoPush {
+  push: string;
+}
+
+const fileKey = (installation: string, repo: string, ref: string) =>
+  `repo-file:${installation}@${repo}@${ref}:`;
+const pushKey = (installation: string, repo: string, ref: string) =>
+  `repo-push:${installation}@${repo}@${ref}`;
+
+/** A repository file as Coder last read it through `access`, revalidated by ETag once a push marked it stale or, on a branch, after 10 minutes; the token is minted only then. Concurrent reads of one file share one. */
+export function cachedFile(
+  ctx: Pick<ServerContext, 'store' | 'fileReads'>,
+  contents: Integration,
+  access: PlatformAccess,
   repo: string,
-  token: string,
+  path: string,
+  ref?: string,
+): Promise<string | undefined> {
+  const key = `${fileKey(access.installation, repo, ref ?? '')}${path}`;
+  const reads = (ctx.fileReads ??= new Map());
+  let read = reads.get(key);
+  if (!read) {
+    const signal = AbortSignal.timeout(FILE_READ_TIMEOUT_MS);
+    const deadline = new Promise<never>((_, reject) =>
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true }),
+    );
+    read = Promise.race([
+      storedFile(ctx.store, contents, access, repo, path, ref, key, signal),
+      deadline,
+    ])
+      .catch(error => {
+        if (signal.aborted)
+          console.error(`coder server: repository file read timed out for ${repo}/${path}`, error);
+        throw error;
+      })
+      .finally(() => reads.delete(key));
+    reads.set(key, read);
+  }
+
+  return read;
+}
+
+async function storedFile(
+  store: Store,
+  contents: Integration,
+  access: PlatformAccess,
+  repo: string,
+  path: string,
+  ref: string | undefined,
+  key: string,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  const held = await store.get<RepoFile>('snapshot', key);
+  signal.throwIfAborted();
+  const commit = /^[0-9a-f]{40}$/i.test(ref ?? '');
+  const now = Date.now();
+  if (held && !held.stale && (commit || now - (held.readAt ?? 0) < BRANCH_FILE_FRESH_MS))
+    return held.text;
+
+  const fence = pushKey(access.installation, repo, ref ?? '');
+  const [token, push] = await Promise.all([
+    access.token(repo),
+    commit ? undefined : store.get<RepoPush>('snapshot', fence),
+  ]);
+  signal.throwIfAborted();
+  if (!token || !contents.repos) return undefined;
+
+  const read = contents.repos.revalidate
+    ? await contents.repos.revalidate(repo, path, token, {
+        ...(ref ? { ref } : {}),
+        ...(held?.etag ? { etag: held.etag } : {}),
+        fetch: ((input, init) => access.fetch(input, { ...init, signal })) as typeof fetch,
+      })
+    : { text: await contents.repos.readFile(repo, path, token, ref) };
+  signal.throwIfAborted();
+  const { stale: _stale, ...kept } = held ?? {};
+  const file = { ...(read === 'unchanged' ? kept : read), ...(commit ? {} : { readAt: now }) };
+  await store.put('snapshot', key, file, { ttlMs: FILE_TTL_MS });
+  if (!commit && (await store.get<RepoPush>('snapshot', fence))?.push !== push?.push)
+    await store.put('snapshot', key, { ...file, stale: true }, { ttlMs: FILE_TTL_MS });
+
+  return file.text;
+}
+
+/** Marks the files Coder holds for a pushed branch stale; the default branch's are also held under no ref. */
+export async function pushedFiles(store: Store, pushed: Pushed): Promise<void> {
+  const refs = [pushed.branch, ...(pushed.branch === pushed.defaultBranch ? [''] : [])];
+  for (const ref of refs) {
+    await store.put(
+      'snapshot',
+      pushKey(pushed.installation, pushed.repo, ref),
+      { push: randomUUID() },
+      { ttlMs: PUSH_FENCE_TTL_MS },
+    );
+    for (const { id, value } of await store.list<RepoFile>('snapshot', {
+      prefix: fileKey(pushed.installation, pushed.repo, ref),
+    }))
+      if (!value.stale)
+        await store.put('snapshot', id, { ...value, stale: true }, { ttlMs: FILE_TTL_MS });
+  }
+}
+
+async function readUsage(
+  ctx: Pick<ServerContext, 'store' | 'fileReads'>,
+  contents: Integration,
+  access: PlatformAccess,
+  repo: string,
   ref?: string,
 ): Promise<unknown> {
-  const config = await contents.repos.readFile(repo, CONFIG_FILE, token, ref);
+  const config = await cachedFile(ctx, contents, access, repo, CONFIG_FILE, ref);
   return config === undefined ? undefined : (JSON.parse(config) as { agents?: unknown }).agents;
 }
 
@@ -38,22 +158,18 @@ export interface RepositoryAccess {
   installation?: Installation;
 }
 
-/** Find repository contents access from resolved tokens or an installed app that owns the repo. */
+/** Find repository contents access from the event's tokens or an installed app that owns the repo. */
 async function repositoryAccess(
   integrations: Record<string, Integration>,
   options: { config: Pick<ServerConfig, 'encryptionKey'>; store: Store },
   repo: string,
   event: AgentEvent,
-  tokens: Record<string, string> = {},
+  tokens: TokenSource = async () => undefined,
 ): Promise<RepositoryAccess | undefined> {
   for (const integration of Object.values(integrations)) {
-    if (
-      (!event.repo && integration.id === event.integration) ||
-      !integration.repos ||
-      !tokens[integration.id]
-    )
-      continue;
-    return { contents: integration as Contents, token: tokens[integration.id]! };
+    if ((!event.repo && integration.id === event.integration) || !integration.repos) continue;
+    const token = await (await tokens(integration.id))?.token(repo);
+    if (token) return { contents: integration as Contents, token };
   }
   const [owner, name] = repo.split('/');
 
@@ -89,60 +205,41 @@ async function repositoryAccess(
   return undefined;
 }
 
-/** Disk agents win; otherwise records are authoritative and only usage is cached per repo/ref. */
+/** Disk agents win; otherwise records are authoritative and usage is read through the repository file cache. */
 export function remoteAgentLoader(
   integrations: Record<string, Integration>,
   options: {
     cwd?: string;
     config: Pick<ServerConfig, 'encryptionKey'>;
     store: Store;
+    fileReads?: ServerContext['fileReads'];
     now?: () => number;
   },
 ): ServerContext['loadAgent'] {
   const cwd = options.cwd ?? process.cwd();
   const now = options.now ?? Date.now;
-  // Owned by this loader; an entry serves one minute, so repository edits land without a restart.
-  const usageCache = new Map<string, { at: number; usage: Promise<unknown> }>();
 
   async function usageFor(
     installation: Installation,
     event: AgentEvent,
-    tokens: Record<string, string>,
+    tokens: TokenSource,
   ): Promise<unknown> {
     const reader = repositoryReader(integrations);
-    const token = reader && tokens[reader.id];
-    if (!reader?.repos || !token) return undefined;
+    const access = reader?.repos && (await tokens(reader.id));
+    if (!reader || !access) return undefined;
     const repo = eventRepo(event);
     if (event.integration === reader.id && repo)
-      return readUsage(reader as Contents, repo, token, event.repo?.ref);
+      return readUsage(options, reader, access, repo, event.repo?.ref);
     const configRepo = installation.settings?.configRepo;
-    if (configRepo) return readUsage(reader as Contents, configRepo, token);
+    if (configRepo) return readUsage(options, reader, access, configRepo);
     return undefined;
-  }
-
-  function cachedUsage(
-    app: AgentApp,
-    installation: Installation,
-    event: AgentEvent,
-    tokens: Record<string, string>,
-  ): Promise<unknown> {
-    const key = `${app.id}@${eventRepo(event) ?? installation.settings?.configRepo ?? ''}@${event.repo?.ref ?? ''}`;
-    const at = now();
-    for (const [entry, value] of usageCache)
-      if (at - value.at >= USAGE_TTL_MS) usageCache.delete(entry);
-    let cached = usageCache.get(key);
-    if (!cached) {
-      cached = { at, usage: usageFor(installation, event, tokens) };
-      usageCache.set(key, cached);
-    }
-    return cached.usage;
   }
 
   async function stored(
     app: AgentApp,
     installation: Installation,
     event: AgentEvent,
-    tokens: Record<string, string>,
+    tokens: TokenSource,
   ): Promise<Agent | undefined> {
     let loaded = await agentWithVersion(options.store, app.agent);
     if (loaded.record && (await seedBuiltinAgent(options.store, now(), app.agent, loaded)))
@@ -150,7 +247,7 @@ export function remoteAgentLoader(
     const { record, version } = loaded;
     if (!record) return undefined;
     if (!version) throw new Error(`No version ${record.currentVersion} for agent "${record.id}".`);
-    const usage = await cachedUsage(app, installation, event, tokens);
+    const usage = await usageFor(installation, event, tokens);
     const entry =
       usage && typeof usage === 'object'
         ? (usage as Record<string, unknown>)[app.agent]

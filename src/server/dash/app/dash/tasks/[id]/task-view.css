@@ -104,14 +104,6 @@ pre.json {
   font-size: 11px;
   color: var(--dim);
 }
-.body.waiting {
-  display: flex;
-  justify-content: center;
-  padding-block: 40px;
-}
-.body.waiting > .loading {
-  flex: 0 1 auto;
-}
 .turn .collapse.open > .btn.more-toggle {
   margin: 8px auto 0;
 }
@@ -138,9 +130,6 @@ pre.json {
   background: none;
   font: 12.5px/1.7 var(--mono);
   text-align: left;
-}
-.act-slot:has(> .sep) {
-  padding-top: 8px;
 }
 button.act {
   grid-template-columns: 76px 16px minmax(0, 1fr) 14px;
@@ -188,9 +177,6 @@ button.act:hover {
   flex: 1 1 0;
   color: var(--dim);
 }
-.act-tool {
-  color: var(--fg);
-}
 .act.open .act-text {
   display: grid;
   gap: 2px;
@@ -206,6 +192,8 @@ button.act:hover {
 .act.assistant .act-title {
   color: var(--fg);
   font-size: 13px;
+  /* the same line box as every other row */
+  line-height: calc(12.5px * 1.7);
 }
 .act.assistant .ic {
   color: var(--acc);
@@ -243,11 +231,62 @@ button.act:hover {
   margin: 0 6px 0 0;
   vertical-align: -1px;
 }
-.act-state .spin {
+.act-state .spin,
+.act.step > .spin {
   border: 1.5px solid currentColor;
   border-top-color: transparent;
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
+}
+/* the result card while a task runs: its summary, two step lines whether or not they have arrived, then the wait line */
+.run-sum,
+.run-foot {
+  color: var(--muted);
+  font-size: 12px;
+}
+.run > .run-steps {
+  display: grid;
+  grid-template-rows: repeat(2, 28px);
+  margin: 8px -8px 0;
+}
+/* earlier steps fade out above the first line */
+.run-steps.earlier {
+  mask-image: linear-gradient(to bottom, rgb(0 0 0 / 0.25), #000 28px);
+}
+.run > .loading.inline {
+  display: flex;
+  margin-top: 12px;
+}
+.act.step {
+  grid-template-columns: 16px minmax(0, 1fr) auto 14px;
+}
+.act.run-sum {
+  grid-template-columns: minmax(0, 1fr) 14px;
+  width: calc(100% + 16px);
+  margin-inline: -8px;
+}
+.act.step.approval {
+  border-left-color: transparent;
+}
+.act.step.approval:not(:hover) {
+  background: none;
+}
+.act.step > .spin {
+  width: 11px;
+  height: 11px;
+  margin-inline: 1px;
+  align-self: center;
+}
+.run-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 8px 6px 16px;
+  border-top: 1px solid var(--line);
+}
+.act-slot.at > .act {
+  background: var(--wash);
 }
 .act-empty {
   padding: 24px 0;
@@ -273,6 +312,20 @@ button.act:hover {
 .no-reply {
   margin-top: 16px;
   font-size: 12px;
+}
+
+/* the approval card floats above the reply box, so its coming and going moves nothing */
+.approval-dock {
+  position: sticky;
+  bottom: calc(var(--reply, 0px) + 8px);
+  z-index: 12;
+  height: 0;
+  margin-top: -20px;
+}
+.approval-dock .card {
+  position: absolute;
+  inset: auto 0 0;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
 }
 
 /* the reply box stays at the bottom of the window */

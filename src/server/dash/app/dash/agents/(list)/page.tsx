@@ -48,7 +48,7 @@ export default function AgentsPage({ request }: { request?: Request }) {
     connect: true,
     ...filters,
   });
-  const credentials = load(request).credentials.list({ cursor: '', limit: 1 });
+  const credentials = load(request).credentials.list({ cursor: '', limit: 1, fields: 'id' });
   const me = load(request).me();
   const catalog = load(request).integrations.list();
 

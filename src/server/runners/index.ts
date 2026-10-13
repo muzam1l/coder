@@ -67,14 +67,18 @@ export async function chooseRunner(
   ctx: ServerContext,
   options: { requester?: string; runner?: string; agent?: string } = {},
 ): Promise<{ runner: RunnerKind; runnerId?: string }> {
-  const rows = (await ctx.store.list('runner')).filter(
+  const named = options.runner ?? options.agent;
+  if (named === serverRunnerId(ctx)) return { runner: ctx.config.runner };
+  const rows = (
+    await ctx.store.list('runner', {
+      visibleTo: options.requester,
+      ...(named ? { runner: named } : { defaults: true }),
+    })
+  ).filter(
     ({ value }) =>
       visibleRunner(value, options.requester) &&
       (ctx.local || (value.kind !== 'local' && value.kind !== 'local-docker')),
   );
-  const named = options.runner ?? options.agent;
-  if (named === serverRunnerId(ctx)) return { runner: ctx.config.runner };
-
   const found = named
     ? rows.find(({ id, value }) => id === named || value.name === named)
     : (rows.find(({ value }) => value.scope === 'personal' && value.default) ??
@@ -253,6 +257,7 @@ export interface RunnerStatus {
 export interface RunnerLogs {
   lines: Array<Pick<TaskLogLine, 'level' | 'line'> & { at?: number }>;
   next: number;
+  complete?: boolean;
 }
 
 export interface Runner {

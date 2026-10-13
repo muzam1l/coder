@@ -40,7 +40,13 @@ import {
   taskLog,
   usage,
 } from './schema';
-import { addUsage, timeZone } from '../../tasks/usage';
+import {
+  addUsage,
+  timeZone,
+  type UsageGroup,
+  type UsageTotal,
+  type UsageTotals,
+} from '../../tasks/usage';
 import { agents, agentVersions, insertVersion, publishAgent } from './tables/agents';
 import {
   apps,
@@ -75,6 +81,7 @@ import {
 import { inboxes, logs, tasks, usages } from './tables/tasks';
 import type {
   Store,
+  StoreListOptions,
   MetadataKind,
   AgentPageOptions,
   CredentialScope,
@@ -207,6 +214,24 @@ export class DrizzleStore implements Store {
     return row && { organizationId: row.row.organizationId, app: appValue(row.row, row.sealed) };
   }
 
+  /** Every workspace's apps on one integration. */
+  static async apps(
+    db: Db,
+    integration: string,
+  ): Promise<Array<{ organizationId: string; app: AgentApp }>> {
+    const rows = await readQuery(db, () =>
+      db
+        .select({ row: app, sealed: secret })
+        .from(app)
+        .innerJoin(secret, eq(secret.id, app.credentialsSecretId))
+        .where(eq(app.integration, integration)),
+    );
+    return rows.map(({ row, sealed }) => ({
+      organizationId: row.organizationId,
+      app: appValue(row, sealed),
+    }));
+  }
+
   /** The workspace an installation key is bound to, across every organization. */
   static async installationOrganization(db: Db, key: string): Promise<string | undefined> {
     const [row] = await readQuery(db, () =>
@@ -268,21 +293,26 @@ export class DrizzleStore implements Store {
     return rows.map(row => ({ id: row.row.key, value: appValue(row.row, row.sealed) }));
   }
 
-  async listCredentials(opts: { owner?: string; engine?: string }) {
+  async listCredentials(opts: { owner?: string; engine?: string; limit?: number }) {
     const t = engineCredential;
+    const query = this.db
+      .select({ row: t, sealed: secret })
+      .from(t)
+      .innerJoin(secret, eq(secret.id, t.secretId))
+      .where(
+        and(
+          this.mine(t.organizationId),
+          opts.owner ? or(isNull(t.owner), eq(t.owner, opts.owner)) : isNull(t.owner),
+          opts.engine ? eq(t.engine, opts.engine as StoredCredential['engine']) : undefined,
+        ),
+      )
+      .orderBy(
+        asc(t.engine),
+        asc(sql`case when ${t.owner} is null then 'workspace' else 'personal' end`),
+        asc(t.label),
+      );
     const rows = await readQuery(this.db, () =>
-      this.db
-        .select({ row: t, sealed: secret })
-        .from(t)
-        .innerJoin(secret, eq(secret.id, t.secretId))
-        .where(
-          and(
-            this.mine(t.organizationId),
-            opts.owner ? or(isNull(t.owner), eq(t.owner, opts.owner)) : isNull(t.owner),
-            opts.engine ? eq(t.engine, opts.engine as StoredCredential['engine']) : undefined,
-          ),
-        )
-        .orderBy(asc(t.owner), asc(t.label)),
+      opts.limit === undefined ? query : query.limit(opts.limit),
     );
     return rows.map(({ row, sealed }) => ({
       id: credentialId(row.owner ?? undefined, row.label),
@@ -318,7 +348,7 @@ export class DrizzleStore implements Store {
       kind === 'app'
         ? ['name', 'agentsRepo', 'branch']
         : kind === 'installation'
-          ? ['account', 'covers', 'connections', 'settings', 'deletedAt']
+          ? ['account', 'self', 'covers', 'repos', 'connections', 'settings', 'deletedAt']
           : ['name', 'config', 'lastSeen', 'updatedAt'];
     if (Object.keys(fields).some(key => !allowed.includes(key)))
       throw new Error('Invalid metadata fields');
@@ -688,22 +718,66 @@ export class DrizzleStore implements Store {
 
   list<K extends StoreKind>(
     kind: K,
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: StoreRecords[K] }>>;
   list<T extends StoreRecords['snapshot']>(
     kind: 'snapshot',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: T }>>;
   list<T extends StoreRecords['delivery']>(
     kind: 'delivery',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: T }>>;
-  async list(
-    kind: StoreKind,
-    opts: { prefix?: string; after?: string; limit?: number } = {},
-  ): Promise<Rows<StoreRecords[StoreKind]>> {
+  async list(kind: StoreKind, opts: StoreListOptions = {}): Promise<Rows<StoreRecords[StoreKind]>> {
     const k = this.kinds[kind];
-    if (k.where) return readQuery(this.db, async () => await k.rows(k.where!(opts), opts.limit));
+    const filters: Array<SQL | undefined> = [];
+    if (opts.ids)
+      filters.push(
+        opts.ids.length
+          ? inArray(
+              sql`${k.key}`,
+              opts.ids.map(id => (k.where ? stateKey(this.organizationId, kind, id) : id)),
+            )
+          : sql`false`,
+      );
+    if (opts.runner)
+      filters.push(
+        kind === 'runner'
+          ? or(eq(runner.publicId, opts.runner), eq(runner.name, opts.runner))
+          : sql`false`,
+      );
+    if (opts.defaults) filters.push(kind === 'runner' ? eq(runner.isDefault, true) : sql`false`);
+    if (opts.installation)
+      filters.push(kind === 'usage' ? eq(install.key, opts.installation) : sql`false`);
+    if (opts.agent)
+      filters.push(
+        kind === 'app' || kind === 'installation'
+          ? eq(app.agent, opts.agent)
+          : kind === 'agent'
+            ? eq(agent.slug, opts.agent)
+            : sql`false`,
+      );
+    if (opts.active) filters.push(kind === 'installation' ? isNull(install.deletedAt) : undefined);
+    if (opts.apps)
+      filters.push(
+        kind === 'installation' && opts.apps.length ? inArray(app.key, opts.apps) : sql`false`,
+      );
+    if (Object.hasOwn(opts, 'visibleTo')) {
+      const owner =
+        kind === 'runner'
+          ? runner.owner
+          : kind === 'credential'
+            ? engineCredential.owner
+            : sql`${chatState.value}->>'owner'`;
+      filters.push(
+        or(isNull(owner), opts.visibleTo ? eq(sql`${owner}`, opts.visibleTo) : undefined),
+      );
+    }
+    if (k.where)
+      return readQuery(
+        this.db,
+        async () => await k.rows(and(k.where!(opts), ...filters), opts.limit),
+      );
 
     const parent = opts.prefix?.endsWith(':') ? opts.prefix.slice(0, -1) : undefined;
     const from = opts.after === undefined ? undefined : splitKey(opts.after);
@@ -717,7 +791,7 @@ export class DrizzleStore implements Store {
 
     const prefix = opts.prefix ? sql`${k.key} like ${`${escapeLike(opts.prefix)}%`}` : undefined;
     const after = opts.after ? sql`${k.key} > ${opts.after}` : undefined;
-    const where = prefix && after ? and(prefix, after) : (prefix ?? after);
+    const where = and(prefix, after, ...filters);
 
     return readQuery(this.db, async () => await k.rows(where, opts.limit));
   }
@@ -839,6 +913,107 @@ export class DrizzleStore implements Store {
     if (found === undefined) return false;
     await this.delete(kind, id);
     return true;
+  }
+
+  async usageSummary(since: number, by?: UsageGroup): Promise<UsageTotals['totals']> {
+    const group = sql`case groups.kind when 'agent' then ${usage.agent} when 'engine' then coalesce(${usage.engine}, 'unknown') else coalesce(${install.key}, 'none') end`;
+    const key = by ? group : sql`groups.kind || ':' || (${group})`;
+    const result = await readQuery(this.db, () =>
+      this.db.execute(sql`
+      with recursive records as (
+        select ${key} as key, ${usage.runnerMs} as runner_ms, ${usage.tokens} as tokens,
+          row_number() over (partition by ${key} order by ${task.publicId}) as n
+        from ${usage} inner join ${task} on ${task.id} = ${usage.taskId}
+        left join ${install} on ${install.id} = ${usage.installationId}
+        cross join unnest(${sql.param(by ? [by] : ['agent', 'installation', 'engine'])}::text[]) groups(kind)
+        where ${this.mine(usage.organizationId)} and ${usage.at} >= ${new Date(since).toISOString()}::timestamptz
+      ), nodes(key, path, n, value) as (
+        select key, '{}'::text[], n, tokens from records where tokens is not null
+        union all
+        select nodes.key, nodes.path || child.key, nodes.n, child.value from nodes
+        cross join lateral jsonb_each(case when jsonb_typeof(nodes.value) = 'object' then nodes.value else '{}'::jsonb end) child
+      ), resolved(key, path, kind, cutoff) as (
+        select keys.key, '{}'::text[], latest.kind, coalesce((
+          select max(n) from nodes where nodes.key = keys.key and path = '{}'::text[]
+            and jsonb_typeof(value) in ('number', 'object') and jsonb_typeof(value) <> latest.kind
+        ), 0) from (select distinct key from records) keys
+        cross join lateral (
+          select jsonb_typeof(value) as kind from nodes where nodes.key = keys.key and path = '{}'::text[]
+            and jsonb_typeof(value) in ('number', 'object') order by n desc limit 1
+        ) latest
+        union all
+        select parent.key, child.path, latest.kind, greatest(parent.cutoff, coalesce((
+          select max(n) from nodes where nodes.key = parent.key and nodes.path = child.path
+            and n > parent.cutoff and jsonb_typeof(value) in ('number', 'object') and jsonb_typeof(value) <> latest.kind
+        ), 0)) from resolved parent
+        cross join lateral (
+          select distinct path[1:cardinality(parent.path) + 1] as path from nodes
+          where nodes.key = parent.key and n > parent.cutoff and cardinality(path) > cardinality(parent.path)
+            and path[1:cardinality(parent.path)] = parent.path
+        ) child
+        cross join lateral (
+          select jsonb_typeof(value) as kind from nodes where nodes.key = parent.key and nodes.path = child.path
+            and n > parent.cutoff and jsonb_typeof(value) in ('number', 'object') order by n desc limit 1
+        ) latest where parent.kind = 'object'
+      ), sums as (
+        select key, path, case when kind = 'object' then '{}'::jsonb else to_jsonb((
+          select sum(case when jsonb_typeof(value) = 'number' then (value #>> '{}')::numeric end)::float8
+          from nodes where nodes.key = resolved.key and nodes.path = resolved.path and n > cutoff
+        )) end as value from resolved
+      ) select key, count(*)::int as tasks, sum(runner_ms)::float8 as runner_ms,
+        (select jsonb_agg(jsonb_build_object('path', path, 'value', value) order by path) from sums where sums.key = records.key) as tokens
+        from records group by key order by key
+    `),
+    );
+    type Row = {
+      key: string;
+      tasks: number;
+      runner_ms: number;
+      tokens: Array<{ path: string[]; value: number | Record<string, never> }> | null;
+    };
+    const rows = (
+      Array.isArray(result) ? result : (result as unknown as { rows: Row[] }).rows
+    ) as Row[];
+    const totals = rows.map(row => {
+      let tokens: unknown;
+      for (const entry of row.tokens ?? []) {
+        if (!entry.path.length) {
+          tokens = typeof entry.value === 'number' ? entry.value : Object.create(null);
+          continue;
+        }
+        const root =
+          tokens && typeof tokens === 'object'
+            ? (tokens as Record<string, unknown>)
+            : Object.create(null);
+        tokens = root;
+        let object = root;
+        for (const name of entry.path.slice(0, -1))
+          object = (object[name] ??= Object.create(null)) as Record<string, unknown>;
+        Object.defineProperty(object, entry.path.at(-1)!, {
+          value: typeof entry.value === 'number' ? entry.value : Object.create(null),
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
+      return {
+        key: row.key,
+        tasks: row.tasks,
+        runnerMs: row.runner_ms,
+        ...(tokens === undefined ? {} : { tokens }),
+      };
+    });
+    if (by) return totals;
+    const grouped: Record<UsageGroup, UsageTotal[]> = { agent: [], installation: [], engine: [] };
+    for (const row of totals) {
+      const colon = row.key.indexOf(':');
+      grouped[row.key.slice(0, colon) as UsageGroup].push({
+        ...row,
+        key: row.key.slice(colon + 1),
+      });
+    }
+
+    return grouped;
   }
 
   async usageTotals(query: UsageQuery): Promise<UsageTotalRow[]> {

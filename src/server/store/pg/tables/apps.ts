@@ -38,6 +38,7 @@ export const appValue = (
     agentsRepo: r.agentsRepo,
     branch: r.branch,
     builtin: r.organizationId === UNSCOPED_ORGANIZATION || undefined,
+    public: r.public || undefined,
     credentials: opaque(sealed),
     createdAt: ms(r.createdAt),
   });
@@ -82,6 +83,7 @@ export function apps(s: DrizzleStore): Kind<AgentApp> {
           name: value.name,
           agentsRepo: value.agentsRepo ?? null,
           branch: value.branch ?? null,
+          public: value.public ?? null,
           credentialsSecretId,
           createdAt: date(value.createdAt),
           updatedAt: s.at(),
@@ -117,7 +119,9 @@ export function installationValue(
     account: r.account,
     token: sealed ? opaque(sealed) : undefined,
     installer: r.installer,
+    self: r.self,
     covers: r.covers,
+    repos: r.repos,
     connections: r.connections,
     settings: r.settings,
     createdAt: ms(r.createdAt),
@@ -198,7 +202,9 @@ export function installations(s: DrizzleStore): Kind<Installation> {
           account: value.account,
           tokenSecretId: value.token ? tokenSecretId : null,
           installer: value.installer ?? null,
+          self: value.self ?? null,
           covers: value.covers ?? null,
+          repos: value.repos ?? null,
           connections: value.connections ?? null,
           settings: value.settings ?? null,
           createdAt: date(value.createdAt),
@@ -352,7 +358,7 @@ export function credentials(s: DrizzleStore): Kind<StoredCredential> {
         .from(t)
         .innerJoin(secret, eq(secret.id, t.secretId))
         .where(and(s.mine(t.organizationId), where))
-        .orderBy(asc(t.owner), asc(t.label));
+        .orderBy(asc(sql`coalesce(${t.owner} || '/', '') || ${t.label}`));
       const rows = await (limit === undefined ? q : q.limit(limit));
       return rows.map(({ row, sealed }) => ({
         id: credentialId(row.owner ?? undefined, row.label),

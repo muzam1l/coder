@@ -1,6 +1,12 @@
 /** Slack through Chat SDK: the app's signing secret verifies, Coder's bound installations hold the bot tokens. */
-import { SlackAdapter, type SlackAdapterConfig } from '@chat-adapter/slack';
-import { type Adapter, type ChatInstance, ConsoleLogger, type StateAdapter } from 'chat';
+import { SlackAdapter, type SlackAdapterConfig, type SlackEvent } from '@chat-adapter/slack';
+import {
+  type Adapter,
+  type ChatInstance,
+  ConsoleLogger,
+  type StateAdapter,
+  type WebhookOptions,
+} from 'chat';
 
 import type { AdapterContext } from '../types';
 import type { SlackAppCredentials } from './app';
@@ -50,8 +56,39 @@ class BoundSlackAdapter extends SlackAdapter {
     config: SlackAdapterConfig,
     private readonly outbound?: () => Promise<string>,
     private readonly privateState?: () => StateAdapter,
+    private readonly hears?: AdapterContext['hears'],
+    private readonly active?: AdapterContext['active'],
   ) {
     super(config);
+  }
+
+  /** Set for a plain message outside a conversation: its users are named by id, never looked up. */
+  private unnamed = false;
+
+  // Filtered before Chat looks up the author and mentions: a plain message Coder does not take is dropped.
+  protected override handleMessageEvent(event: SlackEvent, options?: WebhookOptions): void {
+    const plain =
+      event.type === 'message' &&
+      event.subtype !== 'message_changed' &&
+      event.subtype !== 'message_deleted' &&
+      event.channel_type !== 'im' &&
+      !this.parseMessage(event).isMention;
+    if (!plain || !this.hears) return super.handleMessageEvent(event, options);
+
+    const work = (async () => {
+      if (!(await this.hears!(event.text ?? ''))) return;
+      this.unnamed = !(
+        event.thread_ts && (await this.active?.(this.threadIdForMessageEvent(event)))
+      );
+      super.handleMessageEvent(event, options);
+    })();
+    options?.waitUntil?.(work);
+  }
+
+  protected override lookupUser(userId: string) {
+    return this.unnamed
+      ? Promise.resolve({ displayName: userId, realName: userId })
+      : super.lookupUser(userId);
   }
 
   override async initialize(chat: ChatInstance): Promise<void> {
@@ -134,5 +171,7 @@ export function slackAdapter(ctx: AdapterContext): Adapter {
     },
     signingSecret && installationId ? () => mint(installationId) : undefined,
     ctx.privateState,
+    ctx.hears,
+    ctx.active,
   );
 }

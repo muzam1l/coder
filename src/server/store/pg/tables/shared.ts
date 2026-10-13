@@ -21,11 +21,20 @@ export function storedTaskContext(value: TaskStatus['task']) {
 }
 
 export function readTaskContext(value: TaskStatus['task']['context'] | null) {
-  const { connections, ...context } = (value ?? {}) as NonNullable<
+  const { connections, runnerLogs, ...context } = (value ?? {}) as NonNullable<
     TaskStatus['task']['context']
-  > & { connections?: string[] };
+  > & {
+    connections?: string[];
+    runnerLogs?: {
+      at?: number;
+      complete?: boolean;
+      handle?: string;
+      attempts?: number;
+      generation?: number;
+    };
+  };
 
-  return { connections, context: Object.keys(context).length ? context : undefined };
+  return { connections, runnerLogs, context: Object.keys(context).length ? context : undefined };
 }
 
 /** Postgres requests acquire their organization from a session, app, or task. */
@@ -157,6 +166,11 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
     logCursor: r.logCursor ?? undefined,
     logSeq: r.logSeq ?? undefined,
     logBytes: r.logBytes ?? undefined,
+    ...(context.runnerLogs?.handle === r.handle &&
+    context.runnerLogs?.attempts === r.attempts &&
+    context.runnerLogs?.generation === r.generation
+      ? { logsPulledAt: context.runnerLogs?.at, logsComplete: context.runnerLogs?.complete }
+      : {}),
     archivedAt: optionalMs(r.archivedAt),
     approval: r.approval,
     answer: Array.isArray(r.answer) ? r.answer : undefined,

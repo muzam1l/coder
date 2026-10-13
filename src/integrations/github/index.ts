@@ -1,9 +1,9 @@
-import { createHmac } from 'node:crypto';
+import { createHash, createHmac } from 'node:crypto';
 
 import { safeEqual } from '../../utils/crypto';
 import type { SerializedThread } from 'chat';
 
-import type { AgentApp, AgentEvent, Installation, Integration, TokenBound } from '../types';
+import type { AgentApp, AgentEvent, Installation, Integration, Pushed, TokenBound } from '../types';
 import {
   canWriteGithub,
   githubCommit,
@@ -12,7 +12,9 @@ import {
   listGithubDir,
   listGithubPullRequests,
   listGithubRepositories,
+  octokit,
   readGithubFile,
+  revalidateGithubFile,
 } from './api';
 import { githubApp, githubAppPermissions, githubUserAuth, type GithubAppCredentials } from './app';
 import { GITHUB_MCP_SERVER_INSTALL, GITHUB_PRESETS, githubToolServer } from './tools';
@@ -53,6 +55,11 @@ type Payload = {
     id?: number | string;
     account?: { login?: string; type?: string };
   };
+  repositories?: Repo[];
+  repositories_added?: Repo[];
+  repositories_removed?: Repo[];
+  changes?: { repository?: { name?: { from?: string } } };
+  repository_selection?: 'all' | 'selected';
   repository?: Repo;
   pull_request?: Pull;
   requested_reviewer?: User;
@@ -211,24 +218,52 @@ export function parseGithubEvent(
   return [];
 }
 
-/** An installation token narrowed to `scope`, minted with the app's key through the GitHub adapter's own auth library. */
-export async function installationToken(
+/** An installation token narrowed to `scope`, minted with the app's key through the GitHub adapter's own auth library; GitHub's last an hour. */
+async function mintInstallationToken(
   config: { appId: string; privateKey: string },
   installationId: string | number,
   scope: { repositories?: string[]; permissions?: Record<string, string> } = {},
-): Promise<string> {
-  const { createAppAuth } = await import('@octokit/auth-app');
-  const { token } = await createAppAuth(config)({
+  request?: typeof fetch,
+): Promise<{ token: string; expiresAt: number }> {
+  const client = await octokit(
+    { appId: config.appId, privateKey: config.privateKey, installationId: Number(installationId) },
+    request,
+  );
+  const { token, expiresAt } = (await client.auth({
     type: 'installation',
     installationId,
     ...(scope.repositories ? { repositoryNames: scope.repositories } : {}),
     ...(scope.permissions ? { permissions: scope.permissions } : {}),
-  });
-  return token;
+  })) as { token: string; expiresAt: string };
+  return { token, expiresAt: Date.parse(expiresAt) };
 }
+
+export async function installationToken(
+  ...input: Parameters<typeof mintInstallationToken>
+): Promise<string> {
+  return (await mintInstallationToken(...input)).token;
+}
+
+/** The app key and the exact scope, repositories sorted; an omitted part differs from an empty one. */
+function githubReuseKey(credentials: unknown, bound?: TokenBound): string {
+  const { appId, privateKey } = credentials as GithubAppCredentials;
+  const { repositories, permissions } = githubTokenScope(bound);
+  return createHash('sha256')
+    .update(
+      JSON.stringify([
+        appId,
+        privateKey,
+        repositories ? [...repositories].sort() : null,
+        permissions ? Object.entries(permissions).sort() : null,
+      ]),
+    )
+    .digest('base64url');
+}
+
 const LIFECYCLE: Record<string, string[]> = {
-  installation: ['created', 'deleted', 'suspend', 'unsuspend'],
+  installation: ['created', 'deleted', 'suspend', 'unsuspend', 'new_permissions_accepted'],
   installation_repositories: ['added', 'removed'],
+  repository: ['created', 'deleted', 'renamed'],
 };
 
 /** An `installation` or `installation_repositories` webhook, by its `X-GitHub-Event` name and action. */
@@ -236,16 +271,55 @@ export function githubInstallation(
   name: string | null,
   body: unknown,
   app: AgentApp,
-): { op: 'upsert' | 'delete'; installation: Installation } | undefined {
+):
+  | {
+      op: 'upsert' | 'delete';
+      installation: Installation;
+      repos?: { add: string[]; remove: string[]; refresh?: true };
+    }
+  | undefined {
   const payload = value(body);
   const id = payload.installation?.id;
   const action = payload.action;
   if (id === undefined || !LIFECYCLE[name ?? '']?.includes(action ?? '')) return;
   const account = payload.installation?.account;
   const now = Date.now();
-  const gone = action === 'deleted' || action === 'suspend';
+  const gone = name === 'installation' && (action === 'deleted' || action === 'suspend');
   return {
     op: gone ? 'delete' : 'upsert',
+    ...(name === 'repository' && payload.repository?.full_name
+      ? {
+          repos: {
+            add: action === 'created' || action === 'renamed' ? [payload.repository.full_name] : [],
+            remove:
+              action === 'deleted'
+                ? [payload.repository.full_name]
+                : action === 'renamed' && payload.changes?.repository?.name?.from
+                  ? [
+                      `${payload.repository.full_name.split('/')[0]}/${payload.changes.repository.name.from}`,
+                    ]
+                  : [],
+          },
+        }
+      : {}),
+    ...(name === 'installation_repositories'
+      ? {
+          repos: {
+            ...(payload.repository_selection &&
+            (action === 'removed'
+              ? !payload.repositories_removed?.length
+              : !payload.repositories_added?.length)
+              ? { refresh: true as const }
+              : {}),
+            add: (payload.repositories_added ?? []).flatMap(repo =>
+              repo.full_name ? [repo.full_name] : [],
+            ),
+            remove: (payload.repositories_removed ?? []).flatMap(repo =>
+              repo.full_name ? [repo.full_name] : [],
+            ),
+          },
+        }
+      : {}),
     installation: {
       integration: 'github',
       id: `${app.id}:${id}`,
@@ -255,6 +329,9 @@ export function githubInstallation(
         ...(account?.type ? { type: account.type } : {}),
       },
       createdAt: now,
+      ...(payload.repositories
+        ? { repos: payload.repositories.flatMap(repo => (repo.full_name ? [repo.full_name] : [])) }
+        : {}),
       ...(gone ? { deletedAt: now } : {}),
     },
   };
@@ -287,6 +364,30 @@ export function githubChanges(
   ].filter(file => file.startsWith('.coder/agents/'));
   return paths.length ? { repo, ref: payload.after, branch, paths } : undefined;
 }
+/** A push to a branch that may change `.coder/` files; a payload listing no commits (a force push, a new or deleted branch, or one cut at GitHub's 2048) counts. */
+export function githubPush(body: unknown, app: AgentApp): Pushed | undefined {
+  const payload = value(body);
+  const repo = payload.repository?.full_name;
+  const branch = payload.ref?.startsWith('refs/heads/') && payload.ref.slice('refs/heads/'.length);
+  const id = payload.installation?.id;
+  if (!repo || !branch || id === undefined) return undefined;
+  const commits = payload.commits ?? [];
+  const paths = commits.flatMap(commit => [
+    ...(commit.added ?? []),
+    ...(commit.modified ?? []),
+    ...(commit.removed ?? []),
+  ]);
+  if (commits.length && commits.length < 2048 && !paths.some(file => file.startsWith('.coder/')))
+    return undefined;
+  return {
+    installation: `${app.id}:${id}`,
+    repo,
+    branch,
+    ...(payload.repository?.default_branch
+      ? { defaultBranch: payload.repository.default_branch }
+      : {}),
+  };
+}
 /** The narrowest token for a bound: its repository, and the permissions its tools need. */
 export function githubTokenScope(bound: TokenBound = {}): {
   repositories?: string[];
@@ -312,6 +413,7 @@ export const github: Integration = {
   description: 'Pull requests, issues, and comments on GitHub repositories',
   installLabel: 'Connect GitHub',
   organizationApps: true,
+  publicApps: true,
   hint: 'Cite repository file paths when discussing code. After making changes, link the pull request.',
   sample: 'github:owner/repo:1',
   author: name => `${name}[bot]`,
@@ -340,26 +442,36 @@ export const github: Integration = {
   },
   auth: {
     // Installation store ids are `<app id>:<platform installation id>`.
-    token: (installation, credentials, bound) =>
-      installationToken(
-        credentials as GithubAppCredentials,
-        installation.id.split(':').pop()!,
-        githubTokenScope(bound),
-      ),
+    token: async (installation, credentials, bound, { fetch: request, hold } = {}) => {
+      const mint = () =>
+        mintInstallationToken(
+          credentials as GithubAppCredentials,
+          installation.id.split(':').pop()!,
+          githubTokenScope(bound),
+          request,
+        );
+      return hold ? hold(githubReuseKey(credentials, bound), mint) : (await mint()).token;
+    },
     get user() {
       return githubUserAuth;
     },
-    canWrite: async (event, token) =>
+    canWrite: async (event, token, request) =>
       Boolean(event.repo && event.actor.login) &&
-      canWriteGithub(`${event.repo!.owner}/${event.repo!.name}`, event.actor.login!, token),
+      canWriteGithub(
+        `${event.repo!.owner}/${event.repo!.name}`,
+        event.actor.login!,
+        token,
+        request,
+      ),
   },
   repos: {
     cloneHosts: ['github.com'],
     credentialUsername: 'x-access-token',
     readFile: readGithubFile,
+    revalidate: revalidateGithubFile,
     listDir: listGithubDir,
     commit: githubCommit,
-    list: (_installation, token) => listGithubRepositories(token),
+    list: (_installation, token, request) => listGithubRepositories(token, request),
     get: githubRepository,
     url: githubRepositoryUrl,
     pullRequests: listGithubPullRequests,
@@ -393,7 +505,9 @@ export const github: Integration = {
     const installation = githubInstallation(name, body, app);
     if (installation) return { installation };
     const changes = githubChanges(body, app);
-    if (changes) return { changes };
+    const pushed = name === 'push' ? githubPush(body, app) : undefined;
+    if (changes) return { changes, ...(pushed ? { pushed } : {}) };
+    if (pushed) return { pushed };
     return { events: parseGithubEvent(req, body, app, { slug }) };
   },
   event(type, _thread, message) {

@@ -3,16 +3,24 @@ import { createHash } from 'node:crypto';
 
 import { Chat, Message, type SerializedMessage, type SerializedThread, type Thread } from 'chat';
 
+import { eventOptions } from '../agent/definition';
 import { type AgentApp, type AgentEvent, type TaskContext } from '../agent/types';
+import { agentWithVersion } from './agents/records';
 import type { ChatRoute, Integration, TokenBound } from '../integrations/types';
 import { appOwner, forInstallation, scoped, type ServerContext } from './context';
+import { SigningKeys } from './auth/signing-keys';
 import { appChatState, LocalChatState } from './store/chat';
 import { decryptSecret } from './store/secrets';
+import { updateMetadata } from './store';
 import { installationToken } from './tasks/context';
 import { DELIVERY_TTL_MS, dispatchEvent, type Replies } from './tasks/events';
+import { conversationKey } from './tasks/thread';
 import { kick } from './tasks/kick';
 
 const HISTORY_LIMIT = 10;
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** How long one sweep holds a due renewal before another may retry it. */
+const RENEW_LEASE_MS = 10 * 60 * 1000;
 /** Messages read at most to reach a long thread's end. */
 const HISTORY_SCAN = 1000;
 
@@ -26,6 +34,18 @@ export interface Target {
   within?: string;
 }
 
+/** One of the app's installations in the workspace it is bound to; a removed one is none. */
+async function boundInstallation(ctx: ServerContext, app: AgentApp, installationId: string) {
+  const key = `${app.id}:${installationId}`;
+  const tenant = await forInstallation(ctx, key);
+  const installation =
+    tenant?.boundInstallation?.installation.id === key
+      ? tenant.boundInstallation.installation
+      : await tenant?.store.get('installation', key);
+
+  return { tenant, installation: installation?.deletedAt ? undefined : installation };
+}
+
 /** A token for one of the app's bound installations; an unbound or removed one gets none. */
 async function boundToken(
   ctx: ServerContext,
@@ -34,13 +54,8 @@ async function boundToken(
   installationId: string,
   bound?: TokenBound,
 ): Promise<string> {
-  const key = `${app.id}:${installationId}`;
-  const tenant = await forInstallation(ctx, key);
-  const installation =
-    tenant?.boundInstallation?.installation.id === key
-      ? tenant.boundInstallation.installation
-      : await tenant?.store.get('installation', key);
-  if (!tenant || !installation || installation.deletedAt)
+  const { tenant, installation } = await boundInstallation(ctx, app, installationId);
+  if (!tenant || !installation)
     throw new Error(
       `${app.integration} installation ${installationId} is not bound to this server`,
     );
@@ -86,6 +101,30 @@ export function addressedTo(text: string, name: string): string | undefined {
   if (mentioned !== undefined) return mentioned;
   const leading = new RegExp(`^\\s*${escape(name)}${END}[\\s,:;!.?-]*`, 'i');
   return leading.test(text) ? tidy(text.replace(leading, '')) : undefined;
+}
+
+/** Whether the app takes a plain message, from its agent's stored definition and without a platform call; a built-in app only when addressed by name, and an unknown agent counts as yes. */
+async function hears(
+  ctx: ServerContext,
+  integration: Integration,
+  app: AgentApp,
+  target: Target,
+  text: string,
+): Promise<boolean> {
+  if (app.builtin) return addressedTo(text, app.agent) !== undefined;
+  const type = raisedBy(integration, 'message');
+  const tenant = await forInstallation(ctx, `${app.id}:${target.id}`);
+  if (!type || !tenant) return false;
+  // A local server reads its agents from disk at dispatch.
+  if (tenant.local) return true;
+
+  const { record, version } = await agentWithVersion(tenant.store, app.agent);
+  if (!record || !version) return true;
+
+  return (
+    !record.settings?.disabled &&
+    eventOptions(version.definition.integrations[integration.id], type) !== undefined
+  );
 }
 
 /** Dispatch after the platform has its answer: a failure is logged with its app and event, since nothing else will see it. */
@@ -238,6 +277,8 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
   const integration = ctx.integrations[app.integration];
   if (!integration) throw new Error(`Unknown integration "${app.integration}"`);
   const credentials = decryptSecret(ctx.config, app.credentials);
+  // A context without the server's cache keeps the keys for this request only.
+  const keys = ctx.signingKeys ?? new SigningKeys();
   const adapter = await integration.adapter({
     fetch: ctx.fetch ?? fetch,
     appId: app.id.slice(integration.id.length + 1),
@@ -250,19 +291,36 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
         ...bound,
       }),
     isBound: async id => {
-      const key = `${app.id}:${id}`;
-      const tenant = await forInstallation(ctx, key);
-      const installation =
-        tenant?.boundInstallation?.installation.id === key
-          ? tenant.boundInstallation.installation
-          : await tenant?.store.get('installation', key);
+      const { tenant, installation } = await boundInstallation(ctx, app, id);
 
       return Boolean(
-        installation &&
-        !installation.deletedAt &&
-        (app.builtin || tenant?.organizationId === ctx.organizationId),
+        installation && (app.builtin || tenant?.organizationId === ctx.organizationId),
       );
     },
+    installedSelf: async id => (await boundInstallation(ctx, app, id)).installation?.self,
+    saveSelf: async (id, self) => {
+      const { tenant, installation } = await boundInstallation(ctx, app, id);
+      if (!tenant || !installation || installation.self) return;
+      await updateMetadata(tenant.store, 'installation', installation.id, { self }).catch(error =>
+        console.error(`coder server: could not save ${installation.id}'s app user`, error),
+      );
+    },
+    signingKeys: url => keys.resolver(url, ctx.fetch ?? fetch),
+    ...(target
+      ? {
+          hears: text =>
+            hears(ctx, integration, app, target, text).catch(error => {
+              console.error(`coder server: could not read ${app.id}'s agent for a message`, error);
+              return true;
+            }),
+          active: async thread => {
+            const tenant = await forInstallation(ctx, `${app.id}:${target.id}`);
+            const key = conversationKey(app.id, target.id, thread);
+
+            return Boolean(await tenant?.store.get('delivery', key));
+          },
+        }
+      : {}),
     privateState: () => new LocalChatState(),
   });
   const state = appChatState(ctx.chatState ?? new LocalChatState(), app.id);
@@ -351,7 +409,7 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
   return chat;
 }
 
-/** Renew one bound installation's platform subscription through its adapter, or only catch up on what it missed. */
+/** Renew one bound installation's platform subscription through its adapter, held until its last day, or only catch up on what it missed. */
 export async function renewInstallation(
   ctx: ServerContext,
   app: AgentApp,
@@ -360,6 +418,7 @@ export async function renewInstallation(
 ): Promise<void> {
   const integration = ctx.integrations[app.integration];
   if (!integration?.[op]) return;
+  const key = `${app.id}:${installationId}`;
   const pending: Promise<unknown>[] = [];
   const chat = await chatFor(
     {
@@ -373,24 +432,52 @@ export async function renewInstallation(
     { id: installationId },
   );
   await chat.initialize();
-  await integration[op](chat.getAdapter(integration.id));
+  const adapter = chat.getAdapter(integration.id);
+  const expiresAt =
+    op === 'renew' ? await integration.renew!(adapter) : await integration.sync!(adapter);
   while (pending.length) await Promise.all(pending.splice(0));
+
+  const now = (ctx.now ?? Date.now)();
+  const store = (await forInstallation(ctx, key))?.store ?? ctx.store;
+  if (expiresAt)
+    await store.put(
+      'delivery',
+      `renew:${key}`,
+      { at: now },
+      { ttlMs: Math.max(expiresAt - now - DAY_MS, 0) },
+    );
 }
 
-/** The sweep's renewal (or the kick timer's sync) of every live installation that keeps a platform subscription; one failure skips only that one. */
+/** The sweep's renewal of subscriptions in their last day and daily catch-up (or the kick timer's sync) of every live installation that keeps one; one failure skips only that one. */
 export async function renewInstallations(
   ctx: ServerContext,
   op: 'renew' | 'sync' = 'renew',
 ): Promise<void> {
+  const now = (ctx.now ?? Date.now)();
   for (const integration of Object.values(ctx.integrations)) {
     if (!integration[op]) continue;
     for (const { key, organizationId } of (await ctx.installations?.(integration.id)) ?? []) {
-      const installation = await scoped(ctx, organizationId).store.get('installation', key);
+      const store = scoped(ctx, organizationId).store;
+      const due = (name: string, ttlMs: number) =>
+        store.create('delivery', `${name}:${key}`, { at: now }, { ttlMs });
+      const renew = op === 'sync' || (await due('renew', RENEW_LEASE_MS));
+      const reconcile = op === 'renew' && !!integration.sync && (await due('reconcile', DAY_MS));
+      if (!renew && !reconcile) continue;
+
+      const installation = await store.get('installation', key);
       const owner = installation && (await appOwner(ctx, installation.app));
-      if (owner)
-        await renewInstallation(owner.ctx, owner.app, key.slice(owner.app.id.length + 1), op).catch(
-          () => {},
+      if (!owner) continue;
+
+      const id = key.slice(owner.app.id.length + 1);
+      if (renew)
+        await renewInstallation(owner.ctx, owner.app, id, op).catch(error =>
+          console.error(`coder server: could not ${op} ${key}`, error),
         );
+      if (reconcile)
+        await renewInstallation(owner.ctx, owner.app, id, 'sync').catch(async error => {
+          console.error(`coder server: could not reconcile ${key}`, error);
+          await store.delete('delivery', `reconcile:${key}`);
+        });
     }
   }
 }

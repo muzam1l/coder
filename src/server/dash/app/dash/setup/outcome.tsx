@@ -55,6 +55,8 @@ function outcomeText({ status, account, app, error }: SetupOutcome, name: string
       return `That ${name} account is connected to someone else.`;
     case 'not-member':
       return 'Only members of the workspace this agent works for can link here.';
+    case 'other-workspace':
+      return 'This app belongs to another Coder workspace. Ask its owner to invite you.';
     case 'disconnected':
       return `This ${name} installation is no longer connected.`;
     case 'renew-failed':

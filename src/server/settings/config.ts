@@ -50,6 +50,10 @@ export async function shownConfig(where: Where): Promise<Partial<CoderConfig>> {
   return where.local ? withoutMcp(userConfig()) : read(where.store);
 }
 
+/** The config tasks run with: a local server's folder config, else the shown one over the defaults. */
+export const effectiveConfig = (where: Where, config: Partial<CoderConfig>) =>
+  where.local ? withoutMcp(loadConfig(where.local.cwd)) : withDefaults(config);
+
 /** Validate and store a whole config. */
 export async function saveConfig(
   where: Where,
@@ -160,10 +164,7 @@ export async function readConfig(
       {
         const config = await shownConfig(ctx);
 
-        return json({
-          config,
-          effective: ctx.local ? withoutMcp(loadConfig(ctx.local.cwd)) : withDefaults(config),
-        });
+        return json({ config, effective: effectiveConfig(ctx, config) });
       }
     }
   } catch (error) {

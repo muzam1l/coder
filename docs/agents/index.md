@@ -50,7 +50,7 @@ If asked to change code, describe the change and stop; never promise a PR.
 From there:
 
 1. Get the agent to a server. A local server reads it from the repo on disk. A cloud server imports it from the dashboard and again on each push to the agents repo once the agent's GitHub App is installed there; `coder agent push` uploads it without a repo.
-2. On the dashboard, the agent's Platforms tab creates its app on each platform it uses and installs it; the app's credentials go straight to the server.
+2. On the dashboard, the agent's Platforms tab creates its app on each platform it uses and installs it; the app's credentials go straight to the server. An app is private, installable only by its owner, or public where the platform allows it (GitHub, Linear), installable by any account. An install started on the platform signs the installer in to Coder and binds to the app's workspace when they are a member.
 3. Events now reach the server, a task runs on its runner, and the reply is posted back. `coder agent run helper <event.json> --server --wait` fires one by hand; without `--server` it runs offline, platform tools off, reply printed. `--server` means `CODER_SERVER`, else the hosted service; give it a URL to pick another.
 
 Only pushes to the agents repo's configured branch are imported. An app created before push events existed needs the `push` event enabled once in its GitHub App settings.
@@ -112,7 +112,7 @@ Disable or Enable any agent, built-in ones included, in its Settings › Manage 
 
 An integration gives an agent two things:
 
-1. **Chat.** The agent's own app on the platform. Its events start tasks, and the reply goes back to the same thread. Only linked workspace members can address an agent.
+1. **Chat.** The agent's own app on the platform. Its events start tasks, and the reply goes back to the same thread. Linked workspace members can address an agent, and so can anyone the platform lets write there (on GitHub, write access to the repository); they get the workspace's connections only.
 2. **Platform tools.** Actions beyond replying, through the platform's own MCP server or API. They run outside the agent's sandbox, with a token narrowed to the task, and the token never reaches the agent. The presets add up: `comment` includes `observe`, and `write` includes `comment`.
 
 | Platform        | App                                                                                                                                                                              | Events                                                     | Tools                                                                                                                  |

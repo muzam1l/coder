@@ -1,3 +1,4 @@
+import type { UsageGroup, UsageTotals } from '../tasks/usage';
 import type {
   AgentDefinition,
   AgentTask,
@@ -15,6 +16,8 @@ import type { LocalCompletion, LocalStart } from '../tasks/local';
 import type { SessionBinding, PendingHandoff } from '../tasks/events';
 import { type PairingRecord } from '../settings/runners';
 import type { SnapshotState } from '../runners/vercel-sandbox';
+import type { RepoFile, RepoPush } from '../agents/repo';
+import type { HeldToken, TokenDrop } from '../tasks/context';
 
 export interface StoreRecords {
   agent: AgentRecord;
@@ -34,7 +37,11 @@ export interface StoreRecords {
     | LocalCompletion
     | SessionBinding
     | DeliveryLease
-    | AuditRow;
+    | AuditRow
+    | RepoFile
+    | RepoPush
+    | HeldToken
+    | TokenDrop;
   task: TaskStatus;
   tasklog: Omit<TaskLogLine, 'seq'>;
   inbox: InboxEntry;
@@ -127,6 +134,21 @@ export interface DeliveryLease {
   next?: number;
 }
 
+export interface StoreListOptions {
+  prefix?: string;
+  after?: string;
+  limit?: number;
+  ids?: string[];
+  agent?: string;
+  visibleTo?: string;
+  active?: boolean;
+  apps?: string[];
+  installation?: string;
+  runner?: string;
+  defaults?: boolean;
+  secrets?: 'oauth' | 'all';
+}
+
 export interface Store {
   connectionContexts?: Map<
     string,
@@ -165,6 +187,7 @@ export interface Store {
   listCredentials?(options: {
     owner?: string;
     engine?: string;
+    limit?: number;
   }): Promise<Array<{ id: string; value: import('../settings/credentials').StoredCredential }>>;
   listAgentSummaries?(
     options?: AgentPageOptions,
@@ -197,31 +220,31 @@ export interface Store {
   ): Promise<void>;
   list<K extends StoreKind>(
     kind: K,
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: StoreRecords[K] }>>;
   list<T extends StoreRecords['snapshot']>(
     kind: 'snapshot',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: T }>>;
   list<T extends StoreRecords['delivery']>(
     kind: 'delivery',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: T }>>;
   list<T extends StoredCredential>(
     kind: 'credential',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: StoredCredential }>>;
   list<T extends AgentApp>(
     kind: 'app',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: AgentApp }>>;
   list<T extends Installation>(
     kind: 'installation',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: Installation }>>;
   list<T extends RunnerRecord>(
     kind: 'runner',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: RunnerRecord }>>;
   delete(kind: StoreKind, id: string): Promise<void>;
   /** Atomically insert only when no live entry exists. */
@@ -259,6 +282,7 @@ export interface Store {
   ): Promise<Array<{ id: string; value: AgentVersionSummary }>>;
   /** Usage summed in the database; stores without it are summed from `list("usage")`. */
   usageTotals?(query: UsageQuery): Promise<UsageTotalRow[]>;
+  usageSummary?(since: number, by?: UsageGroup): Promise<UsageTotals['totals']>;
 }
 
 export interface AgentPublication {
@@ -341,6 +365,8 @@ export interface TaskStatus {
   logCursor?: number;
   logSeq?: number;
   logBytes?: number;
+  logsPulledAt?: number;
+  logsComplete?: boolean;
   archivedAt?: number;
   /** Archived by the auto-archive sweep, which lists take up on their next read rather than as an event. */
   autoArchived?: true;

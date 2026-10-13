@@ -5,7 +5,7 @@ import { taskCredential } from './context';
 import { copyRunnerLogs } from './logs';
 import type { ClaimedTask, TaskFence } from './queue';
 import { taskRunner, type Runner } from '../runners';
-import { startQueuedLocalTask, inspectLocalTask, localTasks } from './local';
+import { startQueuedLocalTask, inspectLocalTask, localTasks, sweepLocalQueue } from './local';
 import { loadTask } from '../../core/state';
 
 function deadline<T>(work: Promise<T>, ms: number, operation: string): Promise<T> {
@@ -101,6 +101,8 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
       ? ctx.config.maxTasks
       : Math.min(concurrentTasks, ctx.config.maxTasks ?? concurrentTasks);
   if (sweep) {
+    if (ctx.local) await sweepLocalQueue(ctx, ctx.local.cwd);
+    else await ctx.queue.archiveStopped(undefined, now());
     const running = await ctx.queue.running();
     let freed = 0;
     for (const claimed of running) {

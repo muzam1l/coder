@@ -17,6 +17,7 @@ export function Select({
   value,
   defaultValue,
   onChange,
+  onFocus,
   name,
   disabled,
   headings,
@@ -37,6 +38,8 @@ export function Select({
   value?: string;
   defaultValue?: string;
   onChange?: (value: string) => void;
+  /** Also on press, since Safari gives a clicked button no focus. */
+  onFocus?: () => void;
   name?: string;
   disabled?: boolean;
 }) {
@@ -175,6 +178,8 @@ export function Select({
         aria-controls={`${id}-list`}
         aria-activedescendant={open ? `${id}-${active}` : undefined}
         disabled={disabled}
+        onFocus={onFocus}
+        onPointerDown={onFocus}
         onClick={event => {
           event.preventDefault();
           if (open) close();

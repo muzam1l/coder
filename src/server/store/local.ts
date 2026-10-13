@@ -5,7 +5,13 @@ import { execFile } from 'node:child_process';
 
 import { LocalConnections } from '../../core/connections';
 import { coderHome, resolveStateDir, resolveRunnerUsageFile } from '../../core/state';
-import { checkBinding, credentialLock, MemoryStore, writeCredentials } from './memory';
+import {
+  checkBinding,
+  credentialLock,
+  matchesStoreRow,
+  MemoryStore,
+  writeCredentials,
+} from './memory';
 import type {
   CredentialScope,
   CredentialWork,
@@ -13,6 +19,7 @@ import type {
   Store,
   StoreKind,
   StoreRecords,
+  StoreListOptions,
 } from './types';
 import { loadAgents } from '../../agent/load';
 import type { AgentApp, Installation } from '../../agent/types';
@@ -278,21 +285,23 @@ export class LocalStore implements Store {
 
   list<K extends StoreKind>(
     kind: K,
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: StoreRecords[K] }>>;
   list<T extends StoreRecords['snapshot']>(
     kind: 'snapshot',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: T }>>;
   list<T extends StoreRecords['delivery']>(
     kind: 'delivery',
-    options?: { prefix?: string; after?: string; limit?: number },
+    options?: StoreListOptions,
   ): Promise<Array<{ id: string; value: T }>>;
   async list(
     kind: StoreKind,
-    options: { prefix?: string; after?: string; limit?: number } = {},
+    options: StoreListOptions = {},
   ): Promise<Array<{ id: string; value: StoreRecords[StoreKind] }>> {
     if (DERIVED.has(kind)) return this.derived.list(kind, options);
+
+    const apps = kind === 'installation' && options.agent ? this.apps().app : undefined;
 
     return this.entries(kind)
       .filter(
@@ -300,9 +309,27 @@ export class LocalStore implements Store {
           (!options.prefix || id.startsWith(options.prefix)) &&
           (!options.after || id > options.after),
       )
+      .filter(([id, value]) =>
+        matchesStoreRow(
+          id,
+          value,
+          options,
+          (apps?.[(value as Installation).app] as AgentApp | undefined)?.agent,
+        ),
+      )
       .sort(([left], [right]) => left.localeCompare(right))
       .slice(0, options.limit)
-      .map(([id, value]) => ({ id, value: value as StoreRecords[StoreKind] }));
+      .map(([id, value]) => {
+        const connection = value as StoreRecords['connection'];
+        const full =
+          kind === 'connection' &&
+          options.secrets &&
+          (options.secrets === 'all' ||
+            (connection.provider === 'mcp' && connection.auth === 'oauth'))
+            ? this.connections().get(id)
+            : undefined;
+        return { id, value: (full ?? value) as StoreRecords[StoreKind] };
+      });
   }
 
   async delete(kind: StoreKind, id: string): Promise<void> {

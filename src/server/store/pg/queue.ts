@@ -89,10 +89,18 @@ const rank = (status: SQLWrapper) =>
 /** Milliseconds, as cursors carry them. */
 const millis = (at: SQLWrapper) => sql`date_trunc('milliseconds', ${at})`;
 
+/** Ids in byte order, as the server and CLI compare them, whatever the database collation. */
+const bytes = (id: SQLWrapper) => sql`${id} collate "C"`;
+
 const pageOrder = (row: Record<'status' | 'createdAt' | 'publicId', SQLWrapper>) => [
   asc(rank(row.status)),
   desc(millis(row.createdAt)),
-  desc(row.publicId),
+  desc(bytes(row.publicId)),
+];
+
+const deltaOrder = (row: Record<'updatedAt' | 'publicId', SQLWrapper>) => [
+  asc(row.updatedAt),
+  asc(bytes(row.publicId)),
 ];
 
 export class DrizzleQueue implements TaskQueue {
@@ -349,11 +357,24 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     fence: TaskFence = {},
   ): Promise<boolean> {
-    const { answer, archivedAt, autoArchived: _auto, lastSeenAt, ...fields } = patch;
+    const {
+      answer,
+      archivedAt,
+      autoArchived: _auto,
+      lastSeenAt,
+      logsPulledAt,
+      logsComplete,
+      ...fields
+    } = patch;
     const [row] = await this.db
       .update(task)
       .set({
         ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value ?? null])),
+        ...(logsPulledAt !== undefined || logsComplete !== undefined
+          ? {
+              context: sql`jsonb_set(coalesce(${task.context}, '{}'::jsonb), '{runnerLogs}', coalesce(${task.context}->'runnerLogs', '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object('at', ${logsPulledAt ?? null}::bigint, 'complete', ${logsComplete ?? null}::boolean, 'handle', ${task.handle}, 'attempts', ${task.attempts}, 'generation', ${task.generation})))`,
+            }
+          : {}),
         ...(answer === undefined
           ? {}
           : {
@@ -372,13 +393,17 @@ export class DrizzleQueue implements TaskQueue {
     return Boolean(row);
   }
 
-  async archiveStopped(organizationId: string, now: number, ids?: string[]): Promise<void> {
+  async archiveStopped(
+    organizationId: string | undefined,
+    now: number,
+    ids?: string[],
+  ): Promise<void> {
     await this.db
       .update(task)
-      .set({ archivedAt: new Date(now) })
+      .set({ archivedAt: new Date(now), updatedAt: new Date(now) })
       .where(
         and(
-          eq(task.organizationId, organizationId),
+          organizationId === undefined ? undefined : eq(task.organizationId, organizationId),
           ids ? inArray(task.publicId, ids) : undefined,
           isNull(task.archivedAt),
           inArray(task.status, [...TERMINAL_STATUSES]),
@@ -622,22 +647,46 @@ export class DrizzleQueue implements TaskQueue {
             ),
           status: task.status,
           attempts: task.attempts,
+          approval: task.approval,
+          archivedAt: task.archivedAt,
           createdAt: task.createdAt,
           startedAt: task.startedAt,
           finishedAt: task.finishedAt,
+          updatedAt: task.updatedAt,
         }
       : getTableColumns(task);
     const query = this.db
       .select(columns)
       .from(task)
-      .where(and(this.filter(organizationId, opts), before ? this.after(before) : undefined))
-      .orderBy(...pageOrder(task));
+      .where(
+        and(
+          this.filter(organizationId, opts),
+          opts.since === undefined
+            ? undefined
+            : or(
+                gt(task.updatedAt, new Date(opts.since)),
+                opts.sinceId
+                  ? and(
+                      eq(task.updatedAt, new Date(opts.since)),
+                      gt(bytes(task.publicId), opts.sinceId),
+                    )
+                  : undefined,
+              ),
+          before ? this.after(before) : undefined,
+        ),
+      )
+      .orderBy(...(opts.since === undefined ? pageOrder(task) : deltaOrder(task)));
     return opts.limit === undefined ? query : query.limit(opts.limit);
   }
 
   /** Rows after the cursor in list order. */
   private after(before: ListCursor) {
-    const older = sql`(${millis(task.createdAt)}, ${task.publicId}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.id})`;
+    if ('updatedAt' in before)
+      return or(
+        gt(task.updatedAt, new Date(before.updatedAt)),
+        and(eq(task.updatedAt, new Date(before.updatedAt)), gt(bytes(task.publicId), before.id)),
+      );
+    const older = sql`(${millis(task.createdAt)}, ${bytes(task.publicId)}) < (${new Date(before.createdAt).toISOString()}::timestamptz, ${before.id})`;
     return or(gt(rank(task.status), before.rank), and(eq(rank(task.status), before.rank), older));
   }
 
@@ -654,9 +703,12 @@ export class DrizzleQueue implements TaskQueue {
       }),
       status: row.status,
       attempts: row.attempts,
+      approval: row.approval,
+      archivedAt: row.archivedAt ? ms(row.archivedAt as Date) : undefined,
       createdAt: ms(row.createdAt as Date),
       startedAt: row.startedAt ? ms(row.startedAt as Date) : undefined,
       finishedAt: row.finishedAt ? ms(row.finishedAt as Date) : undefined,
+      updatedAt: ms(row.updatedAt as Date),
     }) as TaskStatus;
   }
 
@@ -788,11 +840,13 @@ export class DrizzleQueue implements TaskQueue {
         .from(totals)
         .leftJoin(page, sql`true`)
         .orderBy(
-          ...pageOrder({
-            status: fields.status!,
-            createdAt: fields.createdAt!,
-            publicId: fields.publicId!,
-          }),
+          ...(opts.since === undefined
+            ? pageOrder({
+                status: fields.status!,
+                createdAt: fields.createdAt!,
+                publicId: fields.publicId!,
+              })
+            : deltaOrder({ updatedAt: fields.updatedAt!, publicId: fields.publicId! })),
         ),
     );
     const { all = 0, active = 0, waiting = 0 } = records[0] ?? {};
@@ -958,13 +1012,14 @@ export class DrizzleQueue implements TaskQueue {
     });
   }
 
-  async pendingInbox(): Promise<ClaimedTask[]> {
+  async pendingInbox(organizationId?: string): Promise<ClaimedTask[]> {
     const records = await readQuery(this.db, () =>
       this.db
         .select()
         .from(task)
         .where(
           and(
+            organizationId === undefined ? undefined : eq(task.organizationId, organizationId),
             inArray(task.status, ['running', 'waiting']),
             sql`exists (select 1 from ${taskInbox} where ${taskInbox.taskId} = ${task.id} and ${taskInbox.generation} = ${task.generation})`,
           ),

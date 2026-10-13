@@ -71,6 +71,7 @@ import { hook, listFlows, listPulls, review, runFlow } from '../tasks/flows';
 import { type ServerContext } from '../context';
 import { readUsage, readUsageTotals } from '../tasks/usage';
 import { checkFolder, cloneFolder, localFolders, pickFolder } from '../settings/folders';
+import { composerOptions } from '../tasks/composer';
 import { engineStatus } from '../tasks/local';
 import {
   createCredential,
@@ -86,6 +87,7 @@ import {
   integrationCatalog,
   listApps,
   listInstallations,
+  removeApp,
 } from '../agents/connections';
 import { importAgent, previewImport } from '../agents/import';
 import { listAgents, listVersions, readAgent, readVersion } from '../agents/catalog';
@@ -251,6 +253,7 @@ const appsRoutes = [
   ),
   route('POST', '/apps/create/:integration', adminCreateTransaction),
   route('GET', '/apps', listApps),
+  route('DELETE', '/apps/:id', removeApp),
   route('GET', '/installations', listInstallations),
   route('GET', '/connections', listConnections, connectionAllowed),
   route('POST', '/connections', createConnection, connectionAllowed),
@@ -259,6 +262,7 @@ const appsRoutes = [
   route('POST', '/connections/:id/authorize', authorizeConnection, connectionAllowed),
   route('GET', '/integrations', (req, ctx, params, url) => integrationCatalog(ctx, url)),
   route('GET', '/repositories', (req, ctx) => adminRepositories(ctx)),
+  route('POST', '/repositories/refresh', (req, ctx) => adminRepositories(ctx, true)),
 ];
 
 const agentsRoutes = [
@@ -296,6 +300,7 @@ const runnersRoutes = [
 ];
 
 const tasksRoutes = [
+  route('GET', '/composer', composerOptions),
   route('GET', '/tasks', listTasks),
   route('POST', '/tasks', adminCreate),
   route('GET', '/tasks/:id', readTask),

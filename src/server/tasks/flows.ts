@@ -7,9 +7,10 @@ import { redactTask, taskError } from './admin';
 import { json } from '../routes/http';
 import { type AgentApp } from '../../agent/types';
 import { type Integration, type OwnEvent } from '../../integrations/types';
-import { importAgents, sourceEvent } from '../agents/repo';
+import { importAgents, pushedFiles, sourceEvent } from '../agents/repo';
 import { storeInstallation } from '../agents/install';
 import { chatFor, deliver, eventReplies, later } from '../chat';
+import { dropTokens } from './context';
 import { updateMetadata } from '../store';
 import { decryptSecret } from '../store/secrets';
 import { InstallationBoundError } from '../store/types';
@@ -155,10 +156,26 @@ async function ownEvent(
     const existing = await tenant?.store.get('installation', own.installation.installation.id);
     if (!tenant || !existing) return json({ ok: true });
 
-    await updateMetadata(tenant.store, 'installation', existing.id, {
-      account: own.installation.installation.account,
-      deletedAt: own.installation.op === 'delete' ? now : undefined,
+    await tenant.store.withAppLock(`repositories:${existing.id}`, async store => {
+      const current = await store.get('installation', existing.id);
+      if (!current || (own.installation.repos && current.deletedAt)) return;
+      const change = own.installation.repos;
+      // A selection change or an unknown list leaves it unknown; the next read lists it.
+      const repos = change
+        ? change.refresh || current.repos == null
+          ? undefined
+          : [...new Set([...current.repos, ...change.add])].filter(
+              repo => !change.remove.includes(repo),
+            )
+        : own.installation.installation.repos;
+      await updateMetadata(store, 'installation', existing.id, {
+        account: own.installation.installation.account,
+        ...(change || repos ? { repos } : {}),
+        deletedAt: own.installation.op === 'delete' ? now : undefined,
+      });
     });
+    // Its repositories or permissions may have changed.
+    await dropTokens(tenant.store, existing.id);
 
     return json({ ok: true });
   }
@@ -189,6 +206,11 @@ async function ownEvent(
       ? json({ ok: true })
       : new Response('Installation not stored yet', { status: 503 });
   }
+  if ('pushed' in own && own.pushed) {
+    const tenant = await forInstallation(ctx, own.pushed.installation);
+    if (tenant) await pushedFiles(tenant.store, own.pushed);
+  }
+  if (!('changes' in own) && 'pushed' in own) return json({ ok: true });
   if ('changes' in own) {
     const change = own.changes;
     try {

@@ -8,7 +8,7 @@ import type { TaskLogLine, TaskStatus, Store, UsageRecord } from '../store/types
 import { scoped, type ServerContext } from '../context';
 import { taskRunner } from '../runners';
 import { pushLocalInbox } from './local';
-import { byListKey, listRank, type ListKey } from '../../core/defaults';
+import { byId, byListKey, listRank, type ListKey } from '../../core/defaults';
 import { archiveDue } from '../../core/state';
 
 export interface ClaimedTask {
@@ -37,6 +37,8 @@ export interface TaskFilter {
   archived?: boolean;
   /** Case-insensitive match on the request text, agent, or task id. */
   q?: string;
+  since?: number;
+  sinceId?: string;
 }
 
 export interface TaskListOptions extends TaskFilter {
@@ -61,6 +63,12 @@ export const ACTIVE_STATES: TaskStatus['status'][] = ['queued', 'running', 'wait
 
 /** Whether a task passes a filter; the memory queue's version of the SQL predicate. */
 export function matchesTask(status: TaskStatus, filter: TaskFilter): boolean {
+  if (
+    filter.since !== undefined &&
+    (status.updatedAt < filter.since ||
+      (status.updatedAt === filter.since && (!filter.sinceId || status.task.id <= filter.sinceId)))
+  )
+    return false;
   const states = filter.status ? [filter.status] : filter.statuses;
   if (states && !states.includes(status.status)) return false;
   if (filter.agent && status.task.agent !== filter.agent) return false;
@@ -76,20 +84,30 @@ export function matchesTask(status: TaskStatus, filter: TaskFilter): boolean {
   );
 }
 
-export type ListCursor = ListKey;
+export type ListCursor = ListKey | { updatedAt: number; id: string };
 
-export const listCursor = (row: TaskStatus): ListCursor => ({
+export const listCursor = (row: TaskStatus): ListKey => ({
   rank: listRank(row.status),
   createdAt: row.createdAt,
   id: row.task.id,
 });
+
+export const deltaCursor = (row: TaskStatus) => ({ updatedAt: row.updatedAt, id: row.task.id });
+
+/** The delta order, which `deltaCursor` pages through. */
+export const deltaOrder = (a: TaskStatus, b: TaskStatus) =>
+  a.updatedAt - b.updatedAt || byId(a.task.id, b.task.id);
 
 /** The CLI's list order, so a keyset cursor is stable under inserts. */
 export const listOrder = (a: TaskStatus, b: TaskStatus) => byListKey(listCursor(a), listCursor(b));
 
 /** Whether a row comes after the cursor in list order. */
 export const afterCursor = (row: TaskStatus, before?: ListCursor) =>
-  !before || byListKey(listCursor(row), before) > 0;
+  !before ||
+  ('updatedAt' in before
+    ? row.updatedAt > before.updatedAt ||
+      (row.updatedAt === before.updatedAt && row.task.id > before.id)
+    : byListKey(listCursor(row), before) > 0);
 
 export interface TaskFence {
   generation?: number;
@@ -117,6 +135,8 @@ export type TaskPatch = Partial<
     | 'logCursor'
     | 'logSeq'
     | 'logBytes'
+    | 'logsPulledAt'
+    | 'logsComplete'
     | 'archivedAt'
     | 'autoArchived'
     | 'approval'
@@ -201,8 +221,8 @@ export interface TaskQueue {
     now: number,
     fence?: TaskFence,
   ): Promise<boolean>;
-  /** The CLI's auto-archive sweep over tasks stopped longer than AUTO_ARCHIVE_MS, or only `ids`; silent, so updatedAt stays. */
-  archiveStopped(organizationId: string, now: number, ids?: string[]): Promise<void>;
+  /** Archives tasks stopped longer than AUTO_ARCHIVE_MS, or only `ids`; deltas carry the change. */
+  archiveStopped(organizationId: string | undefined, now: number, ids?: string[]): Promise<void>;
   continueTask(
     organizationId: string,
     id: string,
@@ -249,7 +269,7 @@ export interface TaskQueue {
     after: number,
   ): Promise<InboxEntry[] | undefined>;
   ackInbox(organizationId: string, id: string, ack: InboxAck, fence: TaskFence): Promise<boolean>;
-  pendingInbox(): Promise<ClaimedTask[]>;
+  pendingInbox(organizationId?: string): Promise<ClaimedTask[]>;
   cancelRequested(organizationId: string, id: string): Promise<boolean>;
   /** Newest first. */
   list(organizationId: string, opts?: TaskListOptions): Promise<TaskStatus[]>;
@@ -588,7 +608,11 @@ export class StoreQueue implements TaskQueue {
     });
   }
 
-  async archiveStopped(_organizationId: string, now: number, ids?: string[]): Promise<void> {
+  async archiveStopped(
+    _organizationId: string | undefined,
+    now: number,
+    ids?: string[],
+  ): Promise<void> {
     const due = (status?: TaskStatus): status is TaskStatus =>
       status !== undefined &&
       DONE.has(status.status) &&
@@ -605,6 +629,7 @@ export class StoreQueue implements TaskQueue {
             await this.store.put('task', current.task.id, {
               ...current,
               archivedAt: now,
+              updatedAt: now,
               autoArchived: true,
             });
         });
@@ -623,6 +648,9 @@ export class StoreQueue implements TaskQueue {
       const { answer, ...fields } = patch;
       await this.store.put('task', id, {
         ...current,
+        ...(Object.hasOwn(patch, 'handle') && patch.handle !== current.handle
+          ? { logsPulledAt: undefined, logsComplete: undefined }
+          : {}),
         ...fields,
         ...(answer !== undefined ? { answer: [...(current.answer ?? []), answer] } : {}),
         updatedAt: now,
@@ -811,7 +839,7 @@ export class StoreQueue implements TaskQueue {
       .map(row => row.value)
       .filter(status => matchesTask(status, opts))
       .filter(status => afterCursor(status, before))
-      .sort(listOrder)
+      .sort(opts.since === undefined ? listOrder : deltaOrder)
       .slice(0, opts.limit);
   }
 
@@ -988,7 +1016,7 @@ export class StoreQueue implements TaskQueue {
     });
   }
 
-  async pendingInbox(): Promise<ClaimedTask[]> {
+  async pendingInbox(_organizationId?: string): Promise<ClaimedTask[]> {
     const pending = await this.store.list('inbox');
 
     return (await this.running()).filter(({ status }) =>
@@ -1133,8 +1161,8 @@ export function pushInbox(ctx: ServerContext, id: string): Promise<void> {
   return current.work;
 }
 
-export async function flushInbox(ctx: ServerContext): Promise<void> {
-  const pending = await ctx.queue.pendingInbox();
+export async function flushInbox(ctx: ServerContext, organizationId?: string): Promise<void> {
+  const pending = await ctx.queue.pendingInbox(organizationId);
   await Promise.allSettled(
     pending.map(({ organizationId, status }) =>
       pushInbox(scoped(ctx, organizationId), status.task.id),
@@ -1142,8 +1170,10 @@ export async function flushInbox(ctx: ServerContext): Promise<void> {
   );
 }
 
-export function scheduleInbox(ctx: ServerContext): void {
-  const work = flushInbox(ctx).catch(() => {});
+export function scheduleInbox(ctx: ServerContext, organizationId?: string): void {
+  const work = flushInbox(ctx, organizationId).catch(error =>
+    console.error('coder server: inbox flush failed', error),
+  );
   if (ctx.waitUntil) ctx.waitUntil(work);
   else void work;
 }

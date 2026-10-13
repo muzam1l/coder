@@ -1,6 +1,7 @@
 import { connectionGrants } from '../connections/grants';
 import { narrowConnections } from '../../core/connections';
 import { checkFolder } from '../settings/folders';
+import { repositorySnapshot } from '../agents/connections';
 import { getApps } from '../store';
 /** Tasks started from the dashboard, the CLI, or a schedule: a prompt or a flow, optionally on a workspace repo. */
 import { randomBytes } from 'node:crypto';
@@ -25,7 +26,7 @@ import { syncLocalAgents } from '../store/local';
 import { machineSignedIn, runLocalTask } from './local';
 import { credentialFix, resolveCredential } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
-import { unsealed } from './context';
+import { installationToken } from './context';
 import { chooseRunner } from '../runners';
 
 export interface NewTask {
@@ -128,9 +129,13 @@ export async function repoAccess(
   ctx: ServerContext,
   repo: string,
 ): Promise<{ integration: Integration; installation: Installation; app: AgentApp; token: string }> {
-  const installations = (await ctx.store.list('installation')).filter(
-    ({ value }) => !value.deletedAt && ctx.integrations[value.integration]?.repos,
-  );
+  const installations = (await ctx.store.list('installation'))
+    .filter(({ value }) => !value.deletedAt && ctx.integrations[value.integration]?.repos)
+    .sort(
+      (a, b) =>
+        Number(b.value.repos?.includes(repo) ?? false) -
+        Number(a.value.repos?.includes(repo) ?? false),
+    );
   const apps = new Map(
     (
       await getApps(
@@ -146,14 +151,20 @@ export async function repoAccess(
     const app = apps.get(installation.app);
     if (!app) continue;
     try {
-      const token = await integration.auth.token(
-        unsealed(ctx, installation),
+      const token = await installationToken(
+        ctx,
+        integration,
+        installation,
         decryptSecret(ctx.config, app.credentials),
       );
-      if ((await integration.repos.list(installation, token)).includes(repo))
-        return { integration, installation, app, token };
-    } catch {
-      // One unreachable install must not hide the others.
+      const current = installation.repos?.includes(repo)
+        ? installation
+        : await repositorySnapshot(ctx, installation, false, { app, token, repo });
+      if (!current?.repos?.includes(repo)) continue;
+
+      return { integration, installation: current, app, token };
+    } catch (error) {
+      console.error(`coder server: repository token for ${installation.id} failed`, error);
     }
   }
   throw new TaskInputError(`No install in this workspace reaches ${repo}`, 404);

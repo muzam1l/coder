@@ -2,9 +2,10 @@ import { type Params } from '../routes/match';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import { InstallationBoundError, type Store } from '../store/types';
 import { checkBinding } from '../store/memory';
-import { type Installation } from '../../agent/types';
-import { IntegrationError } from '../../integrations/types';
-import { consumeNonce, inspectNonce } from '../auth/nonce';
+import { type AgentApp, type Installation } from '../../agent/types';
+import { type Integration, IntegrationError } from '../../integrations/types';
+import { consumeNonce, inspectNonce, issueNonce, nonceOrganization } from '../auth/nonce';
+import { memberOf } from '../auth/connect';
 import { encodeJson } from '../../utils/base64url';
 import { decodeParam, redirect } from '../routes/http';
 import {
@@ -94,22 +95,81 @@ export async function installPage(
   );
 }
 
-export async function completeInstall(
+/** A platform-started install: re-authorizes in the app's workspace; the callback's own code is never used. */
+async function platformInstall(
   req: Request,
   ctx: AppsContext,
+  integration: Integration,
+  request: typeof fetch,
+): Promise<Response> {
+  const id = integration.id;
+  const rows = ctx.apps
+    ? await ctx.apps(id)
+    : (await ctx.store.list('app', { prefix: `${id}:` })).map(entry => ({
+        organizationId: ctx.organizationId,
+        app: entry.value,
+      }));
+  const found = await integration.app.installedApp!(req, {
+    apps: rows.map(({ app }) => ({ app, credentials: decryptSecret(ctx.config, app.credentials) })),
+    fetch: request,
+  }).catch((error: unknown) => {
+    console.error(`coder server: finding the ${id} app of an install failed`, error);
+
+    return error instanceof Error ? error : new Error(String(error));
+  });
+  if (found instanceof Error) return outcome(ctx, 'failed', { platform: id });
+  if (!found) return outcome(ctx, 'unknown-app', { platform: id });
+
+  const { app, installation } = found;
+  // The shared app binds where a dashboard install would: the session's workspace.
+  const owner = rows.find(row => row.app.id === app.id)!.organizationId;
+  const member = app.builtin || !ctx.session ? ctx : memberOf(ctx, ctx.session, owner);
+  if (!member) return outcome(ctx, 'other-workspace', { platform: id });
+
+  const tx = await issueNonce(member, 'install', ctx.session?.user.id ?? 'anonymous', app.id);
+
+  return redirect(
+    integration.app.installUrl(app, decryptSecret(ctx.config, app.credentials), {
+      publicUrl: ctx.config.publicUrl!,
+      state: encodeJson({ tx, installation }),
+      installation,
+    }),
+  );
+}
+
+export async function completeInstall(
+  req: Request,
+  entry: AppsContext,
   params: Params,
   url: URL,
 ): Promise<Response | undefined> {
   const id = params.id!;
-  const operator = ctx.operatorApp ?? false;
+  const operator = entry.operatorApp ?? false;
   if (!/^[a-z0-9_-]+$/.test(url.pathname.split('/')[2]!)) return undefined;
 
-  const userId = operator ? OPERATOR : (ctx.session?.user.id ?? 'anonymous');
+  const userId = operator ? OPERATOR : (entry.session?.user.id ?? 'anonymous');
   const linkState = decodeParam<{
     link?: string;
     tx?: string;
     back?: string;
+    installation?: string;
   }>(url.searchParams.get('state'));
+  // Resolve in the workspace the transaction was issued for.
+  const issued =
+    linkState?.tx && entry.session
+      ? memberOf(entry, entry.session, nonceOrganization(entry, linkState.tx))
+      : undefined;
+  const ctx = issued ? { ...entry, ...issued } : entry;
+  // An install bound in another of the person's workspaces opens the dashboard there.
+  const landed = async (response: Response) => {
+    const slug = entry.session?.organizations.find(
+      org => org.id === issued?.organizationId && org.id !== entry.session!.organizationId,
+    )?.slug;
+    const switched = slug ? await ctx.auth!.setOrganization(req.headers, slug) : undefined;
+    for (const cookie of switched?.cookies ?? []) response.headers.append('set-cookie', cookie);
+
+    return response;
+  };
   const stated = backPath(linkState?.back);
   const integration = ctx.integrations[id!];
   if (!integration) return outcome(ctx, 'unknown-integration', { platform: id }, stated);
@@ -118,7 +178,6 @@ export async function completeInstall(
   if (!publicUrl) return outcome(ctx, 'no-public-url', {}, stated);
 
   const request = ctx.fetch ?? fetch;
-  const now = ctx.now?.() ?? Date.now();
   const appId = url.searchParams.get('app');
   const transactionTarget = linkState?.tx
     ? await inspectNonce(ctx, linkState.tx, 'install', userId)
@@ -133,6 +192,9 @@ export async function completeInstall(
       ? outcome(ctx, 'cancelled', retry, stated)
       : outcome(ctx, 'platform-error', { ...retry, error }, stated);
 
+  // No state: the install began on the platform.
+  if (!url.searchParams.has('state') && integration.app.installedApp && !operator)
+    return platformInstall(req, ctx, integration, request);
   if (!transactionTarget || (appId && appId !== transactionTarget))
     return outcome(ctx, 'install-expired', retry, stated);
   if (!(await consumeNonce(ctx, linkState!.tx!, 'install', userId, transactionTarget)))
@@ -148,6 +210,26 @@ export async function completeInstall(
     return linkState && !linkState.link
       ? outcome(ctx, 'connected', { platform: id }, stated)
       : outcome(ctx, 'unknown-app', { platform: id }, stated);
+
+  return landed(
+    await bindInstall(req, ctx, integration, target, linked, stated, linkState?.installation),
+  );
+}
+
+/** Finish the install with the platform and bind the installation to `target` in this workspace. */
+async function bindInstall(
+  req: Request,
+  ctx: AppsContext,
+  integration: Integration,
+  target: AgentApp,
+  linked: Installation | undefined,
+  stated: string | undefined,
+  verifying: string | undefined,
+): Promise<Response> {
+  const id = integration.id;
+  const request = ctx.fetch ?? fetch;
+  const now = ctx.now?.() ?? Date.now();
+  const publicUrl = ctx.config.publicUrl!;
   if (target.builtin && integration.app.builtin !== 'shared')
     return outcome(ctx, 'unknown-app', { platform: id }, stated);
 
@@ -161,12 +243,20 @@ export async function completeInstall(
       publicUrl,
       fetch: request,
       connect: connectLinks(ctx, target, publicUrl),
+      ...(verifying ? { installation: verifying } : {}),
     })
-    .catch((error: unknown) =>
-      error instanceof IntegrationError
-        ? outcome(ctx, error.code, { platform: id, appId: target.id, error: error.error }, back)
-        : outcome(ctx, 'failed', { platform: id, appId: target.id }, back),
-    );
+    .catch((error: unknown) => {
+      if (error instanceof IntegrationError)
+        return outcome(
+          ctx,
+          error.code,
+          { platform: id, appId: target.id, error: error.error },
+          back,
+        );
+      console.error(`coder server: installing ${target.id} failed`, error);
+
+      return outcome(ctx, 'failed', { platform: id, appId: target.id }, back);
+    });
   if (result instanceof Response) return result;
 
   const installationId = `${target.id}:${result.platformInstallId}`;
@@ -186,10 +276,22 @@ export async function completeInstall(
     account: result.account ?? existing?.account ?? linked?.account ?? { login: 'unknown' },
     ...(result.token ? { token: encryptSecret(ctx.config, result.token) } : {}),
     ...(result.installer ? { installer: result.installer } : {}),
+    ...(result.self ? { self: result.self } : {}),
     ...(result.covers ? { covers: result.covers } : {}),
     createdAt: existing?.createdAt ?? now,
   };
   delete installation.deletedAt;
+  if (integration.repos) {
+    const token = await integration.auth.token(
+      installation.token
+        ? { ...installation, token: decryptSecret<string>(ctx.config, installation.token) }
+        : installation,
+      credentials,
+      undefined,
+      { fetch: request },
+    );
+    installation.repos = await integration.repos.list(installation, token, request);
+  }
 
   const sibling = linked && !linked.deletedAt ? linked : undefined;
   if (sibling) installation = link(installation, sibling.integration, sibling.id);

@@ -1,9 +1,10 @@
+import { randomUUID } from 'node:crypto';
 import { eventOptions } from '../../agent/definition';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import { BROKERED, BROKERED_PLACEHOLDER } from '../runners/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
 import type { AgentEvent, InstallationLink, Installation } from '../../agent/types';
-import type { EngineCredential, TaskStatus } from '../store/types';
+import type { EngineCredential, Store, TaskStatus } from '../store/types';
 import type { ServerContext } from '../context';
 import type { CoderConfig } from '../../core/config';
 import { taskConfig } from '../settings/config';
@@ -30,23 +31,121 @@ export function unsealed(ctx: ServerContext, installation: Installation): Instal
     : installation;
 }
 
-/** The installation's token through its integration; a refreshed one is stored again, sealed. */
-export function installationToken(
+/** A held token is reused only while more than this remains. */
+const REUSE_MARGIN_MS = 5 * 60 * 1000;
+
+/** A minted token held for reuse, sealed. */
+export interface HeldToken {
+  token: string;
+  expiresAt: number;
+  mintedAt: number;
+}
+
+/** An installation's or app's latest token drop. */
+export interface TokenDrop {
+  drop: string;
+}
+
+const heldKey = (id: string, key = '') => `token:${id}:${key}`;
+const dropKey = (id: string) => `token-drop:${id}`;
+/** Outlives any mint in flight when tokens are dropped. */
+const DROP_FENCE_TTL_MS = 60 * 60 * 1000;
+
+/** The installation's and its app's latest drops, so a mint that began before one is never held. */
+const drops = (store: Store, installation: Installation) =>
+  Promise.all(
+    [installation.id, installation.app].map(id => store.get<TokenDrop>('snapshot', dropKey(id))),
+  ).then(rows => rows.map(row => row?.drop).join());
+
+/** Forgets every token held for an installation, or given an app id, for all of its installations. */
+export async function dropTokens(store: Store, id: string): Promise<void> {
+  await store.put('snapshot', dropKey(id), { drop: randomUUID() }, { ttlMs: DROP_FENCE_TTL_MS });
+  for (const row of await store.list<HeldToken>('snapshot', { prefix: heldKey(id) }))
+    await store.delete('snapshot', row.id);
+}
+
+/** The installation's token through its integration, reused from the store per exact scope where it can be; a refreshed one is stored again, sealed. A task's token must outlive `taskMs`. */
+export async function installationToken(
   ctx: ServerContext,
   integration: Integration,
   installation: Installation,
   credentials: unknown,
   bound?: TokenBound,
+  taskMs = 0,
 ): Promise<string> {
-  return integration.auth.token(unsealed(ctx, installation), credentials, bound, async token => {
-    const current = await ctx.store.get('installation', installation.id);
-    if (current) {
+  const expected = installation.token;
+  const read = unsealed(ctx, installation);
+  return integration.auth.token(read, credentials, bound, {
+    fetch: ctx.fetch,
+    async hold(reuse, mint) {
+      const key = heldKey(installation.id, reuse);
+      const held = await ctx.store.get<HeldToken>('snapshot', key);
+      const now = (ctx.now ?? Date.now)();
+      // A task's token covers its timeout, plus the margin when a fresh one would.
+      const fresh = held ? held.expiresAt - held.mintedAt : 0;
+      const needed = taskMs + (taskMs + REUSE_MARGIN_MS <= fresh ? REUSE_MARGIN_MS : 0);
+      if (held && held.expiresAt - now > Math.max(needed, REUSE_MARGIN_MS)) {
+        try {
+          return decryptSecret<string>(ctx.config, held.token);
+        } catch (error) {
+          console.error('coder server: held token unreadable, minting again', error);
+        }
+      }
+
+      const drop = await drops(ctx.store, installation);
+      const minted = await mint();
+      if ((await drops(ctx.store, installation)) !== drop) return minted.token;
+      await ctx.store.put(
+        'snapshot',
+        key,
+        {
+          token: encryptSecret(ctx.config, minted.token),
+          expiresAt: minted.expiresAt,
+          mintedAt: now,
+        },
+        { ttlMs: Math.max(minted.expiresAt - now - REUSE_MARGIN_MS, 0) },
+      );
+      if ((await drops(ctx.store, installation)) !== drop) await ctx.store.delete('snapshot', key);
+
+      return minted.token;
+    },
+    // Lands only over the exact token it refreshed, or that token resealed; otherwise another refresh won.
+    async save(token) {
       const sealed = encryptSecret(ctx.config, token);
-      await ctx.store.put('installation', installation.id, { ...current, token: sealed });
-      installation.token = sealed;
-    }
+      let winner: string | undefined;
+      await ctx.store.withCredential('installation', installation.id, async current => {
+        if (!current) return undefined;
+        const same =
+          current.token === expected ||
+          (!!current.token && decryptSecret<string>(ctx.config, current.token) === read.token);
+        if (!same) {
+          winner = current.token;
+          return undefined;
+        }
+
+        return [{ id: installation.id, value: { ...current, token: sealed } }];
+      });
+      installation.token = winner ?? sealed;
+
+      return winner && decryptSecret<string>(ctx.config, winner);
+    },
   });
 }
+
+/** A platform installation an event may act through; its token is minted on first use. */
+export interface PlatformAccess {
+  /** The installation's store id. */
+  installation: string;
+  /** A token that can see `repo` (`owner/name`), by default the access's own repository. */
+  token(repo?: string): Promise<string | undefined>;
+  fetch: typeof fetch;
+}
+
+/** Access by integration id. */
+export type TokenSource = (integration: string) => Promise<PlatformAccess | undefined>;
+
+/** An event's access, with every token it minted. */
+export type EventTokens = TokenSource & { minted: string[] };
 
 /** The linked member's own platform token, refreshed and stored again when it had expired. */
 export async function requesterToken(
@@ -99,7 +198,10 @@ export async function taskToken(
     actAs === 'requester'
       ? await requesterToken(ctx, integration, event, credentials).catch(() => undefined)
       : undefined;
-  return own ?? installationToken(ctx, integration, installation, credentials, bound);
+  return (
+    own ??
+    installationToken(ctx, integration, installation, credentials, bound, ctx.config.taskTimeoutMs)
+  );
 }
 
 const repoName = (value: string | undefined) => {
@@ -107,14 +209,21 @@ const repoName = (value: string | undefined) => {
   return match ? { owner: match[1]!, name: match[2]! } : undefined;
 };
 
-/** A connected installation's token, narrowed to the task's frozen bound, or before a task to its config repository read-only. */
-async function connectionToken(
+/** A connected installation that can mint, narrowed to the task's frozen bound, or before a task to its config repository read-only. */
+async function connection(
   ctx: ServerContext,
   integration: string,
-  connection: InstallationLink,
+  link: InstallationLink,
   task?: Pick<TaskStatus['task'], 'tools' | 'toolScopes'>,
-): Promise<string | undefined> {
-  const linked = await ctx.store.get('installation', connection.id);
+): Promise<
+  | {
+      installation: string;
+      repo: { owner: string; name: string };
+      mint(repo?: { owner: string; name: string }): Promise<string>;
+    }
+  | undefined
+> {
+  const linked = await ctx.store.get('installation', link.id);
   if (!linked || linked.deletedAt) return undefined;
 
   const app = await ctx.store.get('app', linked.app);
@@ -124,32 +233,93 @@ async function connectionToken(
   const repo = task ? task.toolScopes?.[integration]?.repo : repoName(linked.settings?.configRepo);
   if (!repo) return undefined;
 
-  return target.auth.token(
-    unsealed(ctx, linked),
-    decryptSecret(ctx.config, app.credentials),
-    tokenBound(repo, task ? (task.tools[integration] ?? []) : target.tools.presets.observe),
-  );
+  return {
+    installation: linked.id,
+    repo,
+    mint: async (read = repo) =>
+      installationToken(
+        ctx,
+        target,
+        linked,
+        decryptSecret(ctx.config, app.credentials),
+        tokenBound(read, task ? (task.tools[integration] ?? []) : target.tools.presets.observe),
+        task && ctx.config.taskTimeoutMs,
+      ),
+  };
 }
 
-/** Event token plus tokens for connected integrations that can still be minted. */
-export async function resolveTokens(
+const connectionFailed = (integration: string) => (error: unknown) => {
+  console.error(`coder server: could not mint a connected ${integration} token`, error);
+
+  return undefined;
+};
+
+/** Dispatch's access: the event installation's read token and connected installations' config repository tokens, none minted until asked for. */
+export function dispatchTokens(
   ctx: ServerContext,
+  integration: Integration,
   installation: Installation,
   event: AgentEvent,
-  eventToken: string,
-  task?: Pick<TaskStatus['task'], 'tools' | 'toolScopes'>,
-): Promise<Record<string, string>> {
-  const tokens: Record<string, string> = { [event.integration]: eventToken };
-  await Promise.all(
-    Object.entries(installation.connections ?? {}).map(async ([integration, connection]) => {
-      if (integration === event.integration) return;
-      try {
-        const token = await connectionToken(ctx, integration, connection, task);
-        if (token) tokens[integration] = token;
-      } catch {}
-    }),
+  credentials: unknown,
+): EventTokens {
+  const minted: string[] = [];
+  const scoped = (
+    own: { owner: string; name: string } | undefined,
+    mint: (repo: typeof own) => Promise<string | undefined>,
+  ) => {
+    const tokens = new Map<string, Promise<string | undefined>>();
+    return (repo?: string) => {
+      const bound = repo ? repoName(repo) : own;
+      if (repo && !bound) return Promise.resolve(undefined);
+
+      const key = bound ? `${bound.owner}/${bound.name}` : '';
+      let token = tokens.get(key);
+      if (!token) {
+        token = mint(bound).then(value => {
+          if (value) minted.push(value);
+          return value;
+        });
+        tokens.set(key, token);
+      }
+
+      return token;
+    };
+  };
+  const access = async (id: string): Promise<PlatformAccess | undefined> => {
+    const fetcher = ctx.fetch ?? fetch;
+    if (id === event.integration)
+      return {
+        installation: installation.id,
+        fetch: fetcher,
+        token: scoped(event.repo, repo =>
+          installationToken(
+            ctx,
+            integration,
+            installation,
+            credentials,
+            tokenBound(repo, integration.tools.presets.observe),
+          ),
+        ),
+      };
+    const link = installation.connections?.[id];
+    const linked = link && (await connection(ctx, id, link));
+    return (
+      linked && {
+        installation: linked.installation,
+        fetch: fetcher,
+        token: scoped(linked.repo, repo => linked.mint(repo).catch(connectionFailed(id))),
+      }
+    );
+  };
+  const found = new Map<string, Promise<PlatformAccess | undefined>>();
+
+  return Object.assign(
+    (id: string) => {
+      if (!found.has(id)) found.set(id, access(id));
+      return found.get(id)!;
+    },
+    { minted },
   );
-  return tokens;
 }
 export async function eventTokens(
   ctx: ServerContext,
@@ -180,9 +350,15 @@ export async function eventTokens(
     ),
     eventOptions(task.definition.integrations[event.integration], event.type)?.actAs,
   );
-  const resolved = await resolveTokens(ctx, installation, event, eventToken, task);
-  const tokens = Object.fromEntries(Object.entries(resolved).filter(([id]) => id in task.tools));
-  tokens[event.integration] = eventToken;
+  const tokens: Record<string, string> = { [event.integration]: eventToken };
+  await Promise.all(
+    Object.entries(installation.connections ?? {}).map(async ([id, link]) => {
+      if (id === event.integration || !(id in task.tools)) return;
+      const linked = await connection(ctx, id, link, task);
+      const token = await linked?.mint().catch(connectionFailed(id));
+      if (token) tokens[id] = token;
+    }),
+  );
 
   return tokens;
 }

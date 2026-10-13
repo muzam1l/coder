@@ -121,6 +121,8 @@ export interface IntegrationInfo {
   /** A connection can sign in here with OAuth now: the integration has user OAuth and an app to sign in through. */
   connectable?: true;
   organizationApps: boolean;
+  /** Apps may be public: installable by any account, not only the one that owns them. */
+  publicApps: boolean;
   events: Record<string, { description: string; noisy?: true; addressed?: true }>;
   presets: Record<string, string[]>;
   repositories?: boolean;
@@ -155,6 +157,7 @@ export interface SetupOutcome {
     | 'installation-bound'
     | 'account-taken'
     | 'not-member'
+    | 'other-workspace'
     | 'disconnected'
     | 'renew-failed'
     | 'failed'
@@ -230,6 +233,15 @@ export type TaskEvent =
     })
   | { id: string; deleted: true };
 
+export interface TaskCountEvent {
+  active: number;
+}
+
+/** The runners the stream's requester sees, sent when one is added, changed, removed, or goes on or offline. */
+export interface RunnersEvent {
+  items: RunnerRow[];
+}
+
 export interface TaskCounts {
   all: number;
   active: number;
@@ -254,9 +266,13 @@ export interface AppRow {
   agent: string;
   name: string;
   builtin?: boolean;
+  /** Any account may install it, not only the one that owns it. */
+  public?: true;
   agentsRepo?: string;
   branch?: string;
   createdAt: number;
+  /** The app's settings page on the platform. */
+  settingsUrl?: string;
 }
 
 export interface InstallationRow {
@@ -265,6 +281,7 @@ export interface InstallationRow {
   integration: string;
   account: { login: string; type?: string };
   covers?: string[];
+  repos?: string[];
   deletedAt?: number;
   settings?: {
     configRepo?: string;
@@ -339,12 +356,19 @@ export interface PageQuery {
   limit?: number;
 }
 export interface AgentQuery extends PageQuery {
+  fields?: 'id' | 'id,name';
   q?: string;
   platform?: string;
   type?: string;
   connect?: boolean;
 }
+export interface CredentialQuery extends PageQuery {
+  fields?: 'id';
+}
+
 export interface TaskQuery extends PageQuery {
+  since?: number;
+  sinceId?: string;
   status?: string;
   archived?: boolean;
   summary?: boolean;
@@ -546,6 +570,19 @@ export interface LocalFolders {
   recent: LocalFolder[];
   /** The machine can open its own folder dialog. */
   picker: boolean;
+}
+
+/** What the New task composer offers: enabled agents with the default first, the workspace's defaults, models, runners, built-in flows, and on a local server its folders. */
+export interface ComposerOptions {
+  agents: Array<{ id: string; name: string; default?: true }>;
+  engine?: string;
+  engines: Record<string, { model?: string; effort?: string; permissions?: string } | undefined>;
+  models: ModelsShape;
+  runners: Array<Pick<RunnerRow, 'id' | 'name' | 'default'>>;
+  flows: string[];
+  folders?: LocalFolders;
+  /** The install label of the platform that reaches repositories. */
+  connectLabel?: string;
 }
 
 export type TaskInput = {

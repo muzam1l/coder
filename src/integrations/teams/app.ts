@@ -107,14 +107,21 @@ export const teamsApp: IntegrationApp = {
   },
 };
 
-/** A Bot Framework token for the bot's own directory, minted with its client secret. */
-export async function teamsToken(credentials: unknown): Promise<string> {
+/** A Bot Framework token for the bot's own directory, minted with its client secret; Microsoft says when it expires. */
+export async function teamsToken(
+  credentials: unknown,
+  request?: typeof fetch,
+): Promise<{ token: string; expiresAt: number }> {
   const { appId, appPassword, tenantId } = credentials as TeamsAppCredentials;
-  const token = await tokenGrant(`${LOGIN}/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`, {
-    grant_type: 'client_credentials',
-    client_id: appId,
-    client_secret: appPassword,
-    scope: BOT_SCOPE,
-  });
-  return token.accessToken;
+  const token = await tokenGrant(
+    `${LOGIN}/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`,
+    {
+      grant_type: 'client_credentials',
+      client_id: appId,
+      client_secret: appPassword,
+      scope: BOT_SCOPE,
+    },
+    request,
+  );
+  return { token: token.accessToken, expiresAt: token.expiresAt ?? 0 };
 }

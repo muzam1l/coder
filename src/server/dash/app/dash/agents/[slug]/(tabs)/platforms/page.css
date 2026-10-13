@@ -65,8 +65,13 @@ dialog.create-dialog::backdrop {
 }
 .create-dialog form {
   display: grid;
-  gap: 14px;
-  padding: 16px 20px 20px;
+  gap: 16px;
+  padding: 20px 24px 24px;
+}
+/* two lines kept, so switching the choice never moves the form */
+.where-note {
+  min-height: 3em;
+  line-height: 1.5;
 }
 .create-dialog header {
   display: flex;
@@ -114,6 +119,52 @@ dialog.create-dialog::backdrop {
 .create-dialog .actions {
   justify-content: flex-end;
   margin-top: 4px;
+}
+/* a main action with its alternatives behind a caret, as one control */
+.split {
+  display: inline-flex;
+  vertical-align: top;
+}
+.plat .acts .split > .menu {
+  display: flex;
+  margin-left: 0;
+}
+.plat .acts .split-more {
+  min-width: 0;
+  padding: 0 7px;
+}
+.split > .btn + .menu .split-more {
+  border-left-color: rgba(255, 255, 255, 0.3);
+}
+/* an unexpected failure, marked like an error toast */
+dialog.failed-dialog {
+  width: min(500px, calc(100vw - 32px));
+  border-color: color-mix(in srgb, var(--bad) 40%, var(--line2));
+  box-shadow:
+    inset 3px 0 0 var(--bad),
+    0 12px 32px rgba(0, 0, 0, 0.18);
+}
+.failed-dialog form {
+  gap: 10px;
+  padding: 24px 24px 20px 28px;
+}
+.failed-dialog header {
+  gap: 10px;
+  margin-right: 0;
+  color: var(--bad);
+}
+.failed-dialog h2 {
+  color: var(--fg);
+}
+.failed-dialog p {
+  color: var(--muted);
+  line-height: 1.6;
+}
+.failed-dialog .actions {
+  margin-top: 14px;
+}
+.failed-dialog .actions > :first-child {
+  margin-right: auto;
 }
 
 @media (max-width: 1180px) {

@@ -1,7 +1,6 @@
 import './page.css';
 import { dynamic } from '@wular/pnext/dynamic';
 
-import { formatDay, zoneOf } from '@/utils/format';
 import { Link } from '@wular/pnext/link';
 import { encodeDefinition, load, unwrap } from '@/api/load';
 import type {
@@ -10,6 +9,7 @@ import type {
   InstallationRow,
   IntegrationInfo,
   Reach,
+  SetupOutcome,
 } from '@coder/client/types';
 import { Card, Empty } from '@/comps/ui/card';
 import { Badge, Chips } from '@/comps/ui/badge';
@@ -42,45 +42,23 @@ const REACH_BADGE: Record<Reach, { tone?: 'ok' | 'warn'; label: string }> = {
   none: { label: 'not set up' },
 };
 
-/** Organizations this workspace already works in on `integration`, where a new app could live. */
-const organizationsOn = (
-  integration: string,
-  catalog: IntegrationInfo[],
-  everywhere: InstallationRow[],
-) =>
-  catalog.find(entry => entry.id === integration)?.organizationApps
-    ? [
-        ...new Set(
-          everywhere
-            .filter(
-              entry =>
-                entry.integration === integration &&
-                entry.account.type &&
-                entry.account.type !== 'User',
-            )
-            .map(entry => entry.account.login),
-        ),
-      ].sort()
-    : [];
-
 /** One row per platform: what wakes it, its access, the app, where it is installed, and the next step. */
 function Platforms({
   agent,
   apps,
   installations,
-  everywhere,
   catalog,
-  tz,
   operator = false,
+  failed,
 }: {
   agent: AgentRow;
   apps: AppRow[];
   installations: InstallationRow[];
-  everywhere: InstallationRow[];
   catalog: IntegrationInfo[];
-  tz: string;
   /** The viewer runs this server and can set up its shared apps. */
   operator?: boolean;
+  /** The last setup, when it failed unexpectedly. */
+  failed?: SetupOutcome;
 }) {
   const declared = agent.definition?.integrations ?? {};
   const ids = Object.keys(declared).sort();
@@ -177,10 +155,9 @@ function Platforms({
                       ? own.map(app => (
                           <span key={app.id} class="inst">
                             <b>{app.name}</b>
-                            <span class="sub">
-                              {events.includes('mention') ? `mention @${app.name} · ` : ''}
-                              created {formatDay(app.createdAt, tz)}
-                            </span>
+                            {events.includes('mention') ? (
+                              <span class="sub">mention @{app.name}</span>
+                            ) : null}
                           </span>
                         ))
                       : null}
@@ -221,16 +198,25 @@ function Platforms({
                         <Badge tone={REACH_BADGE[state].tone}>{REACH_BADGE[state].label}</Badge>
                         <PlatformActions
                           integration={id}
+                          name={info?.name ?? id}
                           apps={own.map(app => ({
                             id: app.id,
                             name: app.name,
+                            public: app.public,
+                            settingsUrl: app.settingsUrl,
                           }))}
                           installed={installs.length > 0}
                           createUrl={createUrl(id)}
                           create={info?.create}
                           unreachable={catalog.some(entry => entry.unreachable)}
-                          owners={organizationsOn(id, catalog, everywhere)}
+                          publicApps={info?.publicApps}
+                          organizationApps={info?.organizationApps}
                           shared={builtin && info?.builtinApp !== 'own'}
+                          failed={
+                            failed?.platform === id
+                              ? { name: info?.name ?? id, app: failed.appId }
+                              : undefined
+                          }
                         />
                       </>
                     )}
@@ -255,10 +241,11 @@ export default async function AgentPlatformsPage({
   if (!request) return null;
   const { slug: raw } = await params;
   const slug = Array.isArray(raw) ? raw[0]! : raw!;
-  const tz = zoneOf(request);
   const agent = loadAgent(request, slug);
   const apps = load(request).apps.list(slug).then(unwrap);
-  const everywhere = load(request).installations.list().then(unwrap);
+  const installations = load(request)
+    .installations.list(slug, { limit: 200, active: true })
+    .then(unwrap);
   const catalog = load(request)
     .integrations.list(slug)
     .catch(() => []);
@@ -267,22 +254,25 @@ export default async function AgentPlatformsPage({
     .catch(() => undefined);
   const port = new URL(request.url).port || '8787';
   const outcome = readOutcome(new URL(request.url).searchParams);
+  // An unexpected failure opens a dialog on its platform's row instead.
+  const failed = outcome?.status === 'failed' ? outcome : undefined;
   const appOn = (apps: AppRow[], integration?: string) =>
     apps.find(app => app.integration === integration);
   const retried = (apps: AppRow[]) =>
     apps.find(app => app.id === outcome?.appId) ?? appOn(apps, outcome?.platform);
   apps.catch(() => {});
-  everywhere.catch(() => {});
+  installations.catch(() => {});
 
   return (
     <>
       <Lead />
       <Settle
         load={() =>
-          Promise.all([agent, apps, everywhere, catalog, me]).then(
+          Promise.all([agent, apps, installations, catalog, me]).then(
             ([row, own, all, integrations, who]) => (
               <>
-                {outcome ? (
+                {outcome &&
+                !(failed?.platform && row.definition?.integrations?.[failed.platform]) ? (
                   <Outcome outcome={outcome} catalog={integrations}>
                     {succeeded(outcome) ? (
                       (outcome.connect ?? []).map(id => {
@@ -305,13 +295,10 @@ export default async function AgentPlatformsPage({
                 <Platforms
                   agent={row}
                   apps={own}
-                  installations={all.filter(
-                    entry => !entry.deletedAt && own.some(app => app.id === entry.app),
-                  )}
-                  everywhere={all.filter(entry => !entry.deletedAt)}
+                  installations={all}
                   catalog={integrations}
-                  tz={tz}
                   operator={who?.operator === true}
+                  failed={failed}
                 />
                 <ConnectionsLine />
                 {(who && needsTunnel(who)) || integrations.some(entry => entry.unreachable) ? (

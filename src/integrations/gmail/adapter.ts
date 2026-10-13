@@ -40,6 +40,9 @@ class BackgroundGmailAdapter extends GmailAdapter {
   }
 }
 
+/** Where Google publishes the keys that sign Pub/Sub push tokens. */
+const GOOGLE_CERTS = 'https://www.googleapis.com/oauth2/v3/certs';
+
 export function gmailAdapter(ctx: AdapterContext): Adapter {
   const credentials = ctx.credentials as GmailAppCredentials | undefined;
   const mailbox = ctx.installationId;
@@ -50,6 +53,7 @@ export function gmailAdapter(ctx: AdapterContext): Adapter {
         subscription: credentials.subscription,
         audience: credentials.audience,
         serviceAccountEmail: credentials.serviceAccount,
+        ...(ctx.signingKeys ? { verificationKey: ctx.signingKeys(GOOGLE_CERTS) } : {}),
       }
     : { subscription: 'projects/none/subscriptions/none', webhookVerifier: () => false };
   return new BackgroundGmailAdapter(

@@ -4,7 +4,7 @@ import './runners-list.css';
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { client, poll } from '@/utils/client';
+import { client } from '@/utils/client';
 import {
   iCheck,
   iDots,
@@ -25,6 +25,7 @@ import { Menu, MenuItem } from '@/comps/ui/menu';
 import { Select } from '@/comps/ui/select';
 import { formatDuration, reasonText } from '@/utils/format';
 import { sortedRunners } from '@/app/dash/tasks/composer-data';
+import { useRunnerEvents } from '@/comps/frame/task-toasts';
 import { useRemove } from './list';
 import type { Me, RunnerKind, RunnerPairing, RunnerRow, RunnerSpec } from '@coder/client/types';
 
@@ -223,24 +224,16 @@ function AddRunner({
   const [pairing, setPairing] = useState<RunnerPairing>();
   const spec = catalog.find(each => each.kind === kind);
 
-  // A paired machine shows up in the list once it calls home.
+  // A paired machine shows up in the list, through the events stream, once it calls home.
+  const before = useRef(known);
   useEffect(() => {
     if (!pairing) return;
-    const until = Math.min(pairing.expiresAt, Date.now() + 15 * 60_000);
-    // A list read from a pairing already gone never ends the next one.
-    let current = true;
-    const stop = poll(async () => {
-      if (Date.now() > until) return cancel();
-      const rows = await client.runners.list();
-      if (!current || !rows.items.some(row => !known.includes(row.id))) return;
-      onAdded(rows);
-      cancel();
-    }, 2000);
-    return () => {
-      current = false;
-      stop();
-    };
+    const timer = setTimeout(cancel, Math.min(pairing.expiresAt - Date.now(), 15 * 60_000));
+    return () => clearTimeout(timer);
   }, [pairing]);
+  useEffect(() => {
+    if (pairing && known.some(id => !before.current.includes(id))) cancel();
+  }, [known.join(), pairing]);
 
   const cancel = () => {
     setPairing(undefined);
@@ -253,6 +246,7 @@ function AddRunner({
     setPairing(undefined);
     setKind(next.kind);
     if (next.connect !== 'pair') return;
+    before.current = known;
     setBusy(true);
     client.runners
       .pair({ scope: scope as RunnerRow['scope'] })
@@ -395,8 +389,7 @@ export function RunnersList({ first, me }: { first: Runners; me: Me }) {
   const admin = !me.user || ADMIN_ROLES.has(me.organization?.role ?? '');
   const items = sortedRunners(rows.items);
 
-  // Online dots stay fresh while the tab is open.
-  useEffect(() => poll(() => client.runners.list().then(setRows), 30_000), []);
+  useRunnerEvents(({ items }) => setRows(current => ({ ...current, items })));
 
   const change = async (act: () => Promise<unknown>) => {
     setError('');

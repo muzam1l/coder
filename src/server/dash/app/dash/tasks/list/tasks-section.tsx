@@ -47,7 +47,7 @@ export function loadTasks(request: Request, agent?: string) {
   const agents = agent
     ? undefined
     : load(request)
-        .agents.list({ cursor: '', limit: FILTER_ROWS + 1 })
+        .agents.list({ cursor: '', limit: FILTER_ROWS + 1, fields: 'id,name' })
         .then(
           page => page.items.map((row): [string, string] => [row.id, row.name]),
           () => [],

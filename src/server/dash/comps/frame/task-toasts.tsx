@@ -5,7 +5,13 @@ import '@/comps/ui/toast.css';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { serverEvents } from '@coder/client';
-import type { TaskEvent, TaskRow, TaskState } from '@coder/client/types';
+import type {
+  RunnersEvent,
+  TaskCountEvent,
+  TaskEvent,
+  TaskRow,
+  TaskState,
+} from '@coder/client/types';
 import { client } from '@/utils/client';
 import { Link } from '@wular/pnext/link';
 import { usePathname, useRouter } from '@wular/pnext/navigation/client';
@@ -36,6 +42,9 @@ const TASK = 'coder:task';
 const REPLAY = 'coder:task-replay';
 const RESET = 'coder:task-reset';
 const RESYNC = 'coder:task-resync';
+const COUNTS = 'coder:task-counts';
+const COUNTS_REPLAY = 'coder:task-counts-replay';
+const RUNNERS = 'coder:runners';
 // A write that commits past the server's look-back still reaches shown pages within this, through a fresh read.
 const RESYNC_MS = 60_000;
 // Latest events a tab keeps, so a page that mounts later starts from them.
@@ -116,7 +125,15 @@ export function useTaskEvents(
   }, []);
 }
 
-type Message = { hello?: true; id?: string; event?: TaskEvent; reset?: true; resync?: true };
+type Message = {
+  hello?: true;
+  id?: string;
+  event?: TaskEvent;
+  counts?: TaskCountEvent;
+  runners?: RunnersEvent;
+  reset?: true;
+  resync?: true;
+};
 
 /** One events stream per browser: the tab holding the lock reads it, shares it on a channel, and a tab that takes over resumes from the last event id. */
 function useEventsStream(ids: string[], leading: { current: boolean }) {
@@ -138,6 +155,10 @@ function useEventsStream(ids: string[], leading: { current: boolean }) {
         (event as CustomEvent<(e: TaskEvent) => void>).detail(each);
     };
     addEventListener(REPLAY, replay);
+    let counts: TaskCountEvent | undefined;
+    const replayCounts = (event: Event) =>
+      counts && (event as CustomEvent<(counts: TaskCountEvent) => void>).detail(counts);
+    addEventListener(COUNTS_REPLAY, replayCounts);
     const channel =
       typeof BroadcastChannel !== 'undefined' && navigator.locks
         ? new BroadcastChannel(EVENTS)
@@ -149,6 +170,11 @@ function useEventsStream(ids: string[], leading: { current: boolean }) {
     const receive = (message: Message) => {
       last = message.id ?? last;
       if (message.event) deliver(message.event);
+      if (message.counts) {
+        counts = message.counts;
+        dispatchEvent(new CustomEvent(COUNTS, { detail: counts }));
+      }
+      if (message.runners) dispatchEvent(new CustomEvent(RUNNERS, { detail: message.runners }));
       if (message.resync) dispatchEvent(new Event(RESYNC));
       if (!message.reset) return;
       latest.clear();
@@ -200,6 +226,8 @@ function useEventsStream(ids: string[], leading: { current: boolean }) {
               const message: Message = {
                 ...(id ? { id } : {}),
                 ...(event === 'task' ? { event: JSON.parse(data) as TaskEvent } : {}),
+                ...(event === 'counts' ? { counts: JSON.parse(data) as TaskCountEvent } : {}),
+                ...(event === 'runners' ? { runners: JSON.parse(data) as RunnersEvent } : {}),
                 ...(event === 'reset' ? { reset: true as const } : {}),
               };
               channel?.postMessage(message);
@@ -229,12 +257,46 @@ function useEventsStream(ids: string[], leading: { current: boolean }) {
       clearTimeout(soon);
       channel?.close();
       removeEventListener(REPLAY, replay);
+      removeEventListener(COUNTS_REPLAY, replayCounts);
     };
   }, []);
 
   useEffect(() => {
     if (current.current && current.current.key !== key) current.current.abort.abort();
   }, [key]);
+}
+
+/** Hears the runners this person sees whenever one is added, changed, removed, or goes on or offline. */
+export function useRunnerEvents(on: (event: RunnersEvent) => void) {
+  const handler = useRef(on);
+  handler.current = on;
+  useEffect(() => {
+    const listener = (event: Event) => handler.current((event as CustomEvent<RunnersEvent>).detail);
+    addEventListener(RUNNERS, listener);
+    return () => removeEventListener(RUNNERS, listener);
+  }, []);
+}
+
+/** The workspace's active tasks, as the events stream counts them. */
+export function ActiveCount() {
+  const [active, setActive] = useState<number>();
+
+  useEffect(() => {
+    const on = (event: Event) => setActive((event as CustomEvent<TaskCountEvent>).detail.active);
+    addEventListener(COUNTS, on);
+    dispatchEvent(
+      new CustomEvent(COUNTS_REPLAY, {
+        detail: (counts: TaskCountEvent) => setActive(counts.active),
+      }),
+    );
+    return () => removeEventListener(COUNTS, on);
+  }, []);
+
+  return active ? (
+    <span class="n" title={`${active} active`}>
+      {active}
+    </span>
+  ) : null;
 }
 
 function Item({ toast, dismiss }: { toast: Toast; dismiss: (key: string) => void }) {

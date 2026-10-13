@@ -1,5 +1,6 @@
 /** The contract every integration implements: a Chat SDK adapter, apps, tools, tokens and repository reads. */
 import type { Adapter, Message, ReactionEvent, SerializedThread, StateAdapter, Thread } from 'chat';
+import type { JWTVerifyGetKey } from 'jose';
 
 import type { McpServerSpec } from '../core/types';
 import type { McpTool } from '../utils/mcp-server';
@@ -46,7 +47,7 @@ export interface CreateState {
   tx?: string;
   /** Where the app lives, such as a GitHub organization; the creator's own account when absent. */
   owner?: string;
-  /** A server-level app anyone may install. */
+  /** Any account may install the app, not only the one that owns it. */
   public?: boolean;
 }
 
@@ -114,7 +115,10 @@ export interface IntegrationApp {
     encodedState: string;
   }): PlatformPost;
   /** The form that creates the app from values the user copies from the platform; used when there is no `createPost`. */
-  createStep?(publicUrl: string, input?: { name?: string; shared?: boolean }): CreateStep;
+  createStep?(
+    publicUrl: string,
+    input?: { name?: string; shared?: boolean; public?: boolean },
+  ): CreateStep;
   /** `/create/<id>/callback`: finish creation; credentials are stored encrypted by the caller, or `shared` keeps the shared app's. */
   createCallback(
     req: Request,
@@ -140,12 +144,19 @@ export interface IntegrationApp {
       saveCredentials(credentials: unknown): Promise<void>;
     },
   ): Promise<unknown | undefined>;
-  /** Where the browser goes to install an existing app; `state` comes back to installCallback. */
+  /** The app's settings page on the platform, where it is deleted. */
+  settingsUrl?(app: AgentApp, credentials: unknown): string | undefined;
+  /** Where the browser goes to install an existing app; `state` comes back to installCallback. With `installation`, a fresh authorization that verifies it. */
   installUrl(
     app: AgentApp,
     credentials: unknown,
-    input: { publicUrl: string; state: string },
+    input: { publicUrl: string; state: string; installation?: string },
   ): string;
+  /** The app and installation id of a platform-started install, checked with the platform, never read from the query. */
+  installedApp?(
+    req: Request,
+    input: { apps: Array<{ app: AgentApp; credentials: unknown }>; fetch: typeof fetch },
+  ): Promise<{ app: AgentApp; installation: string } | undefined>;
   /** `/install/<id>/callback`: the platform's install redirect or OAuth code. */
   installCallback(
     req: Request,
@@ -156,6 +167,8 @@ export interface IntegrationApp {
       fetch: typeof fetch;
       /** Install links for this agent's apps on other integrations, given the new installation's id. */
       connect: (installationId: string) => Promise<Record<string, string>>;
+      /** A platform-started install to verify, from Coder's own state. */
+      installation?: string;
     },
   ): Promise<{
     platformInstallId: string;
@@ -163,6 +176,8 @@ export interface IntegrationApp {
     /** Plaintext platform token to store encrypted (Slack bot token). */
     token?: string;
     installer?: string;
+    /** The app's own platform user in the installation. */
+    self?: string;
     /** Accounts an install spans; null keeps known grants when reading them failed. */
     covers?: string[] | null;
     /** The installer's verified platform identity, linked to the signed-in user. */
@@ -216,8 +231,18 @@ export interface AdapterContext {
   token(installationId: string, bound?: TokenBound): Promise<string>;
   /** Check a webhook's installation without minting a platform token. */
   isBound?(installationId: string): Promise<boolean>;
+  /** The app's own platform user in a bound installation, as stored at install. */
+  installedSelf?(installationId: string): Promise<string | undefined>;
+  /** Saves the app's platform user on an installation that lacks it, so it is looked up once. */
+  saveSelf?(installationId: string, self: string): Promise<void>;
+  /** Public signing keys from `url`, a fixed platform endpoint, held across requests. */
+  signingKeys?(url: string): JWTVerifyGetKey;
   /** A fresh in-memory Chat SDK state for caches the adapter must not share. */
   privateState?(): StateAdapter;
+  /** Whether Coder acts on a plain message that neither mentions the app nor is direct, by its raw text; the adapter reads nothing more of one it does not. */
+  hears?(text: string): Promise<boolean>;
+  /** Whether Coder answered in this Chat SDK thread lately; only mentions, direct messages and such threads look up users. */
+  active?(thread: string): Promise<boolean>;
 }
 
 /** Chat SDK handlers that raise Coder events. */
@@ -240,9 +265,24 @@ export interface EventSpec {
 export type OwnEvent =
   | { invalid: true }
   | { events: AgentEvent[] }
-  | { installation: { op: 'upsert' | 'delete'; installation: Installation } }
+  | {
+      installation: {
+        op: 'upsert' | 'delete';
+        installation: Installation;
+        repos?: { add: string[]; remove: string[]; refresh?: true };
+      };
+    }
   | { covers: { installation: string; add?: string[]; remove?: string[] } }
-  | { changes: { repo: string; ref: string; branch: string; paths?: string[] } };
+  | { changes: { repo: string; ref: string; branch: string; paths?: string[] }; pushed?: Pushed }
+  | { pushed: Pushed };
+
+/** A push to a branch: repository files Coder holds for it are read again. */
+export interface Pushed {
+  installation: string;
+  repo: string;
+  branch: string;
+  defaultBranch?: string;
+}
 
 /** What an unverified webhook names: the app whose secret verifies it, and the installation whose token is minted once it has. */
 export interface WebhookTarget {
@@ -257,19 +297,28 @@ export interface WebhookTarget {
   self?: string;
 }
 
+/** What Coder lends a token mint. */
+export interface TokenInput {
+  /** Stores a refreshed installation token, or resolves to the one another refresh stored first. */
+  save?(token: string): Promise<string | void>;
+  /** Reuses a token minted for `key` (the app's credentials and the exact scope) while it has time left, else runs `mint`, whose expiry is in epoch ms. */
+  hold?(key: string, mint: () => Promise<{ token: string; expiresAt: number }>): Promise<string>;
+  fetch?: typeof globalThis.fetch;
+}
+
 /** Tokens: minted and narrowed by Coder, never by an adapter. */
 export interface IntegrationAuth {
-  /** Mint a token narrowed to `bound`: its repository and what its tools need; `save` stores a refreshed installation token. */
+  /** Mint a token narrowed to `bound`: its repository and what its tools need. */
   token(
     installation: Installation,
     credentials: unknown,
     bound?: TokenBound,
-    save?: (token: string) => Promise<void>,
+    input?: TokenInput,
   ): Promise<string>;
   /** Linking by the app's user OAuth; without it, links go out privately as an ephemeral message. */
   user?: IntegrationUserAuth;
   /** Whether the event's actor may write where the event happened, checked with the platform. */
-  canWrite?(event: AgentEvent, token: string): Promise<boolean>;
+  canWrite?(event: AgentEvent, token: string, fetch?: typeof globalThis.fetch): Promise<boolean>;
 }
 
 /** Repository reads, for an integration that hosts code. */
@@ -279,12 +328,19 @@ export interface Repositories {
   readonly credentialUsername?: string;
   /** One file; `undefined` when it does not exist. */
   readFile(repo: string, path: string, token: string, ref?: string): Promise<string | undefined>;
+  /** One file sent with the ETag of Coder's copy: `unchanged` while it matches, else its text (none when missing) and ETag. */
+  revalidate?(
+    repo: string,
+    path: string,
+    token: string,
+    input: { ref?: string; etag?: string; fetch: typeof globalThis.fetch },
+  ): Promise<'unchanged' | { text?: string; etag?: string }>;
   /** Entry names in a directory; `[]` when it does not exist. */
   listDir(repo: string, path: string, token: string, ref?: string): Promise<string[]>;
   /** The commit a ref points at; `undefined` when it does not exist. */
   commit(repo: string, ref: string, token: string): Promise<string | undefined>;
   /** `owner/name` of every repository an installation's token can read. */
-  list(installation: Installation, token: string): Promise<string[]>;
+  list(installation: Installation, token: string, request?: typeof fetch): Promise<string[]>;
   /** One repository as a task checks it out, at its default branch. */
   get(repo: string, token: string): Promise<NonNullable<AgentEvent['repo']>>;
   /** Browser address of a repository folder. */
@@ -311,6 +367,8 @@ export interface Integration {
   readonly covered?: string;
   /** Apps may live under an organization instead of the creator's own account. */
   readonly organizationApps?: boolean;
+  /** Apps may be public: installable by any account, not only the one that owns them. */
+  readonly publicApps?: boolean;
   /** Listed first among an agent's handles. */
   readonly featured?: true;
   /** How an agent should write for this platform, added to its prompt for events from it. */
@@ -332,9 +390,9 @@ export interface Integration {
   adapter(ctx: AdapterContext): Promise<Adapter>;
   /** The platform delivery or activity that raised a reaction. */
   reactionId?(reaction: ReactionEvent): string | undefined;
-  /** Keep a bound installation's platform subscription alive and catch up on what it missed; runs after binding and on the server's sweep. */
-  renew?(adapter: Adapter): Promise<void>;
-  /** Catch up on what the platform could not push; runs every minute on a server with no public URL. */
+  /** Keep a bound installation's platform subscription alive; resolves to when it expires, in epoch ms. Runs after binding and on the sweep once it nears expiry. */
+  renew?(adapter: Adapter): Promise<number | undefined>;
+  /** Catch up on what the platform could not push; runs daily after a renewal, and every minute on a server with no public URL. */
   sync?(adapter: Adapter): Promise<void>;
   /** Signed webhooks the adapter does not handle (GitHub pull requests, issues, installs and pushes); `undefined` leaves it to the adapter. */
   ownEvents?(req: Request, raw: string, app: AgentApp, credentials: unknown): OwnEvent | undefined;

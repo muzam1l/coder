@@ -16,6 +16,8 @@ import { mailboxId, type MailboxKey } from '../../mailbox';
 import { shortPath } from '../../../utils/fsx';
 import { CLI_PATH } from '../../runtime';
 import { engineEnvironment } from '../../connections';
+import { parseVersion } from '../../hosts';
+import { compareVersions } from '../../update-check';
 import type {
   AuthStatus,
   Availability,
@@ -33,6 +35,9 @@ const USAGE_LOG_STEP = 1000;
 
 // Tools whose file_path names a file the turn changed.
 const WRITING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
+
+const claudeVersions = new Map<string, string>();
+const CLAUDE_VERSION_ENV = 'CODER_CLAUDE_VERSION';
 
 // Flatten a tool_result block's content (string, or array of text parts) to
 // raw text for progress output.
@@ -168,15 +173,79 @@ function normalizeClaudeUsage(usage: any): TokenUsage | null {
   return { input, cachedInput, output, total: input + cachedInput + output };
 }
 
-export function getClaudeAvailability(): Availability {
-  const probe = spawnSync('claude', ['--version'], { encoding: 'utf8', env: engineEnvironment() });
-  if (probe.error || probe.status !== 0) {
-    return {
-      available: false,
-      detail: 'claude CLI not found on PATH (npm install -g @anthropic-ai/claude-code)',
-    };
+function resolveClaudeExecutable(executable: string, env: NodeJS.ProcessEnv, cwd: string): string {
+  const searchPath =
+    process.platform === 'win32'
+      ? (env[
+          Object.keys(env)
+            .sort()
+            .find(key => key.toLowerCase() === 'path') ?? 'PATH'
+        ] ??
+        process.env.PATH ??
+        '')
+      : (env.PATH ?? '/usr/bin:/bin');
+  const directories = /[\\/]/.test(executable)
+    ? ['']
+    : [...(process.platform === 'win32' ? [cwd] : []), ...searchPath.split(path.delimiter)];
+  const extensions =
+    process.platform === 'win32' && !path.extname(executable)
+      ? ['', ...(env.PATHEXT ?? '.EXE;.COM').split(';')]
+      : [''];
+  for (const directory of directories) {
+    for (const extension of extensions) {
+      const file = path.resolve(cwd, directory, executable + extension);
+      try {
+        fs.accessSync(file, fs.constants.X_OK);
+        if (fs.statSync(file).isFile()) return fs.realpathSync(file);
+      } catch {}
+    }
   }
-  return { available: true, detail: String(probe.stdout || '').trim() };
+  return path.resolve(cwd, executable);
+}
+
+export function claudeVersionEnvironment(env: NodeJS.ProcessEnv, cwd: string) {
+  const executable = resolveClaudeExecutable('claude', engineEnvironment(env), cwd);
+  const detail = claudeVersions.get(executable);
+
+  return {
+    [CLAUDE_VERSION_ENV]: detail === undefined ? undefined : JSON.stringify({ executable, detail }),
+  };
+}
+
+function claudeVersion(executable: string, env: NodeJS.ProcessEnv, cwd: string): string {
+  const file = resolveClaudeExecutable(executable, env, cwd);
+  const known = claudeVersions.get(file);
+  if (known !== undefined) return known;
+  try {
+    const inherited = JSON.parse(env[CLAUDE_VERSION_ENV] ?? 'null');
+    if (inherited?.executable === file && typeof inherited.detail === 'string') {
+      claudeVersions.set(file, inherited.detail);
+      return inherited.detail;
+    }
+  } catch {}
+
+  return getClaudeAvailability(executable, env, cwd).detail;
+}
+
+export function getClaudeAvailability(
+  executable = 'claude',
+  env: NodeJS.ProcessEnv = process.env,
+  cwd = process.cwd(),
+): Availability {
+  env = engineEnvironment(env);
+  const file = resolveClaudeExecutable(executable, env, cwd);
+  const probe = spawnSync(executable, ['--version'], {
+    encoding: 'utf8',
+    env,
+    cwd,
+  });
+  const available = !probe.error && probe.status === 0;
+  const detail = available
+    ? String(probe.stdout || '').trim()
+    : 'claude CLI not found on PATH (npm install -g @anthropic-ai/claude-code)';
+  claudeVersions.set(file, detail);
+
+  return { available, detail };
 }
 
 // Whether the claude CLI is logged in, via `claude auth status --json`.
@@ -289,6 +358,7 @@ export function buildClaudeTurnArgs(
   options: ClaudeTurnOptions,
   sessionId: string,
   mcpConfigPath?: string,
+  cliVersion?: string,
 ): string[] {
   // stream-json emits newline-delimited events (tool calls, result) as the turn
   // runs, so progress is visible instead of a single blob at the end like the
@@ -302,6 +372,10 @@ export function buildClaudeTurnArgs(
     '--verbose',
     '--replay-user-messages',
   ];
+  const version = parseVersion(cliVersion);
+  if (version && compareVersions(version, '2.1.94') >= 0) {
+    args.push('--thinking-display', 'summarized');
+  }
   args.push(options.resumeSessionId ? '--resume' : '--session-id', sessionId);
   if (options.model) args.push('--model', options.model);
   if (options.effort) args.push('--effort', options.effort);
@@ -678,7 +752,9 @@ export async function runClaudeTurn(
       mode: 0o600,
     });
   }
-  const args = buildClaudeTurnArgs(cwd, options, sessionId, configFile);
+  const env = engineEnvironment({ ...process.env, ...options.env });
+  const version = claudeVersion(options.executable ?? 'claude', env, cwd);
+  const args = buildClaudeTurnArgs(cwd, options, sessionId, configFile, version);
   const removeConfig = () => {
     if (!configFile) return;
     try {
@@ -698,7 +774,7 @@ export async function runClaudeTurn(
     const child = spawn(options.executable ?? 'claude', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: engineEnvironment({ ...process.env, ...options.env }),
+      env,
     });
     let buffer = '';
     let stderr = '';
@@ -787,7 +863,7 @@ export async function runClaudeTurn(
             options.onProgress?.({
               kind: 'reasoning',
               message: block.thinking.trim(),
-              durationMs: Math.max(1000, Date.now() - lastEventAt),
+              durationMs: Math.max(0, Date.now() - lastEventAt),
               threadId: streamSessionId,
             });
           }

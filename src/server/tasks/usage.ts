@@ -238,7 +238,10 @@ export async function readUsage(
   if (ctx.local) await syncLocalUsage(ctx);
 
   const installation = url.searchParams.get('installation');
-  const usage = await ctx.store.list('usage');
+  const usage = await ctx.store.list('usage', {
+    limit: pageLimit(url, 200),
+    ...(installation ? { installation } : {}),
+  });
 
   return json(
     installation ? usage.filter(entry => entry.value.installationId === installation) : usage,
@@ -263,6 +266,11 @@ export async function readUsageTotals(
   if (!Number.isFinite(since) || (by && !['agent', 'installation', 'engine'].includes(by)))
     return json({ error: 'Invalid usage query' }, 400);
 
+  if (ctx.store.usageSummary)
+    return json({
+      since,
+      totals: await ctx.store.usageSummary(since, by as UsageGroup | undefined),
+    });
   const rows = (await ctx.store.list('usage')).map(entry => entry.value);
 
   return json(usageSummary(rows, since, by as UsageGroup | undefined));

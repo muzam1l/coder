@@ -195,6 +195,12 @@ export function runnerRow(
   };
 }
 
+const shown =
+  (ctx: ServerContext, user?: string) =>
+  ({ value }: { value: RunnerRecord }) =>
+    visibleRunner(value, user) &&
+    (ctx.local || (value.kind !== 'local' && value.kind !== 'local-docker'));
+
 export function runnerContext(ctx: ServerContext) {
   const user = ctx.session?.user.id;
   const now = (ctx.now ?? Date.now)();
@@ -202,11 +208,7 @@ export function runnerContext(ctx: ServerContext) {
   const canCreate = (value: RunnerRecord['scope']) =>
     value === 'workspace' ? workspaceAdmin(ctx) : Boolean(user);
   const rows = async (store: Store = ctx.store) =>
-    (await store.list('runner')).filter(
-      ({ value }) =>
-        visibleRunner(value, user) &&
-        (ctx.local || (value.kind !== 'local' && value.kind !== 'local-docker')),
-    );
+    (await store.list('runner')).filter(shown(ctx, user));
   const row = async (id: string, record: RunnerRecord, store: Store = ctx.store) => {
     const personal = (await rows(store)).some(
       ({ value }) => value.scope === 'personal' && value.default,
@@ -222,12 +224,22 @@ export async function listRunners(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const { user, now, canCreate, rows, row } = runnerContext(ctx);
-  const records = await rows();
+  return json({
+    items: runnerItems(ctx, await ctx.store.list('runner'), (ctx.now ?? Date.now)()),
+    catalog: runnerCatalog(ctx),
+  });
+}
+
+/** The runners the requester sees out of the workspace's `records`, the server's own first. */
+export function runnerItems(
+  ctx: ServerContext,
+  records: Array<{ id: string; value: RunnerRecord }>,
+  now: number,
+): RunnerRow[] {
+  const rows = records.filter(shown(ctx, ctx.session?.user.id));
   const chosen =
-    records.find(({ value }) => value.scope === 'personal' && value.default) ??
-    records.find(({ value }) => value.default);
+    rows.find(({ value }) => value.scope === 'personal' && value.default) ??
+    rows.find(({ value }) => value.default);
   const builtin: RunnerRow = {
     id: serverRunnerId(ctx),
     kind: ctx.config.runner,
@@ -239,13 +251,7 @@ export async function listRunners(
     createdAt: 0,
   };
 
-  return json({
-    items: [
-      builtin,
-      ...records.map(({ id, value }) => runnerRow(id, value, now, id === chosen?.id)),
-    ],
-    catalog: runnerCatalog(ctx),
-  });
+  return [builtin, ...rows.map(({ id, value }) => runnerRow(id, value, now, id === chosen?.id))];
 }
 
 export async function createRunner(
@@ -582,7 +588,7 @@ export async function registerRunner(
 
   const now = (ctx.now ?? Date.now)();
 
-  return ctx.store.withAppLock(`runners:${ctx.organizationId}`, async store => {
+  const registered = await ctx.store.withAppLock(`runners:${ctx.organizationId}`, async store => {
     let record: RunnerRecord;
     let id: string;
     if (input.token) {
@@ -627,4 +633,7 @@ export async function registerRunner(
 
     return json({ ...runnerRow(id, record, now), organizationId });
   });
+  if (registered.ok) ctx.taskWatcher?.runnersChanged(ctx.organizationId);
+
+  return registered;
 }

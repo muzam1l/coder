@@ -1,7 +1,6 @@
 import './layout.css';
 import { CoderError } from '@coder/core/errors';
 import type { ComponentChildren } from 'preact';
-import { Suspense } from 'preact/compat';
 import { redirect } from '@wular/pnext/navigation';
 
 import { AuthPanel } from '@/comps/frame/auth-panel';
@@ -23,7 +22,7 @@ import {
 import { Link } from '@wular/pnext/link';
 import { load, signedOut } from '@/api/load';
 import { localServer } from '@/api/types';
-import type { TasksPage, Me } from '@coder/client/types';
+import type { Me } from '@coder/client/types';
 import { initial } from '@/utils/format';
 import { Icon, Mark } from '@/comps/ui/icon';
 import { ThemeChoices } from '@/comps/frame/theme-choices';
@@ -33,7 +32,7 @@ import { CurrentLink } from '@/comps/nav/current-link';
 import { SideToggle } from '@/comps/nav/side-toggle';
 import type { To } from '@/comps/nav/to';
 import { Menu } from '@/comps/ui/menu';
-import { TaskToasts } from '@/comps/frame/task-toasts';
+import { ActiveCount, TaskToasts } from '@/comps/frame/task-toasts';
 
 // Four places; the workspace lives in the account menu.
 const NAV: Array<To & { within: string; label: string; icon: string }> = [
@@ -209,16 +208,6 @@ function ServerMenu({ me, host }: { me?: Me; host: string }) {
   );
 }
 
-async function ActiveCount({ count }: { count: Promise<TasksPage> }) {
-  const active = await count.then(page => page.counts?.active).catch(() => undefined);
-
-  return active ? (
-    <span class="n" title={`${active} active`}>
-      {active}
-    </span>
-  ) : null;
-}
-
 // Without a saved choice, mid-width screens start with the sidebar collapsed, before first paint.
 const SIDE_AUTO = `(() => {
   const app = document.currentScript.parentElement;
@@ -310,7 +299,6 @@ export default function DashLayout({
   if (!request) return null;
   const { pathname, host } = new URL(request.url);
   const me = load(request).me();
-  const active = load(request).tasks.list({ cursor: '', limit: 1, summary: true, counts: true });
   const side = /(?:^|; )side=(min|max)(?:;|$)/.exec(request.headers.get('cookie') ?? '')?.[1];
 
   return (
@@ -338,11 +326,7 @@ export default function DashLayout({
               <CurrentLink key={within} {...to} within={within} data-tip={label}>
                 <Icon d={icon} />
                 {label}
-                {label === 'Tasks' ? (
-                  <Suspense fallback={null}>
-                    <ActiveCount count={active} />
-                  </Suspense>
-                ) : null}
+                {label === 'Tasks' ? <ActiveCount /> : null}
               </CurrentLink>
             ),
           )}

@@ -68,8 +68,11 @@ async function startCreate(
     };
   if (!parsed.definition.integrations[id])
     return { error: `This agent declares no ${id} integration in its agent.json`, status: 400 };
-  if (parsed.state.public && !operator)
-    return { error: 'Only the server operator creates public apps', status: 403 };
+  if (parsed.state.public && !operator && !ctx.integrations[id]!.publicApps)
+    return {
+      error: `${ctx.integrations[id]!.name} apps cannot be public here. Create a private one.`,
+      status: 400,
+    };
 
   const target = createTarget(id, parsed.state);
   // The operator's command issued the transaction already; the dashboard gets a fresh one.
@@ -119,10 +122,13 @@ async function startedCreate(ctx: AppsContext, id: string, source: URLSearchPara
 
   const { app } = ctx.integrations[id]!;
   const tx = started.state.tx!;
-  // An operator link has no catalog to read its form from.
+  // Operator links have no catalog form; public creates have their own.
   const create =
-    ctx.operatorApp && app.createStep
-      ? app.createStep(ctx.config.publicUrl!, { name: started.definition.name })
+    app.createStep && (ctx.operatorApp || started.state.public)
+      ? app.createStep(ctx.config.publicUrl!, {
+          name: started.definition.name,
+          public: started.state.public,
+        })
       : undefined;
 
   const publicUrl = ctx.config.publicUrl!;
@@ -215,11 +221,13 @@ async function finishCreate(
       fetch: ctx.fetch ?? fetch,
       ...(shared ? { shared: decryptSecret(ctx.config, shared.credentials) } : {}),
     })
-    .catch((error: unknown) =>
-      error instanceof IntegrationError
-        ? outcome(ctx, error.code, { platform: id, error: error.error, ...spent }, back)
-        : outcome(ctx, 'failed', { platform: id, ...spent }, back),
-    );
+    .catch((error: unknown) => {
+      if (error instanceof IntegrationError)
+        return outcome(ctx, error.code, { platform: id, error: error.error, ...spent }, back);
+      console.error(`coder server: creating the ${id} app failed`, error);
+
+      return outcome(ctx, 'failed', { platform: id, ...spent }, back);
+    });
   if (created instanceof Response) return created;
 
   const app: AgentApp = {
@@ -230,6 +238,7 @@ async function finishCreate(
     ...(parsed.state.repo ? { agentsRepo: parsed.state.repo } : {}),
     ...(parsed.state.repo ? { branch: parsed.state.branch ?? 'main' } : {}),
     ...(operator ? { builtin: true } : {}),
+    ...(parsed.state.public ? { public: true } : {}),
     ...('shared' in created
       ? { shared: shared!.id, credentials: '' }
       : { credentials: encryptSecret(ctx.config, created.credentials) }),

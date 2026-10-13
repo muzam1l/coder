@@ -27,6 +27,8 @@ class BoundLinearAdapter extends LinearAdapter {
   constructor(
     config: ConstructorParameters<typeof LinearAdapter>[0],
     private readonly organization: string | undefined,
+    private readonly installedSelf?: AdapterContext['installedSelf'],
+    private readonly saveSelf?: AdapterContext['saveSelf'],
   ) {
     super(config);
   }
@@ -34,6 +36,19 @@ class BoundLinearAdapter extends LinearAdapter {
   // Chat initializes before verifying; the app identity is looked up once the webhook is verified.
   override async initialize(chat: ChatInstance): Promise<void> {
     this.chat = chat;
+  }
+
+  // The app user stored at install stands in for Linear's viewer query.
+  protected override async resolveConnectIdentity(): Promise<void> {
+    const self = this.organization && (await this.installedSelf?.(this.organization));
+    if (!self) {
+      await super.resolveConnectIdentity();
+      if (this.defaultBotUserId && this.defaultOrganizationId === this.organization)
+        await this.saveSelf?.(this.organization, this.defaultBotUserId);
+      return;
+    }
+    this.defaultBotUserId = self;
+    this.defaultOrganizationId = this.organization!;
   }
 
   private bound<T>(work: () => Promise<T>): Promise<T> {
@@ -71,5 +86,7 @@ export function linearAdapter(ctx: AdapterContext): Adapter {
       logger: new ConsoleLogger('error'),
     },
     organization,
+    ctx.installedSelf,
+    ctx.saveSelf,
   );
 }

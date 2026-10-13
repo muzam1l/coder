@@ -1,5 +1,5 @@
 {
-  "id": "e811e72d-c7e0-467c-a266-03e23ba36de5",
+  "id": "0123547b-6f9c-4563-a353-602dbb46fef2",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -304,6 +304,22 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "chat_state_key_prefix_index": {
+          "name": "chat_state_key_prefix_index",
+          "columns": [
+            {
+              "expression": "key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last",
+              "opclass": "text_pattern_ops"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {},
@@ -479,6 +495,12 @@
           "primaryKey": false,
           "notNull": false
         },
+        "public": {
+          "name": "public",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": false
+        },
         "credentials_secret_id": {
           "name": "credentials_secret_id",
           "type": "bigint",
@@ -566,7 +588,7 @@
           "name": "app_id",
           "type": "bigint",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "platform_install_id": {
           "name": "platform_install_id",
@@ -592,8 +614,20 @@
           "primaryKey": false,
           "notNull": false
         },
+        "self": {
+          "name": "self",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "covers": {
           "name": "covers",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "repos": {
+          "name": "repos",
           "type": "jsonb",
           "primaryKey": false,
           "notNull": false
@@ -666,7 +700,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "integration_app_installation_token_secret_id_secret_id_fk": {
@@ -1413,7 +1447,7 @@
           "columnsTo": [
             "id"
           ],
-          "onDelete": "no action",
+          "onDelete": "set null",
           "onUpdate": "no action"
         },
         "task_installation_id_integration_app_installation_id_fk": {

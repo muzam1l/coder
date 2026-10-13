@@ -45,6 +45,8 @@ export interface Backend {
     | undefined
   >;
   appRecord(appKey: string): Promise<{ organizationId: string; app: AgentApp } | undefined>;
+  /** Every workspace's apps on one integration, for an install the platform started. */
+  apps(integration: string): Promise<Array<{ organizationId: string; app: AgentApp }>>;
   /** Which workspace an installation is bound to; webhooks route by it. */
   installationOrganization(key: string): Promise<string | undefined>;
   /** Live installations of one integration in every workspace, for the sweep. */
@@ -106,6 +108,11 @@ export async function createBackend(
 
         return app && { organizationId: DEFAULT_ORGANIZATION, app };
       },
+      apps: async integration =>
+        (await store.list('app', { prefix: `${integration}:` })).map(entry => ({
+          organizationId: DEFAULT_ORGANIZATION,
+          app: entry.value,
+        })),
       installationOrganization: async key =>
         (await store.get('installation', key)) ? DEFAULT_ORGANIZATION : undefined,
       installations: async integration =>
@@ -137,6 +144,7 @@ export async function createBackend(
     webhookTarget: (key, installationKey) =>
       DrizzleStore.webhookTarget(connection.db, key, installationKey),
     appRecord: key => DrizzleStore.appRecord(connection.db, key),
+    apps: integration => DrizzleStore.apps(connection.db, integration),
     installationOrganization: key => DrizzleStore.installationOrganization(connection.db, key),
     installations: integration => DrizzleStore.installations(connection.db, integration),
     taskOrganization: (id, tokenHash) =>

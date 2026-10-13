@@ -31,6 +31,9 @@ export const listRank = (status: string) =>
 /** A row's place in the task list, which keyset cursors carry. */
 export type ListKey = { rank: number; createdAt: number; id: string };
 
+/** Ids in byte order, as Postgres `collate "C"` compares them. */
+export const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
+
 /** The task list order: `listRank` groups, newest start first, ties broken by id. */
 export const byListKey = (a: ListKey, b: ListKey) =>
-  a.rank - b.rank || b.createdAt - a.createdAt || (b.id < a.id ? -1 : b.id > a.id ? 1 : 0);
+  a.rank - b.rank || b.createdAt - a.createdAt || byId(b.id, a.id);

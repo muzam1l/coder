@@ -80,6 +80,7 @@ export interface TurnCaptureState {
   completionTimer: ReturnType<typeof setTimeout> | null;
   lastAgentMessage: string;
   reasoningSummary: string[];
+  reasoningStartedAt: Map<string, number>;
   error: { message?: string } | null;
   fileChanges: TurnItem[];
   commandExecutions: TurnItem[];
@@ -477,6 +478,7 @@ function createTurnCaptureState(
     completionTimer: null,
     lastAgentMessage: '',
     reasoningSummary: [],
+    reasoningStartedAt: new Map(),
     error: null,
     fileChanges: [],
     commandExecutions: [],
@@ -625,6 +627,12 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
       });
       break;
     case 'item/started':
+      if (message.params.item?.type === 'reasoning' && message.params.item.id) {
+        state.reasoningStartedAt.set(
+          `${message.params.threadId}:${message.params.item.id}`,
+          Date.now(),
+        );
+      }
       recordItem(state, message.params.item, 'started', message.params.threadId ?? null);
       emitLine(
         state.onProgress,
@@ -639,7 +647,18 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
           if (change.path) state.reportedChanges.add(shortPath(state.cwd, change.path));
         }
       }
-      emitLine(state.onProgress, withCallId(describeCompletedItem(item, state.cwd), item));
+      const line = withCallId(describeCompletedItem(item, state.cwd), item);
+      if (item?.type === 'reasoning') {
+        const key = `${message.params.threadId}:${item.id}`;
+        const startedAt = state.reasoningStartedAt.get(key);
+        state.reasoningStartedAt.delete(key);
+        if (line)
+          line.extra = {
+            ...line.extra,
+            durationMs: Math.max(0, Date.now() - (startedAt ?? Date.now())),
+          };
+      }
+      emitLine(state.onProgress, line);
       break;
     }
     case 'thread/tokenUsage/updated': {

@@ -69,9 +69,10 @@ function exchange(req: Request, credentials: unknown, redirect: string, request:
   );
 }
 
-/** Linear's prefilled OAuth application form: name, callback URLs and the agent session webhook. */
-function creationLink(publicUrl: string, key: string, name?: string): string {
+/** Linear's prefilled OAuth application form: name, callback URLs, the agent session webhook and, if asked, public distribution. */
+function creationLink(publicUrl: string, key: string, name?: string, isPublic?: boolean): string {
   const params = new URLSearchParams(name ? { 'oauth.client_name': name } : {});
+  if (isPublic) params.set('distribution', 'public');
   params.append('oauth.redirect_uris', `${base(publicUrl)}/install/linear/callback`);
   params.append('oauth.redirect_uris', `${base(publicUrl)}/connect/linear/callback`);
   params.set('webhook.enabled', 'true');
@@ -82,9 +83,9 @@ function creationLink(publicUrl: string, key: string, name?: string): string {
 
 export const linearApp: IntegrationApp = {
   builtin: 'shared',
-  createStep: (publicUrl, { name } = {}, key = randomUUID()) => ({
+  createStep: (publicUrl, { name, public: isPublic } = {}, key = randomUUID()) => ({
     intro: 'Linear runs the agent as an app of your own OAuth application.',
-    link: creationLink(publicUrl, key, name),
+    link: creationLink(publicUrl, key, name, isPublic),
     steps: [
       {
         text: 'Open the link signed in to Linear. The name, callback URLs and webhook are filled in.',
@@ -141,13 +142,15 @@ export const linearApp: IntegrationApp = {
       `${base(publicUrl)}/install/linear/callback`,
       request,
     );
-    const { organization } = await linearQuery<{
+    const { organization, viewer } = await linearQuery<{
       organization: { id: string; name: string; urlKey: string };
-    }>(token.accessToken, 'query { organization { id name urlKey } }', request);
+      viewer: { id: string };
+    }>(token.accessToken, 'query { organization { id name urlKey } viewer { id } }', request);
     return {
       platformInstallId: organization.id,
       account: { login: organization.urlKey },
       token: JSON.stringify(token),
+      self: viewer.id,
     };
   },
 };
@@ -205,18 +208,23 @@ export const linearUserAuth: IntegrationUserAuth = {
 export function linearToken(
   installation: Installation,
   credentials: unknown,
-  save?: (token: string) => Promise<void>,
+  save?: (token: string) => Promise<string | void>,
+  request?: typeof fetch,
 ): Promise<string> {
   const { clientId, clientSecret } = credentials as LinearAppCredentials;
   return freshToken(
     installation.token,
     refreshToken =>
-      tokenGrant(TOKEN, {
-        grant_type: 'refresh_token',
-        refresh_token: refreshToken,
-        client_id: clientId,
-        client_secret: clientSecret,
-      }),
+      tokenGrant(
+        TOKEN,
+        {
+          grant_type: 'refresh_token',
+          refresh_token: refreshToken,
+          client_id: clientId,
+          client_secret: clientSecret,
+        },
+        request,
+      ),
     save,
   );
 }

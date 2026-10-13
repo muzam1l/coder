@@ -6,6 +6,8 @@ import type { Integration } from '../../integrations/types';
 import type { Agent, AgentApp, AgentEvent, Installation, RunnerKind } from '../../agent/types';
 import type { Runner } from '../runners';
 import type { Store } from '../store/types';
+import type { SigningKeys } from '../auth/signing-keys';
+import type { TokenSource } from '../tasks/context';
 import type { TaskQueue } from '../tasks/queue';
 
 export interface ServerConfig {
@@ -141,6 +143,8 @@ export interface ServerContext {
   webhookTarget?: import('../store').Backend['webhookTarget'];
   boundInstallation?: { organizationId: string; installation: Installation };
   appRecord?(appKey: string): Promise<{ organizationId: string; app: AgentApp } | undefined>;
+  /** Every workspace's apps on one integration, for an install the platform started. */
+  apps?(integration: string): Promise<Array<{ organizationId: string; app: AgentApp }>>;
   /** Which workspace an installation is bound to, by its key; webhooks route by it. */
   installationOrganization?(key: string): Promise<string | undefined>;
   /** Live installations of one integration in every workspace, by key and workspace. */
@@ -170,10 +174,16 @@ export interface ServerContext {
     app: AgentApp,
     installation: Installation,
     event: AgentEvent,
-    tokens: Record<string, string>,
+    tokens: TokenSource,
   ): Promise<Agent>;
   /** Test or host override for outbound credential validation. */
   fetch?: typeof fetch;
+  /** Platforms' public signing keys, one cache for the whole server. */
+  signingKeys?: SigningKeys;
+  /** Repository file reads in flight, one per cache key. */
+  fileReads?: Map<string, Promise<string | undefined>>;
+  /** Repository listings in flight, one per installation. */
+  repositoryLists?: Map<string, Promise<Installation | undefined>>;
   runnerExec?: typeof import('node:child_process').execFile;
   now?: () => number;
   waitUntil?: (work: Promise<unknown>) => void;

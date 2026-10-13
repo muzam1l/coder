@@ -31,7 +31,7 @@ const PROVIDER_HOSTS = new Set([
   'api.together.xyz',
 ]);
 
-function modelList(config: Partial<CoderConfig>) {
+export function modelList(config: Partial<CoderConfig>) {
   return {
     builtin: { codex: CODEX_MODELS, claude: CLAUDE_MODELS },
     models: config.models ?? {},

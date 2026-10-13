@@ -63,6 +63,23 @@ export function withAdded(
     .sort(listOrder);
 }
 
+export type DeltaCursor = { since: number; sinceId?: string };
+
+/** A delta read's rows no event changed after `started`, and the cursor past its last row. */
+export function readDelta(
+  changed: TaskRow[],
+  cursor: DeltaCursor,
+  touched: Record<string, number>,
+  started: number,
+) {
+  const last = changed.at(-1);
+
+  return {
+    rows: changed.filter(row => (touched[row.task.id] ?? 0) <= started),
+    cursor: last ? { since: last.updatedAt, sinceId: last.task.id } : cursor,
+  };
+}
+
 export const taskTitle = (task: TaskRow) =>
   task.task.name?.trim() ||
   task.task.prompt?.trim() ||

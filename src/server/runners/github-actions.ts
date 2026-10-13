@@ -198,7 +198,7 @@ export class GithubActionsRunner implements Runner {
     const output: string[] = [];
     for (const job of list.sort((a, b) => a.id - b.id)) {
       const response = await this.request(`/repos/${repo}/actions/jobs/${job.id}/logs`);
-      if (response.status === 404) return { lines: [], next: after };
+      if (response.status === 404) return { lines: [], next: after, complete: false };
       if (response.status === 302 && response.headers.get('location')) {
         const downloaded = await this.fetcher(response.headers.get('location')!, {
           redirect: 'manual',
@@ -210,7 +210,11 @@ export class GithubActionsRunner implements Runner {
       else throw new Error(`GitHub job logs failed: ${response.status}`);
     }
     const all = logLines(output.join('\n'));
-    return { lines: all.slice(after + 1), next: Math.max(after, all.length - 1) };
+    return {
+      lines: all.slice(after + 1),
+      next: Math.max(after, all.length - 1),
+      complete: list.length > 0,
+    };
   }
 
   async stop(handle: string): Promise<void> {

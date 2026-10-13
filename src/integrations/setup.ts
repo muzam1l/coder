@@ -61,7 +61,7 @@ export async function tokenGrant(
 export async function freshToken(
   stored: string | undefined,
   refresh: (refreshToken: string) => Promise<StoredToken>,
-  save?: (token: string) => Promise<void>,
+  save?: (token: string) => Promise<string | void>,
   now = Date.now(),
 ): Promise<string> {
   if (!stored)
@@ -73,8 +73,8 @@ export async function freshToken(
     idToken?: string;
   };
   const kept = { ...next, refreshToken: next.refreshToken ?? token.refreshToken };
-  await save?.(JSON.stringify(kept));
-  return kept.accessToken;
+  const winner = await save?.(JSON.stringify(kept));
+  return winner ? (JSON.parse(winner) as StoredToken).accessToken : kept.accessToken;
 }
 
 /** Claims of an ID token the token endpoint returned over TLS, which OIDC Core 3.1.3.7 lets a client trust without its signature. */

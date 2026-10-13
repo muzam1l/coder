@@ -2,6 +2,7 @@ import { type Params } from '../routes/match';
 import { builtinDefinitions, defaultAgent } from '../../agent/load';
 import { type AgentApp } from '../../agent/types';
 import {
+  type AgentPageOptions,
   type AgentRecord,
   type AgentVersionRecord,
   type AgentVersionSummary,
@@ -59,6 +60,38 @@ export async function prepareAgent(ctx: ServerContext, slug?: string) {
   return { now, local, loadCurrent };
 }
 
+/** Agent records in id order, at most `limit`, in one read where the store can; built-ins are seeded by the caller. */
+export async function agentRecords(
+  ctx: ServerContext,
+  local: Array<{ record: AgentRecord; version?: AgentVersionRecord }> | undefined,
+  { after, q, source, platform, limit }: AgentPageOptions & { limit: number },
+): Promise<AgentRecord[]> {
+  if (!local && ctx.store.listAgentSummaries)
+    return (await ctx.store.listAgentSummaries({ after, q, source, platform, limit })).map(
+      ({ record }) => record,
+    );
+
+  return (
+    local ??
+    (platform
+      ? await agentsWithVersions(ctx.store)
+      : (await ctx.store.list('agent')).map(({ value: record }) => ({ record, version: undefined })))
+  )
+    .filter(({ version }) => !platform || Boolean(version?.definition?.integrations?.[platform]))
+    .map(({ record }) => record)
+    .filter(
+      record =>
+        (!after || record.id > after) &&
+        (!source || record.source === source) &&
+        (!q ||
+          [record.id, record.name, record.description, record.repo].some(value =>
+            value?.toLowerCase().includes(q),
+          )),
+    )
+    .sort((a, b) => a.id.localeCompare(b.id))
+    .slice(0, limit);
+}
+
 export async function listAgents(
   req: Request,
   ctx: ServerContext,
@@ -69,16 +102,34 @@ export async function listAgents(
   const versionNumber = params.version ? Number(params.version) : undefined;
   if (params.version && !/^\d+$/.test(url.pathname.split('/').at(-1)!)) return notFound();
 
+  const fields = url.searchParams.get('fields');
+  if (fields && !['id', 'id,name'].includes(fields)) return json({ error: 'Invalid fields' }, 400);
   const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
   if (!local && ctx.store.listAgentSummaries) {
     await seedBuiltinAgents(ctx.store, now);
-    if (paged(url)) return json(await agentsPage(ctx, url));
+    if (paged(url) && !fields) return json(await agentsPage(ctx, url));
+  }
+
+  const limit = pageLimit(url, 200);
+  if (fields) {
+    if (!local && !ctx.store.listAgentSummaries) await seedBuiltinAgents(ctx.store, now);
+    const records = await agentRecords(ctx, local, {
+      after: decodeCursor<string>(url),
+      q: url.searchParams.get('q')?.trim().toLowerCase(),
+      source: AGENT_TYPES[url.searchParams.get('type') ?? ''],
+      platform: url.searchParams.get('platform') ?? undefined,
+      limit: limit + (paged(url) ? 1 : 0),
+    });
+    const shape = (record: AgentRecord) =>
+      fields === 'id' ? { id: record.id } : { id: record.id, name: record.name };
+    const result = page(records, limit, record => record.id);
+    return json(paged(url) ? { ...result, items: result.items.map(shape) } : records.map(shape));
   }
 
   let agents =
     local ??
     (ctx.store.listAgentSummaries
-      ? await ctx.store.listAgentSummaries()
+      ? await ctx.store.listAgentSummaries({ limit })
       : await agentsWithVersions(ctx.store));
   if (
     !local &&
@@ -107,7 +158,7 @@ export async function listAgents(
 
   return json(
     await Promise.all(
-      agents.map(async ({ record, version }) => {
+      agents.slice(0, limit).map(async ({ record, version }) => {
         if (record.source === 'repo' && record.repo) apps ??= ctx.store.list('app');
 
         const source = await sourceUrl(ctx, record, version, apps);

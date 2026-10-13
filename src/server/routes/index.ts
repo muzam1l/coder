@@ -123,8 +123,15 @@ async function request(
     const parts = new URL(req.url).pathname.split('/');
     const task = parts[1] === 'tasks';
     const adminTask = parts[1] === 'admin' && parts[2] === 'tasks';
-    if (req.method !== 'GET' && response.ok && !['hooks', 'tasks', 'logins'].includes(parts[1]!))
-      scheduleInbox(ctx);
+    if (
+      req.method !== 'GET' &&
+      response.ok &&
+      !['hooks', 'tasks', 'logins'].includes(parts[1]!) &&
+      !(admitted instanceof Response)
+    ) {
+      const tenant = admitted.scope instanceof Response ? undefined : (admitted.scope ?? scope.ctx);
+      if (tenant) scheduleInbox(tenant, tenant.organizationId);
+    }
     if (
       req.method !== 'GET' &&
       response.ok &&
