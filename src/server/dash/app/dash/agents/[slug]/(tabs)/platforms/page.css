@@ -6,9 +6,6 @@
 .tab-lead b {
   color: var(--fg);
 }
-.more-list .inst {
-  padding: 4px 6px;
-}
 .plat td:first-child b {
   margin-right: 8px;
 }

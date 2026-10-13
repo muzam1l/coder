@@ -180,6 +180,10 @@
   display: grid;
   gap: 4px;
 }
+/* items pad themselves; rows and tips bring their own */
+.more-list > :not(.pf-row, p) {
+  padding: 4px 6px;
+}
 
 @media (max-width: 760px) {
   .pop.wide {

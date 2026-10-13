@@ -258,7 +258,10 @@ export async function readAgent(
       : Boolean(events && 'mention' in events);
   };
   const handles: Array<{ name: string; integration: string; platform: string }> = [];
-  for (const { value } of apps)
+  const ids = Object.keys(ctx.integrations);
+  const byPlatform = (a: { value: AgentApp }, b: { value: AgentApp }) =>
+    ids.indexOf(a.value.integration) - ids.indexOf(b.value.integration);
+  for (const { value } of [...apps].sort(byPlatform))
     if (
       mentions(value.integration) &&
       !handles.some(

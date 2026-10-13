@@ -123,6 +123,8 @@ export const linearApp: IntegrationApp = {
     submit: 'Create Linear app',
   }),
   // The webhook URL in the prefilled form names the app by `key`, chosen before Linear knows the client ID.
+  // Linear's app pages use its own app id, not the client ID; the API page lists them in the current workspace.
+  settingsUrl: () => 'https://linear.app/settings/api',
   async createCallback(req, { state, definition }) {
     const { key, ...credentials }: LinearAppCredentials & { key: string } = await postedFields(
       req,

@@ -22,7 +22,8 @@ import { Hero } from '@/app/dash/agents/agent/hero';
 import { Back, PageHead } from '@/comps/frame/page-head';
 import { HEADS } from '@/comps/frame/heads';
 import { initial, reasonText } from '@/utils/format';
-import { ErrorText, Field } from '@/comps/ui/field';
+import { Field } from '@/comps/ui/field';
+import { toastError } from '@/comps/frame/task-toasts';
 import { Badge } from '@/comps/ui/badge';
 import { Icon } from '@/comps/ui/icon';
 import { Select } from '@/comps/ui/select';
@@ -104,7 +105,11 @@ interface Draft {
   effort: string;
 }
 
-function draftOf(agent: AgentRow | undefined, suggested: string): Draft {
+function draftOf(
+  agent: AgentRow | undefined,
+  suggested: string,
+  catalog: IntegrationInfo[],
+): Draft {
   const definition = agent?.definition;
   const draft: Draft = {
     name: agent?.name ?? suggested,
@@ -120,7 +125,9 @@ function draftOf(agent: AgentRow | undefined, suggested: string): Draft {
     model: definition?.model ?? '',
     effort: definition?.effort ?? '',
   };
+  // A platform this server does not offer is left out, so publishing drops it.
   for (const [id, entry] of Object.entries(definition?.integrations ?? {})) {
+    if (!catalog.some(info => info.id === id)) continue;
     draft.platforms.push(id);
     draft.events[id] = eventNames(entry.events);
     draft.match[id] = {};
@@ -246,15 +253,13 @@ export function AgentEditor({
   const creating = !agent;
   const [template, setTemplate] = useState<Template>(first ?? 'blank');
   const [draft, setDraft] = useState(() => ({
-    ...draftOf(agent, suggested),
+    ...draftOf(agent, suggested, catalog),
     ...(creating ? fromTemplate(first ?? 'blank', catalog) : {}),
   }));
   const [idTouched, setIdTouched] = useState(false);
   const [writing, setWriting] = useState('write');
   const [query, setQuery] = useState('');
-  const [more, setMore] = useState(false);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft(current => ({ ...current, [key]: value }));
   const access = (id: string, tools = draft.tools[id]) =>
@@ -357,7 +362,11 @@ export function AgentEditor({
 
   const submit = async () => {
     const silent = draft.platforms.find(id => !draft.events[id]?.length);
-    if (silent) return setError(`Pick at least one event on ${silent}, or turn ${silent} off.`);
+    if (silent)
+      return toastError(
+        'Not published',
+        `Pick at least one event on ${silent}, or turn ${silent} off.`,
+      );
     const integrations: NonNullable<AgentDefinition['integrations']> = {};
     for (const id of draft.platforms)
       integrations[id] = {
@@ -381,7 +390,6 @@ export function AgentEditor({
     const id = creating ? draft.id : agent.id;
     const name = draft.name.trim();
     setBusy(true);
-    setError('');
     try {
       const files = agent?.files;
       await client.agents.put(id, {
@@ -396,13 +404,12 @@ export function AgentEditor({
       else nav.push('/dash/agents/[slug]', { params: { slug: id } });
     } catch (reason) {
       setBusy(false);
-      setError(reasonText(reason));
+      toastError(creating ? 'Agent not created' : 'Not published', reasonText(reason));
     }
   };
 
   const actions = (
     <>
-      <ErrorText value={error} />
       {creating ? (
         <button
           type="button"
@@ -478,14 +485,10 @@ export function AgentEditor({
   const matches = catalog.filter(info =>
     `${info.id} ${info.description}`.toLowerCase().includes(needle),
   );
-  // Featured and picked platforms first; the rest wait under Show more unless searching.
+  // Featured and picked platforms first.
   const upFront = (info: (typeof catalog)[number]) =>
     !!info.featured || draft.platforms.includes(info.id);
-  const shown =
-    needle || more
-      ? [...matches.filter(upFront), ...matches.filter(info => !upFront(info))]
-      : matches.filter(upFront);
-  const hidden = needle ? 0 : catalog.length - catalog.filter(upFront).length;
+  const shown = [...matches.filter(upFront), ...matches.filter(info => !upFront(info))];
   return (
     <form
       class="agent-new"
@@ -681,16 +684,6 @@ export function AgentEditor({
               })}
               {shown.length ? null : <li class="listen-none muted">No platform matches.</li>}
             </ul>
-            {hidden ? (
-              <button
-                type="button"
-                class="btn ghost sm more-toggle"
-                aria-expanded={more}
-                onClick={() => setMore(!more)}
-              >
-                {more ? 'Show less' : 'Show more'}
-              </button>
-            ) : null}
             {levels.length ? (
               <Field
                 label="Platform access"

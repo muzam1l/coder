@@ -111,7 +111,7 @@ function Platforms({
   };
 
   return (
-    <Card title="Handles" count={ids.length}>
+    <Card title="Handles" count={order.filter(id => catalog.some(entry => entry.id === id)).length}>
       <div class="table-scroll">
         <table class="plat stacked early">
           <thead>
@@ -176,12 +176,7 @@ function Platforms({
                       ? own.map(app => (
                           <span key={app.id} class="inst">
                             {app.settingsUrl ? (
-                              <a
-                                class="link"
-                                href={app.settingsUrl}
-                                target="_blank"
-                                rel="noreferrer"
-                              >
+                              <a href={app.settingsUrl} target="_blank" rel="noreferrer">
                                 <b>{app.name}</b>
                               </a>
                             ) : (
@@ -209,7 +204,17 @@ function Platforms({
                     ) : null}
                   </td>
                   <td class="acts">
-                    {builtin && !own.length && info?.builtinApp !== 'own' ? (
+                    {!info ? (
+                      <>
+                        <Badge>not offered</Badge>
+                        <InfoTip label={`Why ${id} is not offered`}>
+                          <p>
+                            This server does not offer {id}. Remove it from the agent's platforms,
+                            or ask whoever runs this server to add it.
+                          </p>
+                        </InfoTip>
+                      </>
+                    ) : builtin && !own.length && info.builtinApp !== 'own' ? (
                       <>
                         <Badge>{REACH_BADGE.none.label}</Badge>
                         {operator ? (
@@ -242,7 +247,7 @@ function Platforms({
                           unreachable={catalog.some(entry => entry.unreachable)}
                           publicApps={info?.publicApps}
                           organizationApps={info?.organizationApps}
-                          shared={builtin && info?.builtinApp !== 'own'}
+                          shared={builtin && info.builtinApp !== 'own'}
                           failed={
                             failed?.platform === id
                               ? { name: info?.name ?? id, app: failed.appId, issues }
