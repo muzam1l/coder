@@ -6,7 +6,17 @@ import type { AgentRow } from '@coder/client/types';
 import { initial } from '@/utils/format';
 import { AgentPills } from '@/app/dash/agents/agent/agent-pills';
 import { AgentToggle } from '@/app/dash/agents/agent/agent-toggle';
+import { MoreList } from '@/comps/ui/menu';
 import { Sentinel } from '@/comps/ui/sentinel';
+
+/** Handles shown before the rest fold behind +N more. */
+const SHOWN = 2;
+
+const handleLine = ({ name, platform }: { name: string; platform: string }) => (
+  <li key={`${platform} ${name}`}>
+    <b>@{name}</b> on {platform}
+  </li>
+);
 
 /** An agent's hero before its record arrives: the same lines, blank, so what it shows lands in place. */
 export function LoadingHero({
@@ -26,7 +36,11 @@ export function LoadingHero({
         </div>
         <p class="lead">{BLANK}</p>
       </div>
-      {actions ? <div class="actions">{actions}</div> : null}
+      {actions ? (
+        <div class="hero-side">
+          <div class="actions">{actions}</div>
+        </div>
+      ) : null}
     </header>
   );
 }
@@ -52,15 +66,26 @@ export function Hero({
             <h1>{agent.name}</h1>
             <AgentPills agent={agent} />
             {agent.settings?.disabled ? <AgentToggle agent={agent} class="link" /> : null}
-            {agent.handles?.length ? (
-              <span class="handles" title="Mention it on its platforms by these names">
-                {agent.handles.map(handle => `@${handle}`).join(' · ')}
-              </span>
-            ) : null}
           </div>
           <p class="lead">{agent.description ?? 'No description yet.'}</p>
         </div>
-        {actions ? <div class="actions">{actions}</div> : null}
+        {actions || agent.handles?.length ? (
+          <div class="hero-side">
+            {actions ? <div class="actions">{actions}</div> : null}
+            {agent.handles?.length ? (
+              <ul class="handles" title="Mention it on its platforms by these names">
+                {agent.handles.slice(0, SHOWN).map(handleLine)}
+                {agent.handles.length > SHOWN ? (
+                  <li>
+                    <MoreList label={`+${agent.handles.length - SHOWN} more`}>
+                      <ul class="handles">{agent.handles.slice(SHOWN).map(handleLine)}</ul>
+                    </MoreList>
+                  </li>
+                ) : null}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
       </header>
     </>
   );

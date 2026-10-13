@@ -17,15 +17,38 @@ export function readOutcome(search: URLSearchParams): SetupOutcome | undefined {
     app: value('app'),
     appId: value('appId'),
     error: value('error'),
-    connect: value('connect')?.split(',').filter(Boolean),
-    link: value('link'),
   };
 }
 
 export const succeeded = ({ status }: SetupOutcome) =>
   status === 'connected' || status === 'created' || status === 'linked';
 
-function outcomeText({ status, account, app, error }: SetupOutcome, name: string): string {
+/** How a flow ended, as a dialog's title. */
+export function outcomeTitle({ status }: SetupOutcome, name: string): string {
+  switch (status) {
+    case 'connected':
+      return `Connected to ${name}`;
+    case 'created':
+      return `${name} app created`;
+    case 'linked':
+      return `Linked on ${name}`;
+    case 'disconnected':
+      return `Disconnected from ${name}`;
+    case 'create-expired':
+    case 'invalid-field':
+    case 'no-public-url':
+    case 'unknown-integration':
+      return `${name} app not created`;
+    default:
+      return `${name} not connected`;
+  }
+}
+
+/** The platform's display name for `outcome`. */
+export const outcomeName = (outcome: SetupOutcome, catalog: IntegrationInfo[]) =>
+  catalog.find(entry => entry.id === outcome.platform)?.name ?? outcome.platform ?? 'the platform';
+
+export function outcomeText({ status, account, app, error }: SetupOutcome, name: string): string {
   switch (status) {
     case 'connected':
       return account ? `Connected to ${account} on ${name}.` : `Connected ${name}.`;
@@ -59,14 +82,12 @@ function outcomeText({ status, account, app, error }: SetupOutcome, name: string
       return 'This app belongs to another Coder workspace. Ask its owner to invite you.';
     case 'disconnected':
       return `This ${name} installation is no longer connected.`;
-    case 'renew-failed':
-      return `Connected to ${account ?? name}, but ${name} did not start sending events yet. Coder tries again within the hour.`;
     case 'platform-error':
       return `${name} answered ${error ?? 'with an error'}, so nothing was connected.`;
     case 'missing-code':
       return `${name} sent no authorization code back, so nothing was connected. Try again.`;
     case 'invalid-field':
-      return `The ${error ?? 'form'} value is not valid. Check it and create the app again.`;
+      return `The ${error ?? 'form'} value is not valid. Create the app again.`;
     case 'not-yours':
       return `That ${name} installation is not one of yours, so nothing was connected.`;
     case 'wrong-account':
@@ -88,15 +109,10 @@ export function Outcome({
   catalog: IntegrationInfo[];
   children?: ComponentChildren;
 }) {
-  const name =
-    catalog.find(entry => entry.id === outcome.platform)?.name ??
-    outcome.platform ??
-    'the platform';
-
   return (
     <div class="outcome">
       <p class={succeeded(outcome) ? 'flash' : 'flash err'} role="status">
-        {outcomeText(outcome, name)}
+        {outcomeText(outcome, outcomeName(outcome, catalog))}
       </p>
       {children}
     </div>

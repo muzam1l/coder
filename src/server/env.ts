@@ -15,6 +15,9 @@ const flag = z.pipe(
   z.transform(value => value === '1'),
 );
 
+/** Where the dashboard sends bug reports unless `ISSUES_URL` says otherwise. */
+export const ISSUES_URL = 'https://github.com/muzam1l/coder/issues/new';
+
 const url = (valid: (url: URL) => boolean, message: string) =>
   z.string().check(
     z.overwrite(value => value.replace(/\/$/, '')),
@@ -82,6 +85,7 @@ const schema = z.object({
     ),
   ),
   SERVER_NAME: z.optional(z.string().check(z.trim())),
+  ISSUES_URL: emptyAsUnset(z.optional(url(() => true, 'must be a URL'))),
   VERCEL_PROJECT_PRODUCTION_URL: z.optional(z.string()),
   VERCEL_URL: z.optional(z.string()),
   VERCEL: z.optional(z.string()),
@@ -139,6 +143,7 @@ export function loadServerConfig(
     ...(values.ADMIN_TOKEN ? { adminToken: values.ADMIN_TOKEN } : {}),
     ...(publicUrl ? { publicUrl } : {}),
     ...(values.SERVER_NAME ? { name: values.SERVER_NAME } : {}),
+    issuesUrl: values.ISSUES_URL ?? ISSUES_URL,
     ...(databaseUrl
       ? {
           databaseUrl,

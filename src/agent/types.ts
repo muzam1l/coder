@@ -120,8 +120,6 @@ export interface AgentApp {
   builtin?: boolean;
   /** The server's shared app whose credentials this app reads; it keeps no copy of its own. */
   shared?: string;
-  /** Any account may install it; only installs bound through Coder act. */
-  public?: true;
   /** Encrypted JSON (`encryptSecret`) of `GithubAppCredentials` or `SlackAppCredentials`. */
   credentials: string;
   createdAt: number;
@@ -175,7 +173,8 @@ export interface Installation {
   id: string;
   app: string;
   integration: string;
-  account: { login: string; type?: string };
+  /** `url`: the account's page on the platform, when the install learned it. */
+  account: { login: string; type?: string; url?: string };
   /** Secret the platform hands out once (Slack bot token), encrypted at rest. */
   token?: string;
   /** Platform user who installed (Slack user id); used for the welcome DM. */

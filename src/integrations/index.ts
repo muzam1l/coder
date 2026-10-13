@@ -1,15 +1,12 @@
 import type { Integration } from './types';
 import { github } from './github';
-import { gmail } from './gmail';
 import { linear } from './linear';
 import { slack } from './slack';
-import { teams } from './teams';
 
+/** Catalog order is display order: chat and code first, mail last. */
 export const INTEGRATIONS: Record<string, Integration> = {
   github,
   slack,
-  teams,
-  gmail,
   linear,
 };
 

@@ -352,6 +352,7 @@ export const githubApp: IntegrationApp = {
     };
     return { platformAppId: created.appId, name: created.slug, credentials };
   },
+  accountUrl: ({ login }) => `https://github.com/${encodeURIComponent(login)}`,
   settingsUrl(_app, credentials) {
     const { slug, owner } = credentials as GithubAppCredentials;
     if (!owner) return undefined;

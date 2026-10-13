@@ -1,30 +1,35 @@
 'use client';
 
-import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 import { useRouter } from '@wular/pnext/navigation/client';
 
 import type { CreateStart } from '@coder/client/types';
 import type { CreateStep, PlatformPost } from '@coder/integrations/types';
 import { client } from '@/utils/client';
-import { iAlert, iDots, iDown, iPlus, iSpark, iX } from '@/comps/ui/icons';
+import { iAlert, iDots, iDown, iOut, iPlus, iSpark, iSteer, iX } from '@/comps/ui/icons';
+import { Modal } from '@/comps/ui/modal';
 import { reasonText } from '@/utils/format';
 import { ConfirmDialog } from '@/comps/ui/confirm';
-import { CopyLine } from '@/comps/ui/copy';
+import { CopyButton, CopyLine } from '@/comps/ui/copy';
 import { ErrorText, Field } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
 import { Menu, MenuItem } from '@/comps/ui/menu';
 import { Segmented } from '@/comps/ui/segmented';
 import { toastError } from '@/comps/frame/task-toasts';
 
-const ISSUES = 'https://github.com/muzam1l/coder/issues/new';
-
-/** Who can install a new app, as the create link's `public`. */
+/** Who can install a new app, as the create link's `public`, with what owning it then means. */
 const WHO = {
-  private: ['Private', 'Only its owner can install it.'],
-  public: [
-    'Public',
-    'Any account can install it. It only works where a member of this workspace installs it.',
-  ],
+  private: {
+    text: 'Private',
+    note: () => 'Only the account that owns it can install it.',
+    owner: 'Owns it and is the only place it installs. Leave empty for your personal account.',
+  },
+  public: {
+    text: 'Public',
+    note: (name: string) => `Any account can install it. ${name} asks where on each install.`,
+    owner:
+      'Manages its settings; it still installs anywhere. Leave empty for your personal account.',
+  },
 } as const;
 
 /** Finishes a create with `fields` and goes where the server answers; a navigation, so the CSP's form-action never stops the trip to the platform. */
@@ -75,15 +80,15 @@ const createState = (createUrl: string, owner = '', isPublic = false) => ({
   ...(isPublic ? { public: '1' } : {}),
 });
 
-/** Asks for a public address first; closes `dialog` on the way. */
-function Unreachable({ dialog }: { dialog: { current: HTMLDialogElement | null } }) {
+/** Asks for a public address first; closes the dialog it sits in on the way. */
+function Unreachable() {
   return (
     <p class="flash err">
       This server is only reachable from this machine, so{' '}
       <a
         href="#tunnel"
-        onClick={() => {
-          dialog.current!.close();
+        onClick={event => {
+          event.currentTarget.closest('dialog')!.close();
           document.querySelector('#tunnel details')?.setAttribute('open', '');
         }}
       >
@@ -94,13 +99,13 @@ function Unreachable({ dialog }: { dialog: { current: HTMLDialogElement | null }
   );
 }
 
-/** Installs an app, linked to installation `link` when given, and comes back to this page. */
+/** Installs an app and comes back to this page. */
 function useInstall() {
   const [busy, setBusy] = useState(false);
-  const install = (app: string, link?: string) => {
+  const install = (app: string) => {
     setBusy(true);
     void client.apps
-      .install(app, location.pathname, link)
+      .install(app, location.pathname)
       .then(({ url }) => {
         location.href = url;
       })
@@ -114,23 +119,31 @@ function useInstall() {
 }
 
 /** One install button, for the next steps of a flow's outcome. */
-export function InstallButton({ app, link, label }: { app: string; link?: string; label: string }) {
+export function InstallButton({
+  app,
+  label,
+  class: className = 'btn sm outline',
+}: {
+  app: string;
+  label: string;
+  class?: string;
+}) {
   const { busy, install } = useInstall();
 
   return (
     <button
       type="button"
-      class="btn sm outline"
+      class={className}
       disabled={busy}
       aria-busy={busy}
-      onClick={() => install(app, link)}
+      onClick={() => install(app)}
     >
       {label}
     </button>
   );
 }
 
-type AppChoice = { id: string; name: string; public?: true; settingsUrl?: string };
+type AppChoice = { id: string; name: string; settingsUrl?: string };
 
 /** Asks before Coder forgets `app`; the app itself stays on the platform until deleted there. */
 function RemoveDialog({
@@ -205,14 +218,8 @@ export function CreateDialog({
   unreachable?: boolean;
   onClose: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  const id = useId();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-
-  useEffect(() => dialog.current!.showModal(), []);
-
-  const close = () => !busy && dialog.current!.close();
   const submit = (event: SubmitEvent) => {
     event.preventDefault();
     const form = event.currentTarget as HTMLFormElement;
@@ -228,80 +235,73 @@ export function CreateDialog({
   };
 
   return (
-    <dialog
-      ref={dialog}
+    <Modal
       class="create-dialog"
-      aria-labelledby={id}
+      title={step.submit}
+      dismiss
+      busy={busy}
+      onSubmit={submit}
       onClose={onClose}
-      onCancel={event => {
-        event.preventDefault();
-        close();
-      }}
-      onClick={event => event.target === event.currentTarget && close()}
+      actions={
+        <button class="btn" disabled={busy} aria-busy={busy}>
+          {step.submit}
+          <Icon d={iSteer} />
+        </button>
+      }
     >
-      <form onSubmit={submit}>
-        <header>
-          <h2 id={id}>{step.submit}</h2>
-          <button type="button" class="icon-btn" aria-label="Close" onClick={close}>
-            <Icon d={iX} />
-          </button>
-        </header>
-        {unreachable ? <Unreachable dialog={dialog} /> : null}
-        <p class="muted">{step.intro}</p>
+      {unreachable ? <Unreachable /> : null}
+      <p class="muted">{step.intro}</p>
+      <div class="create-link">
         <a class="btn secondary create-open" href={step.link} target="_blank" rel="noreferrer">
           Open {new URL(step.link).host} ↗
         </a>
-        <ol class="create-steps">
-          {step.steps.map(({ text, link, copy = [] }) => (
-            <li key={text}>
-              <p>{uiNames(text)}</p>
-              {link && link !== step.link ? (
+        <CopyButton value={step.link} label="Copy link" />
+      </div>
+      <ol class="create-steps">
+        {step.steps.map(({ text, link, copy = [] }) => (
+          <li key={text}>
+            <p>{uiNames(text)}</p>
+            {link && link !== step.link ? (
+              <div class="create-link">
                 <a href={link} target="_blank" rel="noreferrer">
                   {link.replace(/^https:\/\//, '')}
                 </a>
-              ) : null}
-              {copy.map(value => (
-                <CopyLine key={value} value={value} label="Copy" />
-              ))}
-            </li>
-          ))}
-        </ol>
-        {step.notes?.length ? (
-          <details class="create-more">
-            <summary>Advanced</summary>
-            <ul>
-              {step.notes.map(note => (
-                <li key={note}>{uiNames(note)}</li>
-              ))}
-            </ul>
-          </details>
-        ) : null}
-        {step.fields.map(field => (
-          <Field
-            key={field.name}
-            label={field.label}
-            hint={field.hint ?? (field.required ? undefined : 'optional')}
-          >
-            <input
-              name={field.name}
-              placeholder={field.placeholder}
-              required={field.required}
-              autocomplete="off"
-              spellcheck={false}
-            />
-          </Field>
+                <CopyButton value={link} label="Copy link" />
+              </div>
+            ) : null}
+            {copy.map(value => (
+              <CopyLine key={value} value={value} label="Copy" />
+            ))}
+          </li>
         ))}
-        <ErrorText value={error} />
-        <div class="actions">
-          <button type="button" class="btn ghost" disabled={busy} onClick={close}>
-            Cancel
-          </button>
-          <button class="btn" disabled={busy} aria-busy={busy}>
-            {step.submit}
-          </button>
-        </div>
-      </form>
-    </dialog>
+      </ol>
+      {step.notes?.length ? (
+        <details class="create-more">
+          <summary>Advanced</summary>
+          <ul>
+            {step.notes.map(note => (
+              <li key={note}>{uiNames(note)}</li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+      {step.fields.map(field => (
+        <Field
+          key={field.name}
+          label={field.label}
+          hint={field.hint ?? (field.required ? undefined : 'optional')}
+        >
+          <input
+            name={field.name}
+            placeholder={field.placeholder}
+            required={field.required}
+            autocomplete="off"
+            spellcheck={false}
+          />
+        </Field>
+      ))}
+      <ErrorText value={error} />
+    </Modal>
   );
 }
 
@@ -323,14 +323,10 @@ function WhereDialog({
   onSubmit: (owner: string, isPublic: boolean) => Promise<unknown>;
   onClose: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  const id = useId();
   const [who, setWho] = useState<keyof typeof WHO>('private');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const owner = useRef<HTMLInputElement>(null);
-
-  useEffect(() => dialog.current!.showModal(), []);
 
   // The first organization the workspace already works in, preselected once read.
   useEffect(() => {
@@ -351,7 +347,6 @@ function WhereDialog({
       .catch(reason => console.error('coder dashboard: installations', reason));
   }, []);
 
-  const close = () => !busy && dialog.current!.close();
   const submit = (event: SubmitEvent) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
@@ -364,112 +359,98 @@ function WhereDialog({
   };
 
   return (
-    <dialog
-      ref={dialog}
+    <Modal
       class="create-dialog"
-      aria-labelledby={id}
+      title={`Create ${name} app`}
+      dismiss
+      busy={busy}
+      onSubmit={submit}
       onClose={onClose}
-      onCancel={event => {
-        event.preventDefault();
-        close();
-      }}
-      onClick={event => event.target === event.currentTarget && close()}
+      actions={
+        <button class="btn" disabled={busy} aria-busy={busy}>
+          Continue to {name}
+          <Icon d={iOut} />
+        </button>
+      }
     >
-      <form onSubmit={submit}>
-        <header>
-          <h2 id={id}>Create {name} app</h2>
-          <button type="button" class="icon-btn" aria-label="Close" onClick={close}>
-            <Icon d={iX} />
-          </button>
-        </header>
-        {unreachable ? <Unreachable dialog={dialog} /> : null}
-        {publicApps ? (
-          <Field label="Who can install it" group>
-            <Segmented
-              label="Who can install it"
-              options={Object.entries(WHO).map(([key, [text]]) => [key, text])}
-              value={who}
-              onChange={value => setWho(value as keyof typeof WHO)}
-              disabled={busy}
-            />
-            <small class="where-note">{WHO[who][1]}</small>
-          </Field>
-        ) : null}
-        {organizationApps ? (
-          <Field label="Organization" hint="Leave empty to own it on your personal account.">
-            <input
-              ref={owner}
-              name="owner"
-              placeholder="your-org"
-              autocomplete="off"
-              spellcheck={false}
-            />
-          </Field>
-        ) : null}
-        <ErrorText value={error} />
-        <div class="actions">
-          <button type="button" class="btn ghost" disabled={busy} onClick={close}>
-            Cancel
-          </button>
-          <button class="btn" disabled={busy} aria-busy={busy}>
-            Continue to {name}
-          </button>
-        </div>
-      </form>
-    </dialog>
+      {unreachable ? <Unreachable /> : null}
+      {publicApps ? (
+        <Field label="Who can install it" group>
+          <Segmented
+            label="Who can install it"
+            options={Object.entries(WHO).map(([key, { text }]) => [key, text])}
+            value={who}
+            onChange={value => setWho(value as keyof typeof WHO)}
+            disabled={busy}
+          />
+          <small class="where-note">{WHO[who].note(name)}</small>
+        </Field>
+      ) : null}
+      {organizationApps ? (
+        <Field label="Owner" hint={WHO[who].owner}>
+          <input
+            ref={owner}
+            name="owner"
+            placeholder="your-org"
+            autocomplete="off"
+            spellcheck={false}
+          />
+        </Field>
+      ) : null}
+      <ErrorText value={error} />
+    </Modal>
   );
 }
 
 /** An unexpected setup failure, open on load: try again, or report it. */
-function FailedDialog({ name, onRetry }: { name: string; onRetry: () => void }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  const id = useId();
+function FailedDialog({
+  name,
+  issues,
+  onRetry,
+}: {
+  name: string;
+  /** Where to report it. */
+  issues?: string;
+  onRetry: () => void;
+}) {
   const title = `Setting up ${name} failed`;
-
-  useEffect(() => dialog.current!.showModal(), []);
+  const retry = (event: MouseEvent) => {
+    event.currentTarget!.closest('dialog')!.close();
+    onRetry();
+  };
 
   return (
-    <dialog
-      ref={dialog}
-      class="create-dialog failed-dialog"
-      aria-labelledby={id}
+    <Modal
+      class="outcome-dialog err"
+      title={title}
+      icon={iAlert}
+      cancel="Close"
+      focus="actions"
       // A reload must not show it again.
       onClose={() => history.replaceState(history.state, '', location.pathname)}
-      onClick={event => event.target === event.currentTarget && dialog.current!.close()}
-    >
-      <form method="dialog">
-        <header>
-          <Icon d={iAlert} />
-          <h2 id={id}>{title}</h2>
-        </header>
-        <p>
-          Coder ran into an unexpected error, so nothing was set up. Try again, and if it fails
-          again, report it on GitHub.
-        </p>
-        <div class="actions">
-          <button class="btn ghost">Close</button>
-          <a
-            class="btn outline"
-            href={`${ISSUES}?title=${encodeURIComponent(title)}`}
-            target="_blank"
-            rel="noreferrer"
-          >
-            Report issue
-          </a>
-          <button
-            type="button"
-            class="btn"
-            autofocus
-            onClick={() => {
-              dialog.current!.close();
-              onRetry();
-            }}
-          >
+      actions={
+        <>
+          {issues ? (
+            <a
+              class="btn outline"
+              href={`${issues}?title=${encodeURIComponent(title)}`}
+              target="_blank"
+              rel="noreferrer"
+            >
+              Report issue
+            </a>
+          ) : null}
+          <button type="button" class="btn" autofocus onClick={retry}>
             Try again
           </button>
-        </div>
-      </form>
-    </dialog>
+        </>
+      }
+    >
+      <p>
+        Coder ran into an unexpected error, so nothing was set up. Try again, and if it fails again,
+        report it on GitHub.
+      </p>
+    </Modal>
   );
 }
 
@@ -503,7 +484,7 @@ export function PlatformActions({
   /** The apps are this server's shared ones, installed but never created here. */
   shared?: boolean;
   /** The platform's last setup failed unexpectedly, on `app` when it was an install. */
-  failed?: { name: string; app?: string };
+  failed?: { name: string; app?: string; issues?: string };
 }) {
   const { busy, install } = useInstall();
   const [leaving, setLeaving] = useState(false);
@@ -579,6 +560,7 @@ export function PlatformActions({
   const failure = failed ? (
     <FailedDialog
       name={failed.name}
+      issues={failed.issues}
       onRetry={() => (apps.some(app => app.id === failed.app) ? install(failed.app!) : start())}
     />
   ) : null;
@@ -614,26 +596,16 @@ export function PlatformActions({
           summary={<Icon d={installed ? iDots : iDown} />}
         >
           {apps.map(app => {
+            // The main button already installs the first app.
+            if (!installed && app === apps[0]) return null;
             const named = apps.length > 1 ? ` ${app.name}` : '';
 
             return (
               <MenuItem
                 key={app.id}
                 icon={iPlus}
-                title={
-                  app.public
-                    ? `Install${named} on another account`
-                    : installed
-                      ? `Change${named} access`
-                      : `Install${named}`
-                }
-                sub={
-                  app.public
-                    ? 'Add it to another account, organization, or workspace.'
-                    : installed
-                      ? "Choose what it can reach on its owner's account."
-                      : 'Install it on the account that owns it.'
-                }
+                title={`Install${named}`}
+                sub={`On its owner's account, or any account if it is public on ${name}.`}
                 onClick={() => install(app.id)}
               />
             );
@@ -643,11 +615,7 @@ export function PlatformActions({
               icon={iSpark}
               onClick={start}
               title={`Create another ${name} app`}
-              sub={
-                apps.every(app => app.public)
-                  ? 'A separate app with its own name.'
-                  : 'For another account or organization; private apps install only on their owner.'
-              }
+              sub="A separate app with its own name."
             />
           )}
           {shared

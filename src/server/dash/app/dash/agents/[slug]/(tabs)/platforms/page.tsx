@@ -20,11 +20,20 @@ import { needsTunnel } from '@/api/types';
 import { editableAgent } from '@/api/types';
 import { TunnelGuide } from '@/app/dash/settings/tunnel-guide';
 import { Platform } from '@/app/dash/agents/agent/agent-pills';
-import { Outcome, readOutcome, succeeded } from '@/app/dash/setup/outcome';
+import {
+  outcomeName,
+  outcomeText,
+  outcomeTitle,
+  readOutcome,
+  succeeded,
+} from '@/app/dash/setup/outcome';
 import { ConnectionsLine, Lead } from './loading';
 
 const PlatformActions = dynamic(() => import('./platform-actions').then(m => m.PlatformActions));
 const InstallButton = dynamic(() => import('./platform-actions').then(m => m.InstallButton));
+const OutcomeDialog = dynamic(() =>
+  import('@/app/dash/setup/outcome-dialog').then(m => m.OutcomeDialog),
+);
 
 /** Outcomes the person fixes by installing again. */
 const RETRY = new Set(['cancelled', 'install-expired', 'platform-error', 'missing-code', 'failed']);
@@ -50,6 +59,7 @@ function Platforms({
   catalog,
   operator = false,
   failed,
+  issues,
 }: {
   agent: AgentRow;
   apps: AppRow[];
@@ -59,6 +69,8 @@ function Platforms({
   operator?: boolean;
   /** The last setup, when it failed unexpectedly. */
   failed?: SetupOutcome;
+  /** Where to report an unexpected failure. */
+  issues?: string;
 }) {
   const declared = agent.definition?.integrations ?? {};
   const ids = Object.keys(declared).sort();
@@ -80,9 +92,12 @@ function Platforms({
       </Empty>
     );
 
-  // Featured handles first, then the rest.
-  const featured = (id: string) => catalog.some(entry => entry.id === id && entry.featured);
-  const order = [...ids.filter(featured), ...ids.filter(id => !featured(id))];
+  // In catalog order; a platform the catalog lacks goes last.
+  const position = (id: string) => {
+    const index = catalog.findIndex(entry => entry.id === id);
+    return index < 0 ? catalog.length : index;
+  };
+  const order = [...ids].sort((a, b) => position(a) - position(b));
 
   const builtin = agent.source === 'builtin';
   const def = agent.definition ? encodeDefinition(agent.definition) : '';
@@ -120,7 +135,13 @@ function Platforms({
               const tools = narrowed?.allowedTools ?? declared[id]?.tools;
               const place = (entry: InstallationRow) => (
                 <span key={entry.id} class="inst">
-                  <b>{entry.account.login}</b>
+                  {entry.account.url ? (
+                    <a href={entry.account.url} target="_blank" rel="noreferrer">
+                      <b>{entry.account.login}</b>
+                    </a>
+                  ) : (
+                    <b>{entry.account.login}</b>
+                  )}
                   <span class="sub">
                     {[
                       entry.account.type?.toLowerCase(),
@@ -154,7 +175,18 @@ function Platforms({
                     {own.length
                       ? own.map(app => (
                           <span key={app.id} class="inst">
-                            <b>{app.name}</b>
+                            {app.settingsUrl ? (
+                              <a
+                                class="link"
+                                href={app.settingsUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                              >
+                                <b>{app.name}</b>
+                              </a>
+                            ) : (
+                              <b>{app.name}</b>
+                            )}
                             {events.includes('mention') ? (
                               <span class="sub">mention @{app.name}</span>
                             ) : null}
@@ -202,7 +234,6 @@ function Platforms({
                           apps={own.map(app => ({
                             id: app.id,
                             name: app.name,
-                            public: app.public,
                             settingsUrl: app.settingsUrl,
                           }))}
                           installed={installs.length > 0}
@@ -214,7 +245,7 @@ function Platforms({
                           shared={builtin && info?.builtinApp !== 'own'}
                           failed={
                             failed?.platform === id
-                              ? { name: info?.name ?? id, app: failed.appId }
+                              ? { name: info?.name ?? id, app: failed.appId, issues }
                               : undefined
                           }
                         />
@@ -269,45 +300,49 @@ export default async function AgentPlatformsPage({
       <Settle
         load={() =>
           Promise.all([agent, apps, installations, catalog, me]).then(
-            ([row, own, all, integrations, who]) => (
-              <>
-                {outcome &&
-                !(failed?.platform && row.definition?.integrations?.[failed.platform]) ? (
-                  <Outcome outcome={outcome} catalog={integrations}>
-                    {succeeded(outcome) ? (
-                      (outcome.connect ?? []).map(id => {
-                        const app = appOn(own, id);
-                        const name = integrations.find(entry => entry.id === id)?.name ?? id;
-                        return app ? (
-                          <InstallButton
-                            key={id}
-                            app={app.id}
-                            link={outcome.link}
-                            label={`Connect ${name} so the agent can act there`}
-                          />
-                        ) : null;
-                      })
-                    ) : RETRY.has(outcome.status) && retried(own) ? (
-                      <InstallButton app={retried(own)!.id} label="Install again" />
-                    ) : null}
-                  </Outcome>
-                ) : null}
-                <Platforms
-                  agent={row}
-                  apps={own}
-                  installations={all}
-                  catalog={integrations}
-                  operator={who?.operator === true}
-                  failed={failed}
-                />
-                <ConnectionsLine />
-                {(who && needsTunnel(who)) || integrations.some(entry => entry.unreachable) ? (
-                  <div id="tunnel">
-                    <TunnelGuide port={port} />
-                  </div>
-                ) : null}
-              </>
-            ),
+            ([row, own, all, integrations, who]) => {
+              // A failure opens on its row when the row has actions; a shared app not set up here has none.
+              const inRow =
+                failed?.platform &&
+                row.definition?.integrations?.[failed.platform] &&
+                !(
+                  row.source === 'builtin' &&
+                  !appOn(own, failed.platform) &&
+                  integrations.find(entry => entry.id === failed.platform)?.builtinApp !== 'own'
+                );
+
+              return (
+                <>
+                  {outcome && !inRow ? (
+                    <OutcomeDialog
+                      ok={succeeded(outcome)}
+                      title={outcomeTitle(outcome, outcomeName(outcome, integrations))}
+                      text={outcomeText(outcome, outcomeName(outcome, integrations))}
+                      issues={who?.server?.issuesUrl}
+                    >
+                      {RETRY.has(outcome.status) && retried(own) ? (
+                        <InstallButton app={retried(own)!.id} label="Install again" class="btn" />
+                      ) : null}
+                    </OutcomeDialog>
+                  ) : null}
+                  <Platforms
+                    agent={row}
+                    apps={own}
+                    installations={all}
+                    catalog={integrations}
+                    operator={who?.operator === true}
+                    failed={inRow ? failed : undefined}
+                    issues={who?.server?.issuesUrl}
+                  />
+                  <ConnectionsLine />
+                  {(who && needsTunnel(who)) || integrations.some(entry => entry.unreachable) ? (
+                    <div id="tunnel">
+                      <TunnelGuide port={port} />
+                    </div>
+                  ) : null}
+                </>
+              );
+            },
           )
         }
       />

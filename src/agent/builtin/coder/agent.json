@@ -29,12 +29,6 @@
       },
       "tools": "comment"
     },
-    "gmail": {
-      "events": {
-        "mail": true
-      },
-      "tools": "comment"
-    },
     "linear": {
       "events": {
         "mention": true

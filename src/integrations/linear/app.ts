@@ -72,6 +72,8 @@ function exchange(req: Request, credentials: unknown, redirect: string, request:
 /** Linear's prefilled OAuth application form: name, callback URLs, the agent session webhook and, if asked, public distribution. */
 function creationLink(publicUrl: string, key: string, name?: string, isPublic?: boolean): string {
   const params = new URLSearchParams(name ? { 'oauth.client_name': name } : {});
+  params.set('developer.name', base(publicUrl).replace(/^https?:\/\//, ''));
+  params.set('oauth.client_uri', base(publicUrl));
   if (isPublic) params.set('distribution', 'public');
   params.append('oauth.redirect_uris', `${base(publicUrl)}/install/linear/callback`);
   params.append('oauth.redirect_uris', `${base(publicUrl)}/connect/linear/callback`);
@@ -87,15 +89,13 @@ export const linearApp: IntegrationApp = {
     intro: 'Linear runs the agent as an app of your own OAuth application.',
     link: creationLink(publicUrl, key, name, isPublic),
     steps: [
-      {
-        text: 'Open the link signed in to Linear. The name, callback URLs and webhook are filled in.',
-      },
-      { text: 'Review the form and click **Create**.' },
+      { text: 'Open the link signed in to Linear, check the form and click **Create**.' },
       {
         text: 'Copy the client ID, the client secret and the webhook signing secret into the fields below.',
       },
     ],
     notes: [
+      'The link fills in the name, the callback URLs and the webhook.',
       'To install the app in other Linear workspaces, make it public in its Linear settings.',
     ],
     hidden: { key },
@@ -131,6 +131,7 @@ export const linearApp: IntegrationApp = {
     if (!/^[0-9a-f-]{36}$/.test(key)) throw new IntegrationError('invalid-field', 'key');
     return { platformAppId: key, name: definition.name ?? state.agent, credentials };
   },
+  accountUrl: ({ login }) => `https://linear.app/${encodeURIComponent(login)}`,
   installUrl(_app, credentials, { publicUrl, state }) {
     return authorizeUrl(credentials, `${base(publicUrl)}/install/linear/callback`, state, true);
   },

@@ -5,9 +5,8 @@ import {
   type InstallationLink,
   type Installation,
 } from '../../agent/types';
-import { consumeNonce, inspectNonce, issueNonce } from '../auth/nonce';
+import { consumeNonce, inspectNonce } from '../auth/nonce';
 import { type SetupOutcome } from '../../client/types';
-import { encodeJson } from '../../utils/base64url';
 import { type ServerContext } from '../context';
 import { decodeParam, redirect } from '../routes/http';
 
@@ -127,27 +126,6 @@ export function link(installation: Installation, integration: string, id: string
   return {
     ...installation,
     connections: { ...installation.connections, [integration]: connection },
-  };
-}
-
-export function connectLinks(ctx: AppsContext, app: AgentApp, publicUrl: string) {
-  return async (installationId: string): Promise<Record<string, string>> => {
-    const links: Record<string, string> = {};
-    for (const id of Object.keys(ctx.integrations)) {
-      if (id === app.integration) continue;
-      const sibling = await siblingApp(ctx, app, id);
-      if (sibling) {
-        const tx = await issueNonce(
-          ctx,
-          'install',
-          ctx.session?.user.id ?? 'anonymous',
-          sibling.id,
-        );
-        links[id] =
-          `${publicUrl}/install/${id}?app=${encodeURIComponent(sibling.id)}&state=${encodeJson({ link: installationId, tx })}`;
-      }
-    }
-    return links;
   };
 }
 

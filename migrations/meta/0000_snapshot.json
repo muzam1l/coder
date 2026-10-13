@@ -495,12 +495,6 @@
           "primaryKey": false,
           "notNull": false
         },
-        "public": {
-          "name": "public",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false
-        },
         "credentials_secret_id": {
           "name": "credentials_secret_id",
           "type": "bigint",

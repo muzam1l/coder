@@ -1,6 +1,5 @@
 /** The contract every integration implements: a Chat SDK adapter, apps, tools, tokens and repository reads. */
 import type { Adapter, Message, ReactionEvent, SerializedThread, StateAdapter, Thread } from 'chat';
-import type { JWTVerifyGetKey } from 'jose';
 
 import type { McpServerSpec } from '../core/types';
 import type { McpTool } from '../utils/mcp-server';
@@ -146,6 +145,8 @@ export interface IntegrationApp {
   ): Promise<unknown | undefined>;
   /** The app's settings page on the platform, where it is deleted. */
   settingsUrl?(app: AgentApp, credentials: unknown): string | undefined;
+  /** An installed account's page on the platform. */
+  accountUrl?(account: { login: string; type?: string }): string | undefined;
   /** Where the browser goes to install an existing app; `state` comes back to installCallback. With `installation`, a fresh authorization that verifies it. */
   installUrl(
     app: AgentApp,
@@ -165,14 +166,12 @@ export interface IntegrationApp {
       credentials: unknown;
       publicUrl: string;
       fetch: typeof fetch;
-      /** Install links for this agent's apps on other integrations, given the new installation's id. */
-      connect: (installationId: string) => Promise<Record<string, string>>;
       /** A platform-started install to verify, from Coder's own state. */
       installation?: string;
     },
   ): Promise<{
     platformInstallId: string;
-    account?: { login: string; type?: string };
+    account?: { login: string; type?: string; url?: string };
     /** Plaintext platform token to store encrypted (Slack bot token). */
     token?: string;
     installer?: string;
@@ -182,8 +181,6 @@ export interface IntegrationApp {
     covers?: string[] | null;
     /** The installer's verified platform identity, linked to the signed-in user. */
     user?: PlatformUser;
-    /** The `connect` links offered to the installer, by integration id. */
-    connect?: Record<string, string>;
   }>;
 }
 
@@ -229,14 +226,10 @@ export interface AdapterContext {
   self?: string;
   /** A token for a bound installation, minted and narrowed by Coder; throws for one that is not bound. */
   token(installationId: string, bound?: TokenBound): Promise<string>;
-  /** Check a webhook's installation without minting a platform token. */
-  isBound?(installationId: string): Promise<boolean>;
   /** The app's own platform user in a bound installation, as stored at install. */
   installedSelf?(installationId: string): Promise<string | undefined>;
   /** Saves the app's platform user on an installation that lacks it, so it is looked up once. */
   saveSelf?(installationId: string, self: string): Promise<void>;
-  /** Public signing keys from `url`, a fixed platform endpoint, held across requests. */
-  signingKeys?(url: string): JWTVerifyGetKey;
   /** A fresh in-memory Chat SDK state for caches the adapter must not share. */
   privateState?(): StateAdapter;
   /** Whether Coder acts on a plain message that neither mentions the app nor is direct, by its raw text; the adapter reads nothing more of one it does not. */
@@ -374,8 +367,6 @@ export interface Integration {
   /** How an agent should write for this platform, added to its prompt for events from it. */
   readonly hint?: string;
   readonly events: Record<string, EventSpec>;
-  /** Coder reads no thread history here, because the platform's needs more than the bot's own token (Teams' Graph). */
-  readonly history?: false;
   /** Where the sample events `agent init` writes happen: a Chat SDK thread id. */
   readonly sample?: string;
   /** The handle an app posts as, so flows trust only its own comments; default is the app name. */
@@ -390,10 +381,6 @@ export interface Integration {
   adapter(ctx: AdapterContext): Promise<Adapter>;
   /** The platform delivery or activity that raised a reaction. */
   reactionId?(reaction: ReactionEvent): string | undefined;
-  /** Keep a bound installation's platform subscription alive; resolves to when it expires, in epoch ms. Runs after binding and on the sweep once it nears expiry. */
-  renew?(adapter: Adapter): Promise<number | undefined>;
-  /** Catch up on what the platform could not push; runs daily after a renewal, and every minute on a server with no public URL. */
-  sync?(adapter: Adapter): Promise<void>;
   /** Signed webhooks the adapter does not handle (GitHub pull requests, issues, installs and pushes); `undefined` leaves it to the adapter. */
   ownEvents?(req: Request, raw: string, app: AgentApp, credentials: unknown): OwnEvent | undefined;
   /** What core cannot read from a Chat SDK message, such as the actor's role; `undefined` drops it. */

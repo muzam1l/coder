@@ -38,7 +38,6 @@ export const appValue = (
     agentsRepo: r.agentsRepo,
     branch: r.branch,
     builtin: r.organizationId === UNSCOPED_ORGANIZATION || undefined,
-    public: r.public || undefined,
     credentials: opaque(sealed),
     createdAt: ms(r.createdAt),
   });
@@ -83,7 +82,6 @@ export function apps(s: DrizzleStore): Kind<AgentApp> {
           name: value.name,
           agentsRepo: value.agentsRepo ?? null,
           branch: value.branch ?? null,
-          public: value.public ?? null,
           credentialsSecretId,
           createdAt: date(value.createdAt),
           updatedAt: s.at(),

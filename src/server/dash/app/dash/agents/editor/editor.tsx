@@ -7,7 +7,7 @@ import '@/app/dash/agents/(list)/page.css';
 import { useEffect, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
-import { iDown, iPlus, iShuffle } from '@/comps/ui/icons';
+import { iDown, iPlus, iShuffle, iUpload } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { Link } from '@wular/pnext/link';
 import type {
@@ -423,7 +423,7 @@ export function AgentEditor({
         disabled={busy || !draft.name.trim() || template === 'import'}
         aria-busy={busy}
       >
-        {creating ? <Icon d={iPlus} /> : null}
+        <Icon d={creating ? iPlus : iUpload} />
         {creating ? 'Create agent' : 'Publish new version'}
       </button>
     </>

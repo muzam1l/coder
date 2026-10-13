@@ -100,7 +100,8 @@ export interface AgentRow {
   settings?: AgentSettings;
   versions?: VersionRow[];
   /** The names its platform apps answer to where it wakes on a mention. */
-  handles?: string[];
+  /** The names it answers to, one per app that wakes on mentions, with the platform's display name. */
+  handles?: Array<{ name: string; integration: string; platform: string }>;
 }
 
 /** What an agent can listen to and do on an integration. */
@@ -159,7 +160,6 @@ export interface SetupOutcome {
     | 'not-member'
     | 'other-workspace'
     | 'disconnected'
-    | 'renew-failed'
     | 'failed'
     | IntegrationErrorCode;
   /** Integration id. */
@@ -172,9 +172,6 @@ export interface SetupOutcome {
   appId?: string;
   /** The platform's own error code. */
   error?: string;
-  /** Integrations offered to connect next, linked to installation `link`. */
-  connect?: string[];
-  link?: string;
 }
 
 export interface CredentialRow {
@@ -266,8 +263,6 @@ export interface AppRow {
   agent: string;
   name: string;
   builtin?: boolean;
-  /** Any account may install it, not only the one that owns it. */
-  public?: true;
   agentsRepo?: string;
   branch?: string;
   createdAt: number;
@@ -279,7 +274,8 @@ export interface InstallationRow {
   id: string;
   app: string;
   integration: string;
-  account: { login: string; type?: string };
+  /** `url`: the account's page on the platform. */
+  account: { login: string; type?: string; url?: string };
   covers?: string[];
   repos?: string[];
   deletedAt?: number;
@@ -317,6 +313,8 @@ export interface Me {
     name: string;
     store: 'memory' | 'postgres';
     url?: string;
+    /** Where the dashboard sends bug reports. */
+    issuesUrl?: string;
     subscriptions?: { claude: boolean; codex: boolean };
   };
   /** May enter operator mode. */

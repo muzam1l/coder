@@ -18,7 +18,6 @@ export const linear: Integration = {
   name: 'Linear',
   description: 'Agent sessions on Linear issues: mentions and assignments',
   installLabel: 'Connect Linear',
-  publicApps: true,
   sample: 'linear:2f1e6a1c-0000-4000-8000-000000000001:s:5b7d3c2a-0000-4000-8000-000000000002',
   hint: "You are working in a Linear issue's agent session. Keep replies short and about the issue; link pull requests you open.",
   events: {

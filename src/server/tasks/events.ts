@@ -594,9 +594,7 @@ async function claimed(
       event,
       async id => (declared.has(id) ? tokens(id) : undefined),
       agent,
-      integration.events[event.type]?.addressed && integration.history !== false
-        ? replies.recent
-        : undefined,
+      integration.events[event.type]?.addressed ? replies.recent : undefined,
       member ?? null,
     ),
     connectionGrants(

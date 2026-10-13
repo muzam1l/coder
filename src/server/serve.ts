@@ -69,7 +69,6 @@ export function serverHandler(
       const server = await getContext();
       await Promise.all([
         server.sweep(),
-        import('./chat').then(chat => chat.renewInstallations(server.defaultContext)),
         kick(server.defaultContext, false, true),
         flushInbox(server.defaultContext),
       ]);
@@ -214,7 +213,6 @@ async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
 
   const sweep = () => {
     void host.sweep().catch(() => {});
-    void import('./chat').then(chat => chat.renewInstallations(context)).catch(() => {});
   };
   sweep();
   const sweepTimer = setInterval(sweep, SWEEP_MS);
@@ -223,8 +221,6 @@ async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
   const kickTimer = setInterval(() => {
     void kick(context, false, true).catch(() => {});
     void flushInbox(context).catch(() => {});
-    if (!given.PUBLIC_URL)
-      void import('./chat').then(chat => chat.renewInstallations(context, 'sync')).catch(() => {});
   }, 60_000);
   kickTimer.unref();
 

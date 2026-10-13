@@ -257,13 +257,21 @@ export async function readAgent(
       ? events.includes('mention')
       : Boolean(events && 'mention' in events);
   };
-  const handles: string[] = [];
+  const handles: Array<{ name: string; integration: string; platform: string }> = [];
   for (const { value } of apps)
     if (
       mentions(value.integration) &&
-      !handles.some(name => name.toLowerCase() === value.name.toLowerCase())
+      !handles.some(
+        handle =>
+          handle.integration === value.integration &&
+          handle.name.toLowerCase() === value.name.toLowerCase(),
+      )
     )
-      handles.push(value.name);
+      handles.push({
+        name: value.name,
+        integration: value.integration,
+        platform: ctx.integrations[value.integration]?.name ?? value.integration,
+      });
 
   const versions = rows.map(({ value }) => {
     const { systemPrompt, files, ...metadata } = value as AgentVersionRecord;

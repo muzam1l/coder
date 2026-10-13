@@ -1,11 +1,13 @@
 'use client';
 
 import './confirm.css';
-
 import type { ComponentChildren } from 'preact';
-import { useEffect, useId, useRef } from 'preact/hooks';
 
-/** A modal question before a destructive step; Escape, Cancel or a backdrop click closes it. */
+import { iTrash } from './icons';
+import { Icon } from './icon';
+import { Modal } from './modal';
+
+/** A modal question before a destructive step. */
 export function ConfirmDialog({
   open,
   title,
@@ -23,45 +25,25 @@ export function ConfirmDialog({
   onClose: () => void;
   busy?: boolean;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  const id = useId();
-
-  useEffect(() => {
-    const el = dialog.current!;
-    if (open && !el.open) el.showModal();
-    else if (!open && el.open) el.close();
-  }, [open]);
-
-  const close = () => !busy && onClose();
-
   return (
-    <dialog
-      ref={dialog}
+    <Modal
+      open={open}
       class="confirm"
-      aria-labelledby={id}
-      onCancel={event => {
+      title={title}
+      busy={busy}
+      onSubmit={event => {
         event.preventDefault();
-        close();
+        onConfirm();
       }}
-      onClick={event => event.target === event.currentTarget && close()}
+      onClose={onClose}
+      actions={
+        <button class="btn destructive" aria-busy={busy}>
+          <Icon d={iTrash} />
+          {confirmLabel}
+        </button>
+      }
     >
-      <form
-        onSubmit={event => {
-          event.preventDefault();
-          onConfirm();
-        }}
-      >
-        <h2 id={id}>{title}</h2>
-        {body ? <p>{body}</p> : null}
-        <div class="actions">
-          <button type="button" class="btn ghost" disabled={busy} onClick={close} autofocus>
-            Cancel
-          </button>
-          <button class="btn destructive" aria-busy={busy}>
-            {confirmLabel}
-          </button>
-        </div>
-      </form>
-    </dialog>
+      {body ? <p>{body}</p> : null}
+    </Modal>
   );
 }

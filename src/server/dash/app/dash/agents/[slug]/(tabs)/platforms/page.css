@@ -1,6 +1,7 @@
+/* about four fifths of the column on a desktop, all of it on a phone */
 .tab-lead {
   color: var(--muted);
-  max-width: 72ch;
+  max-width: 115ch;
 }
 .tab-lead b {
   color: var(--fg);
@@ -16,6 +17,13 @@
 }
 .inst {
   display: block;
+}
+/* platform pages open from the name, in the row's own color */
+.inst a {
+  color: inherit;
+}
+.inst a:hover {
+  border-bottom: 1px solid currentColor;
 }
 .inst + .inst {
   margin-top: 8px;
@@ -48,43 +56,13 @@
 }
 
 /* an app's create form */
-dialog.create-dialog {
-  width: min(560px, calc(100vw - 32px));
-  max-height: calc(100dvh - 48px);
-  margin: auto;
-  padding: 0;
-  border: 1px solid var(--line2);
-  background: var(--tile);
-  color: inherit;
-  text-align: left;
-  white-space: normal;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
-}
-dialog.create-dialog::backdrop {
-  background: light-dark(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.72));
-}
-.create-dialog form {
-  display: grid;
-  gap: 16px;
-  padding: 20px 24px 24px;
-}
-/* two lines kept, so switching the choice never moves the form */
 .where-note {
-  min-height: 3em;
   line-height: 1.5;
 }
-.create-dialog header {
+.create-link {
   display: flex;
   align-items: center;
-  margin-right: -10px;
-}
-.create-dialog h2 {
-  flex: 1;
-  font-size: 15px;
-  font-weight: 700;
-}
-.create-open {
-  justify-self: start;
+  gap: 6px;
 }
 .create-steps {
   display: grid;
@@ -116,10 +94,6 @@ dialog.create-dialog::backdrop {
   color: var(--fg);
   background: var(--wash);
 }
-.create-dialog .actions {
-  justify-content: flex-end;
-  margin-top: 4px;
-}
 /* a main action with its alternatives behind a caret, as one control */
 .split {
   display: inline-flex;
@@ -136,37 +110,6 @@ dialog.create-dialog::backdrop {
 .split > .btn + .menu .split-more {
   border-left-color: rgba(255, 255, 255, 0.3);
 }
-/* an unexpected failure, marked like an error toast */
-dialog.failed-dialog {
-  width: min(500px, calc(100vw - 32px));
-  border-color: color-mix(in srgb, var(--bad) 40%, var(--line2));
-  box-shadow:
-    inset 3px 0 0 var(--bad),
-    0 12px 32px rgba(0, 0, 0, 0.18);
-}
-.failed-dialog form {
-  gap: 10px;
-  padding: 24px 24px 20px 28px;
-}
-.failed-dialog header {
-  gap: 10px;
-  margin-right: 0;
-  color: var(--bad);
-}
-.failed-dialog h2 {
-  color: var(--fg);
-}
-.failed-dialog p {
-  color: var(--muted);
-  line-height: 1.6;
-}
-.failed-dialog .actions {
-  margin-top: 14px;
-}
-.failed-dialog .actions > :first-child {
-  margin-right: auto;
-}
-
 @media (max-width: 1180px) {
   .stacked.early thead {
     display: none;

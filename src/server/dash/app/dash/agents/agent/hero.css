@@ -8,9 +8,25 @@
 .hero > .grow {
   flex: 1 1 280px;
 }
+/* the right column: actions, then the handles under them */
+.hero-side {
+  display: grid;
+  gap: 14px;
+  justify-items: end;
+}
 .hero .handles {
+  display: grid;
+  gap: 4px;
+  flex: none;
   font-size: 12px;
   color: var(--muted);
+  text-align: right;
+}
+.hero .handles b {
+  color: var(--fg);
+}
+.hero .handles .more-list .handles {
+  text-align: left;
 }
 .hero.stuck .handles {
   display: none;

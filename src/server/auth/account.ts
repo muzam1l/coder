@@ -37,6 +37,7 @@ function serverInfo(ctx: ServerContext) {
     name: ctx.config.name ?? 'Coder',
     store: ctx.config.store,
     ...(ctx.config.publicUrl ? { url: ctx.config.publicUrl } : {}),
+    issuesUrl: ctx.config.issuesUrl,
     subscriptions: {
       claude: Boolean(ctx.config.subscriptions?.claude),
       codex: Boolean(ctx.config.subscriptions?.codex),

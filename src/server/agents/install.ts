@@ -15,7 +15,6 @@ import {
   platformsPath,
   link,
   linkedSibling,
-  connectLinks,
   backPath,
 } from './platform';
 
@@ -242,7 +241,6 @@ async function bindInstall(
       credentials,
       publicUrl,
       fetch: request,
-      connect: connectLinks(ctx, target, publicUrl),
       ...(verifying ? { installation: verifying } : {}),
     })
     .catch((error: unknown) => {
@@ -315,33 +313,6 @@ async function bindInstall(
       : outcome(ctx, 'installation-taken', { platform: id }, back);
   }
   if (sibling) await ctx.store.put('installation', sibling.id, link(sibling, id!, installationId));
-  if (integration.renew) {
-    const failed = await (
-      await import('../chat')
-    )
-      .renewInstallation({ ...ctx, fetch: request }, target, result.platformInstallId)
-      .then(
-        () => false,
-        () => true,
-      );
-    if (failed)
-      return outcome(
-        ctx,
-        'renew-failed',
-        { platform: id, account: installation.account.login },
-        back,
-      );
-  }
 
-  return outcome(
-    ctx,
-    'connected',
-    {
-      platform: id,
-      account: installation.account.login,
-      connect: Object.keys(result.connect ?? {}),
-      link: result.connect ? installationId : undefined,
-    },
-    back,
-  );
+  return outcome(ctx, 'connected', { platform: id, account: installation.account.login }, back);
 }

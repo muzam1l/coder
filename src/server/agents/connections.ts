@@ -135,8 +135,10 @@ export async function listInstallations(
   return json(
     rows.map(({ id, value }) => {
       const { token: _token, connections: _connections, ...safe } = value;
+      const url =
+        value.account.url ?? ctx.integrations[value.integration]?.app.accountUrl?.(value.account);
 
-      return { id, value: safe };
+      return { id, value: { ...safe, account: { ...safe.account, ...(url ? { url } : {}) } } };
     }),
   );
 }

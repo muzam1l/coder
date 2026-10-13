@@ -6,7 +6,6 @@ import type { Integration } from '../../integrations/types';
 import type { Agent, AgentApp, AgentEvent, Installation, RunnerKind } from '../../agent/types';
 import type { Runner } from '../runners';
 import type { Store } from '../store/types';
-import type { SigningKeys } from '../auth/signing-keys';
 import type { TokenSource } from '../tasks/context';
 import type { TaskQueue } from '../tasks/queue';
 
@@ -23,6 +22,8 @@ export interface ServerConfig {
   publicUrl?: string;
   /** What the dashboard calls this server; `Coder` unless set. */
   name?: string;
+  /** `ISSUES_URL`: where the dashboard sends bug reports. */
+  issuesUrl: string;
   databaseUrl?: string;
   databasePool?: import('../store/pg/client').PoolOptions;
   /** Host-only runner configuration. */
@@ -178,8 +179,6 @@ export interface ServerContext {
   ): Promise<Agent>;
   /** Test or host override for outbound credential validation. */
   fetch?: typeof fetch;
-  /** Platforms' public signing keys, one cache for the whole server. */
-  signingKeys?: SigningKeys;
   /** Repository file reads in flight, one per cache key. */
   fileReads?: Map<string, Promise<string | undefined>>;
   /** Repository listings in flight, one per installation. */

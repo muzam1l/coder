@@ -7,8 +7,7 @@ import { eventOptions } from '../agent/definition';
 import { type AgentApp, type AgentEvent, type TaskContext } from '../agent/types';
 import { agentWithVersion } from './agents/records';
 import type { ChatRoute, Integration, TokenBound } from '../integrations/types';
-import { appOwner, forInstallation, scoped, type ServerContext } from './context';
-import { SigningKeys } from './auth/signing-keys';
+import { forInstallation, type ServerContext } from './context';
 import { appChatState, LocalChatState } from './store/chat';
 import { decryptSecret } from './store/secrets';
 import { updateMetadata } from './store';
@@ -18,9 +17,6 @@ import { conversationKey } from './tasks/thread';
 import { kick } from './tasks/kick';
 
 const HISTORY_LIMIT = 10;
-const DAY_MS = 24 * 60 * 60 * 1000;
-/** How long one sweep holds a due renewal before another may retry it. */
-const RENEW_LEASE_MS = 10 * 60 * 1000;
 /** Messages read at most to reach a long thread's end. */
 const HISTORY_SCAN = 1000;
 
@@ -181,7 +177,7 @@ export function threadReplies(
   message?: Message | string,
 ): Replies {
   return {
-    // Where the platform answers one message (Gmail), the reply goes to the one that raised the event, not the thread's newest.
+    // Where the platform answers one message, the reply goes to the one that raised the event, not the thread's newest.
     post: text =>
       message && thread.adapter.reply ? thread.reply(message, text) : thread.post(text),
     whisper: text =>
@@ -277,8 +273,6 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
   const integration = ctx.integrations[app.integration];
   if (!integration) throw new Error(`Unknown integration "${app.integration}"`);
   const credentials = decryptSecret(ctx.config, app.credentials);
-  // A context without the server's cache keeps the keys for this request only.
-  const keys = ctx.signingKeys ?? new SigningKeys();
   const adapter = await integration.adapter({
     fetch: ctx.fetch ?? fetch,
     appId: app.id.slice(integration.id.length + 1),
@@ -290,13 +284,6 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
         ...(target?.repo ? { repo: { owner: target.repo.owner, name: target.repo.name } } : {}),
         ...bound,
       }),
-    isBound: async id => {
-      const { tenant, installation } = await boundInstallation(ctx, app, id);
-
-      return Boolean(
-        installation && (app.builtin || tenant?.organizationId === ctx.organizationId),
-      );
-    },
     installedSelf: async id => (await boundInstallation(ctx, app, id)).installation?.self,
     saveSelf: async (id, self) => {
       const { tenant, installation } = await boundInstallation(ctx, app, id);
@@ -305,7 +292,6 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
         console.error(`coder server: could not save ${installation.id}'s app user`, error),
       );
     },
-    signingKeys: url => keys.resolver(url, ctx.fetch ?? fetch),
     ...(target
       ? {
           hears: text =>
@@ -334,7 +320,7 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
     logger: 'error',
   });
   if (!target) return chat;
-  // Dispatch continues after the handler so no webhook waits on it (Teams DMs do).
+  // Dispatch continues after the handler so no webhook waits on it.
   const receive = async (route: ChatRoute, thread: Thread, message: Message, delivery?: string) => {
     const event = chatEvent(integration, app, target, route, thread, message, delivery);
     if (event)
@@ -407,77 +393,4 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
     );
   });
   return chat;
-}
-
-/** Renew one bound installation's platform subscription through its adapter, held until its last day, or only catch up on what it missed. */
-export async function renewInstallation(
-  ctx: ServerContext,
-  app: AgentApp,
-  installationId: string,
-  op: 'renew' | 'sync' = 'renew',
-): Promise<void> {
-  const integration = ctx.integrations[app.integration];
-  if (!integration?.[op]) return;
-  const key = `${app.id}:${installationId}`;
-  const pending: Promise<unknown>[] = [];
-  const chat = await chatFor(
-    {
-      ...ctx,
-      waitUntil: work => {
-        pending.push(work);
-        ctx.waitUntil?.(work);
-      },
-    },
-    app,
-    { id: installationId },
-  );
-  await chat.initialize();
-  const adapter = chat.getAdapter(integration.id);
-  const expiresAt =
-    op === 'renew' ? await integration.renew!(adapter) : await integration.sync!(adapter);
-  while (pending.length) await Promise.all(pending.splice(0));
-
-  const now = (ctx.now ?? Date.now)();
-  const store = (await forInstallation(ctx, key))?.store ?? ctx.store;
-  if (expiresAt)
-    await store.put(
-      'delivery',
-      `renew:${key}`,
-      { at: now },
-      { ttlMs: Math.max(expiresAt - now - DAY_MS, 0) },
-    );
-}
-
-/** The sweep's renewal of subscriptions in their last day and daily catch-up (or the kick timer's sync) of every live installation that keeps one; one failure skips only that one. */
-export async function renewInstallations(
-  ctx: ServerContext,
-  op: 'renew' | 'sync' = 'renew',
-): Promise<void> {
-  const now = (ctx.now ?? Date.now)();
-  for (const integration of Object.values(ctx.integrations)) {
-    if (!integration[op]) continue;
-    for (const { key, organizationId } of (await ctx.installations?.(integration.id)) ?? []) {
-      const store = scoped(ctx, organizationId).store;
-      const due = (name: string, ttlMs: number) =>
-        store.create('delivery', `${name}:${key}`, { at: now }, { ttlMs });
-      const renew = op === 'sync' || (await due('renew', RENEW_LEASE_MS));
-      const reconcile = op === 'renew' && !!integration.sync && (await due('reconcile', DAY_MS));
-      if (!renew && !reconcile) continue;
-
-      const installation = await store.get('installation', key);
-      const owner = installation && (await appOwner(ctx, installation.app));
-      if (!owner) continue;
-
-      const id = key.slice(owner.app.id.length + 1);
-      if (renew)
-        await renewInstallation(owner.ctx, owner.app, id, op).catch(error =>
-          console.error(`coder server: could not ${op} ${key}`, error),
-        );
-      if (reconcile)
-        await renewInstallation(owner.ctx, owner.app, id, 'sync').catch(async error => {
-          console.error(`coder server: could not reconcile ${key}`, error);
-          await store.delete('delivery', `reconcile:${key}`);
-        });
-    }
-  }
 }

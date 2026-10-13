@@ -1,4 +1,4 @@
-import { iLeft } from '@/comps/ui/icons';
+import { iLeft, iUpload } from '@/comps/ui/icons';
 import { BLANK, LoadingCard } from '@/comps/frame/loading-card';
 import { LoadingHero } from '@/app/dash/agents/agent/hero';
 import { Page } from '@/comps/frame/page-head';
@@ -20,6 +20,7 @@ export default function AgentEditLoading() {
               Cancel
             </button>
             <button type="button" class="btn" disabled>
+              <Icon d={iUpload} />
               Publish new version
             </button>
           </>

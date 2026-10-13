@@ -1,4 +1,4 @@
-/** App setup the Gmail, Linear and Teams integrations share: the posted credentials and OAuth token endpoint calls. */
+/** App setup helpers for form-based integrations: the posted credentials and OAuth token endpoint calls. */
 import { IntegrationError } from './types';
 
 /** The posted credentials form, every named field present and trimmed. */
@@ -75,15 +75,4 @@ export async function freshToken(
   const kept = { ...next, refreshToken: next.refreshToken ?? token.refreshToken };
   const winner = await save?.(JSON.stringify(kept));
   return winner ? (JSON.parse(winner) as StoredToken).accessToken : kept.accessToken;
-}
-
-/** Claims of an ID token the token endpoint returned over TLS, which OIDC Core 3.1.3.7 lets a client trust without its signature. */
-export function idClaims(idToken: string | undefined, clientId: string): Record<string, unknown> {
-  const claims = JSON.parse(
-    Buffer.from(idToken?.split('.')[1] ?? '', 'base64url').toString() || '{}',
-  ) as Record<string, unknown>;
-  const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-  if (!audience.includes(clientId))
-    throw new Error('The sign-in returned no identity for this app');
-  return claims;
 }

@@ -127,7 +127,6 @@ export const integrationApp = pgTable(
     agentsRepo: text(),
     branch: text(),
     /** Any account may install it, not only the one that owns it. */
-    public: boolean(),
     credentialsSecretId: bigint({ mode: 'number' })
       .notNull()
       .references(() => secret.id),

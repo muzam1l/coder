@@ -68,7 +68,6 @@ CREATE TABLE "coder"."integration_app" (
 	"name" text NOT NULL,
 	"agents_repo" text,
 	"branch" text,
-	"public" boolean,
 	"credentials_secret_id" bigint NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,

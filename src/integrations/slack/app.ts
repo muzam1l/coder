@@ -14,6 +14,8 @@ export interface SlackAppCredentials {
   configRefreshToken?: string;
   /** When `configToken` expires, in epoch milliseconds. */
   configTokenExpires?: number;
+  /** The manifest's bot scopes, asked for again on every install. */
+  scopes?: string[];
 }
 
 function baseUrl(publicUrl: string): string {
@@ -31,8 +33,8 @@ export function slackManifest(
     name: string;
     scopes: string[];
     events: string[];
-    /** `slackManifestExtras(...)`: slash commands and the assistant view. */
-    extras?: { slash_commands?: unknown; assistant_view?: unknown };
+    /** `slackManifestExtras(...)`: slash commands and the agent view. */
+    extras?: { slash_commands?: unknown; agent_view?: unknown };
   },
 ): Record<string, unknown> {
   const base = baseUrl(publicUrl);
@@ -84,13 +86,17 @@ async function createSlackApp(
   };
 }
 
+/** The bot scopes an agent's definition asks for. */
+const agentScopes = (definition: AgentDefinition) =>
+  slackAppScopes(definition.integrations.slack?.tools);
+
 /** The manifest an agent's definition asks for. */
 function agentManifest(publicUrl: string, name: string, definition: AgentDefinition) {
   const wiring = definition.integrations.slack ?? {};
   const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
   return slackManifest(publicUrl, {
     name,
-    scopes: slackAppScopes(wiring.tools),
+    scopes: agentScopes(definition),
     events: slackAppEvents(events),
     extras: slackManifestExtras(publicUrl, definition),
   });
@@ -116,7 +122,7 @@ async function rotateConfigToken(
     exp?: number;
   };
   if (!response.ok || !value.ok || !value.token || !value.refresh_token)
-    throw new Error(`Slack token rotation failed: ${value.error ?? response.statusText}`);
+    throw new IntegrationError('platform-error', value.error ?? String(response.status));
   return {
     configToken: value.token,
     configRefreshToken: value.refresh_token,
@@ -202,11 +208,10 @@ async function grantedTeams(token: string, request: Fetcher): Promise<string[]> 
 }
 
 /** DM sent to the installer right after a Slack install. */
-export function welcomeMessage(agentName: string, connect: Record<string, string>): string {
+export function welcomeMessage(agentName: string): string {
   return [
     `Hi, I'm ${agentName}. Ask me here or mention me in any channel; a thread keeps its context for follow-ups.`,
     'Use `/setup show` to see my settings. Workspace admins configure connected repositories in the Coder dashboard.',
-    ...Object.entries(connect).map(([id, url]) => `Connect ${id} so I can act there: ${url}`),
   ].join('\n\n');
 }
 
@@ -227,13 +232,31 @@ export const slackApp: IntegrationApp = {
       "To install the app in other Slack workspaces, click **Activate Public Distribution** under the app's **Manage Distribution**.",
     ],
     fields: [
-      { name: 'refreshToken', label: 'Refresh token', placeholder: 'xoxe-1-…', required: true },
+      {
+        name: 'refreshToken',
+        label: 'Refresh token',
+        hint: 'Starts with xoxe-1-.',
+        placeholder: 'xoxe-1-…',
+        required: true,
+      },
     ],
     submit: 'Create Slack app',
   }),
   async createCallback(req, { publicUrl, state, definition, fetch: request }) {
     const refreshToken = new URLSearchParams(await req.text()).get('refreshToken');
     if (!refreshToken) throw new Error('Missing refresh token');
+    if (refreshToken.startsWith('xoxe.xoxp-'))
+      throw new IntegrationError(
+        'invalid-field',
+        'access-token',
+        'That is the access token, xoxe.xoxp-…. Paste the refresh token next to it, which starts with xoxe-1-.',
+      );
+    if (!refreshToken.startsWith('xoxe-1-'))
+      throw new IntegrationError(
+        'invalid-field',
+        'refresh-token',
+        'That is not a refresh token; they start with xoxe-1-. Copy it from Your App Configuration Tokens.',
+      );
     const rotated = await rotateConfigToken(refreshToken, request);
     const name = definition.name ?? state.agent;
     const created = await createSlackApp(
@@ -241,7 +264,11 @@ export const slackApp: IntegrationApp = {
       agentManifest(publicUrl, name, definition),
       request,
     );
-    return { platformAppId: created.appId, name, credentials: { ...created, ...rotated } };
+    return {
+      platformAppId: created.appId,
+      name,
+      credentials: { ...created, ...rotated, scopes: agentScopes(definition) },
+    };
   },
   // Configuration tokens last 12 hours; an expired one is rotated and the new pair saved first.
   async update(app, credentials, { publicUrl, definition, fetch: request, saveCredentials }) {
@@ -260,11 +287,17 @@ export const slackApp: IntegrationApp = {
       current.configToken!,
       request,
     );
+    const scopes = agentScopes(definition);
+    if (scopes.join() !== current.scopes?.join()) await saveCredentials({ ...current, scopes });
   },
+  settingsUrl: (_app, credentials) =>
+    `https://api.slack.com/apps/${encodeURIComponent((credentials as SlackAppCredentials).appId)}`,
+  // Slack's authorize page needs the scopes on the URL; an app created before they were saved asks for the write set.
   installUrl(_app, credentials, { publicUrl, state }) {
-    return oauthInstallUrl(credentials as SlackAppCredentials, publicUrl, state);
+    const current = credentials as SlackAppCredentials;
+    return oauthInstallUrl(current, publicUrl, state, current.scopes ?? slackAppScopes('write'));
   },
-  async installCallback(req, { app, credentials, publicUrl, fetch: request, connect }) {
+  async installCallback(req, { app, credentials, publicUrl, fetch: request }) {
     const code = new URL(req.url).searchParams.get('code');
     if (!code) throw new IntegrationError('missing-code');
     const result = await oauthCallback(
@@ -273,26 +306,32 @@ export const slackApp: IntegrationApp = {
       publicUrl,
       request,
     );
-    const links = await connect(`${app.id}:${result.id}`);
     if (result.installer)
       await slackApi(
         'chat.postMessage',
-        { channel: result.installer, text: welcomeMessage(app.name, links) },
+        { channel: result.installer, text: welcomeMessage(app.name) },
         result.accessToken,
         request,
       ).catch(() => undefined);
+    // The workspace address, for the dashboard's link; `auth.test` needs no scope.
+    const url = await slackApi<{ url?: string }>('auth.test', {}, result.accessToken, request)
+      .then(value => value.url?.replace(/\/$/, ''))
+      .catch(() => undefined);
     // Workspaces the org admin grants later arrive as `team_access_granted`.
     const covers = result.org
       ? await grantedTeams(result.accessToken, request).catch(() => null)
       : undefined;
     return {
       platformInstallId: result.id,
-      account: { login: result.name, ...(result.org ? { type: 'Organization' } : {}) },
+      account: {
+        login: result.name,
+        ...(result.org ? { type: 'Organization' } : {}),
+        ...(url ? { url } : {}),
+      },
       token: result.accessToken,
       ...(result.org ? { covers } : {}),
       installer: result.installer,
       ...(result.installer ? { user: { id: result.installer } } : {}),
-      ...(Object.keys(links).length ? { connect: links } : {}),
     };
   },
 };
@@ -331,13 +370,13 @@ export function slackAppEvents(events: string[]): string[] {
   ];
 }
 
-/** Manifest pieces beyond scopes and events: the `/setup` slash command and the assistant view. */
+/** Manifest pieces beyond scopes and events: the `/setup` slash command and the agent view. */
 export function slackManifestExtras(
   publicUrl: string,
   agent: { name?: string; description?: string },
 ): {
   slash_commands: Array<Record<string, string>>;
-  assistant_view: { assistant_description: string };
+  agent_view: { agent_description: string };
 } {
   const base = publicUrl.replace(/\/$/, '');
   return {
@@ -349,8 +388,8 @@ export function slackManifestExtras(
         usage_hint: 'repo owner/name | model <name> | show',
       },
     ],
-    assistant_view: {
-      assistant_description: agent.description ?? `${agent.name ?? 'Coder'} in your workspace.`,
+    agent_view: {
+      agent_description: agent.description ?? `${agent.name ?? 'Coder'} in your workspace.`,
     },
   };
 }

@@ -17,10 +17,6 @@ The built-in agent. On the hosted service it has an install link per platform; s
 - Replies stay in the thread they were asked in, in Slack's style, with short paragraphs and code spans and no headings.
 - When the workspace has connected GitHub from the [dashboard](../dash.md), it can read and change code there.
 
-## On Gmail
-
-- An email under the watched label, from a sender whose domain passes DMARC, gets an answer by reply.
-
 ## On Linear
 
 - Mentioning or assigning the agent starts a session that answers, or makes the change and links the pull request.
@@ -30,7 +26,7 @@ The built-in agent. On the hosted service it has an install link per platform; s
 |             |                                                                   |
 | ----------- | ----------------------------------------------------------------- |
 | Permissions | `workspace-write`; `read-only` for pull-request reviews           |
-| Tools       | GitHub `write`; Slack, Gmail and Linear `comment`          |
+| Tools       | GitHub `write`; Slack and Linear `comment`                        |
 | Flows       | `review`                                                          |
 | Engine      | the workspace's default [credential](../self-host.md#credentials) |
 

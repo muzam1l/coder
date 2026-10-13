@@ -222,6 +222,13 @@ async function finishCreate(
       ...(shared ? { shared: decryptSecret(ctx.config, shared.credentials) } : {}),
     })
     .catch((error: unknown) => {
+      // A form value the dashboard can fix in place stays in its dialog.
+      if (
+        error instanceof IntegrationError &&
+        error.code === 'invalid-field' &&
+        req.headers.get('accept') === 'application/json'
+      )
+        return json({ error: error.message }, 400);
       if (error instanceof IntegrationError)
         return outcome(ctx, error.code, { platform: id, error: error.error, ...spent }, back);
       console.error(`coder server: creating the ${id} app failed`, error);
@@ -238,7 +245,6 @@ async function finishCreate(
     ...(parsed.state.repo ? { agentsRepo: parsed.state.repo } : {}),
     ...(parsed.state.repo ? { branch: parsed.state.branch ?? 'main' } : {}),
     ...(operator ? { builtin: true } : {}),
-    ...(parsed.state.public ? { public: true } : {}),
     ...('shared' in created
       ? { shared: shared!.id, credentials: '' }
       : { credentials: encryptSecret(ctx.config, created.credentials) }),

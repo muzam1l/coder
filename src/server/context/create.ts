@@ -13,7 +13,6 @@ import { loadServerConfig } from '../env';
 import { handleRequest } from '../routes';
 import { DashboardHosts } from '../dash/serve';
 import { ServerLimits } from '../limits';
-import { SigningKeys } from '../auth/signing-keys';
 import { RegistryIndex } from '../settings/mcp';
 import { sql } from 'drizzle-orm';
 import { createBackend } from '../store';
@@ -152,7 +151,6 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
     const requestScopes = new Map<string, import('../routes').RequestScope>();
     const taskWatcher = new TaskWatcher();
     const logWatcher = new LogWatcher();
-    const signingKeys = new SigningKeys();
     const context = (organizationId: string): ServerContext => {
       const existing = contexts.get(organizationId);
       if (existing) return existing;
@@ -179,7 +177,6 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
         taskWatcher,
         logWatcher,
         dashboardHosts,
-        signingKeys,
         dbProfile: backend.connection?.profile,
         chatState: backend.chatState,
         fileReads,
