@@ -5,9 +5,9 @@
   gap: 12px;
   flex-wrap: wrap;
 }
-.date-pop:popover-open {
+.date-pop {
   display: grid;
   gap: 12px;
-  min-width: 240px;
-  padding: 14px;
+  min-width: 226px;
+  padding: 8px;
 }

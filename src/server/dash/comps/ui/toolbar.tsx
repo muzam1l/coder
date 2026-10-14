@@ -1,5 +1,5 @@
 import './toolbar.css';
-import type { ComponentChildren } from 'preact';
+import type { ComponentChildren, JSX } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { iSearch } from './icons';
@@ -39,24 +39,31 @@ export function useFilters<K extends string>(initial: Record<K, string>) {
   return { values, set, query: queryOf(applied) };
 }
 
+/** A search field; `disabled` shows it inert, for a loading page. */
 export function Search({
   value,
   label,
   onInput,
-}: {
-  value: string;
+  disabled,
+  ...rest
+}: Omit<JSX.InputHTMLAttributes<HTMLInputElement>, 'value' | 'label' | 'onInput'> & {
+  value?: string;
   label: string;
-  onInput: (value: string) => void;
+  onInput?: (value: string) => void;
+  disabled?: boolean;
 }) {
   return (
-    <label class="search">
+    <label class="search" aria-hidden={disabled || undefined}>
       <Icon d={iSearch} />
       <input
+        {...rest}
         type="search"
         value={value}
         placeholder={label}
         aria-label={label}
-        onInput={event => onInput((event.currentTarget as HTMLInputElement).value)}
+        disabled={disabled}
+        tabIndex={disabled ? -1 : undefined}
+        onInput={event => onInput?.((event.currentTarget as HTMLInputElement).value)}
       />
     </label>
   );

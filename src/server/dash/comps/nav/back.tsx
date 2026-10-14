@@ -2,19 +2,18 @@
 
 import type { ComponentChildren } from 'preact';
 import { useEffect } from 'preact/hooks';
-import { Link } from '@wular/pnext/link';
 
 import { Back } from '@/comps/frame/page-head';
+import { LinkButton, type Look } from '@/comps/ui/button';
 import { useOrg } from '@/comps/nav/org';
 import { BACK_COOKIE, rememberedBack, type Remembered } from '@/comps/nav/back-cookie';
 
 /** Settings' credentials tab; it links back to this page, named `label` where its section name is not enough. */
 export function CredentialsLink({
-  class: cls,
   label,
   children,
-}: {
-  class: string;
+  ...look
+}: Look & {
   label?: string;
   children: ComponentChildren;
 }) {
@@ -24,14 +23,14 @@ export function CredentialsLink({
   };
 
   return (
-    <Link
-      class={cls}
+    <LinkButton
+      {...look}
       href="/dash/[org]/settings/[tab]"
       params={{ org: useOrg(), tab: 'credentials' }}
       onClick={remember}
     >
       {children}
-    </Link>
+    </LinkButton>
   );
 }
 

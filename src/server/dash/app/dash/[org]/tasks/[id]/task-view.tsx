@@ -13,12 +13,14 @@ import { Link } from '@wular/pnext/link';
 import { useSearchParams } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import type { TaskLog, TaskRow } from '@coder/client/types';
-import { iAgent, iCheck, iClock, iDown, iFolder, iPlug, iRight, iTerminal } from '@/comps/ui/icons';
+import { iAgent, iClock, iDown, iFolder, iPlug, iRight, iTerminal } from '@/comps/ui/icons';
 import { Badge } from '@/comps/ui/badge';
+import { Button } from '@/comps/ui/button';
 import { Card, Loading } from '@/comps/ui/card';
 import { Collapse } from '@/comps/ui/collapse';
 import { Icon } from '@/comps/ui/icon';
 import { Menu } from '@/comps/ui/menu';
+import { MenuRadio } from '@/comps/ui/menu-items';
 import { Back, PageHead } from '@/comps/frame/page-head';
 import { backFrom } from '@/comps/frame/heads';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
@@ -419,10 +421,9 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
     setTab('activity');
   };
   const activityLink = (
-    <button type="button" class="btn ghost sm" onClick={() => openActivity('end')}>
+    <Button variant="ghost" size="sm" rightIcon={iRight} onClick={() => openActivity('end')}>
       Activity
-      <Icon d={iRight} />
-    </button>
+    </Button>
   );
   const run = rows.filter(row => row.at >= (task.startedAt ?? 0));
   const foot =
@@ -559,30 +560,20 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
                 align="up"
                 wide
               >
-                <button
-                  type="button"
-                  class="pop-item rich"
-                  role="menuitemradio"
-                  aria-checked={!ask}
-                  onClick={() => pickMode(false)}
+                <MenuRadio
+                  on={!ask}
+                  onPick={() => pickMode(false)}
+                  sub="Change course while it works."
                 >
-                  <span class="grow">
-                    Steer<small>Change course while it works.</small>
-                  </span>
-                  <Icon d={iCheck} />
-                </button>
-                <button
-                  type="button"
-                  class="pop-item rich"
-                  role="menuitemradio"
-                  aria-checked={ask}
-                  onClick={() => pickMode(true)}
+                  Steer
+                </MenuRadio>
+                <MenuRadio
+                  on={ask}
+                  onPick={() => pickMode(true)}
+                  sub="A question that does not interrupt it."
                 >
-                  <span class="grow">
-                    Ask<small>A question that does not interrupt it.</small>
-                  </span>
-                  <Icon d={iCheck} />
-                </button>
+                  Ask
+                </MenuRadio>
               </Menu>
             ) : null}
             <textarea
@@ -603,9 +594,9 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
                 void send();
               }}
             />
-            <button class="btn sm" disabled={sending} aria-busy={sending || asking > 0}>
+            <Button type="submit" size="sm" disabled={sending} aria-busy={sending || asking > 0}>
               Send
-            </button>
+            </Button>
           </div>
         </form>
       ) : (

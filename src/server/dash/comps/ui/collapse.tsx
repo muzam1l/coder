@@ -5,6 +5,8 @@ import './collapse.css';
 import type { ComponentChildren } from 'preact';
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 
+import { Button } from './button';
+
 /** Long content cut to its first `lines` lines under a fade, with a Show more toggle. */
 export function Collapse({
   lines = 10,
@@ -35,14 +37,15 @@ export function Collapse({
         {children}
       </div>
       {long ? (
-        <button
-          type="button"
-          class="btn ghost sm more-toggle"
+        <Button
+          variant="ghost"
+          size="sm"
+          class="more-toggle"
           aria-expanded={open}
           onClick={() => setOpen(!open)}
         >
           {open ? 'Show less' : 'Show more'}
-        </button>
+        </Button>
       ) : null}
     </div>
   );

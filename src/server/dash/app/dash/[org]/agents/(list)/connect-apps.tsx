@@ -4,6 +4,7 @@ import { client } from '@/utils/client';
 import { useAction } from '@/utils/action';
 import { iPlus } from '@/comps/ui/icons';
 import { Icon } from '@/comps/ui/icon';
+import { Button } from '@/comps/ui/button';
 import { useOrg } from '@/comps/nav/org';
 import { Notice } from '@/comps/ui/notice';
 
@@ -25,16 +26,16 @@ export function ConnectApps({
       <Icon d={iPlus} />
       <span class="grow">Add the built-in agent to your repositories and channels.</span>
       {apps.map(app => (
-        <button
+        <Button
           key={app.id}
-          type="button"
-          class="btn outline sm"
+          variant="outline"
+          size="sm"
           disabled={Boolean(action.pending)}
-          aria-busy={action.pending === app.id}
+          loading={action.pending === app.id}
           onClick={() => connect(app)}
         >
           {app.label}
-        </button>
+        </Button>
       ))}
     </Notice>
   );

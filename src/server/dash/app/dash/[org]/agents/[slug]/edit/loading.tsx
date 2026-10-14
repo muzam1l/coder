@@ -1,28 +1,22 @@
-import { iLeft, iUpload } from '@/comps/ui/icons';
-import { BLANK, LoadingCard } from '@/comps/frame/loading-card';
+import { iUpload } from '@/comps/ui/icons';
+import { LoadingCard } from '@/comps/frame/loading-card';
 import { LoadingHero } from '@/app/dash/[org]/agents/agent/hero';
-import { Page } from '@/comps/frame/page-head';
-import { Icon } from '@/comps/ui/icon';
+import { LoadingBack, Page } from '@/comps/frame/page-head';
+import { Button } from '@/comps/ui/button';
 
 export default function AgentEditLoading() {
   return (
     <Page>
       <LoadingHero
-        back={
-          <span class="back" aria-hidden="true">
-            <Icon d={iLeft} />
-            {BLANK}
-          </span>
-        }
+        back={<LoadingBack />}
         actions={
           <>
-            <button type="button" class="btn ghost" disabled>
+            <Button variant="ghost" disabled>
               Cancel
-            </button>
-            <button type="button" class="btn" disabled>
-              <Icon d={iUpload} />
+            </Button>
+            <Button leftIcon={iUpload} disabled>
               Publish new version
-            </button>
+            </Button>
           </>
         }
       />

@@ -5,13 +5,15 @@ import './menu.css';
 import type { ComponentChildren } from 'preact';
 import { useId, useRef } from 'preact/hooks';
 
-import { iCheck, iInfo } from './icons';
+import { Button, IconButton, type Look } from './button';
+import { iInfo } from './icons';
 import { Icon } from './icon';
 
 /** A button and its popover panel, placed at the button; picking an item, an outside click or Escape closes it. */
 export function Menu({
   summary,
   summaryClass,
+  button,
   label,
   tip,
   align = 'right',
@@ -21,6 +23,8 @@ export function Menu({
 }: {
   summary: ComponentChildren;
   summaryClass?: string;
+  /** The summary as an `IconButton`, or a `Button` with this look. */
+  button?: 'icon' | Look;
   label?: string;
   /** A styled tooltip in place of the native title, where the layout shows one. */
   tip?: string;
@@ -32,16 +36,26 @@ export function Menu({
   const id = useId();
   return (
     <span class={`menu ${align}${cls ? ` ${cls}` : ''}`}>
-      <button
-        popovertarget={id}
-        type="button"
-        class={summaryClass}
-        aria-label={label}
-        title={tip ? undefined : label}
-        data-tip={tip}
-      >
-        {summary}
-      </button>
+      {button === 'icon' ? (
+        <IconButton popovertarget={id} label={label ?? ''}>
+          {summary}
+        </IconButton>
+      ) : button ? (
+        <Button {...button} popovertarget={id} aria-label={label} title={tip ? undefined : label}>
+          {summary}
+        </Button>
+      ) : (
+        <button
+          popovertarget={id}
+          type="button"
+          class={summaryClass}
+          aria-label={label}
+          title={tip ? undefined : label}
+          data-tip={tip}
+        >
+          {summary}
+        </button>
+      )}
       <div
         id={id}
         class={wide ? 'pop wide' : 'pop'}
@@ -70,51 +84,6 @@ export function Menu({
         {children}
       </div>
     </span>
-  );
-}
-
-export function MenuItem({
-  icon,
-  title,
-  sub,
-  href,
-  onClick,
-  danger,
-}: {
-  icon?: string;
-  title: ComponentChildren;
-  sub?: ComponentChildren;
-  /** An outside page; in-app links use Link. */
-  href?: string;
-  onClick?: () => void;
-  /** Destructive: red on hover. */
-  danger?: boolean;
-}) {
-  const inner = (
-    <>
-      {icon ? <Icon d={icon} /> : null}
-      <span class="grow">
-        {title}
-        {sub ? <small>{sub}</small> : null}
-      </span>
-    </>
-  );
-  const cls = `pop-item${sub ? ' rich' : ''}${danger ? ' danger' : ''}`;
-
-  if (href)
-    return (
-      <a
-        class={cls}
-        href={href}
-        {...(/^https?:\/\//.test(href) ? { target: '_blank', rel: 'noreferrer' } : {})}
-      >
-        {inner}
-      </a>
-    );
-  return (
-    <button type="button" class={cls} onClick={onClick}>
-      {inner}
-    </button>
   );
 }
 
@@ -163,31 +132,3 @@ export const InfoTip = ({ label, children }: { label: string; children: Componen
     {children}
   </MoreList>
 );
-
-/** One choice in a menu section; the picked one shows a check. */
-export function MenuRadio({
-  on,
-  onPick,
-  icon,
-  children,
-}: {
-  on: boolean;
-  onPick: () => void;
-  /** An icon path or a ready element. */
-  icon?: string | ComponentChildren;
-  children: ComponentChildren;
-}) {
-  return (
-    <button
-      type="button"
-      role="menuitemradio"
-      aria-checked={on}
-      class={on ? 'pop-item on' : 'pop-item'}
-      onClick={onPick}
-    >
-      {typeof icon === 'string' ? <Icon d={icon} /> : icon}
-      <span class="grow">{children}</span>
-      {on ? <Icon d={iCheck} /> : null}
-    </button>
-  );
-}

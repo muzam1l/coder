@@ -7,9 +7,11 @@ import { useAction } from '@/utils/action';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import type { TaskRow } from '@coder/client/types';
+import { Button } from '@/comps/ui/button';
 import { Card } from '@/comps/ui/card';
 import { ConfirmDialog } from '@/comps/ui/confirm';
-import { Menu, MenuItem } from '@/comps/ui/menu';
+import { Menu } from '@/comps/ui/menu';
+import { MenuItem } from '@/comps/ui/menu-items';
 import { Icon } from '@/comps/ui/icon';
 import { iDots } from '@/comps/ui/icons';
 import { showToast } from '@/comps/frame/task-toasts';
@@ -63,27 +65,26 @@ export function TaskActions({ task, live }: { task: TaskRow; live: boolean }) {
         {outcome}
       </span>
       {live ? (
-        <button
-          type="button"
-          class="btn outline"
+        <Button
+          variant="outline"
           disabled={Boolean(action.pending)}
-          aria-busy={action.pending === 'cancel'}
+          loading={action.pending === 'cancel'}
           onClick={() => void act('cancel')}
         >
           Stop
-        </button>
+        </Button>
       ) : archived ? null : (
-        <button
-          type="button"
-          class="btn outline archive"
+        <Button
+          variant="outline"
+          class="archive"
           disabled={Boolean(action.pending)}
-          aria-busy={action.pending === 'archive'}
+          loading={action.pending === 'archive'}
           onClick={archive}
         >
           Archive
-        </button>
+        </Button>
       )}
-      <Menu summary={<Icon d={iDots} />} summaryClass="icon-btn" label="More actions">
+      <Menu summary={<Icon d={iDots} />} button="icon" label="More actions">
         {live && !archived ? <MenuItem title="Archive" onClick={archive} /> : null}
         <MenuItem
           title="Copy task id"
@@ -133,24 +134,23 @@ export function Approval({ task }: { task: TaskRow }) {
       actions={
         task.task.flow === 'default' ? (
           <>
-            <button
-              type="button"
-              class="btn outline sm"
+            <Button
+              variant="outline"
+              size="sm"
               disabled={Boolean(busy)}
-              aria-busy={busy === 'decline'}
+              loading={busy === 'decline'}
               onClick={() => void decide('decline')}
             >
               Deny
-            </button>
-            <button
-              type="button"
-              class="btn sm"
+            </Button>
+            <Button
+              size="sm"
               disabled={Boolean(busy)}
-              aria-busy={busy === 'accept'}
+              loading={busy === 'accept'}
               onClick={() => void decide('accept')}
             >
               Allow
-            </button>
+            </Button>
           </>
         ) : undefined
       }

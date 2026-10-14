@@ -4,7 +4,9 @@ import { iDown } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { linkOf, withSearch, type To } from '@/comps/nav/to';
 import { Icon } from '@/comps/ui/icon';
-import { useId } from 'preact/hooks';
+import { Button } from '@/comps/ui/button';
+import { Field } from '@/comps/ui/field';
+import { Menu } from '@/comps/ui/menu';
 
 /** Custom from and to dates; applying them moves the page to that range. */
 export function CustomRange({
@@ -23,24 +25,26 @@ export function CustomRange({
   on: boolean;
 }) {
   const nav = useRouter();
-  const id = useId();
 
   return (
-    <span class={on ? 'menu custom on' : 'menu custom'}>
-      <button popovertarget={id} type="button">
-        Custom
-        <Icon d={iDown} />
-      </button>
+    <Menu
+      class={on ? 'custom on' : 'custom'}
+      align="left"
+      summary={
+        <>
+          Custom
+          <Icon d={iDown} />
+        </>
+      }
+    >
       <form
-        id={id}
-        class="pop date-pop"
-        popover="auto"
+        class="date-pop"
         onSubmit={event => {
           event.preventDefault();
           const values = new FormData(event.currentTarget);
           const [start, end] = [String(values.get('from')), String(values.get('to'))].sort();
 
-          event.currentTarget.hidePopover();
+          event.currentTarget.closest<HTMLElement>('[popover]')?.hidePopover();
           nav.push(page.href, {
             params: linkOf(page).params,
             search: withSearch(page.search, { from: String(start), to: String(end) }),
@@ -48,16 +52,16 @@ export function CustomRange({
           });
         }}
       >
-        <label class="field">
-          <span>From</span>
+        <Field label="From">
           <input type="date" name="from" defaultValue={from} max={today} required />
-        </label>
-        <label class="field">
-          <span>To</span>
+        </Field>
+        <Field label="To">
           <input type="date" name="to" defaultValue={to} max={today} required />
-        </label>
-        <button class="btn sm">Apply</button>
+        </Field>
+        <Button type="submit" size="sm" data-keep>
+          Apply
+        </Button>
       </form>
-    </span>
+    </Menu>
   );
 }

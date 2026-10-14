@@ -10,7 +10,7 @@ import { ClientError } from '@coder/client';
 import type { OperatorAppRow, OperatorApps as Apps } from '@coder/client/types';
 import { Badge } from '@/comps/ui/badge';
 import { Field } from '@/comps/ui/field';
-import { Icon } from '@/comps/ui/icon';
+import { Button, IconButton } from '@/comps/ui/button';
 import { iX } from '@/comps/ui/icons';
 import { List, Row } from '@/app/dash/[org]/settings/[tab]/list';
 
@@ -69,9 +69,7 @@ function SetUpDialog({
       >
         <header>
           <h2 id={id}>Set up shared {row.name} app</h2>
-          <button type="button" class="icon-btn" aria-label="Close" onClick={close}>
-            <Icon d={iX} />
-          </button>
+          <IconButton icon={iX} label="Close" onClick={close} />
         </header>
         {unreachable ? (
           <p class="flash err">
@@ -95,12 +93,12 @@ function SetUpDialog({
           </Field>
         ) : null}
         <div class="actions">
-          <button type="button" class="btn ghost" disabled={busy} onClick={close}>
+          <Button variant="ghost" disabled={busy} onClick={close}>
             Cancel
-          </button>
-          <button class="btn" disabled={busy || unreachable} aria-busy={busy}>
+          </Button>
+          <Button type="submit" disabled={unreachable} loading={busy}>
             Continue on {row.name}
-          </button>
+          </Button>
         </div>
       </form>
     </dialog>
@@ -124,9 +122,9 @@ export function OperatorApps({ first }: { first: Apps }) {
             }
             actions={
               row.app ? null : (
-                <button type="button" class="btn secondary sm" onClick={() => setOpen(row)}>
+                <Button variant="secondary" size="sm" onClick={() => setOpen(row)}>
                   Set up
-                </button>
+                </Button>
               )
             }
           />

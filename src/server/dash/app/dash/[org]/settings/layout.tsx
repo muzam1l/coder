@@ -1,3 +1,4 @@
+import { Button } from '@/comps/ui/button';
 import type { ComponentChildren } from 'preact';
 import { Suspense } from 'preact/compat';
 
@@ -12,9 +13,9 @@ import { rememberedBack } from '@/comps/nav/back-cookie';
 async function Members({ me }: { me: Promise<Me> }) {
   const url = (await me.catch(() => undefined))?.manageMembersUrl;
   return url ? (
-    <a class="btn outline" href={url} target="_blank" rel="noreferrer">
-      Members in Wular Auth ↗
-    </a>
+    <Button variant="outline" href={url} external>
+      Members in Wular Auth
+    </Button>
   ) : null;
 }
 

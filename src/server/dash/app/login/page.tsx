@@ -2,6 +2,7 @@ import './page.css';
 import { redirect } from '@wular/pnext/navigation';
 
 import { AuthPanel } from '@/comps/frame/auth-panel';
+import { Button } from '@/comps/ui/button';
 import { safeReturnPath } from '@coder/server/auth/sign-in';
 import { load } from '@/api/load';
 
@@ -31,10 +32,10 @@ function LoginPage({ signIn, error }: { signIn: string; error?: string | null })
       lead="Coder signs you in with your Wular Auth account."
     >
       <div class="provider-grid">
-        <a class="btn outline provider" href={signIn}>
+        <Button variant="outline" class="provider" href={signIn}>
           {WULAR_LOGO}
           <span>Sign in with Wular Auth</span>
-        </a>
+        </Button>
       </div>
       {error ? (
         <p class="flash err" role="alert">

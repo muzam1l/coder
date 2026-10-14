@@ -326,14 +326,12 @@ export async function reportLogin(
     ...(typeof body.url === 'string' && /^https:\/\//.test(body.url) ? { url: body.url } : {}),
     ...(typeof body.code === 'string' ? { code: body.code.slice(0, 64) } : {}),
   };
-  const updated =
-    login.state === 'starting'
-      ? ((await ctx.store.patchLogin(
-          id,
-          { ...fields, state: 'open' },
-          { state: 'starting', tokenHash: login.tokenHash },
-        )) ?? (await ctx.store.patchLogin(id, fields, { ...active, state: ['open', 'verifying'] })))
-      : await ctx.store.patchLogin(id, fields, active);
+  // A link means the engine waits for the user, again after a rejected code.
+  const updated = await ctx.store.patchLogin(
+    id,
+    fields.url ? { ...fields, state: 'open' } : fields,
+    active,
+  );
   if (!updated) return json({ error: 'This sign-in changed. Try again.' }, 409);
 
   return json({ ok: true });

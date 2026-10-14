@@ -5,7 +5,8 @@ import './engines-list.css';
 import { useState } from 'preact/hooks';
 
 import { Badge } from '@/comps/ui/badge';
-import { MenuItem } from '@/comps/ui/menu';
+import { Button } from '@/comps/ui/button';
+import { MenuItem } from '@/comps/ui/menu-items';
 import { Select, type Option } from '@/comps/ui/select';
 import { ENGINES, ENGINE_NAMES, defaultLabel } from '@/app/dash/[org]/settings/model-options';
 import { useConfig, List, Row, EFFORTS, PERMISSIONS, AddRow } from './list';
@@ -66,11 +67,10 @@ export function EnginesList({
             }
             actions={
               chain[0] === name ? null : (
-                <button
-                  type="button"
-                  class="btn secondary sm"
-                  disabled={making === name}
-                  aria-busy={making === name}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={making === name}
                   onClick={() => {
                     setMaking(name);
                     void config
@@ -79,7 +79,7 @@ export function EnginesList({
                   }}
                 >
                   Make default
-                </button>
+                </Button>
               )
             }
             menu={

@@ -4,6 +4,7 @@ import { toChildArray, type ComponentChildren } from 'preact';
 
 import { iAlert, iCheck } from '@/comps/ui/icons';
 import { Modal } from '@/comps/ui/modal';
+import { Button } from '@/comps/ui/button';
 
 /** A flow's outcome, open on load, with its next steps as `children`; closing drops it from the address. */
 export function OutcomeDialog({
@@ -25,14 +26,13 @@ export function OutcomeDialog({
   const steps = toChildArray(children);
   const report =
     !ok && issues ? (
-      <a
-        class="btn outline"
+      <Button
+        variant="outline"
         href={`${issues}?${new URLSearchParams({ title, body: text })}`}
-        target="_blank"
-        rel="noreferrer"
+        external
       >
         Report issue
-      </a>
+      </Button>
     ) : null;
 
   return (

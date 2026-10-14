@@ -26,7 +26,8 @@ import { HEADS } from '@/comps/frame/heads';
 import { initial } from '@/utils/format';
 import { Field } from '@/comps/ui/field';
 import { showToast, toastError } from '@/comps/frame/task-toasts';
-import { Badge } from '@/comps/ui/badge';
+import { Badge, Chip, Chips } from '@/comps/ui/badge';
+import { Button, LinkButton } from '@/comps/ui/button';
 import { Icon } from '@/comps/ui/icon';
 import { Select } from '@/comps/ui/select';
 import { Segmented } from '@/comps/ui/segmented';
@@ -427,28 +428,31 @@ export function AgentEditor({
   const actions = (
     <>
       {creating ? (
-        <button
-          type="button"
-          class="btn outline"
+        <Button
+          variant="outline"
           aria-pressed={template === 'import'}
           onClick={() => pickTemplate('import')}
         >
           Import from repo
-        </button>
+        </Button>
       ) : null}
       {creating ? null : (
-        <Link class="btn ghost" href="/dash/[org]/agents/[slug]" params={{ org, slug: agent.id }}>
+        <LinkButton
+          variant="ghost"
+          href="/dash/[org]/agents/[slug]"
+          params={{ org, slug: agent.id }}
+        >
           Cancel
-        </Link>
+        </LinkButton>
       )}
-      <button
-        class="btn"
-        disabled={busy || !draft.name.trim() || template === 'import'}
-        aria-busy={busy}
+      <Button
+        type="submit"
+        leftIcon={creating ? iPlus : iUpload}
+        disabled={!draft.name.trim() || template === 'import'}
+        loading={busy}
       >
-        <Icon d={creating ? iPlus : iUpload} />
         {creating ? 'Create agent' : 'Publish new version'}
-      </button>
+      </Button>
     </>
   );
   const head = creating ? (
@@ -535,15 +539,14 @@ export function AgentEditor({
                     onInput={event => rename(event.currentTarget.value)}
                   />
                   {creating ? (
-                    <button
-                      type="button"
-                      class="btn outline"
+                    <Button
+                      variant="outline"
+                      leftIcon={iShuffle}
                       title="Suggest another name"
                       onClick={() => rename(suggestName())}
                     >
-                      <Icon d={iShuffle} />
                       Suggest
-                    </button>
+                    </Button>
                   ) : null}
                 </span>
               </Field>
@@ -671,23 +674,21 @@ export function AgentEditor({
                     </label>
                     {on ? (
                       <div class="events">
-                        <div class="chips" role="group" aria-label={`What wakes it on ${info.id}`}>
+                        <Chips label={`What wakes it on ${info.id}`}>
                           {events.map(([event, spec]) => {
                             const pressed = ticked.includes(event);
                             return (
-                              <button
+                              <Chip
                                 key={event}
-                                type="button"
-                                class="chip"
                                 aria-pressed={pressed}
                                 title={spec.description}
                                 onClick={() => toggleEvent(info.id, event, !pressed)}
                               >
                                 {event.replace(/_/g, ' ')}
-                              </button>
+                              </Chip>
                             );
                           })}
-                        </div>
+                        </Chips>
                         {events
                           .filter(([event, spec]) => spec.noisy && ticked.includes(event))
                           .map(([event]) => (

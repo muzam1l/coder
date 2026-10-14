@@ -6,6 +6,8 @@ import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
 import { Card } from '@/comps/ui/card';
 import { Badge } from '@/comps/ui/badge';
+import { iPlus } from '@/comps/ui/icons';
+import { Button, IconButton } from '@/comps/ui/button';
 import { Select } from '@/comps/ui/select';
 import { Row } from './list';
 import type { ConnectionRow } from '@coder/client/types';
@@ -46,9 +48,7 @@ export function TaskSecrets({
       count={rows.length || undefined}
       actions={
         open ? null : (
-          <button type="button" class="btn ghost sm" onClick={() => setAdding(true)}>
-            Add
-          </button>
+          <IconButton icon={iPlus} label="Add a task secret" onClick={() => setAdding(true)} />
         )
       }
     >
@@ -96,13 +96,9 @@ export function TaskSecrets({
                         <button hidden />
                       </form>
                     ) : (
-                      <button
-                        type="button"
-                        class="btn ghost sm"
-                        onClick={() => setRenewing(row.id)}
-                      >
+                      <Button variant="ghost" size="sm" onClick={() => setRenewing(row.id)}>
                         {row.status === 'ok' ? 'Replace' : 'Reconnect'}
-                      </button>
+                      </Button>
                     )
                   }
                   remove={{

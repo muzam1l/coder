@@ -1,6 +1,6 @@
 'use client';
 
-import '@/comps/ui/toast.css';
+import './task-toasts.css';
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 

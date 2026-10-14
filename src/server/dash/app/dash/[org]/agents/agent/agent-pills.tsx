@@ -133,21 +133,20 @@ export function AgentPills({
     <>
       {agent.source === 'repo' && agent.repo ? (
         agent.sourceUrl ? (
-          <a
-            class="badge link-pill"
+          <Badge
+            class="link-pill"
             href={agent.sourceUrl}
-            target="_blank"
-            rel="noreferrer"
+            external
             title={`Repository agent, opens ${agent.repo}`}
           >
             <Icon d={iGit} />
             {agent.repo}
-          </a>
+          </Badge>
         ) : (
-          <span class="badge link-pill" title="Repository agent">
+          <Badge class="link-pill" title="Repository agent">
             <Icon d={iGit} />
             {agent.repo}
-          </span>
+          </Badge>
         )
       ) : (
         <Badge

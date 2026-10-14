@@ -4,6 +4,7 @@ import './modal.css';
 import { toChildArray, type ComponentChildren } from 'preact';
 import { useEffect, useId, useRef } from 'preact/hooks';
 
+import { Button, IconButton } from './button';
 import { iX } from './icons';
 import { Icon } from './icon';
 
@@ -20,6 +21,7 @@ export function Modal({
   dismiss,
   busy,
   cancel = 'Cancel',
+  cancelDanger,
   focus = 'cancel',
   actions,
   onSubmit,
@@ -37,6 +39,8 @@ export function Modal({
   dismiss?: boolean;
   busy?: boolean;
   cancel?: string;
+  /** A red cancel button beside other actions, when cancelling stops work in progress. */
+  cancelDanger?: boolean;
   /** Where focus lands when it opens; an action marks itself `autofocus`. */
   focus?: 'cancel' | 'actions';
   actions?: ComponentChildren;
@@ -75,23 +79,19 @@ export function Modal({
         <header>
           {icon ? <Icon d={icon} /> : null}
           <h2 id={id}>{title}</h2>
-          {dismiss ? (
-            <button type="button" class="icon-btn" aria-label="Close" onClick={close}>
-              <Icon d={iX} />
-            </button>
-          ) : null}
+          {dismiss ? <IconButton icon={iX} label="Close" onClick={close} /> : null}
         </header>
         {children}
         <div class="actions">
-          <button
-            type="button"
-            class={alone ? 'btn' : 'btn ghost'}
+          <Button
+            variant={alone ? 'primary' : 'ghost'}
+            danger={!alone && cancelDanger}
             disabled={busy}
             autofocus={focus === 'cancel'}
             onClick={close}
           >
             {cancel}
-          </button>
+          </Button>
           {actions}
         </div>
       </form>

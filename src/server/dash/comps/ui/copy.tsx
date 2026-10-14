@@ -5,21 +5,18 @@ import './copy.css';
 import { useState } from 'preact/hooks';
 
 import { iCheck, iCopy } from '@/comps/ui/icons';
-import { Icon } from '@/comps/ui/icon';
+import { IconButton } from '@/comps/ui/button';
 
 /** An icon button that copies `value` and shows a check once it did. */
 export function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }) {
   const [copied, setCopied] = useState(false);
   return (
-    <button
-      type="button"
-      class={copied ? 'icon-btn copied' : 'icon-btn'}
-      aria-label={copied ? 'Copied' : label}
-      title={copied ? 'Copied' : label}
+    <IconButton
+      icon={copied ? iCheck : iCopy}
+      label={copied ? 'Copied' : label}
+      class={copied ? 'copied' : undefined}
       onClick={() => void navigator.clipboard.writeText(value).then(() => setCopied(true))}
-    >
-      <Icon d={copied ? iCheck : iCopy} />
-    </button>
+    />
   );
 }
 

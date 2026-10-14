@@ -10,8 +10,11 @@ import { iGit } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { held } from '@/utils/paged';
+import { Button } from '@/comps/ui/button';
 import { Loading } from '@/comps/ui/card';
 import { Icon } from '@/comps/ui/icon';
+import { Badge, Id } from '@/comps/ui/badge';
+import { MenuItem, MenuNote } from '@/comps/ui/menu-items';
 import { connectRepositories } from '@/app/dash/[org]/agents/editor/connect-repositories';
 import { Search } from '@/comps/ui/toolbar';
 import { TunnelGuide } from '@/app/dash/[org]/settings/tunnel-guide';
@@ -74,12 +77,12 @@ function Agents({ preview, onDone }: { preview: Preview; onDone: (ids: string[])
                 }}
               />
               <span>
-                <b>{agent.name}</b> <span class="id">{agent.id}</span>
+                <b>{agent.name}</b> <Id value={agent.id} />
                 {agent.version ? (
-                  <span class="badge">
+                  <Badge>
                     v{agent.version}
                     {agent.commit ? ` · ${short(agent.commit)}` : ''}
-                  </span>
+                  </Badge>
                 ) : null}
                 <small>
                   {agent.taken
@@ -100,9 +103,9 @@ function Agents({ preview, onDone }: { preview: Preview; onDone: (ids: string[])
         Each push to {preview.repo} that changes an agent publishes its new version here.
       </p>
       <div class="form-actions end">
-        <button class="btn" disabled={Boolean(action.pending) || !ticked.length}>
+        <Button type="submit" disabled={Boolean(action.pending) || !ticked.length}>
           Import {ticked.length === 1 ? '1 agent' : `${ticked.length} agents`}
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -170,9 +173,9 @@ export function ImportPicker({
             <Notice>
               <Icon d={iGit} />
               <span class="grow">Connect to list your repositories here.</span>
-              <button
-                type="button"
-                class="btn outline sm"
+              <Button
+                variant="outline"
+                size="sm"
                 onClick={() =>
                   void connectRepositories(`/dash/${org}/agents/new?template=import`).catch(
                     toastFailure,
@@ -180,7 +183,7 @@ export function ImportPicker({
                 }
               >
                 {connectLabel}
-              </button>
+              </Button>
             </Notice>
             <form
               class="with-btn"
@@ -197,7 +200,9 @@ export function ImportPicker({
                 value={query}
                 onInput={event => setQuery(event.currentTarget.value)}
               />
-              <button class="btn outline">Look up</button>
+              <Button type="submit" variant="outline">
+                Look up
+              </Button>
             </form>
           </>
         )}
@@ -208,30 +213,24 @@ export function ImportPicker({
             ) : (
               <>
                 {typed ? (
-                  <button
-                    type="button"
-                    class="pop-item"
+                  <MenuItem
                     aria-pressed={preview?.repo === typed}
+                    icon={iGit}
+                    title={typed}
                     onClick={() => open(typed)}
-                  >
-                    <Icon d={iGit} />
-                    <span class="grow">{typed}</span>
-                  </button>
+                  />
                 ) : null}
                 {shown.map(repo => (
-                  <button
+                  <MenuItem
                     key={repo}
-                    type="button"
-                    class="pop-item"
                     aria-pressed={preview?.repo === repo}
+                    icon={iGit}
+                    title={repo}
                     onClick={() => open(repo)}
-                  >
-                    <Icon d={iGit} />
-                    <span class="grow">{repo}</span>
-                  </button>
+                  />
                 ))}
                 {!shown.length && !typed ? (
-                  <p class="pop-note">No repository matches. Type owner/repo to use another.</p>
+                  <MenuNote>No repository matches. Type owner/repo to use another.</MenuNote>
                 ) : null}
               </>
             )}

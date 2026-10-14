@@ -11,7 +11,7 @@
 .provider-grid > .provider:only-child {
   grid-column: 1 / -1;
 }
-.provider {
+.btn.provider {
   justify-content: center;
   gap: 10px;
   text-transform: none;

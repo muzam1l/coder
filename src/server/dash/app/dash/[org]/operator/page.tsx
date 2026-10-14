@@ -5,6 +5,7 @@ import { notFound } from '@wular/pnext/navigation';
 
 import { load } from '@/api/load';
 import { Page, PageHead } from '@/comps/frame/page-head';
+import { Button } from '@/comps/ui/button';
 import { Card, FoldCard } from '@/comps/ui/card';
 import { formatDate, reasonText, zoneOf } from '@/utils/format';
 import { Row } from '@/app/dash/[org]/settings/[tab]/list';
@@ -28,9 +29,7 @@ function SignInAgain({ error }: { error: string | null }) {
             {SIGN_IN_ERRORS[error]}
           </p>
         ) : null}
-        <a class="btn" href="/api/auth/sign-in?operator=1">
-          Sign in again
-        </a>
+        <Button href="/api/auth/sign-in?operator=1">Sign in again</Button>
       </div>
     </Card>
   );

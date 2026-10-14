@@ -116,24 +116,6 @@
 .server .kv dd {
   white-space: nowrap;
 }
-.pop-head {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 10px 12px;
-  min-width: 0;
-}
-.pop-head b,
-.pop-head small {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.pop-head small,
-.pop-item small {
-  color: var(--muted);
-  font-size: 11.5px;
-}
 .org,
 .avatar {
   display: inline-grid;
@@ -223,7 +205,7 @@
   display: grid;
   gap: 8px;
 }
-.side-toggle {
+button.side-toggle {
   justify-self: end;
   color: var(--dim);
 }
@@ -313,7 +295,7 @@
   display: none;
 }
 @media (max-width: 760px) {
-  .side-toggle {
+  button.side-toggle {
     display: none;
   }
   .app.side-min {

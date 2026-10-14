@@ -1,10 +1,11 @@
 import './select.css';
-import type { ComponentChildren } from 'preact';
+import type { ComponentChildren, Ref } from 'preact';
 import { Fragment } from 'preact';
 import { useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
-import { iCheck, iDown, iPlus } from './icons';
+import { iDown, iPlus } from './icons';
 import { Icon } from './icon';
+import { MenuLabel, MenuOption, MenuPanel } from './menu-items';
 
 export type Option = [value: string, label: string];
 
@@ -193,25 +194,18 @@ export function Select({
       </button>
       {name ? <input type="hidden" name={name} value={current} /> : null}
       {open ? (
-        <div
-          ref={list}
-          id={`${id}-list`}
-          class="pop select-pop"
-          popover="manual"
-          role="listbox"
-          aria-label={label}
-          style={place || 'visibility:hidden'}
-          onMouseDown={event => event.preventDefault()}
-        >
+        <SelectList id={id} label={label} listRef={list} place={place}>
           {options.map(([key, text], index) => (
             <Fragment key={key}>
-              {headings?.[key] ? <p class="pop-label">{headings[key]}</p> : null}
-              <div
+              {headings?.[key] ? <MenuLabel>{headings[key]}</MenuLabel> : null}
+              <MenuOption
                 id={`${id}-${index}`}
                 data-index={index}
-                role="option"
-                aria-selected={index === selected}
-                class={index === active ? 'pop-item on' : 'pop-item'}
+                active={index === active}
+                selected={index === selected}
+                check
+                icon={icons?.[key]}
+                sub={subs?.[key] ? <bdi dir="ltr">{subs[key]}</bdi> : null}
                 onPointerMove={() => index !== active && setActive(index)}
                 // Picks without letting a wrapping label re-open the list.
                 onClick={event => {
@@ -219,41 +213,60 @@ export function Select({
                   pick(index);
                 }}
               >
-                {icons?.[key] ?? null}
-                <span class="grow">
-                  {text}
-                  {subs?.[key] ? (
-                    <small class="pop-path">
-                      <bdi dir="ltr">{subs[key]}</bdi>
-                    </small>
-                  ) : null}
-                </span>
-                <Icon d={iCheck} />
-              </div>
+                {text}
+              </MenuOption>
             </Fragment>
           ))}
           {action ? (
-            <div
+            <MenuOption
               id={`${id}-${options.length}`}
               data-index={options.length}
-              role="option"
-              aria-selected={false}
-              class={active === options.length ? 'pop-item action on' : 'pop-item action'}
+              active={active === options.length}
+              selected={false}
+              class="action"
+              icon={action.icon ?? iPlus}
               onPointerMove={() => active !== options.length && setActive(options.length)}
               onClick={event => {
                 event.preventDefault();
                 pick(options.length);
               }}
             >
-              <Icon d={action.icon ?? iPlus} />
-              <span class="grow">{action.label}</span>
-            </div>
+              {action.label}
+            </MenuOption>
           ) : null}
-        </div>
+        </SelectList>
       ) : null}
     </span>
   );
 }
+
+/** A select's list in the top layer at `place`; the field keeps focus, so the mouse never takes it. */
+export const SelectList = ({
+  id,
+  label,
+  listRef,
+  place,
+  children,
+}: {
+  id: string;
+  label: string;
+  listRef: Ref<HTMLDivElement>;
+  place: string;
+  children: ComponentChildren;
+}) => (
+  <MenuPanel
+    panelRef={listRef}
+    id={`${id}-list`}
+    class="select-pop"
+    popover="manual"
+    role="listbox"
+    aria-label={label}
+    style={place || 'visibility:hidden'}
+    onMouseDown={event => event.preventDefault()}
+  >
+    {children}
+  </MenuPanel>
+);
 
 /** The label a filter's value shows. */
 export const labelOf = (options: Array<[string, string]>, value: string) =>

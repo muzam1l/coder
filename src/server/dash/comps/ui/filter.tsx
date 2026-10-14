@@ -3,10 +3,13 @@ import { Fragment, type ComponentChildren } from 'preact';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { FILTER_ROWS } from '@/utils/paged';
-import { iLeft, iRight, iSearch, iX } from './icons';
+import { iLeft, iRight, iX } from './icons';
+import { Chip } from './badge';
 import { Icon } from './icon';
-import { Menu, MenuRadio } from './menu';
+import { Menu } from './menu';
+import { LoadingMenu, MenuItem, MenuLabel, MenuNote, MenuRadio } from './menu-items';
 import type { Option } from './select';
+import { Search } from './toolbar';
 
 const RECENT = 'coder:filters';
 
@@ -142,22 +145,25 @@ export function Filter<K extends string>({
       </Menu>
       <span class="filter-chips">
         {chips.map(chip => (
-          <button
+          <Chip
             key={chip.key}
-            type="button"
-            class="chip"
             title={chip.text}
             aria-label={`Clear ${chip.text}`}
             onClick={() => onChange(chip.key, '')}
           >
             <span class="grow">{chip.text}</span>
             <Icon d={iX} />
-          </button>
+          </Chip>
         ))}
       </span>
     </>
   );
 }
+
+/** The Filter button while its list loads, inert. */
+export const LoadingFilter = () => (
+  <LoadingMenu class="filter-more" summaryClass="field-btn" summary="Filter" />
+);
 
 /** The menu's facets; a long facet opens its own list in place, and Escape steps back out of it. */
 function FilterPanel<K extends string>({
@@ -194,7 +200,7 @@ function FilterPanel<K extends string>({
   useEffect(() => {
     const pop = root.current!.closest<HTMLElement>('[popover]')!;
     const toggle = (event: Event) => {
-      if ((event as ToggleEvent).newState === 'open') focus('.pop-item');
+      if ((event as ToggleEvent).newState === 'open') focus('button');
       else show();
     };
     pop.addEventListener('toggle', toggle);
@@ -237,7 +243,7 @@ function FilterPanel<K extends string>({
   const searching = Boolean(open?.search && typed && !found);
 
   const onKeyDown = (event: KeyboardEvent) => {
-    const items = [...root.current!.querySelectorAll<HTMLElement>('input, .pop-item')];
+    const items = [...root.current!.querySelectorAll<HTMLElement>('input, button')];
     const at = items.indexOf(document.activeElement as HTMLElement);
     const target = event.target as HTMLElement;
     const key = event.key;
@@ -257,22 +263,14 @@ function FilterPanel<K extends string>({
     <div ref={root} class="filter-panel" onKeyDown={onKeyDown}>
       {open ? (
         <>
-          <button type="button" class="pop-item" data-keep onClick={() => show()}>
-            <Icon d={iLeft} />
-            <span class="grow">{open.label}</span>
-          </button>
+          <MenuItem data-keep icon={iLeft} title={open.label} onClick={() => show()} />
           {findable(open) ? (
-            <label class="search">
-              <Icon d={iSearch} />
-              <input
-                type="search"
-                value={q}
-                placeholder={`Find ${open.label.toLowerCase()}`}
-                aria-label={`Find ${open.label.toLowerCase()}`}
-                autocomplete="off"
-                onInput={event => setQ(event.currentTarget.value)}
-              />
-            </label>
+            <Search
+              value={q}
+              label={`Find ${open.label.toLowerCase()}`}
+              autocomplete="off"
+              onInput={setQ}
+            />
           ) : null}
           <div role="group" aria-label={open.label} aria-busy={searching}>
             {list.shown.map(([value, label]) => (
@@ -287,9 +285,9 @@ function FilterPanel<K extends string>({
             ))}
           </div>
           {list.more ? (
-            <p class="pop-note">Type to find more.</p>
+            <MenuNote>Type to find more.</MenuNote>
           ) : !list.shown.length && !searching ? (
-            <p class="pop-note">Nothing matches.</p>
+            <MenuNote>Nothing matches.</MenuNote>
           ) : null}
         </>
       ) : (
@@ -300,7 +298,7 @@ function FilterPanel<K extends string>({
 
           return (
             <Fragment key={facet.key}>
-              <p class="pop-label">{facet.label}</p>
+              <MenuLabel>{facet.label}</MenuLabel>
               <div role="group" aria-label={facet.label}>
                 {shown.map(([value, label]) => (
                   <MenuRadio
@@ -314,18 +312,19 @@ function FilterPanel<K extends string>({
                 ))}
               </div>
               {picks.length > shown.length ? (
-                <button
-                  type="button"
-                  class="pop-item"
+                <MenuItem
                   data-keep
                   data-facet={facet.key}
                   aria-haspopup="true"
+                  title="More"
+                  end={
+                    <>
+                      <span class="muted">{picks.length - shown.length}</span>
+                      <Icon d={iRight} />
+                    </>
+                  }
                   onClick={() => show(facet)}
-                >
-                  <span class="grow">More</span>
-                  <span class="muted">{picks.length - shown.length}</span>
-                  <Icon d={iRight} />
-                </button>
+                />
               ) : null}
             </Fragment>
           );

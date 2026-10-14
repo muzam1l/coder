@@ -8,7 +8,7 @@ import {
   iActivity,
   iAgent,
   iChart,
-  iCheck,
+  iExternal,
   iKey,
   iMonitor,
   iMoon,
@@ -32,6 +32,15 @@ import { CurrentLink } from '@/comps/nav/current-link';
 import { SideToggle } from '@/comps/nav/side-toggle';
 import { linkOf, type To } from '@/comps/nav/to';
 import { Menu } from '@/comps/ui/menu';
+import {
+  MenuHead,
+  MenuItem,
+  MenuLabel,
+  MenuLink,
+  MenuNote,
+  MenuRadio,
+} from '@/comps/ui/menu-items';
+import { Button } from '@/comps/ui/button';
 import { ActiveCount, TaskToasts } from '@/comps/frame/task-toasts';
 import { ForeignLink } from '@/comps/frame/foreign-link';
 
@@ -85,7 +94,7 @@ function ThemeMenu({ theme }: { theme: string }) {
     <Menu
       class="theme"
       label="Theme"
-      summaryClass="icon-btn"
+      button="icon"
       summary={
         <>
           <Icon d={iSun} class="sun" />
@@ -94,7 +103,7 @@ function ThemeMenu({ theme }: { theme: string }) {
         </>
       }
     >
-      <p class="pop-label">Theme</p>
+      <MenuLabel>Theme</MenuLabel>
       <ThemeChoices theme={theme} />
     </Menu>
   );
@@ -110,98 +119,78 @@ function AccountMenu({ me, org }: { me: Me; org: string }) {
       summaryClass="avatar-btn"
       summary={tokenMode ? <Icon d={iKey} /> : initial(me.user?.name)}
     >
-      <div class="pop-head">
-        <span class="avatar">{tokenMode ? <Icon d={iKey} /> : initial(me.user?.name)}</span>
-        <div class="grow">
-          <b>{tokenMode ? 'Admin token' : me.user?.name}</b>
-          <small>
-            {tokenMode
-              ? me.mode === 'local'
-                ? 'Local server'
-                : 'Local memory server'
-              : me.user?.email}
-          </small>
-        </div>
-      </div>
-      {me.mode === 'local' ? null : <p class="pop-label">Workspace</p>}
+      <MenuHead
+        icon={<span class="avatar">{tokenMode ? <Icon d={iKey} /> : initial(me.user?.name)}</span>}
+        title={tokenMode ? 'Admin token' : me.user?.name}
+        sub={
+          tokenMode
+            ? me.mode === 'local'
+              ? 'Local server'
+              : 'Local memory server'
+            : me.user?.email
+        }
+      />
+      {me.mode === 'local' ? null : <MenuLabel>Workspace</MenuLabel>}
       {me.mode === 'local' ? null : organizations.length ? (
         organizations.map(organization => {
           const current = organization.id === me.organization?.id;
-          const item = (
-            <>
-              <span class="org">{initial(organization.name)}</span>
-              <span class="grow">
-                {organization.name}
-                <small>{organization.role}</small>
-              </span>
-              <Icon d={iCheck} />
-            </>
-          );
+
           // A full load, so nothing of this workspace's pages carries over.
-          return current ? (
-            <div
+          return (
+            <MenuRadio
               key={organization.id}
-              class="pop-item"
-              role="menuitemradio"
-              aria-checked="true"
-              aria-disabled="true"
-            >
-              {item}
-            </div>
-          ) : (
-            <a
-              key={organization.id}
-              class="pop-item"
+              on={current}
+              disabled={current}
               href={`/dash/${encodeURIComponent(organization.slug)}`}
-              role="menuitemradio"
-              aria-checked="false"
+              icon={<span class="org">{initial(organization.name)}</span>}
             >
-              {item}
-            </a>
+              {organization.name}
+              <small>{organization.role}</small>
+            </MenuRadio>
           );
         })
       ) : (
-        <div class="pop-item" aria-disabled="true">
-          <span class="org">
-            <Icon d={iKey} />
-          </span>
-          <span class="grow">
-            {me.organization?.name ?? 'Local server'}
-            <small>{tokenMode ? 'one workspace' : me.organization?.role}</small>
-          </span>
-        </div>
+        <MenuItem
+          disabled
+          icon={
+            <span class="org">
+              <Icon d={iKey} />
+            </span>
+          }
+          title={
+            <>
+              {me.organization?.name ?? 'Local server'}
+              <small>{tokenMode ? 'one workspace' : me.organization?.role}</small>
+            </>
+          }
+        />
       )}
       {me.manageMembersUrl ? (
-        <a class="pop-item" href={me.manageMembersUrl}>
-          <Icon d={iUsers} />
-          Members ↗
-        </a>
+        <MenuItem
+          href={me.manageMembersUrl}
+          icon={iUsers}
+          title="Members"
+          end={<Icon d={iExternal} />}
+        />
       ) : null}
       <hr />
-      <Link class="pop-item" href="/dash/[org]/account" params={{ org }}>
-        <Icon d={iUser} />
+      <MenuLink href="/dash/[org]/account" params={{ org }} icon={iUser}>
         Account
-      </Link>
+      </MenuLink>
       {me.operator ? (
-        <Link class="pop-item" href="/dash/[org]/operator" params={{ org }}>
-          <Icon d={iKey} />
+        <MenuLink href="/dash/[org]/operator" params={{ org }} icon={iKey}>
           Operator
-        </Link>
+        </MenuLink>
       ) : null}
       <hr />
       {tokenMode ? (
         <form action="/dash/token" method="post">
           <input type="hidden" name="token" value="" />
           <input type="hidden" name="return" value="/dash" />
-          <button class="pop-item">
-            <Icon d={iOut} />
-            Forget token
-          </button>
+          <MenuItem type="submit" icon={iOut} title="Forget token" />
         </form>
       ) : (
-        <SignOut class="pop-item" icon>
-          Sign out
-        </SignOut>
+        <SignOut menu />
       )}
     </Menu>
   );
@@ -229,7 +218,7 @@ function ServerMenu({ me, host }: { me?: Me; host: string }) {
         </>
       }
     >
-      <p class="pop-label">Server</p>
+      <MenuLabel>Server</MenuLabel>
       <dl class="kv">
         <dt>URL</dt>
         <dd>{url}</dd>
@@ -240,7 +229,7 @@ function ServerMenu({ me, host }: { me?: Me; host: string }) {
         <dt>Access</dt>
         <dd>{memory ? 'admin token' : `session, ${me?.user?.email ?? ''}`}</dd>
       </dl>
-      {memory && !local ? <p class="pop-note">Nothing persists across restarts.</p> : null}
+      {memory && !local ? <MenuNote>Nothing persists across restarts.</MenuNote> : null}
     </Menu>
   );
 }
@@ -284,7 +273,9 @@ function TokenPage({ request }: { request: Request }) {
           <span>Admin token</span>
           <input class="mono" name="token" type="password" autocomplete="off" required autofocus />
         </label>
-        <button class="btn wide">Open dashboard</button>
+        <Button type="submit" wide>
+          Open dashboard
+        </Button>
         {rejected ? (
           <p class="flash err" role="alert">
             That token was not accepted.

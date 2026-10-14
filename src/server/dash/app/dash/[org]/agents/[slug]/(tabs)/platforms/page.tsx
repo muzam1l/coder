@@ -1,7 +1,6 @@
 import './page.css';
 import { dynamic } from '@wular/pnext/dynamic';
 
-import { Link } from '@wular/pnext/link';
 import { encodeDefinition, load, orgOf, unwrap } from '@/api/load';
 import type {
   AppRow,
@@ -13,6 +12,7 @@ import type {
 } from '@coder/client/types';
 import { Card, Empty } from '@/comps/ui/card';
 import { Badge, Chips } from '@/comps/ui/badge';
+import { Button, LinkButton } from '@/comps/ui/button';
 import { Icon } from '@/comps/ui/icon';
 import { iAlert } from '@/comps/ui/icons';
 import { InfoTip, MoreList } from '@/comps/ui/menu';
@@ -86,14 +86,15 @@ function Platforms({
     return (
       <Empty title="This agent listens nowhere yet">
         {editableAgent(agent) ? (
-          <Link
-            class="btn outline sm"
+          <LinkButton
+            variant="outline"
+            size="sm"
             href="/dash/[org]/agents/[slug]/edit"
             params={{ org, slug: agent.id }}
             search={{ section: 'platforms' }}
           >
             Pick a platform
-          </Link>
+          </LinkButton>
         ) : (
           'Its definition declares no platform.'
         )}
@@ -226,9 +227,14 @@ function Platforms({
                       <>
                         <Badge>{REACH_BADGE.none.label}</Badge>
                         {operator ? (
-                          <Link class="btn outline sm" href="/dash/[org]/operator" params={{ org }}>
+                          <LinkButton
+                            variant="outline"
+                            size="sm"
+                            href="/dash/[org]/operator"
+                            params={{ org }}
+                          >
                             Set up shared app
-                          </Link>
+                          </LinkButton>
                         ) : (
                           <InfoTip label={`Why ${info?.name ?? id} is not set up`}>
                             <p>
@@ -388,17 +394,15 @@ export default async function AgentPlatformsPage({
                       {...(connected ? { cancel: 'Connect more' } : {})}
                     >
                       {connected?.ready && connected.url ? (
-                        <a class="btn" href={connected.url} target="_blank" rel="noreferrer">
-                          Open {connected.platform} ↗
-                        </a>
+                        <Button href={connected.url} external>
+                          Open {connected.platform}
+                        </Button>
                       ) : null}
                       {connected && !connected.ready ? (
-                        <CredentialsLink class="btn" label={row.name}>
-                          Add a model
-                        </CredentialsLink>
+                        <CredentialsLink label={row.name}>Add a model</CredentialsLink>
                       ) : null}
                       {RETRY.has(outcome.status) && retried(own) ? (
-                        <InstallButton app={retried(own)!.id} label="Install again" class="btn" />
+                        <InstallButton app={retried(own)!.id} label="Install again" />
                       ) : null}
                     </OutcomeDialog>
                   ) : null}
@@ -421,14 +425,15 @@ export default async function AgentPlatformsPage({
                           ? '1 delivery failed in the last day.'
                           : `${row.deliveries.failed} deliveries failed in the last day.`}
                       </span>
-                      <Link
-                        class="btn outline sm"
+                      <LinkButton
+                        variant="outline"
+                        size="sm"
                         href="/dash/[org]/agents/[slug]/usage"
                         params={{ org: orgOf(request), slug: row.id }}
                         hash="deliveries"
                       >
                         View deliveries
-                      </Link>
+                      </LinkButton>
                     </Notice>
                   ) : null}
                   <ConnectionsLine />

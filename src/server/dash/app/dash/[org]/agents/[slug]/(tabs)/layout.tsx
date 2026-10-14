@@ -2,11 +2,10 @@ import type { ComponentChildren } from 'preact';
 import { dynamic } from '@wular/pnext/dynamic';
 
 import { iGit, iPencil, iPlus } from '@/comps/ui/icons';
-import { Link } from '@wular/pnext/link';
 import { load, orgOf } from '@/api/load';
 import type { AgentRow, TasksPage } from '@coder/client/types';
 import { Back, Page } from '@/comps/frame/page-head';
-import { Icon } from '@/comps/ui/icon';
+import { Button, LinkButton } from '@/comps/ui/button';
 import { Stream } from '@/comps/frame/stream';
 import { LoadingTabs, Tabs } from '@/comps/ui/tabs';
 import { editableAgent } from '@/api/types';
@@ -23,25 +22,23 @@ function Actions({ agent, org }: { agent: AgentRow; org: string }) {
   return (
     <>
       {editableAgent(agent) ? (
-        <Link
-          class="btn outline"
+        <LinkButton
+          variant="outline"
+          leftIcon={iPencil}
           href="/dash/[org]/agents/[slug]/edit"
           params={{ org, slug: agent.id }}
         >
-          <Icon d={iPencil} />
           Edit
-        </Link>
+        </LinkButton>
       ) : agent.source === 'repo' && agent.sourceUrl ? (
-        <a class="btn outline" href={agent.sourceUrl} target="_blank" rel="noreferrer">
-          <Icon d={iGit} />
+        <Button variant="outline" leftIcon={iGit} href={agent.sourceUrl} external>
           Open in repository
-        </a>
+        </Button>
       ) : null}
       {agent.settings?.disabled ? (
-        <button type="button" class="btn" disabled title="Enable this agent to start tasks">
-          <Icon d={iPlus} />
+        <Button leftIcon={iPlus} disabled title="Enable this agent to start tasks">
           New task
-        </button>
+        </Button>
       ) : (
         <NewTaskButton agent={agent.id} />
       )}
@@ -68,10 +65,9 @@ function LoadingAgentHead({ back }: { back: ComponentChildren }) {
       <LoadingHero
         back={back}
         actions={
-          <button type="button" class="btn" disabled>
-            <Icon d={iPlus} />
+          <Button leftIcon={iPlus} disabled>
             New task
-          </button>
+          </Button>
         }
       />
       <LoadingTabs labels={TABS.map(([, label]) => label)} />

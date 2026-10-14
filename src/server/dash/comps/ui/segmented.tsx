@@ -1,4 +1,7 @@
 import './segmented.css';
+import type { ComponentChildren } from 'preact';
+import { Link, type LinkProps } from '@wular/pnext/link';
+
 import type { Option } from './select';
 
 /** One-click choices in a row, a radio group to the keyboard: arrows move and pick, Enter submits the form. */
@@ -7,16 +10,38 @@ export function Segmented({
   options,
   value,
   onChange,
+  link,
   class: cls,
   disabled,
+  children,
 }: {
   label: string;
   options: Option[];
   value: string;
-  onChange: (value: string) => void;
+  /** Without it, `link` makes each choice a page link, or with neither they only show, for a loading page. */
+  onChange?: (value: string) => void;
+  link?: (value: string) => LinkProps;
   class?: string;
   disabled?: boolean;
+  /** More at the row's end, like a menu. */
+  children?: ComponentChildren;
 }) {
+  if (!onChange)
+    return (
+      <div class={cls ? `seg-btns ${cls}` : 'seg-btns'} role="group" aria-label={label}>
+        {options.map(([key, text]) =>
+          link ? (
+            <Link key={key} {...link(key)} aria-current={key === value ? 'page' : undefined}>
+              {text}
+            </Link>
+          ) : (
+            <a key={key}>{text}</a>
+          ),
+        )}
+        {children}
+      </div>
+    );
+
   const at = Math.max(
     0,
     options.findIndex(([key]) => key === value),

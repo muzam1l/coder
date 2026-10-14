@@ -1,7 +1,8 @@
-import { iDown, iSearch } from '@/comps/ui/icons';
+import { Button } from '@/comps/ui/button';
 import { Card, Loading } from '@/comps/ui/card';
-import { Icon } from '@/comps/ui/icon';
-import { Toolbar } from '@/comps/ui/toolbar';
+import { LoadingFilter } from '@/comps/ui/filter';
+import { Select } from '@/comps/ui/select';
+import { Search, Toolbar } from '@/comps/ui/toolbar';
 
 export const BLANK = ' ';
 
@@ -35,32 +36,17 @@ export function LoadingToolbar({
       head={head}
       action={
         action ? (
-          <button type="button" class="btn" disabled>
-            <Icon d={action.icon} />
+          <Button disabled leftIcon={action.icon}>
             {action.label}
-          </button>
+          </Button>
         ) : undefined
       }
     >
-      <label class="search" aria-hidden="true">
-        <Icon d={iSearch} />
-        <input type="search" placeholder={search} disabled tabIndex={-1} />
-      </label>
+      <Search label={search} disabled />
       {selects.map(label => (
-        <span key={label} class="select" aria-hidden="true">
-          <button type="button" disabled tabIndex={-1}>
-            <span class="grow">{label}</span>
-            <Icon d={iDown} />
-          </button>
-        </span>
+        <Select key={label} label={label} options={[['', label]]} disabled />
       ))}
-      {more ? (
-        <span class="menu filter-more" aria-hidden="true">
-          <button type="button" class="field-btn" disabled tabIndex={-1}>
-            Filter
-          </button>
-        </span>
-      ) : null}
+      {more ? <LoadingFilter /> : null}
     </Toolbar>
   );
 }

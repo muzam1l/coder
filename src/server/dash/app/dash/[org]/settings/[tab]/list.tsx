@@ -10,9 +10,11 @@ import { toastFailure } from '@/utils/action';
 import type { Config, ConfigPatch } from '@coder/client/types';
 
 import { iDots } from '@/comps/ui/icons';
+import { Button } from '@/comps/ui/button';
 import { Card } from '@/comps/ui/card';
 import { Icon } from '@/comps/ui/icon';
-import { Menu, MenuItem } from '@/comps/ui/menu';
+import { Menu } from '@/comps/ui/menu';
+import { MenuItem } from '@/comps/ui/menu-items';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 
 /** RFC 7396: objects merge, null deletes, anything else replaces. */
@@ -88,7 +90,7 @@ export function AddRow({
           autocomplete="off"
         />
       ))}
-      <button class="btn">Add</button>
+      <Button type="submit">Add</Button>
     </form>
   );
 }
@@ -157,7 +159,7 @@ export function Row({
       <td class="acts">
         {actions}
         {menu || removing.item ? (
-          <Menu summaryClass="icon-btn" label="Actions" summary={<Icon d={iDots} />}>
+          <Menu button="icon" label="Actions" summary={<Icon d={iDots} />}>
             {menu}
             {removing.item}
           </Menu>

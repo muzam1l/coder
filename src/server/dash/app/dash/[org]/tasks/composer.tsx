@@ -9,15 +9,23 @@ import type { LocalFolder, LocalFolders } from '@coder/client/types';
 import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
 import { formatDate } from '@/utils/format';
-import { iAlert, iCheck, iDown, iPlus, iRight, iSliders, iSteer, iX } from '@/comps/ui/icons';
-import { Link } from '@wular/pnext/link';
+import { iAlert, iDown, iPlus, iRight, iSliders, iSteer, iX } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Loading } from '@/comps/ui/card';
+import { Button, IconButton } from '@/comps/ui/button';
 import { reasonText } from '@/utils/format';
 import { Icon } from '@/comps/ui/icon';
 import { Select, type Option } from '@/comps/ui/select';
-import { MenuRadio } from '@/comps/ui/menu';
+import {
+  MenuLabel,
+  MenuLink,
+  MenuNote,
+  MenuOption,
+  MenuPanel,
+  MenuRadio,
+  MenuRow,
+} from '@/comps/ui/menu-items';
 import { connectRepositories } from '@/app/dash/[org]/agents/editor/connect-repositories';
 import {
   ENGINES,
@@ -193,24 +201,23 @@ function Entries({
     <>
       {entries.flatMap((entry, index) => [
         entry.head ? (
-          <div key={`h:${entry.key}`} class="pop-label" role="presentation">
+          <MenuLabel key={`h:${entry.key}`} role="presentation">
             {entry.head}
-          </div>
+          </MenuLabel>
         ) : null,
-        <div
+        <MenuOption
           key={entry.key}
           id={`${id}-${index}`}
-          role="option"
-          aria-selected={selected === undefined ? index === active : entry.key === selected}
-          class={index === active ? 'pop-item on' : 'pop-item'}
+          active={index === active}
+          selected={selected === undefined ? index === active : entry.key === selected}
+          check={selected !== undefined}
+          end={entry.hint ? <small>{entry.hint}</small> : null}
           onMouseDown={event => event.preventDefault()}
           onPointerMove={() => index !== active && onActive(index)}
           onClick={entry.pick}
         >
-          <span class="grow">{entry.label}</span>
-          {entry.hint ? <small>{entry.hint}</small> : null}
-          {selected === undefined ? null : <Icon d={iCheck} />}
-        </div>,
+          {entry.label}
+        </MenuOption>,
       ])}
     </>
   );
@@ -236,7 +243,7 @@ export function NeedsCredential({ reason, label }: { reason?: string; label?: st
     <Notice tone="warning" slim>
       <Icon d={iAlert} />
       <span class="grow">{reason || 'Tasks need a model credential to run.'}</span>
-      <CredentialsLink class="btn outline sm" label={label}>
+      <CredentialsLink variant="outline" size="sm" label={label}>
         Add credential
       </CredentialsLink>
     </Notice>
@@ -676,15 +683,16 @@ export function Composer({
             <Icon d={iSliders} />
             {changed ? <span>{changed}</span> : null}
           </button>
-          <button
-            class="btn sm send"
-            disabled={busy || !text.trim() || lists.agentsOff}
-            aria-busy={busy}
+          <Button
+            type="submit"
+            size="sm"
+            class="send"
+            leftIcon={iSteer}
+            disabled={!text.trim() || lists.agentsOff}
+            loading={busy}
             aria-label={busy ? 'Starting task' : 'Start task'}
             title="Start task (Enter)"
-          >
-            <Icon d={iSteer} />
-          </button>
+          />
         </div>
         {lists.agentsOff ? (
           <small class="folder-hint">
@@ -694,13 +702,13 @@ export function Composer({
         {typing === 'url' ? (
           <small class="folder-hint">Uses this machine's git logins</small>
         ) : null}
-        <div
+        <MenuPanel
           id={`${id}-settings`}
-          class="pop composer-settings"
+          class="composer-settings"
           popover="auto"
           onBeforeToggle={place}
         >
-          <p class="pop-label">Model</p>
+          <MenuLabel>Model</MenuLabel>
           <div role="group" aria-label="Model" class="pop-radios">
             {modelSections(lists.models, defaults).map(([engine, items]) => (
               <Fragment key={engine}>
@@ -719,21 +727,17 @@ export function Composer({
                   const showing = expanded === value;
                   return (
                     <Fragment key={value}>
-                      <div class="pop-row">
-                        <button
-                          type="button"
-                          role="menuitemradio"
-                          aria-checked={on}
-                          class={on ? 'pop-item on' : 'pop-item'}
-                          onClick={event => {
+                      <MenuRow>
+                        <MenuRadio
+                          on={on}
+                          onPick={() => {
                             apply({ ...picked, effort: '' });
-                            event.currentTarget.closest<HTMLElement>('[popover]')?.hidePopover();
+                            document.getElementById(`${id}-settings`)?.hidePopover();
                           }}
+                          end={effortLabel ? <small>{effortLabel.toLowerCase()}</small> : null}
                         >
-                          <span class="grow">{label}</span>
-                          {effortLabel ? <small>{effortLabel.toLowerCase()}</small> : null}
-                          {on ? <Icon d={iCheck} /> : null}
-                        </button>
+                          {label}
+                        </MenuRadio>
                         <button
                           type="button"
                           class="pop-chev"
@@ -744,7 +748,7 @@ export function Composer({
                         >
                           <Icon d={iRight} />
                         </button>
-                      </div>
+                      </MenuRow>
                       {showing ? (
                         <div role="group" aria-label={`Effort for ${label}`} class="pop-sub">
                           {efforts.map(([effort, text]) => (
@@ -766,16 +770,16 @@ export function Composer({
                 })}
               </Fragment>
             ))}
-            <Link
-              class="pop-item add-models"
+            <MenuLink
+              class="add-models"
               href="/dash/[org]/settings/[tab]"
               params={{ org, tab: 'models' }}
+              icon={iPlus}
             >
-              <Icon d={iPlus} />
-              <span class="grow">Add models</span>
-            </Link>
+              Add models
+            </MenuLink>
           </div>
-          <p class="pop-label">Permissions</p>
+          <MenuLabel>Permissions</MenuLabel>
           <div role="group" aria-label="Permissions">
             {resolved(PERMISSIONS, own.permissions ?? 'auto').map(([value, label]) => (
               <MenuRadio
@@ -789,7 +793,7 @@ export function Composer({
           </div>
           {agents.length > 1 ? (
             <>
-              <p class="pop-label">Agent</p>
+              <MenuLabel>Agent</MenuLabel>
               <Select
                 label="Agent"
                 value={choice.agent}
@@ -800,7 +804,7 @@ export function Composer({
           ) : null}
           {lists.runners.length > 1 ? (
             <>
-              <p class="pop-label">Runs on</p>
+              <MenuLabel>Runs on</MenuLabel>
               <Select
                 label="Runs on"
                 options={lists.runners}
@@ -809,27 +813,27 @@ export function Composer({
               />
             </>
           ) : null}
-        </div>
-        <div
-          ref={slash}
+        </MenuPanel>
+        <MenuPanel
+          panelRef={slash}
           id={`${id}-slash`}
-          class="pop composer-slash"
+          class="composer-slash"
           popover="manual"
           role="listbox"
           aria-label={menu?.label ?? 'Commands'}
         >
           {menu ? (
             <>
-              <div class="pop-label">{menu.label}</div>
+              <MenuLabel>{menu.label}</MenuLabel>
               <Entries id={`${id}-slash`} entries={menu.entries} active={active} onActive={setAt} />
               {menu.note === 'loading' ? (
                 <Loading label="Loading pull requests" inline />
               ) : menu.note && !menu.entries.length ? (
-                <p class="pop-note">{menu.note}</p>
+                <MenuNote>{menu.note}</MenuNote>
               ) : null}
             </>
           ) : null}
-        </div>
+        </MenuPanel>
       </form>
       {needs === undefined || missing ? null : <NeedsCredential reason={needs} />}
     </>
@@ -863,10 +867,9 @@ export function NewTaskButton({ agent }: { agent?: string }) {
 
   return (
     <>
-      <button type="button" class="btn new-task" onClick={open}>
-        <Icon d={iPlus} />
+      <Button class="new-task" leftIcon={iPlus} onClick={open}>
         New task
-      </button>
+      </Button>
       <dialog
         ref={dialog}
         class="compose-dialog"
@@ -877,14 +880,7 @@ export function NewTaskButton({ agent }: { agent?: string }) {
         <header>
           <h2>New task</h2>
           {agent ? <span class="sub">{agent}</span> : null}
-          <button
-            type="button"
-            class="icon-btn"
-            aria-label="Close"
-            onClick={() => dialog.current?.close()}
-          >
-            <Icon d={iX} />
-          </button>
+          <IconButton icon={iX} label="Close" onClick={() => dialog.current?.close()} />
         </header>
         {!shown ? null : setup ? (
           <Composer

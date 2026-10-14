@@ -1,10 +1,9 @@
 'use client';
 
-import './confirm.css';
 import type { ComponentChildren } from 'preact';
 
+import { Button } from './button';
 import { iTrash } from './icons';
-import { Icon } from './icon';
 import { Modal } from './modal';
 
 /** A modal question before a destructive step. */
@@ -37,10 +36,9 @@ export function ConfirmDialog({
       }}
       onClose={onClose}
       actions={
-        <button class="btn destructive" aria-busy={busy}>
-          <Icon d={iTrash} />
+        <Button type="submit" danger leftIcon={iTrash} loading={busy}>
           {confirmLabel}
-        </button>
+        </Button>
       }
     >
       {body ? <p>{body}</p> : null}

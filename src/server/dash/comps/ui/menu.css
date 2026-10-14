@@ -120,6 +120,8 @@
 }
 .pop-item small {
   display: block;
+  color: var(--muted);
+  font-size: 11.5px;
 }
 .pop-item.rich {
   align-items: flex-start;
@@ -136,6 +138,36 @@
 }
 .pop form {
   margin: 0;
+}
+.pop-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px 12px;
+  min-width: 0;
+}
+.pop-head b,
+.pop-head small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pop-head small {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+/* an item with a control beside it, its hint kept clear of the control */
+.pop-row {
+  display: flex;
+  align-items: center;
+}
+.pop-row > .pop-item {
+  flex: 1 1 auto;
+}
+.pop-row > .pop-item small {
+  margin-right: 6px;
+  color: var(--muted);
+  font-size: 11px;
 }
 .pop-note {
   padding: 0 10px 8px;
@@ -205,14 +237,4 @@
   .pop.wide {
     min-width: min(320px, calc(100vw - 32px));
   }
-}
-
-/* a trailing link in any menu or select, like "Add models" */
-.pop .add-models {
-  margin-top: 4px;
-  color: var(--muted);
-}
-.pop .add-models .ic {
-  width: 14px;
-  height: 14px;
 }

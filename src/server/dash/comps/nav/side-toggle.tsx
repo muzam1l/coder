@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'preact/hooks';
 
 import { iLeft, iRight } from '@/comps/ui/icons';
-import { Icon } from '@/comps/ui/icon';
+import { IconButton } from '@/comps/ui/button';
 
 const COOKIE = 'side';
 
@@ -27,15 +27,15 @@ export function SideToggle({ collapsed: initial }: { collapsed: boolean }) {
     document.querySelector('.app')?.classList.toggle('side-min', next);
     document.cookie = `${COOKIE}=${next ? 'min' : 'max'}; path=/; max-age=31536000; samesite=lax`;
   };
+  const label = collapsed ? 'Expand sidebar' : 'Collapse sidebar';
+
   return (
-    <button
-      type="button"
-      class="icon-btn side-toggle"
-      aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-      data-tip={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+    <IconButton
+      icon={collapsed ? iRight : iLeft}
+      label={label}
+      tip={label}
+      class="side-toggle"
       onClick={toggle}
-    >
-      <Icon d={collapsed ? iRight : iLeft} />
-    </button>
+    />
   );
 }

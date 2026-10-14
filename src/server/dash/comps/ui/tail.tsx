@@ -1,6 +1,7 @@
 import './tail.css';
 import type { RefObject } from 'preact';
 
+import { Button } from './button';
 import { Loading } from './card';
 
 /** Below the rows: what is loading, what failed, and the mark that pulls in the next page. */
@@ -25,9 +26,9 @@ export function Tail({
       {error ? (
         <>
           {error}{' '}
-          <button type="button" class="btn ghost sm" onClick={retry}>
+          <Button variant="ghost" size="sm" onClick={retry}>
             Retry
-          </button>
+          </Button>
         </>
       ) : busy ? (
         <Loading label={`Loading more ${noun}`} inline />

@@ -6,14 +6,18 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { client, usePoll } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
-import { iCheck, iCopy, iDots } from '@/comps/ui/icons';
+import { iCheck, iDots, iPlus } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import type { CredentialRow, EngineStatus, Me } from '@coder/client/types';
 import { Card, Loading } from '@/comps/ui/card';
+import { Modal } from '@/comps/ui/modal';
 import { reasonText } from '@/utils/format';
 import { Badge } from '@/comps/ui/badge';
+import { Button, IconButton } from '@/comps/ui/button';
+import { CopyButton } from '@/comps/ui/copy';
 import { Icon } from '@/comps/ui/icon';
-import { Menu, MenuItem } from '@/comps/ui/menu';
+import { Menu } from '@/comps/ui/menu';
+import { MenuItem } from '@/comps/ui/menu-items';
 import { Segmented } from '@/comps/ui/segmented';
 import { Select } from '@/comps/ui/select';
 import { Combo } from '@/comps/ui/combo';
@@ -94,17 +98,17 @@ function Row({
       </td>
       <td class="acts">
         {row.isDefault || !canManage ? null : (
-          <button
-            type="button"
-            class="btn ghost sm"
-            aria-busy={busy === 'default'}
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={busy === 'default'}
             onClick={() => void onAct('default')}
           >
             Make default
-          </button>
+          </Button>
         )}
         {signIn || removing.item ? (
-          <Menu summaryClass="icon-btn" label="Actions" summary={<Icon d={iDots} />}>
+          <Menu button="icon" label="Actions" summary={<Icon d={iDots} />}>
             {signIn ? (
               <>
                 <MenuItem title="Sign in again" onClick={signIn} />
@@ -204,127 +208,151 @@ function KeyField({
   );
 }
 
-/** The sign-in button's label, as wide as its widest state so the button never moves. */
-function SignInLabel({ engine, label }: { engine: (typeof ENGINES)[number]; label: string }) {
-  const all = [
-    `Sign in with ${engine.signIn}`,
-    `Open ${engine.signIn} sign-in`,
-    'Open sign-in page',
-    'Open again',
-  ];
-  return (
-    <span class="sign-label" data-all={all.join('\n')}>
-      {label}
-    </span>
-  );
-}
-
-/** A subscription sign-in: the official login runs on the server, and the page leads through each step. */
+/** A subscription sign-in, step by step in a dialog: the official login runs on a private machine and the engine's page approves it. */
 function SignIn({
   login,
   engine,
   onChange,
   onDone,
   onError,
+  onCancel,
 }: {
   login: Login;
   engine: (typeof ENGINES)[number];
   onChange: (next: Login) => void;
   onDone: () => void;
   onError: (reason: string) => void;
+  onCancel: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
-  const [opened, setOpened] = useState(false);
+  const [openedUrl, setOpenedUrl] = useState<string>();
+  // The link a code was pasted for; claude offers a new link when it rejects the code.
+  const [sentUrl, setSentUrl] = useState<string>();
 
   usePoll(
     login.id && login.state !== 'done' && login.state !== 'failed'
-      ? () =>
+      ? signal =>
           client.credentials
             .loginStatus(login.id)
             .then(next => {
+              // A status that lands after Cancel or close belongs to a sign-in already gone.
+              if (signal.aborted) return;
               if (next.state === 'done') return onDone();
               if (next.state === 'failed')
                 return onError(next.error ?? 'Sign-in failed. Try again.');
+              // Read before the pasted code landed.
+              if (login.state === 'verifying' && next.state === 'open' && next.url === sentUrl)
+                return;
               onChange(next);
             })
-            .catch(reason => onError(reasonText(reason)))
+            .catch(reason => {
+              if (signal.aborted) return;
+              // A restarting server or a dropped connection only delays the next check.
+              const status = (reason as { status?: number }).status;
+              if (status === undefined || status >= 500)
+                return console.error('coder dashboard: sign-in status', reason);
+              onError(reasonText(reason));
+            })
       : undefined,
     800,
     [login.id],
   );
 
   const onCode = (code: string) => {
+    setSentUrl(login.url);
     onChange({ ...login, state: 'verifying' });
     void client.credentials.loginCode(login.id, code).catch(reason => onError(reasonText(reason)));
   };
 
-  if (!login.url)
-    return (
-      <div class="cred-login grow end" role="status">
-        <button type="button" class="btn" disabled aria-busy="true">
-          <SignInLabel engine={engine} label={`Sign in with ${engine.signIn}`} />
-        </button>
-      </div>
-    );
-  if (login.engine === 'codex')
-    return (
-      <div class="cred-login grow end" role="status">
-        <Loading label="Waiting for approval…" inline />
-        <span class="code-box">
-          {login.code}
-          <button
-            type="button"
-            class="icon-btn"
-            aria-label={copied ? 'Copied' : 'Copy code'}
-            title={copied ? 'Copied' : 'Copy code'}
-            onClick={() =>
-              void navigator.clipboard.writeText(login.code ?? '').then(() => setCopied(true))
-            }
-          >
-            <Icon d={copied ? iCheck : iCopy} />
-          </button>
-        </span>
-        <a class="btn" href={login.url} target="_blank" rel="noopener noreferrer">
-          <SignInLabel engine={engine} label="Open sign-in page" />
-        </a>
-      </div>
-    );
+  const ready = Boolean(login.url);
+  const verifying = login.state === 'verifying';
+  const opened = Boolean(login.url) && openedUrl === login.url;
+  const rejected = Boolean(sentUrl) && login.state === 'open' && login.url !== sentUrl;
+  const open = `Open ${engine.signIn} sign-in`;
+
   return (
-    <div class="cred-login grow end" role="status">
-      {opened ? (
-        <input
-          class="mono"
+    <Modal
+      class="sign-in"
+      title={`Sign in with ${engine.signIn}`}
+      cancelDanger
+      focus="actions"
+      onClose={onCancel}
+      actions={
+        <Button
+          href={login.url}
+          external
+          loading={!ready}
           autoFocus
-          autocomplete="off"
-          aria-label={`Code from the ${engine.signIn} sign-in page`}
-          placeholder="Paste the code from the sign-in page"
-          disabled={login.state === 'verifying'}
-          onPaste={event => {
-            const code = event.clipboardData?.getData('text').trim();
-            if (code) {
-              event.preventDefault();
-              onCode(code);
-            }
-          }}
-          onKeyDown={event => {
-            const code = event.currentTarget.value.trim();
-            if (event.key === 'Enter' && code) onCode(code);
-          }}
-        />
-      ) : null}
-      <a
-        class="btn"
-        href={login.url}
-        target="_blank"
-        rel="noopener noreferrer"
-        onClick={() => setOpened(true)}
-      >
-        <SignInLabel
-          engine={engine}
-          label={opened ? 'Open again' : `Open ${engine.signIn} sign-in`}
-        />
-      </a>
-    </div>
+          onClick={() => setOpenedUrl(login.url)}
+        >
+          {opened ? 'Open again' : open}
+        </Button>
+      }
+    >
+      <p class="muted">Coder signs in on a private machine and keeps the sign-in for your tasks.</p>
+      <ol class="steps-list sign-steps" role="status">
+        <li>
+          {ready ? (
+            'The sign-in machine is ready.'
+          ) : (
+            <Loading label="Starting the sign-in machine…" inline />
+          )}
+        </li>
+        {login.engine === 'codex' ? (
+          <>
+            <li>
+              Open the sign-in page and enter this code.
+              {login.code ? (
+                <span class="code-box">
+                  {login.code}
+                  <CopyButton value={login.code} label="Copy code" />
+                </span>
+              ) : null}
+            </li>
+            <li>
+              {ready ? (
+                <Loading label="Waiting for your approval on the sign-in page…" inline />
+              ) : (
+                'Approve it there.'
+              )}
+            </li>
+          </>
+        ) : (
+          <>
+            <li>Open the {engine.signIn} sign-in and approve it.</li>
+            <li>
+              {rejected ? (
+                <span class="rejected" role="alert">
+                  That code did not work. Open the sign-in again and paste the new code.
+                </span>
+              ) : (
+                'Paste the code it shows.'
+              )}
+              <input
+                class="mono"
+                autocomplete="off"
+                aria-label={`Code from the ${engine.signIn} sign-in page`}
+                placeholder="Paste the code from the sign-in page"
+                disabled={login.state !== 'open'}
+                onPaste={event => {
+                  const code = event.clipboardData?.getData('text').trim();
+                  if (code) {
+                    event.preventDefault();
+                    onCode(code);
+                  }
+                }}
+                onKeyDown={event => {
+                  const code = event.currentTarget.value.trim();
+                  if (event.key !== 'Enter' || !code) return;
+                  event.currentTarget.value = '';
+                  onCode(code);
+                }}
+              />
+              {verifying ? <Loading label="Checking the code…" inline /> : null}
+            </li>
+          </>
+        )}
+      </ol>
+    </Modal>
   );
 }
 
@@ -378,30 +406,30 @@ export function EngineLogins({ status: initial }: { status: EngineStatus }) {
                 <span class="grow muted">Not signed in on this machine.</span>
               )}
               {own?.signedIn ? (
-                <button
-                  type="button"
-                  class="btn secondary-danger sm"
-                  disabled={busy === `${engine.id}:logout`}
-                  aria-busy={busy === `${engine.id}:logout`}
+                <Button
+                  variant="secondary"
+                  danger
+                  size="sm"
+                  loading={busy === `${engine.id}:logout`}
                   onClick={() => act(engine.id, 'logout')}
                 >
                   Sign out
-                </button>
+                </Button>
               ) : (
-                <button
-                  type="button"
-                  class="btn secondary sm"
-                  aria-busy={signingIn}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  loading={signingIn}
                   disabled={Boolean(busy)}
                   onClick={() => act(engine.id, 'login')}
                 >
                   Sign in
-                </button>
+                </Button>
               )}
               {signingIn ? (
-                <button type="button" class="btn ghost sm" onClick={() => setWatching(undefined)}>
+                <Button variant="ghost" size="sm" onClick={() => setWatching(undefined)}>
                   Cancel
-                </button>
+                </Button>
               ) : null}
             </div>
           </Card>
@@ -516,27 +544,25 @@ export function CredentialsList({
         const how = chosen[engine.id] ?? methods[0]!;
         const open = !own.length || adding === engine.id;
         const active = engine.id === 'custom' ? undefined : logins[engine.id];
+        const ready = own.length > 0 && engine.id !== 'custom';
+        const add = !active && own.length > 0 && adding !== engine.id;
         return (
           <Card
             key={engine.id}
             title={engine.name}
             count={own.length || undefined}
             actions={
-              active ? (
-                <button
-                  type="button"
-                  class="btn ghost-danger sm"
-                  onClick={() => {
-                    setLogin(active.engine);
-                    if (active.id) void client.credentials.cancelLogin(active.id).catch(() => {});
-                  }}
-                >
-                  Cancel
-                </button>
-              ) : own.length && adding !== engine.id ? (
-                <button type="button" class="btn ghost sm" onClick={() => setAdding(engine.id)}>
-                  Add
-                </button>
+              ready || add ? (
+                <>
+                  {ready ? <Badge tone="ok">ready</Badge> : null}
+                  {add ? (
+                    <IconButton
+                      icon={iPlus}
+                      label={`Add a ${engine.name} credential`}
+                      onClick={() => setAdding(engine.id)}
+                    />
+                  ) : null}
+                </>
               ) : null
             }
           >
@@ -568,12 +594,6 @@ export function CredentialsList({
                   </tbody>
                 </table>
               ) : null}
-              {own.length && engine.id !== 'custom' ? (
-                <p class="muted cred-note">
-                  Ready. Built-in models run on this key. Add aliases or custom endpoints on{' '}
-                  <a href={`/dash/${org}/settings/models`}>Models</a>.
-                </p>
-              ) : null}
               {open || active ? (
                 <div class="cred-new">
                   {methods.length > 1 ? (
@@ -588,27 +608,32 @@ export function CredentialsList({
                       onChange={method => setChosen({ ...chosen, [engine.id]: method })}
                     />
                   ) : null}
-                  {active ? (
-                    <SignIn
-                      login={active}
-                      engine={engine}
-                      onChange={next => setLogin(active.engine, next)}
-                      onDone={() => done(active.engine)}
-                      onError={reason => {
-                        setLogin(active.engine);
-                        toastFailure(reason);
-                      }}
-                    />
-                  ) : how === 'signin' ? (
+                  {active || how === 'signin' ? (
                     <div class="cred-login grow end">
-                      <button
-                        type="button"
-                        class="btn"
+                      <Button
                         autoFocus={focus === engine.id}
+                        disabled={Boolean(active)}
                         onClick={() => signIn(engine.id as 'claude' | 'codex')}
                       >
-                        <SignInLabel engine={engine} label={`Sign in with ${engine.signIn}`} />
-                      </button>
+                        Sign in with {engine.signIn}
+                      </Button>
+                      {active ? (
+                        <SignIn
+                          login={active}
+                          engine={engine}
+                          onChange={next => setLogin(active.engine, next)}
+                          onDone={() => done(active.engine)}
+                          onError={reason => {
+                            setLogin(active.engine);
+                            toastFailure(reason);
+                          }}
+                          onCancel={() => {
+                            setLogin(active.engine);
+                            if (active.id)
+                              void client.credentials.cancelLogin(active.id).catch(toastFailure);
+                          }}
+                        />
+                      ) : null}
                     </div>
                   ) : (
                     <KeyField

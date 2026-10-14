@@ -5,6 +5,7 @@ import { iKey } from '@/comps/ui/icons';
 import { load } from '@/api/load';
 import { initial, reasonText } from '@/utils/format';
 import { Badge } from '@/comps/ui/badge';
+import { Button } from '@/comps/ui/button';
 import { SignOut } from '@/app/dash/[org]/account/sign-out';
 import { Page, PageHead } from '@/comps/frame/page-head';
 import { Icon } from '@/comps/ui/icon';
@@ -105,10 +106,12 @@ export default async function AccountPage({ request }: { request?: Request }) {
               <form action="/dash/token" method="post">
                 <input type="hidden" name="token" value="" />
                 <input type="hidden" name="return" value="/dash" />
-                <button class="btn outline">Forget token</button>
+                <Button type="submit" variant="outline">
+                  Forget token
+                </Button>
               </form>
             ) : (
-              <SignOut class="btn secondary-danger">Sign out</SignOut>
+              <SignOut />
             )}
           </Row>
         </div>

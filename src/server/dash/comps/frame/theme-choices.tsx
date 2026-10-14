@@ -2,8 +2,8 @@
 
 import { useState } from 'preact/hooks';
 
-import { iCheck, iMonitor, iMoon, iSun } from '@/comps/ui/icons';
-import { Icon } from '@/comps/ui/icon';
+import { iMonitor, iMoon, iSun } from '@/comps/ui/icons';
+import { MenuRadio } from '@/comps/ui/menu-items';
 
 const YEAR = 60 * 60 * 24 * 365;
 
@@ -28,18 +28,9 @@ export function ThemeChoices({ theme: initial }: { theme: string }) {
   return (
     <>
       {THEMES.map(([value, label, icon]) => (
-        <button
-          key={value}
-          type="button"
-          class="pop-item"
-          role="menuitemradio"
-          aria-checked={theme === value}
-          onClick={() => pick(value)}
-        >
-          <Icon d={icon} />
-          <span class="grow">{label}</span>
-          <Icon d={iCheck} />
-        </button>
+        <MenuRadio key={value} on={theme === value} onPick={() => pick(value)} icon={icon}>
+          {label}
+        </MenuRadio>
       ))}
     </>
   );

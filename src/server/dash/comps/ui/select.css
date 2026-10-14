@@ -72,7 +72,7 @@
 }
 
 /* a path under an option: one line, clipped from the start so the folder name stays */
-.select-pop .pop-item .pop-path {
+.select-pop .pop-item small {
   display: block;
   overflow: hidden;
   direction: rtl;

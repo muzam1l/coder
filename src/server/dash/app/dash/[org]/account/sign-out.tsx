@@ -1,24 +1,19 @@
 'use client';
 
-import type { ComponentChildren } from 'preact';
-
 import { signOut } from '@/utils/client';
 import { iOut } from '@/comps/ui/icons';
-import { Icon } from '@/comps/ui/icon';
+import { Button } from '@/comps/ui/button';
+import { MenuItem } from '@/comps/ui/menu-items';
 
-export function SignOut({
-  class: cls,
-  icon,
-  children,
-}: {
-  class: string;
-  icon?: boolean;
-  children: ComponentChildren;
-}) {
-  return (
-    <button type="button" class={cls} onClick={() => void signOut().catch(() => location.reload())}>
-      {icon ? <Icon d={iOut} /> : null}
-      {children}
-    </button>
+/** Ends this browser session; `menu` makes it the account menu's item. */
+export function SignOut({ menu }: { menu?: boolean }) {
+  const out = () => void signOut().catch(() => location.reload());
+
+  return menu ? (
+    <MenuItem icon={iOut} title="Sign out" onClick={out} />
+  ) : (
+    <Button variant="secondary" danger onClick={out}>
+      Sign out
+    </Button>
   );
 }

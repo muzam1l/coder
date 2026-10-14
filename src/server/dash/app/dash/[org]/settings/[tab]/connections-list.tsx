@@ -11,9 +11,10 @@ import { Card, Empty, FoldCard, Loading } from '@/comps/ui/card';
 import { reasonText } from '@/utils/format';
 import { Field } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
+import { MenuItem } from '@/comps/ui/menu-items';
 import { Icon } from '@/comps/ui/icon';
 import { iAlert } from '@/comps/ui/icons';
-import { Link } from '@wular/pnext/link';
+import { Button, LinkButton } from '@/comps/ui/button';
 import { Segmented } from '@/comps/ui/segmented';
 import { Select } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
@@ -245,9 +246,9 @@ function AddPlatform({
             {props.operator ? null : ' Ask whoever runs this server to add one.'}
           </span>
           {props.operator ? (
-            <Link class="btn outline sm" href="/dash/[org]/operator" params={{ org }}>
+            <LinkButton variant="outline" size="sm" href="/dash/[org]/operator" params={{ org }}>
               Set it up
-            </Link>
+            </LinkButton>
           ) : null}
         </Notice>
       ) : null}
@@ -259,10 +260,10 @@ function AddPlatform({
               ? `Connected as ${mine.account ?? 'you'}.`
               : null}
         </p>
-        <button class="btn" disabled={busy || !info?.connectable} aria-busy={busy}>
+        <Button type="submit" disabled={!info?.connectable} loading={busy}>
           {info ? <BrandIcon brand={info.brand} /> : null}
           Sign in to {info?.name ?? 'a platform'}
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -428,15 +429,15 @@ function AddMcp(props: AddProps) {
             {found.error ? (
               <div class="registry-note err" role="alert">
                 <span>{found.error}</span>
-                <button
-                  type="button"
-                  class="btn ghost sm"
+                <Button
+                  variant="ghost"
+                  size="sm"
                   // Keeps focus in the search, so swapping this note for the loader does not close the list.
                   onMouseDown={event => event.preventDefault()}
                   onClick={() => run(found.q)}
                 >
                   Retry
-                </button>
+                </Button>
               </div>
             ) : !found.items ? (
               <div class="registry-note">
@@ -444,30 +445,29 @@ function AddMcp(props: AddProps) {
               </div>
             ) : found.items.length ? (
               found.items.map(server => (
-                <button
+                <MenuItem
                   key={server.name}
-                  type="button"
-                  class="pop-item rich"
                   onClick={() => pick(server)}
-                >
-                  <span class="grow">
-                    <b>{server.title}</b>
-                    {server.verified ? (
-                      <span
-                        title={`The MCP registry checked that the publisher owns ${domainOf(server.name)}`}
-                      >
-                        <Badge tone="ok">by {domainOf(server.name)}</Badge>
-                      </span>
-                    ) : null}
-                    {server.curated ? (
-                      <span title="In GitHub's reviewed list of MCP servers">
-                        <Badge>GitHub list</Badge>
-                      </span>
-                    ) : null}
-                    <Badge>{server.type}</Badge>
-                    <small>{server.description || server.name}</small>
-                  </span>
-                </button>
+                  title={
+                    <>
+                      <b>{server.title}</b>
+                      {server.verified ? (
+                        <span
+                          title={`The MCP registry checked that the publisher owns ${domainOf(server.name)}`}
+                        >
+                          <Badge tone="ok">by {domainOf(server.name)}</Badge>
+                        </span>
+                      ) : null}
+                      {server.curated ? (
+                        <span title="In GitHub's reviewed list of MCP servers">
+                          <Badge>GitHub list</Badge>
+                        </span>
+                      ) : null}
+                      <Badge>{server.type}</Badge>
+                    </>
+                  }
+                  sub={server.description || server.name}
+                />
               ))
             ) : (
               <p class="registry-note">No known server matches. Paste its URL or command below.</p>
@@ -557,9 +557,9 @@ function AddMcp(props: AddProps) {
         </div>
       ) : null}
       <div class="add-foot">
-        <button class="btn" disabled={busy || blocked} aria-busy={busy}>
+        <Button type="submit" disabled={blocked} loading={busy}>
           Add connection
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -648,12 +648,12 @@ function NewKey({
         autocomplete="off"
         required
       />
-      <button class="btn" disabled={busy} aria-busy={busy}>
+      <Button type="submit" loading={busy}>
         Save key
-      </button>
-      <button type="button" class="btn ghost" disabled={busy} onClick={onClose}>
+      </Button>
+      <Button variant="ghost" disabled={busy} onClick={onClose}>
         Cancel
-      </button>
+      </Button>
     </form>
   );
 }
@@ -722,15 +722,14 @@ export function ConnectionsList({
                     sub={<Reach row={row} catalog={catalog} />}
                     actions={
                       row.status === 'ok' ? null : (
-                        <button
-                          type="button"
-                          class="btn outline sm"
-                          disabled={action.pending === row.id}
-                          aria-busy={action.pending === row.id}
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          loading={action.pending === row.id}
                           onClick={() => reconnect(row)}
                         >
                           Reconnect
-                        </button>
+                        </Button>
                       )
                     }
                     remove={{

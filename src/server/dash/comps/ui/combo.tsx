@@ -1,7 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
-import { Icon } from './icon';
-import { iCheck } from './icons';
+import { MenuOption } from './menu-items';
+import { SelectList } from './select';
 
 const SHOWN = 50;
 
@@ -122,32 +122,22 @@ export function Combo({
         }}
       />
       {listed ? (
-        <div
-          ref={list}
-          id={`${id}-list`}
-          class="pop select-pop"
-          popover="manual"
-          role="listbox"
-          aria-label={label}
-          style={place || 'visibility:hidden'}
-          onMouseDown={event => event.preventDefault()}
-        >
+        <SelectList id={id} label={label} listRef={list} place={place}>
           {shown.map((option, index) => (
-            <div
+            <MenuOption
               key={option}
               id={`${id}-${index}`}
               data-index={index}
-              role="option"
-              aria-selected={option === value}
-              class={index === active ? 'pop-item on' : 'pop-item'}
+              active={index === active}
+              selected={option === value}
+              check
               onPointerMove={() => index !== active && setActive(index)}
               onClick={() => pick(index)}
             >
-              <span class="grow">{option}</span>
-              <Icon d={iCheck} />
-            </div>
+              {option}
+            </MenuOption>
           ))}
-        </div>
+        </SelectList>
       ) : null}
     </>
   );

@@ -7,6 +7,7 @@ import { linkOf, type To } from '@/comps/nav/to';
 import { HEADS } from '@/comps/frame/heads';
 import { Icon } from '@/comps/ui/icon';
 import { Sentinel } from '@/comps/ui/sentinel';
+import { BLANK } from '@/comps/frame/loading-card';
 
 export function Page({ narrow, children }: { narrow?: boolean; children: ComponentChildren }) {
   return <div class={narrow ? 'page narrow' : 'page'}>{children}</div>;
@@ -42,6 +43,14 @@ export function Back({
     </Link>
   );
 }
+
+/** A `Back` before its page arrives: the arrow, inert. */
+export const LoadingBack = () => (
+  <span class="back" aria-hidden="true">
+    <Icon d={iLeft} />
+    {BLANK}
+  </span>
+);
 
 /** The page title row with its meta and actions, and one muted lead line; it sticks under the top bar and turns compact there. */
 export function PageHead({

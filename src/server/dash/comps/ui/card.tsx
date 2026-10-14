@@ -1,7 +1,7 @@
 import './card.css';
 import type { ComponentChildren } from 'preact';
 
-import { Icon } from './icon';
+import { Button } from './button';
 import { iPlus } from './icons';
 
 export function Card({
@@ -59,13 +59,18 @@ export function FoldCard({
         <h2>{title}</h2>
         <span class="fold-note">{note}</span>
         {actions ? <span class="bar-r">{actions}</span> : null}
-        <span class="btn outline sm fold-open" aria-hidden="true">
-          {open === 'Add' ? <Icon d={iPlus} /> : null}
+        <Button
+          as="span"
+          variant="outline"
+          size="sm"
+          class="fold-open"
+          leftIcon={open === 'Add' ? iPlus : undefined}
+        >
           {open}
-        </span>
-        <span class="btn ghost sm fold-close" aria-hidden="true">
+        </Button>
+        <Button as="span" variant="ghost" size="sm" class="fold-close">
           Close
-        </span>
+        </Button>
       </summary>
       {children}
     </details>

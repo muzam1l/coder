@@ -12,10 +12,12 @@ import { Modal } from '@/comps/ui/modal';
 import { reasonText } from '@/utils/format';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 import { Badge } from '@/comps/ui/badge';
+import { Button } from '@/comps/ui/button';
 import { CopyButton, CopyLine } from '@/comps/ui/copy';
 import { Field } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
-import { Menu, MenuItem } from '@/comps/ui/menu';
+import { Menu } from '@/comps/ui/menu';
+import { MenuItem } from '@/comps/ui/menu-items';
 import { Segmented } from '@/comps/ui/segmented';
 import { showToast, toastError } from '@/comps/frame/task-toasts';
 
@@ -113,27 +115,13 @@ function useInstall() {
 }
 
 /** One install button, for the next steps of a flow's outcome. */
-export function InstallButton({
-  app,
-  label,
-  class: className = 'btn sm outline',
-}: {
-  app: string;
-  label: string;
-  class?: string;
-}) {
+export function InstallButton({ app, label }: { app: string; label: string }) {
   const { busy, install } = useInstall();
 
   return (
-    <button
-      type="button"
-      class={className}
-      disabled={busy}
-      aria-busy={busy}
-      onClick={() => install(app)}
-    >
+    <Button loading={busy} onClick={() => install(app)}>
       {label}
-    </button>
+    </Button>
   );
 }
 
@@ -225,18 +213,17 @@ export function CreateDialog({
       onSubmit={submit}
       onClose={onClose}
       actions={
-        <button class="btn" disabled={busy} aria-busy={busy}>
+        <Button type="submit" rightIcon={iSteer} loading={busy}>
           {step.submit}
-          <Icon d={iSteer} />
-        </button>
+        </Button>
       }
     >
       {unreachable ? <Unreachable /> : null}
       <p class="muted">{step.intro}</p>
       <div class="create-link">
-        <a class="btn secondary create-open" href={step.link} target="_blank" rel="noreferrer">
-          Open {new URL(step.link).host} ↗
-        </a>
+        <Button variant="secondary" class="create-open" href={step.link} external>
+          Open {new URL(step.link).host}
+        </Button>
         <CopyButton value={step.link} label="Copy link" />
       </div>
       <ol class="create-steps">
@@ -345,10 +332,9 @@ function WhereDialog({
       onSubmit={submit}
       onClose={onClose}
       actions={
-        <button class="btn" disabled={busy} aria-busy={busy}>
+        <Button type="submit" rightIcon={iOut} loading={busy}>
           Continue to {name}
-          <Icon d={iOut} />
-        </button>
+        </Button>
       }
     >
       {unreachable ? <Unreachable /> : null}
@@ -414,19 +400,13 @@ function UpdateDialog({
         current && !check.confirm ? null : (
           <>
             {check.confirm && !current ? (
-              <button
-                type="button"
-                class="btn secondary"
-                disabled={busy}
-                aria-busy={busy}
-                onClick={confirm}
-              >
+              <Button variant="secondary" loading={busy} onClick={confirm}>
                 I updated it
-              </button>
+              </Button>
             ) : null}
-            <a class="btn" href={check.url} target="_blank" rel="noreferrer">
-              {check.label} ↗
-            </a>
+            <Button href={check.url} external>
+              {check.label}
+            </Button>
           </>
         )
       }
@@ -536,18 +516,17 @@ function FailedDialog({
       actions={
         <>
           {issues ? (
-            <a
-              class="btn outline"
+            <Button
+              variant="outline"
               href={`${issues}?${new URLSearchParams({ title, body: text })}`}
-              target="_blank"
-              rel="noreferrer"
+              external
             >
               Report issue
-            </a>
+            </Button>
           ) : null}
-          <button type="button" class="btn" autofocus onClick={retry}>
+          <Button autofocus onClick={retry}>
             Try again
-          </button>
+          </Button>
         </>
       }
     >
@@ -689,9 +668,9 @@ export function PlatformActions({
   if (!apps.length)
     return (
       <>
-        <button type="button" class="btn sm" disabled={leaving} aria-busy={leaving} onClick={start}>
+        <Button size="sm" loading={leaving} onClick={start}>
           {create && !create.fields.length ? create.submit : 'Create app'}
-        </button>
+        </Button>
         {dialog}
         {where}
         {failure}
@@ -701,18 +680,12 @@ export function PlatformActions({
     <>
       <span class="split">
         {installed ? null : (
-          <button
-            type="button"
-            class="btn sm"
-            disabled={busy}
-            aria-busy={busy}
-            onClick={() => install(apps[0]!.id)}
-          >
+          <Button size="sm" loading={busy} onClick={() => install(apps[0]!.id)}>
             Install
-          </button>
+          </Button>
         )}
         <Menu
-          summaryClass={installed ? 'icon-btn' : 'btn sm split-more'}
+          button={installed ? 'icon' : { size: 'sm', class: 'split-more' }}
           label={`More for ${integration}`}
           wide
           summary={<Icon d={installed ? iDots : iDown} />}

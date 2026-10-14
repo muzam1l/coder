@@ -9,7 +9,7 @@
   flex-direction: column;
   gap: 20px;
 }
-.agent-new .btn[aria-pressed='true'] {
+.agent-new .btn.outline[aria-pressed='true'] {
   border-color: var(--deep);
   background: var(--accbg);
 }

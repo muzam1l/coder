@@ -65,7 +65,7 @@ export function Hero({
           <div class="title-row">
             <h1>{agent.name}</h1>
             <AgentPills agent={agent} />
-            {agent.settings?.disabled ? <AgentToggle agent={agent} class="link" /> : null}
+            {agent.settings?.disabled ? <AgentToggle agent={agent} link /> : null}
           </div>
           <p class="lead">{agent.description ?? 'No description yet.'}</p>
         </div>

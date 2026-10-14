@@ -5,6 +5,7 @@ import { useState } from 'preact/hooks';
 import { client } from '@/utils/client';
 import { reasonText } from '@/utils/format';
 import { AuthPanel } from '@/comps/frame/auth-panel';
+import { Button } from '@/comps/ui/button';
 
 export default function LinkPage() {
   const [error, setError] = useState('');
@@ -20,9 +21,8 @@ export default function LinkPage() {
       lead={done || 'Link this platform identity to your signed-in Coder account.'}
     >
       {done ? null : (
-        <button
-          type="button"
-          class="btn wide"
+        <Button
+          wide
           onClick={() =>
             void client
               .linkAccount(token)
@@ -33,7 +33,7 @@ export default function LinkPage() {
           }
         >
           Connect
-        </button>
+        </Button>
       )}
       {/* The line keeps its height, so an error moves nothing. */}
       <p class="flash err reserved" role="alert">

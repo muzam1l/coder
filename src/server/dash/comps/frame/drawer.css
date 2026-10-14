@@ -22,7 +22,7 @@
   }
 }
 @media (min-width: 761px) {
-  .only-m {
+  button.only-m {
     display: none;
   }
 }

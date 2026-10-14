@@ -18,7 +18,8 @@ import {
   iPlus,
   iTerminal,
 } from '@/comps/ui/icons';
-import { Menu, MenuItem } from '@/comps/ui/menu';
+import { Menu } from '@/comps/ui/menu';
+import { MenuItem } from '@/comps/ui/menu-items';
 import { Link } from '@wular/pnext/link';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { usePaged } from '@/utils/paged';
@@ -30,8 +31,9 @@ import type {
   TasksPage,
 } from '@coder/client/types';
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
+import { Button } from '@/comps/ui/button';
 import { Card, Empty } from '@/comps/ui/card';
-import { Id } from '@/comps/ui/badge';
+import { Badge, Id } from '@/comps/ui/badge';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 import { approvalParts } from '@/app/dash/[org]/tasks/[id]/task-actions';
 import { Status } from './status';
@@ -64,10 +66,9 @@ const NewTaskButton = dynamic(
   {
     // TODO: stays disabled after client navigation until pnext SSRs nested dynamic() like Next.js.
     loading: () => (
-      <button type="button" class="btn new-task" disabled>
-        <Icon d={iPlus} />
+      <Button class="new-task" leftIcon={iPlus} disabled>
         New task
-      </button>
+      </Button>
     ),
   },
 );
@@ -194,7 +195,7 @@ function RowActions({ task, onDone }: { task: TaskRow; onDone: (what: RowAction)
       });
   return (
     <>
-      <Menu summary={<Icon d={iDots} />} summaryClass="icon-btn" label="Task actions" align="right">
+      <Menu summary={<Icon d={iDots} />} button="icon" label="Task actions" align="right">
         {task.approval ? (
           <MenuItem title="Approve" onClick={() => act('approve', 'accept')} />
         ) : null}
@@ -487,14 +488,14 @@ export function TasksList({
           counts ? (
             <>
               {counts.active ? (
-                <button type="button" class="badge acc" onClick={() => set('status', 'active')}>
+                <Badge tone="acc" onClick={() => set('status', 'active')}>
                   {formatCount(counts.active)} active
-                </button>
+                </Badge>
               ) : null}
               {counts.waiting ? (
-                <button type="button" class="badge warn" onClick={() => set('status', 'waiting')}>
+                <Badge tone="warn" onClick={() => set('status', 'waiting')}>
                   {formatCount(counts.waiting)} awaiting approval
-                </button>
+                </Badge>
               ) : null}
             </>
           ) : undefined

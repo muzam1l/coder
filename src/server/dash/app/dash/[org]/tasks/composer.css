@@ -80,6 +80,14 @@
   min-height: 30px;
   font-size: 12px;
 }
+.composer-settings .add-models {
+  margin-top: 4px;
+  color: var(--muted);
+}
+.composer-settings .add-models .ic {
+  width: 14px;
+  height: 14px;
+}
 .composer-settings .pop-group {
   margin: 6px 10px 2px;
   font-size: 10.5px;
@@ -222,19 +230,7 @@ dialog.compose-dialog::backdrop {
   }
 }
 
-/* a model row: the pick, its effort hint, and a chevron that opens the efforts under it */
-.pop-row {
-  display: flex;
-  align-items: center;
-}
-.pop-row > .pop-item {
-  flex: 1 1 auto;
-}
-.pop-row > .pop-item small {
-  margin-right: 6px;
-  color: var(--muted);
-  font-size: 11px;
-}
+/* the chevron beside a model opens its efforts under it */
 .pop-chev {
   display: inline-grid;
   place-items: center;

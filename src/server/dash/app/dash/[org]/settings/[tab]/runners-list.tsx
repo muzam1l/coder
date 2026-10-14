@@ -6,23 +6,15 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
-import {
-  iCheck,
-  iDots,
-  iDown,
-  iGit,
-  iMonitor,
-  iPlug,
-  iPlus,
-  iSpark,
-  iTerminal,
-} from '@/comps/ui/icons';
+import { iDots, iDown, iGit, iMonitor, iPlug, iPlus, iSpark, iTerminal } from '@/comps/ui/icons';
 import { Card, Loading } from '@/comps/ui/card';
 import { Badge } from '@/comps/ui/badge';
+import { Button } from '@/comps/ui/button';
 import { CopyLine } from '@/comps/ui/copy';
 import { Field } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
-import { Menu, MenuItem } from '@/comps/ui/menu';
+import { Menu } from '@/comps/ui/menu';
+import { MenuItem, MenuRadio } from '@/comps/ui/menu-items';
 import { Select } from '@/comps/ui/select';
 import { formatDuration } from '@/utils/format';
 import { sortedRunners } from '@/app/dash/[org]/tasks/composer-data';
@@ -143,11 +135,10 @@ function RunnerItem({
       </td>
       <td class="acts">
         {runner.default || !manage ? null : (
-          <button
-            type="button"
-            class="btn secondary sm"
-            disabled={making}
-            aria-busy={making}
+          <Button
+            variant="secondary"
+            size="sm"
+            loading={making}
             onClick={() => {
               setMaking(true);
               void onChange(() => client.runners.update(runner.id, { default: true })).finally(() =>
@@ -156,9 +147,9 @@ function RunnerItem({
             }}
           >
             Make default
-          </button>
+          </Button>
         )}
-        <Menu summaryClass="icon-btn" label="Actions" summary={<Icon d={iDots} />}>
+        <Menu button="icon" label="Actions" summary={<Icon d={iDots} />}>
           <MenuItem title="Test" onClick={test} />
           {manage && !builtIn ? (
             <MenuItem title="Rename" onClick={() => setRenaming(true)} />
@@ -193,9 +184,9 @@ function Pairing({ pairing, onCancel }: { pairing: RunnerPairing; onCancel: () =
       </details>
       <div class="runner-wait">
         <Loading label="Waiting for that computer to connect" inline dots />
-        <button type="button" class="btn secondary-danger sm" onClick={onCancel}>
+        <Button variant="secondary" danger size="sm" onClick={onCancel}>
           Cancel
-        </button>
+        </Button>
       </div>
     </div>
   );
@@ -278,7 +269,7 @@ function AddRunner({
     <form class="runner-add" method="post" onSubmit={add}>
       <div class="runner-pick">
         <Menu
-          summaryClass="btn secondary"
+          button={{ variant: 'secondary' }}
           label="Runner kind"
           align="left"
           wide
@@ -293,21 +284,15 @@ function AddRunner({
           {catalog
             .filter(each => each.available)
             .map(each => (
-              <button
+              <MenuRadio
                 key={each.kind}
-                type="button"
-                role="menuitemradio"
-                aria-checked={each.kind === kind}
-                class="pop-item rich"
-                onClick={() => pick(each)}
+                on={each.kind === kind}
+                onPick={() => pick(each)}
+                icon={KIND_ICONS[each.kind] ?? iPlug}
+                sub={each.available ? each.description : each.reason}
               >
-                <Icon d={KIND_ICONS[each.kind] ?? iPlug} />
-                <span class="grow">
-                  {each.name}
-                  <small>{each.available ? each.description : each.reason}</small>
-                </span>
-                <Icon d={iCheck} />
-              </button>
+                {each.name}
+              </MenuRadio>
             ))}
         </Menu>
         {spec?.connect === 'fields' ? (
@@ -346,9 +331,9 @@ function AddRunner({
                 disabled={!admin}
               />
             ) : null}
-            <button class="btn" aria-busy={busy} disabled={busy}>
+            <Button type="submit" loading={busy}>
               Add runner
-            </button>
+            </Button>
           </div>
         ) : (
           <>

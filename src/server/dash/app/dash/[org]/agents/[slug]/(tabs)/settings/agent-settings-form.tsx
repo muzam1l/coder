@@ -15,6 +15,7 @@ import type { AgentRow, AgentSettings, ConnectionRow, IntegrationInfo } from '@c
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { AgentToggle } from '@/app/dash/[org]/agents/agent/agent-toggle';
 import { Field } from '@/comps/ui/field';
+import { Button } from '@/comps/ui/button';
 import { Chips } from '@/comps/ui/badge';
 import { Select, type Option } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
@@ -403,7 +404,7 @@ export function AgentSettingsForm({
                 stops its events and new tasks in this workspace; its apps and tasks stay
               </small>
             </span>
-            <AgentToggle agent={agent} class="btn outline" />
+            <AgentToggle agent={agent} />
           </div>
           <div class="field row-action">
             <span>
@@ -414,14 +415,14 @@ export function AgentSettingsForm({
                   : `${agent.name} is built in and cannot be deleted; disable it above instead`}
               </small>
             </span>
-            <button
-              type="button"
-              class="btn secondary-danger"
+            <Button
+              variant="secondary"
+              danger
               disabled={!deletable}
               onClick={() => setDeleting(true)}
             >
               Delete agent
-            </button>
+            </Button>
           </div>
         </section>
 
@@ -432,9 +433,9 @@ export function AgentSettingsForm({
                 {saved}
               </span>
             ) : null}
-            <button class="btn" disabled={busy} aria-busy={busy}>
+            <Button type="submit" loading={busy}>
               Save
-            </button>
+            </Button>
           </div>
         )}
       </div>

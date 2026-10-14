@@ -21,3 +21,7 @@
 .copy-line > a:hover code {
   background: var(--accbg);
 }
+.icon-btn.copied,
+.icon-btn.copied:hover {
+  color: var(--ok);
+}

@@ -1,13 +1,16 @@
-import '@/comps/ui/segmented.css';
 import './range-bar.css';
 
-import { Link } from '@wular/pnext/link';
 import { PRESETS, dayOf, type Range } from '@/utils/range';
 import { CustomRange } from './custom-range';
 import { linkOf, withSearch, type To } from '@/comps/nav/to';
 import { iDown } from '@/comps/ui/icons';
 import { Icon } from '@/comps/ui/icon';
 import { BLANK } from '@/comps/frame/loading-card';
+import { LoadingMenu } from '@/comps/ui/menu-items';
+import { Segmented } from '@/comps/ui/segmented';
+import type { Option } from '@/comps/ui/select';
+
+const OPTIONS = Object.entries(PRESETS).map(([key, preset]): Option => [key, preset.short]);
 
 /** Presets and a custom span, for the usage pages. */
 export function RangeBar({
@@ -23,18 +26,16 @@ export function RangeBar({
   const today = dayOf(Date.now(), tz);
   return (
     <div class="range-line">
-      <div class="seg-btns" role="group" aria-label="Range">
-        {Object.entries(PRESETS).map(([key, preset]) => (
-          <Link
-            key={key}
-            {...linkOf(to)}
-            search={withSearch(to.search, { range: key })}
-            scroll={false}
-            aria-current={range.key === key ? 'page' : undefined}
-          >
-            {preset.short}
-          </Link>
-        ))}
+      <Segmented
+        label="Range"
+        options={OPTIONS}
+        value={range.key}
+        link={key => ({
+          ...linkOf(to),
+          search: withSearch(to.search, { range: key }),
+          scroll: false,
+        })}
+      >
         <CustomRange
           page={to}
           from={range.from ?? dayOf(range.since, tz)}
@@ -42,7 +43,7 @@ export function RangeBar({
           today={today}
           on={range.key === 'custom'}
         />
-      </div>
+      </Segmented>
       <span class="muted">{range.label}</span>
     </div>
   );
@@ -52,17 +53,17 @@ export function RangeBar({
 export function LoadingRange() {
   return (
     <div class="range-line" aria-hidden="true">
-      <div class="seg-btns">
-        {Object.values(PRESETS).map(preset => (
-          <a key={preset.short}>{preset.short}</a>
-        ))}
-        <span class="menu custom">
-          <button type="button" disabled tabIndex={-1}>
-            Custom
-            <Icon d={iDown} />
-          </button>
-        </span>
-      </div>
+      <Segmented label="Range" options={OPTIONS} value="">
+        <LoadingMenu
+          class="custom"
+          summary={
+            <>
+              Custom
+              <Icon d={iDown} />
+            </>
+          }
+        />
+      </Segmented>
       <span class="muted">{BLANK}</span>
     </div>
   );

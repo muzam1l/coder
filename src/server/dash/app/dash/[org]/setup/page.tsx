@@ -1,5 +1,5 @@
 import { dynamic } from '@wular/pnext/dynamic';
-import { Link } from '@wular/pnext/link';
+import { LinkButton } from '@/comps/ui/button';
 
 import { load, orgOf } from '@/api/load';
 import { Page, PageHead } from '@/comps/frame/page-head';
@@ -41,13 +41,14 @@ export default function SetupPage({ request }: { request?: Request }) {
                 outcome={readOutcome(url.searchParams) ?? { status: 'failed' }}
                 catalog={entries}
               >
-                <Link
-                  class="btn sm outline"
+                <LinkButton
+                  variant="outline"
+                  size="sm"
                   href="/dash/[org]/agents"
                   params={{ org: orgOf(request) }}
                 >
                   Open agents
-                </Link>
+                </LinkButton>
               </Outcome>
             );
           })

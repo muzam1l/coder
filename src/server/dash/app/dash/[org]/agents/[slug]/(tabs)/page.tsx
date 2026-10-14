@@ -2,7 +2,7 @@ import './page.css';
 import { dynamic } from '@wular/pnext/dynamic';
 
 import { formatDay, zoneOf } from '@/utils/format';
-import { Link } from '@wular/pnext/link';
+import { Button, LinkButton } from '@/comps/ui/button';
 import { load, orgOf } from '@/api/load';
 import type { AgentRow, VersionRow, Paged } from '@coder/client/types';
 import { Card, Empty } from '@/comps/ui/card';
@@ -104,18 +104,19 @@ function OverviewBody({
         title="Instructions"
         actions={
           editableAgent(agent) ? (
-            <Link
-              class="btn ghost sm"
+            <LinkButton
+              variant="ghost"
+              size="sm"
               href="/dash/[org]/agents/[slug]/edit"
               params={{ org, slug: agent.id }}
               search={{ section: 'instructions' }}
             >
               Edit
-            </Link>
+            </LinkButton>
           ) : agent.sourceUrl ? (
-            <a class="btn ghost sm" href={agent.sourceUrl} target="_blank" rel="noreferrer">
+            <Button variant="ghost" size="sm" href={agent.sourceUrl} external>
               Open source
-            </a>
+            </Button>
           ) : undefined
         }
       >

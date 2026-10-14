@@ -7,6 +7,7 @@ import type { CreateStep } from '@coder/integrations/types';
 import { client } from '@/utils/client';
 import { toastFailure } from '@/utils/action';
 import { Loading } from '@/comps/ui/card';
+import { Button } from '@/comps/ui/button';
 import {
   CreateDialog,
   createForm,
@@ -48,8 +49,6 @@ export function CreateLink({
       onClose={() => setOpen(false)}
     />
   ) : (
-    <button type="button" class="btn" onClick={() => setOpen(true)}>
-      {step.submit}
-    </button>
+    <Button onClick={() => setOpen(true)}>{step.submit}</Button>
   );
 }

@@ -1,6 +1,0 @@
-/* a solid red with white text in both themes; the dark theme's --bad is a pastel meant for text */
-.btn.destructive {
-  background: light-dark(#c92a2a, #d42f2f);
-  border-color: light-dark(#c92a2a, #d42f2f);
-  color: #fff;
-}

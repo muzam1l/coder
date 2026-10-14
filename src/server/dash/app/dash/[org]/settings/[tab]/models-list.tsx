@@ -7,7 +7,8 @@ import { useRef, useState } from 'preact/hooks';
 import { Card, FoldCard, Loading } from '@/comps/ui/card';
 import { Field } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
-import { MenuItem } from '@/comps/ui/menu';
+import { Button } from '@/comps/ui/button';
+import { MenuItem } from '@/comps/ui/menu-items';
 import { Select } from '@/comps/ui/select';
 import { Combo } from '@/comps/ui/combo';
 import {
@@ -167,9 +168,9 @@ function AddModel({
                 onChange={setEffort}
               />
             </Field>
-            <button class="btn" disabled={busy} aria-busy={busy}>
+            <Button type="submit" loading={busy}>
               Add
-            </button>
+            </Button>
           </div>
         ) : (
           <CustomFields
@@ -365,9 +366,9 @@ function CustomFields({
             </Field>
           </div>
         </details>
-        <button class="btn" disabled={busy} aria-busy={busy}>
+        <Button type="submit" loading={busy}>
           Add model
-        </button>
+        </Button>
       </div>
     </>
   );
@@ -471,15 +472,15 @@ export function ModelsList({
                 sub={target === name ? undefined : `→ ${target}`}
                 actions={
                   isDefault || entry?.disabled ? null : (
-                    <button
-                      type="button"
-                      class="btn ghost sm"
+                    <Button
+                      variant="ghost"
+                      size="sm"
                       onClick={() =>
                         void settings.patch({ engines: { [engine]: { model: name } } })
                       }
                     >
                       Make default
-                    </button>
+                    </Button>
                   )
                 }
                 menu={
