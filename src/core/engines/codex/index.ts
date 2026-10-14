@@ -22,6 +22,7 @@ import type { MailboxKey } from '../../mailbox';
 import { requestCodexControl, startCodexControlServer } from './control';
 import { binaryAvailable } from '../../../utils/process';
 import { engineEnvironment } from '../../connections';
+import { MACHINE_SANDBOX_ENV } from '../../config';
 import { isCodexSessionArchived, unarchiveCodexSession } from './sessions';
 import type { Availability, AuthStatus, Effort, McpServerSpec, TurnResult } from '../../types';
 import {
@@ -379,16 +380,16 @@ export async function runTurn(
     throw new Error('A prompt is required.');
   }
 
-  const profile = codexReadOnlyProfile(options.sandbox, options.writableRoots);
+  const mode =
+    process.env[MACHINE_SANDBOX_ENV] === '1' && (options.sandbox ?? 'read-only') !== 'read-only'
+      ? 'danger-full-access'
+      : options.sandbox;
+  const profile = codexReadOnlyProfile(mode, options.writableRoots);
   // A permission profile replaces the sandbox mode; codex rejects the two together.
-  const sandbox = profile ? {} : { sandbox: options.sandbox ?? 'read-only' };
+  const sandbox = profile ? {} : { sandbox: mode ?? 'read-only' };
   const merged = { ...(options.configOverrides ?? {}), ...profile };
   const configOverrides = Object.keys(merged).length ? merged : null;
-  const sandboxPolicy = codexSandboxPolicy(
-    options.sandbox,
-    options.networkAccess,
-    options.writableRoots,
-  );
+  const sandboxPolicy = codexSandboxPolicy(mode, options.networkAccess, options.writableRoots);
 
   const turnOn = async (client: AppServerClient): Promise<TurnResult> => {
     let controlServer: Awaited<ReturnType<typeof startCodexControlServer>> | null = null;

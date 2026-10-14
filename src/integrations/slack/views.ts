@@ -34,6 +34,19 @@ const linkButton = (id: string, url: string, text: string, primary?: boolean) =>
   ...(primary ? { style: 'primary' } : {}),
 });
 
+/** How people reach the agent in Slack, from the Slack events it listens to; none when nothing wakes it. */
+function ways(name: string, events: string[]): string | undefined {
+  const all = [
+    events.includes('mention') && `mention @${escaped(name)} in a channel`,
+    events.includes('message') && 'message it here',
+    events.includes('reaction') && 'react to a message',
+  ].filter((way): way is string => Boolean(way));
+  if (!all.length) return undefined;
+  const text = all.length > 1 ? `${all.slice(0, -1).join(', ')}, or ${all.at(-1)}` : all[0]!;
+
+  return `${text[0]!.toUpperCase()}${text.slice(1)}.`;
+}
+
 /** The Home tab: what the agent is, how to use it here, and links to it and to Coder. */
 function homeView(
   urls: { home: string; dash: string },
@@ -52,7 +65,7 @@ function homeView(
           .filter(Boolean)
           .join('\n'),
       ),
-      section(`*Use it here*\nMention @${escaped(name)} in a channel, or message it here.`),
+      ...(ways(name, events) ? [section(`*Use it here*\n${ways(name, events)}`)] : []),
       ...(listens.length ? [section(`*Listens to*\n${listens.join('\n')}`)] : []),
       { type: 'divider' },
       {
@@ -93,13 +106,19 @@ export async function welcome(
   if (!ctx.installationId) return;
   const agent = await ctx.agent?.();
   const name = agent?.name ?? ctx.name;
+  const use = ways(
+    ctx.name,
+    agent
+      ? (agent.listens.find(entry => entry.integration === slack.id)?.events ?? [])
+      : ['mention'],
+  );
   const blocks = [
     section(
       [`*${escaped(name)} is in your workspace*`, agent?.description && escaped(agent.description)]
         .filter(Boolean)
         .join('\n'),
     ),
-    section(`*Use it*\nMention @${escaped(ctx.name)} in a channel, or message it here.`),
+    ...(use ? [section(`*Use it*\n${use}`)] : []),
     ...(setup
       ? [section(`*One step left*\nAdd a model so ${escaped(name)} can start working.`)]
       : []),

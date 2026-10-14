@@ -8,7 +8,8 @@ import { type ServerContext } from '../context';
 import { start } from './flows';
 import { json, pageLimit } from '../routes/http';
 import { localLog, localTask, localTasks, sweepLocalQueue } from './local';
-import { copyRunnerLogs, readLog } from './logs';
+import { readLog } from './logs';
+import { inspectTask } from './kick';
 import { DONE, localRows } from './admin';
 import { StoreQueue, TOMBSTONE_MS } from './queue';
 import { runnerItems } from '../settings/runners';
@@ -66,23 +67,10 @@ export async function taskStream(
       const current = await ctx.store.get('task', taskId);
       if (!current) return undefined;
 
-      const archived = current.task.runner === 'github-actions' && current.handle;
-      const lines =
-        (['running', 'waiting'].includes(current.status) || (archived && !current.logsComplete)) &&
-        current.handle
-          ? await copyRunnerLogs(ctx, current, after, STREAM_LINES).catch(error => {
-              console.error(`coder server: runner logs for ${taskId} failed`, error);
-              return readLog(ctx.store, taskId, after, STREAM_LINES);
-            })
-          : await readLog(ctx.store, taskId, after, STREAM_LINES);
-      const pendingLogs = Boolean(
-        archived &&
-        DONE.has(current.status) &&
-        !current.logsComplete &&
-        !(await ctx.store.get('task', taskId))?.logsComplete,
-      );
+      const status = await inspectTask(ctx, current);
+      const lines = await readLog(ctx.store, taskId, after, STREAM_LINES);
 
-      return { status: current, lines, pendingLogs };
+      return { status, lines };
     }),
   );
 }

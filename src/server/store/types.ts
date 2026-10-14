@@ -393,7 +393,6 @@ export interface TaskStatus {
   logCursor?: number;
   logSeq?: number;
   logBytes?: number;
-  logsPulledAt?: number;
   logsComplete?: boolean;
   archivedAt?: number;
   /** Archived by the auto-archive sweep, which lists take up on their next read rather than as an event. */
@@ -417,7 +416,7 @@ export interface TaskStatus {
 export interface TaskLogLine {
   seq: number;
   at: number;
-  /** `out` and `err` from the runner, `sys` from the worker (retries, timeouts). */
+  /** `out` and `err` from the runner, `sys` from the server. */
   level: 'out' | 'err' | 'sys';
   line: string;
   entry?: import('../../core/state').TaskLogEntry;

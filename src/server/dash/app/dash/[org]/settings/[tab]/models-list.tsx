@@ -5,7 +5,7 @@ import type { ComponentChildren } from 'preact';
 import { useRef, useState } from 'preact/hooks';
 
 import { Card, FoldCard, Loading } from '@/comps/ui/card';
-import { ErrorText, Field } from '@/comps/ui/field';
+import { Field } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
 import { MenuItem } from '@/comps/ui/menu';
 import { Select } from '@/comps/ui/select';
@@ -18,7 +18,8 @@ import {
   type CustomProvider,
 } from '@/app/dash/[org]/settings/model-options';
 import { reasonText } from '@/utils/format';
-import { List, Row, useConfig, useSend } from './list';
+import { useAction } from '@/utils/action';
+import { List, Row, useConfig } from './list';
 import type {
   Config,
   ConfigShape,
@@ -73,7 +74,6 @@ function AddModel({
   admin,
   taken,
   efforts,
-  error,
   onAdd,
 }: {
   builtin: ModelsShape['builtin'];
@@ -83,7 +83,6 @@ function AddModel({
   efforts: Record<string, string | undefined>;
   /** Every model name in use. */
   taken: Record<string, unknown>;
-  error: string;
   onAdd: (act: () => Promise<Config>) => Promise<boolean>;
 }) {
   const [provider, setProvider] = useState('custom');
@@ -102,7 +101,6 @@ function AddModel({
     <FoldCard
       title="Add a model"
       note="A short name for an engine model, or an OpenAI-compatible endpoint"
-      actions={<ErrorText value={error} />}
     >
       <form
         class="add-form"
@@ -387,17 +385,20 @@ export function ModelsList({
   credentials: CredentialRow[] | null;
   admin: boolean;
 }) {
-  const models = useSend(first);
+  const [models, setModels] = useState(first);
+  const action = useAction();
   const settings = useConfig(config.config);
-  const refresh = (answer: Config) => ({ ...models.value, models: answer.models ?? {} });
+  const send = (act: () => Promise<Config>) =>
+    action.run('send', async () => {
+      const answer = await act();
+      setModels(now => ({ ...now, models: answer.models ?? {} }));
+    });
   const defaultOf = (engine: string) =>
     settings.value.engines?.[engine]?.model ?? config.effective.engines?.[engine]?.model;
-  const off = (name: string) => models.value.models[name]?.disabled === true;
+  const off = (name: string) => models.models[name]?.disabled === true;
   const chain = settings.value.chain ?? config.effective.chain ?? ENGINES;
 
-  const own = Object.entries(models.value.models).filter(
-    ([, entry]) => entry.provider || entry.baseUrl,
-  );
+  const own = Object.entries(models.models).filter(([, entry]) => entry.provider || entry.baseUrl);
   const shown: Array<{
     name: string;
     engine: string;
@@ -406,14 +407,14 @@ export function ModelsList({
     removable: boolean;
   }> = [
     // An alias named like a built-in replaces it, so the built-in row steps aside.
-    ...Object.entries(models.value.builtin).flatMap(([engine, names]) =>
+    ...Object.entries(models.builtin).flatMap(([engine, names]) =>
       Object.entries(names)
         .filter(([name]) => !own.some(([alias]) => alias === name))
         .map(([name, id]) => ({
           name,
           engine,
           target: id,
-          entry: models.value.models[name],
+          entry: models.models[name],
           removable: false,
         })),
     ),
@@ -433,12 +434,12 @@ export function ModelsList({
   return (
     <>
       <AddModel
-        builtin={models.value.builtin}
+        builtin={models.builtin}
         credentials={credentials}
         admin={admin}
         taken={{
-          ...models.value.models,
-          ...Object.assign({}, ...Object.values(models.value.builtin)),
+          ...models.models,
+          ...Object.assign({}, ...Object.values(models.builtin)),
         }}
         efforts={Object.fromEntries(
           ENGINES.map(engine => [
@@ -446,16 +447,10 @@ export function ModelsList({
             settings.value.engines?.[engine]?.effort ?? config.effective.engines?.[engine]?.effort,
           ]),
         )}
-        error={models.error}
-        onAdd={act => models.send(act, refresh)}
+        onAdd={send}
       />
-      {groups.map(([engine, list], index) => (
-        <List
-          key={engine}
-          title={ENGINE_NAMES[engine] ?? engine}
-          count={list.length}
-          error={index ? '' : settings.error}
-        >
+      {groups.map(([engine, list]) => (
+        <List key={engine} title={ENGINE_NAMES[engine] ?? engine} count={list.length}>
           {list.map(({ name, target, entry, removable }) => {
             const isDefault = [name, target].includes(defaultOf(engine) ?? '');
             return (
@@ -491,10 +486,7 @@ export function ModelsList({
                   <MenuItem
                     title={off(name) ? 'Enable' : 'Disable'}
                     onClick={() =>
-                      void models.send(
-                        () => client.models[off(name) ? 'enable' : 'disable'](name),
-                        refresh,
-                      )
+                      void send(() => client.models[off(name) ? 'enable' : 'disable'](name))
                     }
                   />
                 }
@@ -503,7 +495,7 @@ export function ModelsList({
                     ? {
                         title: `Remove ${name}?`,
                         body: 'Tasks that ask for it stop running.',
-                        onRemove: () => models.send(() => client.models.remove(name), refresh),
+                        onRemove: () => send(() => client.models.remove(name)),
                       }
                     : undefined
                 }

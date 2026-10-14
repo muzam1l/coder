@@ -7,6 +7,7 @@ import { decryptSecret, encryptCredential, encryptSecret } from '../store/secret
 import { createTaskToken } from '../tasks/token';
 import { type CredentialAccount } from './credentials';
 import { type CallbackContext } from '../tasks/callbacks';
+import { ENGINE_HOSTS } from '../runners/vercel-sandbox';
 
 export async function createLogin(
   req: Request,
@@ -27,6 +28,16 @@ export async function createLogin(
   if (!runner || runner.kind === 'github-actions')
     return json({ error: `Sign-in cannot run on the ${ctx.config.runner} runner.` }, 409);
 
+  const active = (await ctx.store.list('login')).find(
+    ({ value }) =>
+      value.owner === user &&
+      value.engine === engine &&
+      value.state !== 'done' &&
+      value.state !== 'failed' &&
+      value.expiresAt > now(ctx),
+  );
+  if (active) return json(view(active.id, active.value));
+
   const loginId = `login-${randomBytes(12).toString('base64url')}`;
   const token = createTaskToken(loginId, ctx.organizationId, 0);
   const login: EngineLogin = {
@@ -44,11 +55,20 @@ export async function createLogin(
 
   try {
     // Runners only read the id, and the login's env tells the runner process what to do.
-    const handle = await runner.start({ id: loginId } as AgentTask, {
-      CODER_SERVER: ctx.config.publicUrl ?? '',
-      CODER_TASK_TOKEN: token.token,
-      CODER_LOGIN: engine,
-    });
+    // Its machine lives no longer than the sign-in.
+    const handle = await runner.start(
+      { id: loginId } as AgentTask,
+      {
+        CODER_SERVER: ctx.config.publicUrl ?? '',
+        CODER_TASK_TOKEN: token.token,
+        CODER_LOGIN: engine,
+      },
+      undefined,
+      {
+        timeoutMs: LOGIN_TTL_MS,
+        hosts: [ENGINE_HOSTS[engine]!.api, ...ENGINE_HOSTS[engine]!.account],
+      },
+    );
     const current = await ctx.store.patchLogin(loginId, { handle }, { tokenHash: login.tokenHash });
     if (!current) {
       await runner.stop(handle).catch(() => {});
@@ -188,6 +208,19 @@ async function own(ctx: ServerContext, id: string): Promise<EngineLogin | undefi
   return login && login.owner === ctx.session?.user.id ? login : undefined;
 }
 
+/** Stops the machine a finished sign-in ran on; its result is already stored. */
+function release(ctx: ServerContext, login: EngineLogin) {
+  const stopping = login.handle && ctx.runners[login.runner]?.stop(login.handle);
+  if (!stopping) return;
+  const logged = stopping.catch(error =>
+    console.error(
+      `coder server: could not stop the machine of a finished ${login.engine} sign-in`,
+      error,
+    ),
+  );
+  ctx.waitUntil?.(logged);
+}
+
 type LoginCallback = {
   url?: unknown;
   code?: unknown;
@@ -253,7 +286,10 @@ export async function reportLogin(
     tokenHash: login.tokenHash,
   };
   if (typeof body.error === 'string') {
-    await ctx.store.patchLogin(id, { state: 'failed', error: body.error.slice(0, 500) }, active);
+    if (
+      await ctx.store.patchLogin(id, { state: 'failed', error: body.error.slice(0, 500) }, active)
+    )
+      release(ctx, login);
 
     return json({ ok: true });
   }
@@ -280,6 +316,8 @@ export async function reportLogin(
         : {}),
     });
     if (!completed) return json({ error: 'This sign-in changed. Try again.' }, 409);
+
+    release(ctx, login);
 
     return json({ ok: true });
   }

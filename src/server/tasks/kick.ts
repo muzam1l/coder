@@ -1,8 +1,7 @@
 import type { TaskStatus } from '../store/types';
 import { SERVER_LIMITS } from '../limits';
 import { scoped, type ServerContext } from '../context';
-import { taskCredential } from './context';
-import { copyRunnerLogs } from './logs';
+import { taskCredential, taskHosts } from './context';
 import type { ClaimedTask, TaskFence } from './queue';
 import { taskRunner, type Runner } from '../runners';
 import { startQueuedLocalTask, inspectLocalTask, localTasks, sweepLocalQueue } from './local';
@@ -19,12 +18,20 @@ function deadline<T>(work: Promise<T>, ms: number, operation: string): Promise<T
   ]).finally(() => clearTimeout(timer));
 }
 
-async function stop(ctx: ServerContext, runner: Runner, handle: string, taskId: string): Promise<void> {
+async function stop(
+  ctx: ServerContext,
+  runner: Runner,
+  handle: string,
+  taskId: string,
+): Promise<boolean> {
   try {
     await deadline(runner.stop(handle), ctx.runnerTimeoutMs ?? 10_000, 'runner stop');
   } catch (error) {
     console.error(`coder server: runner stop ${taskId} failed`, error);
+    return false;
   }
+
+  return true;
 }
 
 async function fail(
@@ -33,12 +40,8 @@ async function fail(
   error: string,
   fence: TaskFence = {},
 ): Promise<boolean> {
-  try {
-    await deadline(copyRunnerLogs(ctx, status), ctx.runnerTimeoutMs ?? 10_000, 'runner logs');
-  } catch (error) {
-    console.error(`coder server: runner logs ${status.task.id} failed`, error);
-  }
-  return ctx.queue.finish(
+  const runner = status.handle ? await taskRunner(ctx, status.task) : undefined;
+  const finished = await ctx.queue.finish(
     ctx.organizationId,
     status.task.id,
     { status: 'failed', error },
@@ -50,15 +53,37 @@ async function fail(
       ...fence,
     },
   );
+  if (finished) await stopTaskMachine(ctx, status, true, runner);
+
+  return finished;
 }
 
 async function inspect(ctx: ServerContext, status: TaskStatus, now: number): Promise<boolean> {
   if (ctx.local && status.handle?.startsWith('cli:')) return inspectLocalTask(ctx, status, now);
+  const runner = status.handle ? await taskRunner(ctx, status.task) : undefined;
   const activity = {
     handle: status.handle ?? null,
     lastSeenAt: status.lastSeenAt ?? null,
     updatedAt: status.updatedAt,
   };
+  if (status.cancelRequestedAt !== undefined && now - status.cancelRequestedAt >= 30_000) {
+    const finished = await ctx.queue.finish(
+      ctx.organizationId,
+      status.task.id,
+      {
+        status: 'cancelled',
+        error: 'The runner did not acknowledge cancellation within 30 seconds',
+      },
+      now,
+      {
+        attempts: status.attempts,
+        tokenHash: status.tokenHash,
+        generation: status.generation ?? 0,
+      },
+    );
+    if (finished) await stopTaskMachine(ctx, status, true, runner);
+    return finished;
+  }
   if (!status.handle) {
     if (
       now - (status.lastSeenAt ?? status.startedAt ?? status.updatedAt) <
@@ -74,14 +99,22 @@ async function inspect(ctx: ServerContext, status: TaskStatus, now: number): Pro
       ...activity,
     });
   }
-  const runner = await taskRunner(ctx, status.task);
-  if (status.startedAt !== undefined && now - status.startedAt >= ctx.config.taskTimeoutMs) {
-    if (runner) await stop(ctx, runner, status.handle, status.task.id);
+  if (status.startedAt !== undefined && now - status.startedAt >= ctx.config.taskTimeoutMs)
     return fail(ctx, status, 'timeout');
-  }
   if (!runner) return false;
   const seen = status.lastSeenAt ?? status.startedAt ?? status.updatedAt;
-  if (now - seen < (ctx.config.taskStallMs ?? 5 * 60 * 1000)) return false;
+  if (now - seen < Math.min(ctx.config.taskStallMs ?? 60_000, 60_000)) return false;
+  const checked = await ctx.store.withAppLock(
+    `runner-status:${ctx.organizationId}:${status.task.id}`,
+    async store => {
+      const key = `runner-status:${status.task.id}:${status.generation ?? 0}:${status.attempts}`;
+      const prior = await store.get('delivery', key);
+      if (prior && 'at' in prior && prior.at !== undefined && now - prior.at < 30_000) return false;
+      await store.put('delivery', key, { at: now }, { ttlMs: 60_000 });
+      return true;
+    },
+  );
+  if (!checked) return false;
   const state = await deadline(runner.status(status.handle), ctx.runnerTimeoutMs ?? 10_000, 'runner status');
   if (state.state === 'exited')
     return fail(
@@ -90,7 +123,67 @@ async function inspect(ctx: ServerContext, status: TaskStatus, now: number): Pro
       `runner exited${state.code === undefined ? '' : ` with code ${state.code}`}`,
       { handle: status.handle, lastSeenAt: status.lastSeenAt ?? null },
     );
-  return false;
+  return fail(ctx, status, 'The runner stopped reporting heartbeats', {
+    handle: status.handle,
+    lastSeenAt: status.lastSeenAt ?? null,
+  });
+}
+
+export async function inspectTask(ctx: ServerContext, status: TaskStatus): Promise<TaskStatus> {
+  if (!['running', 'waiting'].includes(status.status)) return status;
+  const changed = await inspect(ctx, status, (ctx.now ?? Date.now)()).catch(() => false);
+
+  return changed ? ((await ctx.store.get('task', status.task.id)) ?? status) : status;
+}
+
+export async function stopTaskMachine(
+  ctx: ServerContext,
+  status: TaskStatus,
+  force = false,
+  captured?: Runner,
+): Promise<void> {
+  const key = `${ctx.organizationId}:${status.task.id}:${status.attempts}`;
+  const check = ctx.settings?.cancelChecks?.get(key);
+  if (check) {
+    clearTimeout(check.timer);
+    check.finish();
+    ctx.settings!.cancelChecks!.delete(key);
+  }
+  if (!status.handle || status.logsComplete) return;
+  const runner = captured ?? (await taskRunner(ctx, status.task));
+  if (runner && (force || runner.kind === 'vercel-sandbox' || runner.kind === 'local-docker'))
+    if (!(await stop(ctx, runner, status.handle, status.task.id))) return;
+  await ctx.queue.patchTask(
+    ctx.organizationId,
+    status.task.id,
+    { logsComplete: true },
+    (ctx.now ?? Date.now)(),
+    {
+      attempts: status.attempts,
+      tokenHash: status.tokenHash,
+      generation: status.generation ?? 0,
+      handle: status.handle,
+    },
+  );
+}
+
+export function scheduleCancel(ctx: ServerContext, status: TaskStatus): void {
+  const key = `${ctx.organizationId}:${status.task.id}:${status.attempts}`;
+  const checks = ((ctx.settings ??= {}).cancelChecks ??= new Map());
+  if (checks.has(key)) return;
+  const work = new Promise<void>(resolve => {
+    const timer = setTimeout(resolve, 30_000);
+    checks.set(key, { timer, finish: resolve });
+  })
+    .then(async () => {
+      checks.delete(key);
+      const current = await ctx.store.get('task', status.task.id);
+      if (current && current.attempts === status.attempts && current.tokenHash === status.tokenHash)
+        await inspectTask(ctx, current);
+    })
+    .catch(error => console.error('coder server: cancellation check failed', error));
+  if (ctx.waitUntil) ctx.waitUntil(work);
+  else void work;
 }
 
 async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Promise<void> {
@@ -100,9 +193,9 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
     ctx.config.store === 'postgres'
       ? ctx.config.maxTasks
       : Math.min(concurrentTasks, ctx.config.maxTasks ?? concurrentTasks);
-  if (sweep) {
-    if (ctx.local) await sweepLocalQueue(ctx, ctx.local.cwd);
-    else await ctx.queue.archiveStopped(undefined, now());
+  {
+    if (sweep && ctx.local) await sweepLocalQueue(ctx, ctx.local.cwd);
+    else if (sweep) await ctx.queue.archiveStopped(undefined, now());
     const running = await ctx.queue.running();
     let freed = 0;
     for (const claimed of running) {
@@ -157,6 +250,8 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
     };
     let handle: string | undefined;
     try {
+      const credential =
+        runner.kind === 'vercel-sandbox' ? await taskCredential(taskCtx, status.task) : undefined;
       const start = runner.start(
         status.task,
         {
@@ -167,9 +262,12 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
           CODER_TASK_TOKEN: claimed.token,
           CODER_INBOX_MODE: runner.push ? 'push' : 'poll',
         },
-        runner.kind === 'vercel-sandbox'
-          ? (await taskCredential(taskCtx, status.task)).env
-          : undefined,
+        credential?.env,
+        {
+          timeoutMs: taskCtx.config.taskTimeoutMs + 60_000,
+          waitUntil: taskCtx.waitUntil,
+          ...(credential ? { hosts: await taskHosts(taskCtx, status.task, credential) } : {}),
+        },
       );
       handle = await deadline(start, taskCtx.runnerTimeoutMs ?? 30_000, 'runner start').catch(error => {
         void start.then(

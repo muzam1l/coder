@@ -24,7 +24,8 @@ import { backFrom } from '@/comps/frame/heads';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
 import { Status } from '@/app/dash/[org]/tasks/list/status';
 import { folderName, sourceLabel, taskActive, taskTitle } from '@/app/dash/[org]/tasks/list/task';
-import { Approval, TaskActions, useAction } from './task-actions';
+import { useAction } from '@/utils/action';
+import { Approval, TaskActions } from './task-actions';
 import { Activity, RunPreview, runSummary } from './activity';
 import { toastError, useTaskEvents, watchTask } from '@/comps/frame/task-toasts';
 
@@ -193,12 +194,10 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
   const [tab, setTab] = useState<Tab>('conversation');
   const [at, setAt] = useState<number | 'end'>();
   const [sent, setSent] = useState<Array<{ kind: string; text: string; turn: number }>>([]);
-  const [sending, setSending] = useState(false);
   const [asking, setAsking] = useState(0);
   // Answers already there at open have no known question; later ones pair with this session's asks in order.
   const knownAnswers = useRef(task.answer?.length ?? 0);
   const [ask, setAsk] = useState(false);
-  const [status, setStatus] = useState('');
   const after = useRef(initial.logs?.at(-1)?.seq ?? -1);
   const input = useRef<HTMLTextAreaElement>(null);
   const reply = useRef<HTMLFormElement>(null);
@@ -213,14 +212,13 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
     observer.observe(form);
     return () => observer.disconnect();
   }, [task.task.flow]);
-  const action = useAction(task.task.id);
+  const sender = useAction({ toast: 'Not sent' });
+  const asker = useAction({ toast: 'Not sent' });
+  const sending = Boolean(sender.pending);
   const live = taskActive(task);
   const replies = task.task.flow === 'default';
   const rows = useDisplayRows(lines);
   useEffect(() => watchTask(task.task.id, task.status, taskTitle(task)), [task.status]);
-  useEffect(() => {
-    if (action.error) toastError('Not sent', action.error);
-  }, [action.error]);
 
   const pending = useRef<TaskLog[]>([]);
   const append = (more: TaskLog[]) => {
@@ -249,9 +247,6 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
 
   // Logs stream from when the task runs until the stream ends them, which waits for logs still arriving.
   const [streaming, setStreaming] = useState(live);
-  useEffect(() => {
-    if (live) setStreaming(true);
-  }, [live]);
 
   // Each turn's reads apply to it alone: a continue, here or from elsewhere, starts the next.
   const [round, setRound] = useState(0);
@@ -263,9 +258,11 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
     void client.tasks
       .get(task.task.id)
       .then(({ logs: _logs, ...full }) => {
-        if (roundNow.current === started) setTask(full);
+        if (roundNow.current !== started) return;
+        setTask(full);
+        if (taskActive(full)) setStreaming(true);
       })
-      .catch(reason => setStatus(reasonText(reason)));
+      .catch(reason => toastError('Task not refreshed', reasonText(reason)));
   };
 
   // A running stream follows its own cursor; a stopped page fetches the lines it missed.
@@ -275,16 +272,18 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
   };
 
   // A new turn's prompt, from this page or elsewhere; its state comes from the events stream.
-  useEffect(() => {
-    if (!round) return;
+  const nextRound = () => {
+    const next = ++roundNow.current;
+    setRound(next);
+    setStreaming(true);
     void client.tasks
       .get(task.task.id)
       .then(({ turns }) => {
-        if (roundNow.current === round)
+        if (roundNow.current === next)
           setTask(current => (taskActive(current) ? { ...current, turns } : current));
       })
-      .catch(() => {});
-  }, [round]);
+      .catch(reason => console.error('coder dashboard: task turns', reason));
+  };
 
   // The head follows the browser's events stream; a finish brings the full task.
   useTaskEvents(
@@ -293,10 +292,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       if (live && !taskActive(event)) reload();
       // A new run, even one that finished and was continued between two events.
       const rerun = live && task.startedAt !== undefined && event.startedAt !== task.startedAt;
-      if (taskActive(event) && (!live || rerun)) {
-        setRound(value => value + 1);
-        setStreaming(true);
-      }
+      if (taskActive(event) && (!live || rerun)) nextRound();
       // A turn continued and finished elsewhere while this page heard nothing of it.
       if (!live && !taskActive(event) && event.finishedAt !== task.finishedAt) {
         reload();
@@ -331,7 +327,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
         append(more);
         if (more.length < LOG_CHUNK) setComplete(true);
       })
-      .catch(reason => setStatus(reasonText(reason)));
+      .catch(reason => toastError('Activity not loaded', reasonText(reason)));
   }, [complete, lines.length]);
 
   // A hidden tab holds no log stream and resumes from its cursor.
@@ -343,10 +339,9 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
         try {
           const response = await client.tasks.stream(task.task.id, after.current, abort.signal);
           if (!response.ok || !response.body) {
-            setStatus('Live updates stopped.');
+            toastError('Live updates stopped', 'Reload the page to see new activity.');
             return;
           }
-          setStatus('');
           for await (const event of serverEvents(response.body)) {
             if (abort.signal.aborted) return;
             if (event.event === 'log') append([JSON.parse(event.data)]);
@@ -355,7 +350,6 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
         } catch {
           if (abort.signal.aborted) return;
         }
-        setStatus('Reconnecting.');
         await new Promise(done => setTimeout(done, 1000));
       }
     };
@@ -382,19 +376,22 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       setSent(value => [...value, { kind, text, turn: turns.length - 1 }]);
       setAsking(count => count + 1);
       setTab('conversation');
-      void action.run(kind, { question: text }).then(ok => {
-        setAsking(count => count - 1);
-        if (!ok)
-          setSent(value => value.filter(message => message.text !== text || message.kind !== kind));
-      });
+      void asker
+        .run(kind, () => client.tasks.ask(task.task.id, text))
+        .then(ok => {
+          setAsking(count => count - 1);
+          if (!ok)
+            setSent(value =>
+              value.filter(message => message.text !== text || message.kind !== kind),
+            );
+        });
       return;
     }
-    setSending(true);
-    const ok = await action.run(kind, { text }).finally(() => setSending(false));
+    const ok = await sender.run(kind, () => client.tasks.steer(task.task.id, text));
     if (!ok) return;
     input.current!.value = '';
     if (kind === 'continue') {
-      setRound(value => value + 1);
+      nextRound();
       setTask(current => ({
         ...current,
         status: 'queued',
@@ -468,11 +465,6 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
           );
         })}
       </nav>
-      {status ? (
-        <p class="flash err" role="status">
-          {status}
-        </p>
-      ) : null}
       {tab === 'activity' ? (
         <Activity rows={rows} live={live} tz={tz} at={at} />
       ) : (

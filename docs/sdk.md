@@ -1,6 +1,6 @@
 # SDK
 
-Everything the CLI does, as a library. The SDK mirrors the CLI exactly: every command group is a namespace, every subcommand a function, with the same names and the same options (`coder --help` is the reference for both).
+Everything the CLI does, as a library. The SDK mirrors the CLI exactly: every command group is a namespace, every subcommand a function, with the same names and the same options (`coder --help` is the reference for both). TypeScript users install `zod` alongside it for the schema types.
 
 ```ts
 import coder from '@wular/coder';
@@ -50,7 +50,7 @@ SDK functions never print and never call `process.exit`; results come back as ty
 | `coder agent run --task <id>`                                                          | `agent.runTask(id, options?)` - the runner form, not for application code                                                                                                                                                                             |
 | `coder credentials list / add / remove / default`                                      | `credentials.list()` / `.add(label, { engine, env, workspace?, default?, noCheck? })` / `.remove(label, { workspace? })` / `.default(label, { workspace? })`, all with `{ server? }`                                                                 |
 | `coder agent usage [--since] [--by]`                                                   | `agent.usage({ since?, by?, server?, cwd? })`                                                                                                                                                                                                         |
-| `coder server serve / migrate / rotate-key`                                            | `server.serve(options?)` / `server.migrate(options?)` / `server.rotateKey(options?)`; `server.handler(env)` for serverless hosts, see [Self-hosting](self-host.md#deploy)                                                                             |
+| `coder server serve / rotate-key`                                                                        | `server.serve(options?)` / `server.rotateKey(options?)`; `server.handler(env)` for serverless hosts, see [Self-hosting](self-host.md#deploy)                                                                                                                                                                                                                 |
 
 Options objects take the same names as the CLI flags, camelCased (`--max-tasks` becomes `maxTasks`, `--server` becomes `server`). Every server option accepts `organization`, the `--workspace` flag's slug, which overrides the saved workspace for that call. `server` falls back to `CODER_SERVER`, then the hosted service; authentication comes from `auth.login()`, or from `token` when supplied; `yes: true` acknowledges the first use of a new server origin in non-interactive code.
 

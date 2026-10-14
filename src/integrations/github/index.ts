@@ -437,7 +437,9 @@ export const github: Integration = {
     presets: GITHUB_PRESETS,
     server: githubToolServer,
     install: GITHUB_MCP_SERVER_INSTALL,
+    installHosts: ['github.com', 'release-assets.githubusercontent.com'],
   },
+  hosts: ['github.com', 'api.github.com', 'codeload.github.com'],
   get app() {
     return githubApp;
   },

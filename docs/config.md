@@ -90,7 +90,7 @@ Tunes the `auto` permission mode; ignored by `read-only` and `workspace-write`.
 | `escalationTimeoutMs` | How long an escalated approval waits for an answer before auto-denying and letting the task move on. Default `120000`. |
 | `allowedNetworkHosts` | Hosts (and their subdomains) coders may reach without an approval when network sandboxing is active. Default `[]`.     |
 
-`allowedNetworkHosts` is pre-allowed in the Claude sandbox and auto-accepted by the Codex approval policy when `engines.codex.network` is `false`. A bare hostname covers its subdomains; anything else escalates as usual. Listing `localhost`, `127.0.0.1` or `::1` also lets sandboxed Claude commands serve on local ports (macOS), so a task can run a dev server.
+`allowedNetworkHosts` is pre-allowed in the Claude sandbox and auto-accepted by the Codex approval policy when `engines.codex.network` is `false`. A bare hostname covers its subdomains; anything else escalates as usual. Listing `localhost`, `127.0.0.1` or `::1` also lets sandboxed Claude commands serve on local ports (macOS), so a task can run a dev server. On `vercel-sandbox` they also open the firewall of tasks below `auto`.
 
 Allowlist only hosts you trust: the check is by name, not by the address the name resolves to.
 

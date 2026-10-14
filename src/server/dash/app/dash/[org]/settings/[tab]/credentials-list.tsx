@@ -4,13 +4,13 @@ import './credentials-list.css';
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { client, poll } from '@/utils/client';
+import { client, usePoll } from '@/utils/client';
+import { toastFailure, useAction } from '@/utils/action';
 import { iCheck, iCopy, iDots } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import type { CredentialRow, EngineStatus, Me } from '@coder/client/types';
 import { Card, Loading } from '@/comps/ui/card';
 import { reasonText } from '@/utils/format';
-import { ErrorText } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
 import { Icon } from '@/comps/ui/icon';
 import { Menu, MenuItem } from '@/comps/ui/menu';
@@ -139,26 +139,21 @@ function KeyField({
   const input = useRef<HTMLInputElement>(null);
   const [name, setName] = useState(engine.key);
   const [scope, setScope] = useState('personal');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const action = useAction({ leaves: true });
+  const busy = Boolean(action.pending);
   useEffect(() => {
     if (autoFocus) input.current?.focus();
   }, []);
   const save = () => {
     if (busy || !value.trim() || !name.trim()) return;
-    setBusy(true);
-    setError('');
-    void client.credentials
-      .add({
+    void action.run('save', async () => {
+      await client.credentials.add({
         engine: engine.id,
         env: { [token ? 'CLAUDE_CODE_OAUTH_TOKEN' : name.trim()]: value.trim() },
         ...(scope === 'workspace' && !token ? { workspace: true } : {}),
-      })
-      .then(onSaved)
-      .catch(reason => {
-        setBusy(false);
-        setError(reasonText(reason));
       });
+      onSaved();
+    });
   };
   return (
     <form
@@ -204,7 +199,6 @@ function KeyField({
           disabled={token}
         />
       ) : null}
-      <ErrorText value={error} />
       <button hidden />
     </form>
   );
@@ -242,20 +236,22 @@ function SignIn({
   const [copied, setCopied] = useState(false);
   const [opened, setOpened] = useState(false);
 
-  useEffect(() => {
-    if (!login.id || login.state === 'done' || login.state === 'failed') return;
-    const timer = setTimeout(() => {
-      void client.credentials
-        .loginStatus(login.id)
-        .then(next => {
-          if (next.state === 'done') return onDone();
-          if (next.state === 'failed') return onError(next.error ?? 'Sign-in failed. Try again.');
-          onChange(next);
-        })
-        .catch(reason => onError(reasonText(reason)));
-    }, 800);
-    return () => clearTimeout(timer);
-  }, [login]);
+  usePoll(
+    login.id && login.state !== 'done' && login.state !== 'failed'
+      ? () =>
+          client.credentials
+            .loginStatus(login.id)
+            .then(next => {
+              if (next.state === 'done') return onDone();
+              if (next.state === 'failed')
+                return onError(next.error ?? 'Sign-in failed. Try again.');
+              onChange(next);
+            })
+            .catch(reason => onError(reasonText(reason)))
+      : undefined,
+    800,
+    [login.id],
+  );
 
   const onCode = (code: string) => {
     onChange({ ...login, state: 'verifying' });
@@ -335,46 +331,31 @@ function SignIn({
 /** A server on this machine: tasks use its own claude and codex logins, so nothing is stored here. */
 export function EngineLogins({ status: initial }: { status: EngineStatus }) {
   const [status, setStatus] = useState(initial);
-  const [busy, setBusy] = useState('');
-  const [error, setError] = useState('');
-  const waiting = useRef<() => void>();
-
+  const action = useAction();
   // A sign-in finishes in the browser the engine opened; the status says when.
-  const watch = (engine: string) => {
-    waiting.current?.();
-    const until = Date.now() + 5 * 60_000;
-    // A status read from a sign-in already stopped never stops the next one.
-    let current = true;
-    const stopPoll = poll(async () => {
-      const next = await client.engines.status();
-      if (!current) return;
-      setStatus(next);
-      if (next[engine as 'claude' | 'codex']?.signedIn || Date.now() > until) {
-        stop();
-        setBusy('');
-      }
-    }, 2000);
-    const stop = () => {
-      current = false;
-      stopPoll();
-    };
-    waiting.current = stop;
-  };
-  useEffect(() => () => waiting.current?.(), []);
-  const act = (engine: string, action: 'login' | 'logout') => {
-    setBusy(`${engine}:${action}`);
-    setError('');
-    client.engines[action](engine)
-      .then(next => {
-        setStatus(next);
-        if (action === 'login') watch(engine);
-        else setBusy('');
-      })
-      .catch(reason => {
-        setBusy('');
-        setError(reasonText(reason));
-      });
-  };
+  const [watching, setWatching] = useState<{ engine: string; until: number }>();
+  const busy = action.pending ?? (watching ? `${watching.engine}:login` : '');
+
+  usePoll(
+    watching
+      ? async signal => {
+          const next = await client.engines.status();
+          // A status read from a sign-in already stopped never stops the next one.
+          if (signal.aborted) return;
+          setStatus(next);
+          if (next[watching.engine as 'claude' | 'codex']?.signedIn || Date.now() > watching.until)
+            setWatching(undefined);
+        }
+      : undefined,
+    2000,
+    [watching],
+  );
+
+  const act = (engine: string, kind: 'login' | 'logout') =>
+    void action.run(`${engine}:${kind}`, async () => {
+      setStatus(await client.engines[kind](engine));
+      if (kind === 'login') setWatching({ engine, until: Date.now() + 5 * 60_000 });
+    });
 
   return (
     <>
@@ -418,14 +399,7 @@ export function EngineLogins({ status: initial }: { status: EngineStatus }) {
                 </button>
               )}
               {signingIn ? (
-                <button
-                  type="button"
-                  class="btn ghost sm"
-                  onClick={() => {
-                    waiting.current?.();
-                    setBusy('');
-                  }}
-                >
+                <button type="button" class="btn ghost sm" onClick={() => setWatching(undefined)}>
                   Cancel
                 </button>
               ) : null}
@@ -433,7 +407,6 @@ export function EngineLogins({ status: initial }: { status: EngineStatus }) {
           </Card>
         );
       })}
-      <ErrorText value={error} />
       <p class="muted">
         On the local server, custom models read their key variable from this machine's environment.
       </p>
@@ -452,18 +425,55 @@ export function CredentialsList({
 }) {
   const nav = useRouter();
   const org = useOrg();
-  const [error, setError] = useState('');
-  const [pending, setPending] = useState('');
   const [adding, setAdding] = useState('');
   const [logins, setLogins] = useState<Partial<Record<Login['engine'], Login>>>({});
   const [chosen, setChosen] = useState<Record<string, string>>({});
   const token = !me.user;
   const admin = token || ADMIN_ROLES.has(me.organization?.role ?? '');
   const subscriptions = me.server?.subscriptions;
-  useEffect(() => setPending(''), [rows]);
+  const action = useAction({ refresh: true, leaves: true });
+  // A row's action stays busy until the refreshed rows arrive.
+  const [acted, setActed] = useState(rows);
+  const pending = acted === rows ? (action.pending ?? '') : '';
 
-  const setLogin = (engine: Login['engine'], login?: Login) =>
+  // The tab remembers its sign-ins in progress, so a reload picks them back up.
+  const saved = `coder-logins:${org}`;
+  const remembered = (): Partial<Record<Login['engine'], string>> => {
+    try {
+      return JSON.parse(sessionStorage.getItem(saved) ?? '{}');
+    } catch {
+      return {};
+    }
+  };
+  const setLogin = (engine: Login['engine'], login?: Login) => {
     setLogins(all => ({ ...all, [engine]: login }));
+    try {
+      const ids = { ...remembered(), [engine]: login?.id || undefined };
+      sessionStorage.setItem(saved, JSON.stringify(ids));
+    } catch {}
+  };
+
+  // A sign-in started on this page wins over a restore still in flight.
+  const started = useRef(new Set<Login['engine']>());
+
+  useEffect(() => {
+    for (const [engine, id] of Object.entries(remembered()) as [Login['engine'], string][]) {
+      void client.credentials
+        .loginStatus(id)
+        .then(next => {
+          if (started.current.has(engine)) return;
+          if (next.state === 'done') return done(engine);
+          if (next.state === 'failed') {
+            setLogin(engine);
+            return toastFailure(next.error ?? 'Sign-in failed. Try again.');
+          }
+          setLogin(engine, next);
+        })
+        .catch(() => {
+          if (!started.current.has(engine)) setLogin(engine);
+        });
+    }
+  }, []);
 
   const done = (engine?: Login['engine']) => {
     if (engine) setLogin(engine);
@@ -472,34 +482,29 @@ export function CredentialsList({
   };
 
   const signIn = (engine: Login['engine']) => {
-    setError('');
+    started.current.add(engine);
     setLogin(engine, { id: '', engine, state: 'starting' });
     void client.credentials
       .login(engine)
       .then(next => setLogin(engine, next))
       .catch(reason => {
         setLogin(engine);
-        setError(reasonText(reason));
+        toastFailure(reason);
       });
   };
 
   const act = (row: CredentialRow, kind: 'default' | 'remove') => {
     if (pending) return Promise.resolve();
-    setPending(`${row.scope}/${row.label}/${kind}`);
-    setError('');
-    return client.credentials[kind === 'default' ? 'setDefault' : 'remove'](row.label, {
-      workspace: row.scope === 'workspace',
-    })
-      .then(() => nav.refresh())
-      .catch(reason => {
-        setPending('');
-        setError(reasonText(reason));
-      });
+    setActed(rows);
+    return action.run(`${row.scope}/${row.label}/${kind}`, () =>
+      client.credentials[kind === 'default' ? 'setDefault' : 'remove'](row.label, {
+        workspace: row.scope === 'workspace',
+      }),
+    );
   };
 
   return (
     <>
-      <ErrorText value={error} />
       {ENGINES.map(engine => {
         const own = rows.filter(row => row.engine === engine.id);
         const canSignIn = engine.id !== 'custom' && !token && Boolean(subscriptions?.[engine.id]);
@@ -591,7 +596,7 @@ export function CredentialsList({
                       onDone={() => done(active.engine)}
                       onError={reason => {
                         setLogin(active.engine);
-                        setError(reason);
+                        toastFailure(reason);
                       }}
                     />
                   ) : how === 'signin' ? (

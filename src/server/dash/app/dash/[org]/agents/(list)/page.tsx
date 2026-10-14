@@ -75,10 +75,7 @@ export default function AgentsPage({ request }: { request?: Request }) {
               >
                 {connect.length ? <ConnectApps apps={connect} /> : null}
                 {count === 0 ? (
-                  <NeedsCredential
-                    reason="Agents need a model credential to run."
-                    back={`/dash/${orgOf(request)}/agents`}
-                  />
+                  <NeedsCredential reason="Agents need a model credential to run." />
                 ) : null}
               </AgentsGrid>
             );

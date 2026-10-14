@@ -5,10 +5,12 @@ import { useEffect, useState } from 'preact/hooks';
 import type { IntegrationInfo } from '@coder/client/types';
 import type { CreateStep } from '@coder/integrations/types';
 import { client } from '@/utils/client';
-import { reasonText } from '@/utils/format';
+import { toastFailure } from '@/utils/action';
 import { Loading } from '@/comps/ui/card';
-import { ErrorText } from '@/comps/ui/field';
-import { CreateDialog, createForm } from '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/platform-actions';
+import {
+  CreateDialog,
+  createForm,
+} from '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/platform-actions';
 
 /** A create link opened outside the Platforms tab: its form here, or the platform's own. */
 export function CreateLink({
@@ -20,7 +22,7 @@ export function CreateLink({
   state: Record<string, string>;
   info?: IntegrationInfo;
 }) {
-  const [error, setError] = useState('');
+  const [failed, setFailed] = useState(false);
   const [open, setOpen] = useState(true);
   const [step, setStep] = useState<CreateStep>();
   const start = () => client.apps.start(integration, state);
@@ -28,10 +30,13 @@ export function CreateLink({
   useEffect(() => {
     void createForm(info?.create, state, start)
       .then(setStep)
-      .catch(reason => setError(reasonText(reason)));
+      .catch(reason => {
+        setFailed(true);
+        toastFailure(reason);
+      });
   }, []);
 
-  if (error) return <ErrorText value={error} />;
+  if (failed) return null;
   if (!step) return <Loading label={`Opening ${info?.name ?? integration}`} />;
 
   return open ? (

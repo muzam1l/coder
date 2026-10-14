@@ -2,13 +2,12 @@ import { randomBytes } from 'node:crypto';
 import process from 'node:process';
 
 import { enabledIntegrations } from '../../integrations';
-import { createRunners } from '../runners';
+import { createRunners, runnerSnapshots } from '../runners';
 import { nearestRegion } from '../runners/vercel-sandbox';
 import type { RunnerKind } from '../../agent/types';
 import { CoderError } from '../../core/dispatch';
 import { seedBuiltinAgents } from '../agents/records';
 import { remoteAgentLoader } from '../agents/repo';
-import { migrationStatus } from '../store/pg/migrate';
 import { loadServerConfig } from '../env';
 import { handleRequest } from '../routes';
 import { DashboardHosts } from '../dash/serve';
@@ -96,22 +95,6 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
   };
 
   const backend = await createBackend(config, { local: Boolean(options.local) });
-  if (backend.connection) {
-    try {
-      const status = await migrationStatus(backend.connection.db);
-      if (!status.applied)
-        throw new CoderError('server', 'The database is not set up yet.', {
-          hint: 'Create the tables: coder server migrate',
-        });
-      if (status.pending)
-        warnings.push(
-          `database is ${status.pending} migration${status.pending === 1 ? '' : 's'} behind; run coder server migrate`,
-        );
-    } catch (error) {
-      await backend.close();
-      throw error;
-    }
-  }
 
   try {
     if (config.store === 'memory')
@@ -131,10 +114,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
       local: !(options.host === 'vercel' || env.VERCEL),
       sandbox: {
         region: nearestRegion(config.databaseUrl),
-        snapshots: {
-          get: key => snapshots.get('snapshot', key),
-          put: (key, value) => snapshots.put('snapshot', key, value),
-        },
+        snapshots: runnerSnapshots(snapshots),
       },
     });
     if (!runners[config.runner]) {

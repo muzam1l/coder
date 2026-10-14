@@ -3,9 +3,8 @@
 import { useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { toastFailure, useAction } from '@/utils/action';
 import { Card } from '@/comps/ui/card';
-import { reasonText } from '@/utils/format';
-import { ErrorText } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
 import { Select } from '@/comps/ui/select';
 import { Row } from './list';
@@ -30,13 +29,9 @@ export function TaskSecrets({
   const [adding, setAdding] = useState(false);
   const [scope, setScope] = useState(admin || local ? '' : 'me');
   const [renewing, setRenewing] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const action = useAction();
+  const busy = Boolean(action.pending);
 
-  const failed = (reason: unknown) => {
-    setBusy(false);
-    setError(reasonText(reason));
-  };
   const open = adding || !rows.length;
   const put = (row: ConnectionRow) =>
     setRows(now =>
@@ -50,14 +45,11 @@ export function TaskSecrets({
       title="Task secrets"
       count={rows.length || undefined}
       actions={
-        <>
-          <ErrorText value={error} />
-          {!open ? (
-            <button type="button" class="btn ghost sm" onClick={() => setAdding(true)}>
-              Add
-            </button>
-          ) : null}
-        </>
+        open ? null : (
+          <button type="button" class="btn ghost sm" onClick={() => setAdding(true)}>
+            Add
+          </button>
+        )
       }
     >
       <div class="cred-engine">
@@ -86,13 +78,10 @@ export function TaskSecrets({
                           event.preventDefault();
                           const key = String(new FormData(event.currentTarget).get('key') ?? '');
                           if (!key.trim()) return;
-                          setBusy(true);
-                          setError('');
-                          void client.connections.update(row.id, { key: key.trim() }).then(next => {
-                            put(next);
+                          void action.run('renew', async () => {
+                            put(await client.connections.update(row.id, { key: key.trim() }));
                             setRenewing('');
-                            setBusy(false);
-                          }, failed);
+                          });
                         }}
                       >
                         <input
@@ -122,7 +111,10 @@ export function TaskSecrets({
                     onRemove: () =>
                       client.connections
                         .remove(row.id)
-                        .then(() => setRows(now => now.filter(each => each.id !== row.id)), failed),
+                        .then(
+                          () => setRows(now => now.filter(each => each.id !== row.id)),
+                          toastFailure,
+                        ),
                   }}
                 />
               ))}
@@ -141,22 +133,19 @@ export function TaskSecrets({
                 const env = String(values.get('env') ?? '').trim();
                 const key = String(values.get('key') ?? '').trim();
                 if (!env || !key) return;
-                setBusy(true);
-                setError('');
-                void client.connections
-                  .add({
-                    name: env,
-                    provider: 'env',
-                    key,
-                    keyIn: { env },
-                    ...(scope ? { owner: 'me' as const } : {}),
-                  })
-                  .then(row => {
-                    put(row);
-                    box.reset();
-                    setBusy(false);
-                    setAdding(false);
-                  }, failed);
+                void action.run('add', async () => {
+                  put(
+                    await client.connections.add({
+                      name: env,
+                      provider: 'env',
+                      key,
+                      keyIn: { env },
+                      ...(scope ? { owner: 'me' as const } : {}),
+                    }),
+                  );
+                  box.reset();
+                  setAdding(false);
+                });
               }}
             >
               <input

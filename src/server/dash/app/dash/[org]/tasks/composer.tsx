@@ -7,6 +7,7 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hook
 
 import type { LocalFolder, LocalFolders } from '@coder/client/types';
 import { client } from '@/utils/client';
+import { toastFailure, useAction } from '@/utils/action';
 import { formatDate } from '@/utils/format';
 import { iAlert, iCheck, iDown, iPlus, iRight, iSliders, iSteer, iX } from '@/comps/ui/icons';
 import { Link } from '@wular/pnext/link';
@@ -14,7 +15,6 @@ import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Loading } from '@/comps/ui/card';
 import { reasonText } from '@/utils/format';
-import { ErrorText } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
 import { Select, type Option } from '@/comps/ui/select';
 import { MenuRadio } from '@/comps/ui/menu';
@@ -30,6 +30,7 @@ import { folderName } from '@/app/dash/[org]/tasks/list/task';
 import { watchTask } from '@/comps/frame/task-toasts';
 import { CHOICE, PLACEHOLDER, loadComposer, savedChoice, usableAgent } from './composer-data';
 import { Notice } from '@/comps/ui/notice';
+import { CredentialsLink } from '@/comps/nav/back';
 
 /** What the composer runs with; the last one used comes back through the `compose` cookie. */
 export interface Choice {
@@ -230,21 +231,14 @@ const stepped = (
 };
 
 /** A credential link that comes back here with the draft kept. */
-export function NeedsCredential({ reason, back }: { reason?: string; back?: string }) {
-  const org = useOrg();
-
+export function NeedsCredential({ reason, label }: { reason?: string; label?: string }) {
   return (
     <Notice tone="warning" slim>
       <Icon d={iAlert} />
       <span class="grow">{reason || 'Tasks need a model credential to run.'}</span>
-      <Link
-        class="btn outline sm"
-        href="/dash/[org]/settings/[tab]"
-        params={{ org, tab: 'credentials' }}
-        search={{ return: back ?? `/dash/${org}/tasks` }}
-      >
+      <CredentialsLink class="btn outline sm" label={label}>
         Add credential
-      </Link>
+      </CredentialsLink>
     </Notice>
   );
 }
@@ -273,7 +267,6 @@ export function Composer({
   const [lists, setLists] = useState(data);
   const [pulls, setPulls] = useState<{ repo: string; items?: Pull[] }>();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
   // Why no credential can run it, once a start says so.
   const [needs, setNeeds] = useState<string>();
   // The model row whose effort choices are open.
@@ -313,7 +306,7 @@ export function Composer({
       .then(items => setPulls({ repo, items }))
       .catch(reason => {
         setPulls({ repo, items: [] });
-        setError(reasonText(reason));
+        toastFailure(reason);
       });
     void client.flows
       .list(repo)
@@ -334,17 +327,14 @@ export function Composer({
       .then(rows => setLists(current => ({ ...current, repos: rows.map(row => row.repo) })));
   };
   // Repositories the saved list misses, such as ones created since the platform was connected.
-  const [refreshing, setRefreshing] = useState(false);
+  const repos = useAction();
+  const refreshing = Boolean(repos.pending);
   const refreshRepos = () => {
     reposRead.current = true;
-    setRefreshing(true);
-    void client.repositories
-      .refresh()
-      .then(
-        rows => setLists(current => ({ ...current, repos: rows.map(row => row.repo) })),
-        reason => setError(reasonText(reason)),
-      )
-      .finally(() => setRefreshing(false));
+    void repos.run('refresh', async () => {
+      const rows = await client.repositories.refresh();
+      setLists(current => ({ ...current, repos: rows.map(row => row.repo) }));
+    });
   };
   const choosingRepo = !choice.repo && /^\/review\s/.test(text);
   useEffect(() => void (choosingRepo && readRepos()), [choosingRepo]);
@@ -355,9 +345,7 @@ export function Composer({
     if (value === PICK) return void pickFolder();
     if (value === REFRESH) return refreshing ? undefined : refreshRepos();
     if (value === CONNECT)
-      return void connectRepositories(`/dash/${org}/tasks`).catch(reason =>
-        setError(reasonText(reason)),
-      );
+      return void connectRepositories(`/dash/${org}/tasks`).catch(toastFailure);
     apply({ [key]: value });
     if (key === 'repo' || key === 'cwd') box.current?.focus({ preventScroll: true });
   };
@@ -368,8 +356,7 @@ export function Composer({
   };
 
   const chose = (checked: Awaited<ReturnType<typeof client.folders.check>>) => {
-    if (!checked.ok) return setError(checked.detail);
-    setError('');
+    if (!checked.ok) return toastFailure(checked.detail);
     setTyping('');
     setAdded(current => [
       ...current.filter(each => each.path !== checked.folder.path),
@@ -424,7 +411,7 @@ export function Composer({
     if (!pr && command && !(command === 'flow' ? name : /^#?\d+$/.test(name)))
       return void setDismissed(false);
     const review = pr ?? (command === 'review' ? Number(name.replace('#', '')) : undefined);
-    if (review && !choice.repo) return setError('Pick a repository first.');
+    if (review && !choice.repo) return toastFailure('Pick a repository first.');
     const { agent, engine, model, effort, permissions, runner } = choice;
     const [repo, cwd] = lists.folders ? ['', choice.cwd] : [choice.repo, ''];
     const fields = Object.fromEntries(
@@ -433,7 +420,6 @@ export function Composer({
       ),
     );
     setBusy(true);
-    setError('');
     try {
       const created = review
         ? await client.review({ ...fields, repo: choice.repo, pr: review })
@@ -446,7 +432,7 @@ export function Composer({
     } catch (reason) {
       setBusy(false);
       if ((reason as { status?: number }).status === 409) setNeeds(reasonText(reason));
-      else setError(reasonText(reason));
+      else toastFailure(reason);
     }
   };
 
@@ -653,7 +639,6 @@ export function Composer({
                   if (cloning) return event.preventDefault();
                   if (event.key === 'Escape') {
                     event.preventDefault();
-                    setError('');
                     return setTyping('');
                   }
                   if (event.key !== 'Enter' || event.isComposing) return;
@@ -709,7 +694,6 @@ export function Composer({
         {typing === 'url' ? (
           <small class="folder-hint">Uses this machine's git logins</small>
         ) : null}
-        <ErrorText value={error} />
         <div
           id={`${id}-settings`}
           class="pop composer-settings"
@@ -909,7 +893,9 @@ export function NewTaskButton({ agent }: { agent?: string }) {
             tz={Intl.DateTimeFormat().resolvedOptions().timeZone}
           />
         ) : error ? (
-          <ErrorText value={error} />
+          <p class="flash err" role="alert">
+            {error}
+          </p>
         ) : (
           <LoadingComposer />
         )}

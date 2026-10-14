@@ -36,7 +36,7 @@ coder flow run audit-routes --wait
 
 ## Flows are plain modules
 
-A flow is an ordinary TypeScript module: import the primitives, use top-level `await`, and `export default` the result. Input comes in through the `args` import (see [`args`](#args)):
+A flow is an ordinary TypeScript module: import the primitives, use top-level `await`, and `export default` the result. `@wular/coder/flow` and `zod` come with Coder, so the repository installs neither. Input comes in through the `args` import (see [`args`](#args)):
 
 ```ts
 // .coder/flows/verify-wave.ts
@@ -80,8 +80,8 @@ Returns `{ taskId, status, output, data?, tokens, model }`. If the task fails, `
 Give a task this run started one more turn on its own thread, under the same task id, and await it. It mirrors `coder task steer --wait`, with the same `model`, `effort` and `permissions` overrides:
 
 ```ts
-const draft = await task('Draft the migration for the new orders table.');
-const fixed = await steer(draft.taskId, 'Now add the down migration.');
+const draft = await task('Draft the schema for the new orders table.');
+const fixed = await steer(draft.taskId, 'Now add the indexes.');
 ```
 
 Returns the same shape as `task()` without `data`, throws if the turn fails, and is journaled like `task()`.

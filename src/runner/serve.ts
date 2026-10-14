@@ -217,8 +217,6 @@ export function runnerController(options: {
       }
       if (req.method === 'GET' && action === 'status')
         return json(await options.runner.status(handle));
-      if (req.method === 'GET' && action === 'logs')
-        return json(await options.runner.logs(handle, Number(url.searchParams.get('after') ?? -1)));
       if (req.method === 'POST' && action === 'stop') {
         await options.runner.stop(handle);
         return new Response(null, { status: 204 });

@@ -13,6 +13,7 @@ import { workspaceAdmin } from '../routes/guards';
 import { json } from '../routes/http';
 import { safeEqual, sha256 } from '../../utils/crypto';
 import { HttpRunner } from '../runners/http';
+import { RUNNER_IMAGE } from '../runners';
 
 export function dockerAvailable(): boolean {
   return (process.env.PATH ?? '').split(path.delimiter).some(dir => {
@@ -29,6 +30,7 @@ export function dockerAvailable(): boolean {
 export function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
   const local = Boolean(ctx.local);
   const docker = local && dockerAvailable();
+  const tarball = { key: 'tarballUrl', label: 'Package URL', hint: "Leave empty for this server's published version.", optional: true };
   return [
     {
       kind: 'local',
@@ -50,12 +52,13 @@ export function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
         {
           key: 'image',
           label: 'Image',
-          placeholder: 'node:22',
-          hint: 'node 20 or newer',
+          placeholder: RUNNER_IMAGE,
+          hint: 'Needs Bun, Node, Git, curl, tar, Claude Code, Codex and GitHub MCP server.',
           optional: true,
         },
         { key: 'memory', label: 'Memory limit', placeholder: '4g', optional: true },
         { key: 'cpus', label: 'CPU limit', placeholder: '2', optional: true },
+        tarball,
       ],
       available: docker,
       ...(!docker
@@ -97,6 +100,7 @@ export function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
           hint: 'nearest if empty',
           optional: true,
         },
+        tarball,
       ],
       available: true,
     },
@@ -128,6 +132,7 @@ export function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
           hint: 'default branch if empty',
           optional: true,
         },
+        tarball,
       ],
       available: true,
     },

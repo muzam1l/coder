@@ -65,9 +65,7 @@
 }
 /* success, warning or error: a bar on top in its tone, as on dialogs */
 .toast:is(.success, .warning, .error) {
-  box-shadow:
-    inset 0 3px 0 var(--tone),
-    0 12px 32px rgba(0, 0, 0, 0.18);
+  border-top: 3px solid var(--tone);
 }
 .toast.success {
   --tone: var(--ok);

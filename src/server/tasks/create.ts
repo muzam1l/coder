@@ -239,7 +239,7 @@ export async function createTask(
     ? (loaded as { credential?: string }).credential
     : (await resolveCredential(ctx.store, settings.engine, requester))?.id;
   const engine = settings.engine ?? DEFAULT_ENGINE;
-  if (!credential && chosen.runner !== 'http' && !(await machineSignedIn(ctx, engine)))
+  if (!credential && chosen.runner !== 'http' && !(await machineSignedIn(ctx, settings.engine)))
     throw new TaskInputError(
       `No ${engine} credential is connected`,
       409,

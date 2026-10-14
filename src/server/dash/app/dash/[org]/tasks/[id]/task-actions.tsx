@@ -1,19 +1,18 @@
 'use client';
 
-import { useEffect, useState } from 'preact/hooks';
+import { useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { useAction } from '@/utils/action';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import type { TaskRow } from '@coder/client/types';
 import { Card } from '@/comps/ui/card';
-import { reasonText } from '@/utils/format';
-import { ErrorText } from '@/comps/ui/field';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 import { Menu, MenuItem } from '@/comps/ui/menu';
 import { Icon } from '@/comps/ui/icon';
 import { iDots } from '@/comps/ui/icons';
-import { showToast, toastError } from '@/comps/frame/task-toasts';
+import { showToast } from '@/comps/frame/task-toasts';
 
 export function approvalParts(approval: unknown): {
   id?: string;
@@ -31,92 +30,45 @@ export function approvalParts(approval: unknown): {
   };
 }
 
-const DONE = {
-  approve: 'Decision sent.',
-  archive: 'Archived.',
-  ask: 'Question sent.',
-  cancel: 'Stop requested.',
-  continue: 'Sent.',
-  steer: 'Steer sent.',
-};
-
-export function useAction(taskId: string) {
-  const [error, setError] = useState('');
-  const [outcome, setOutcome] = useState('');
-  const [pending, setPending] = useState<keyof typeof DONE>();
-  const run = async (
-    name: keyof typeof DONE,
-    body: {
-      text?: string;
-      question?: string;
-      approvalId?: string;
-      decision?: 'accept' | 'decline';
-    } = {},
-  ) => {
-    setError('');
-    setOutcome('');
-    setPending(name);
-    try {
-      if (name === 'approve')
-        await client.tasks.approve(taskId, body.approvalId ?? '', body.decision ?? 'decline');
-      else if (name === 'ask') await client.tasks.ask(taskId, body.question ?? '');
-      else if (name === 'continue' || name === 'steer')
-        await client.tasks.steer(taskId, body.text ?? '');
-      else await client.tasks[name](taskId);
-      setOutcome(DONE[name]!);
-      return true;
-    } catch (reason) {
-      setError(reasonText(reason));
-      return false;
-    } finally {
-      setPending(undefined);
-    }
-  };
-  return { error, outcome, pending, setError, run };
-}
-
-export function Flash({ error, outcome }: { error: string; outcome: string }) {
-  return error ? (
-    <ErrorText value={error} />
-  ) : (
-    <span class="flash" role="status">
-      {outcome}
-    </span>
-  );
-}
-
 /** Archive, Stop while it runs, and Delete behind the ⋯ menu; phones keep Archive in the menu too, away from Stop. */
 export function TaskActions({ task, live }: { task: TaskRow; live: boolean }) {
   const nav = useRouter();
   const org = useOrg();
-  const action = useAction(task.task.id);
+  const action = useAction();
+  const removing = useAction({ leaves: true });
+  const [outcome, setOutcome] = useState('');
   const [archived, setArchived] = useState(Boolean(task.archivedAt));
-  const [deleting, setDeleting] = useState<'ask' | 'busy'>();
+  const [confirming, setConfirming] = useState(false);
 
-  const remove = () => {
-    setDeleting('busy');
-    action.setError('');
-    void client.tasks
-      .delete(task.task.id)
-      .then(() => nav.push('/dash/[org]/tasks', { params: { org } }))
-      .catch(reason => {
-        setDeleting(undefined);
-        action.setError(reasonText(reason));
-      });
+  const act = async (name: 'cancel' | 'archive') => {
+    setOutcome('');
+    const ok = await action.run(name, () => client.tasks[name](task.task.id));
+    if (ok) setOutcome(name === 'cancel' ? 'Stop requested.' : 'Archived.');
+    return ok;
   };
 
-  const archive = () => void action.run('archive').then(setArchived);
+  const remove = () =>
+    void removing
+      .run('delete', async () => {
+        await client.tasks.delete(task.task.id);
+        nav.push('/dash/[org]/tasks', { params: { org } });
+      })
+      .then(ok => ok || setConfirming(false));
+
+  const archive = () => void act('archive').then(setArchived);
 
   return (
     <>
-      <Flash {...action} />
+      <span class="flash" role="status">
+        {outcome}
+      </span>
       {live ? (
         <button
           type="button"
           class="btn outline"
           disabled={Boolean(action.pending)}
           aria-busy={action.pending === 'cancel'}
-          onClick={() => void action.run('cancel')}
+          onClick={() => void act('cancel')}
         >
           Stop
         </button>
@@ -141,40 +93,36 @@ export function TaskActions({ task, live }: { task: TaskRow; live: boolean }) {
               .then(() => showToast('Copied', task.task.id))
           }
         />
-        <MenuItem title="Delete" danger onClick={() => setDeleting('ask')} />
+        <MenuItem title="Delete" danger onClick={() => setConfirming(true)} />
       </Menu>
       <ConfirmDialog
-        open={Boolean(deleting)}
+        open={confirming}
         title="Delete this task?"
         body="Its conversation, activity and diff go with it."
         confirmLabel="Delete"
-        busy={deleting === 'busy'}
+        busy={Boolean(removing.pending)}
         onConfirm={remove}
-        onClose={() => setDeleting(undefined)}
+        onClose={() => setConfirming(false)}
       />
     </>
   );
 }
 
 export function Approval({ task }: { task: TaskRow }) {
-  const action = useAction(task.task.id);
-  const [busy, setBusy] = useState<'accept' | 'decline'>();
+  const action = useAction({ toast: 'Not sent' });
+  const busy = action.pending;
   // A sent decision hides its card at once; the events stream catches up after.
   const [decided, setDecided] = useState<string>();
   const { id, action: tool, reason } = approvalParts(task.approval);
 
   const decide = async (decision: 'accept' | 'decline') => {
-    setBusy(decision);
-    const ok = await action.run('approve', { approvalId: id, decision });
-    setBusy(undefined);
+    const ok = await action.run(decision, () =>
+      client.tasks.approve(task.task.id, id ?? '', decision),
+    );
     if (!ok) return;
     setDecided(id);
     showToast(decision === 'accept' ? 'Allowed' : 'Denied', 'The task continues.');
   };
-
-  useEffect(() => {
-    if (action.error) toastError('Not sent', action.error);
-  }, [action.error]);
 
   if (id && decided === id) return null;
 

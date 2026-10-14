@@ -5,10 +5,11 @@ import './connections-list.css';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { toastFailure, useAction } from '@/utils/action';
 import { held } from '@/utils/paged';
 import { Card, Empty, FoldCard, Loading } from '@/comps/ui/card';
 import { reasonText } from '@/utils/format';
-import { ErrorText, Field } from '@/comps/ui/field';
+import { Field } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
 import { Icon } from '@/comps/ui/icon';
 import { iAlert } from '@/comps/ui/icons';
@@ -176,30 +177,25 @@ type AddProps = {
   admin: boolean;
   operator: boolean;
   onAdded: (row: ConnectionRow) => void;
-  onError: (reason: string) => void;
 };
 
 /** The add forms' shared send: a sign-in answer goes to the platform, anything else joins the list. */
-function useAdd({ local, admin, onAdded, onError }: Omit<AddProps, 'operator'>) {
-  const [busy, setBusy] = useState(false);
+function useAdd({ local, admin, onAdded }: Omit<AddProps, 'operator'>) {
+  const action = useAction({ leaves: true });
   const [owner, setOwner] = useState(admin || local ? '' : 'me');
-  const add = (body: ConnectionInput, onFail?: (reason: unknown) => void) => {
-    setBusy(true);
-    onError('');
-    void client.connections.add({ ...body, ...(owner ? { owner: 'me' } : {}) }).then(
-      ({ authorize, ...row }: Answer) => {
-        if (authorize) return location.assign(authorize);
-        onAdded(row);
-      },
-      reason => {
-        setBusy(false);
-        onError(reasonText(reason));
-        onFail?.(reason);
-      },
-    );
-  };
+  const add = (body: ConnectionInput, onFail?: (reason: unknown) => void) =>
+    void action.run('add', async () => {
+      const { authorize, ...row }: Answer = await client.connections
+        .add({ ...body, ...(owner ? { owner: 'me' } : {}) })
+        .catch(reason => {
+          onFail?.(reason);
+          throw reason;
+        });
+      if (authorize) return location.assign(authorize);
+      onAdded(row);
+    });
   const who = <Who local={local} admin={admin} value={owner} onChange={setOwner} />;
-  return { busy, add, who };
+  return { busy: Boolean(action.pending), add, who };
 }
 
 /** A platform account: sign in there, then tasks use Coder's own tools for it. */
@@ -589,13 +585,11 @@ function AddConnection({
   onAdded: (row: ConnectionRow) => void;
 }) {
   const [kind, setKind] = useState(catalog.some(info => info.personal) ? 'platform' : 'mcp');
-  const [error, setError] = useState('');
   const [round, setRound] = useState(0);
   const props: AddProps = {
     local,
     admin,
     operator,
-    onError: setError,
     onAdded: row => {
       onAdded(row);
       setRound(round + 1);
@@ -603,22 +597,9 @@ function AddConnection({
   };
 
   return (
-    <FoldCard
-      opened={empty}
-      title="Add a connection"
-      note="A platform account, or any MCP server"
-      actions={<ErrorText value={error} />}
-    >
+    <FoldCard opened={empty} title="Add a connection" note="A platform account, or any MCP server">
       <div class="conn-add">
-        <Segmented
-          label="What to connect"
-          options={KINDS}
-          value={kind}
-          onChange={next => {
-            setKind(next);
-            setError('');
-          }}
-        />
+        <Segmented label="What to connect" options={KINDS} value={kind} onChange={setKind} />
         <p class="muted">{HELP[kind]}</p>
       </div>
       {kind === 'platform' ? (
@@ -634,15 +615,14 @@ function AddConnection({
 function NewKey({
   row,
   onSaved,
-  onError,
   onClose,
 }: {
   row: ConnectionRow;
   onSaved: (row: ConnectionRow) => void;
-  onError: (reason: string) => void;
   onClose: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const action = useAction({ leaves: true });
+  const busy = Boolean(action.pending);
   const input = useRef<HTMLInputElement>(null);
   useEffect(() => input.current?.focus(), []);
 
@@ -654,12 +634,9 @@ function NewKey({
         event.preventDefault();
         const key = String(new FormData(event.currentTarget).get('key') ?? '').trim();
         if (!key) return;
-        setBusy(true);
-        onError('');
-        void client.connections.update(row.id, { key }).then(onSaved, reason => {
-          setBusy(false);
-          onError(reasonText(reason));
-        });
+        void action.run('save', async () =>
+          onSaved(await client.connections.update(row.id, { key })),
+        );
       }}
     >
       <input
@@ -697,8 +674,7 @@ export function ConnectionsList({
 }) {
   const [rows, setRows] = useState(first.filter(row => row.provider !== 'env'));
   const [keying, setKeying] = useState<ConnectionRow>();
-  const [busy, setBusy] = useState('');
-  const [error, setError] = useState('');
+  const action = useAction({ leaves: true });
 
   const put = (row: ConnectionRow) =>
     setRows(now =>
@@ -709,14 +685,8 @@ export function ConnectionsList({
 
   const reconnect = (row: ConnectionRow) => {
     if (row.auth === 'key') return setKeying(row);
-    setBusy(row.id);
-    setError('');
-    void client.connections.authorize(row.id).then(
-      ({ url }) => location.assign(url),
-      reason => {
-        setBusy('');
-        setError(reasonText(reason));
-      },
+    void action.run(row.id, async () =>
+      location.assign((await client.connections.authorize(row.id)).url),
     );
   };
 
@@ -731,7 +701,7 @@ export function ConnectionsList({
         empty={!first.some(row => row.provider !== 'env')}
         onAdded={put}
       />
-      <Card title="Connections" count={rows.length} actions={<ErrorText value={error} />}>
+      <Card title="Connections" count={rows.length}>
         {rows.length ? (
           <div class="table-scroll">
             <table class="rows settings conns">
@@ -755,8 +725,8 @@ export function ConnectionsList({
                         <button
                           type="button"
                           class="btn outline sm"
-                          disabled={busy === row.id}
-                          aria-busy={busy === row.id}
+                          disabled={action.pending === row.id}
+                          aria-busy={action.pending === row.id}
                           onClick={() => reconnect(row)}
                         >
                           Reconnect
@@ -767,10 +737,12 @@ export function ConnectionsList({
                       title: `Remove ${row.name}?`,
                       body: 'Tasks stop using it, and its key or sign-in is deleted.',
                       onRemove: () =>
-                        client.connections.remove(row.id).then(
-                          () => setRows(now => now.filter(each => each.id !== row.id)),
-                          reason => setError(reasonText(reason)),
-                        ),
+                        client.connections
+                          .remove(row.id)
+                          .then(
+                            () => setRows(now => now.filter(each => each.id !== row.id)),
+                            toastFailure,
+                          ),
                     }}
                   />
                 ))}
@@ -785,7 +757,6 @@ export function ConnectionsList({
         {keying ? (
           <NewKey
             row={keying}
-            onError={setError}
             onSaved={row => {
               put(row);
               setKeying(undefined);

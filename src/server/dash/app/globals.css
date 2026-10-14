@@ -1,26 +1,23 @@
 @font-face {
-  font-family: "Fira Code";
+  font-family: 'Fira Code';
   font-style: normal;
   font-weight: 400;
   font-display: optional;
-  src: url("/assets/fonts/fira-code-latin-400-normal-717ee080.woff2")
-    format("woff2");
+  src: url('/assets/fonts/fira-code-latin-400-normal-717ee080.woff2') format('woff2');
 }
 @font-face {
-  font-family: "Fira Code";
+  font-family: 'Fira Code';
   font-style: normal;
   font-weight: 500;
   font-display: optional;
-  src: url("/assets/fonts/fira-code-latin-500-normal-530b6706.woff2")
-    format("woff2");
+  src: url('/assets/fonts/fira-code-latin-500-normal-530b6706.woff2') format('woff2');
 }
 @font-face {
-  font-family: "Fira Code";
+  font-family: 'Fira Code';
   font-style: normal;
   font-weight: 700;
   font-display: optional;
-  src: url("/assets/fonts/fira-code-latin-700-normal-98730669.woff2")
-    format("woff2");
+  src: url('/assets/fonts/fira-code-latin-700-normal-98730669.woff2') format('woff2');
 }
 
 :root {
@@ -52,12 +49,12 @@
   --s3: light-dark(#1baf7a, #199e70);
   --s4: light-dark(#eda100, #c98500);
   --s0: light-dark(#b9bdc5, #3d414a);
-  --mono: "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --mono: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
-[data-theme="light"] {
+[data-theme='light'] {
   color-scheme: light;
 }
-[data-theme="dark"] {
+[data-theme='dark'] {
   color-scheme: dark;
 }
 
@@ -293,12 +290,12 @@ th,
   cursor: not-allowed;
   filter: none;
 }
-.btn[aria-busy="true"]:not(:has(> .ic:first-child)) {
+.btn[aria-busy='true']:not(:has(> .ic:first-child)) {
   position: relative;
   -webkit-text-fill-color: transparent;
 }
-.btn[aria-busy="true"]:not(:has(> .ic:first-child))::after {
-  content: "";
+.btn[aria-busy='true']:not(:has(> .ic:first-child))::after {
+  content: '';
   position: absolute;
   inset: 0;
   width: 12px;
@@ -310,7 +307,7 @@ th,
   animation: spin 0.8s linear infinite;
 }
 /* with an icon, the label stays and the icon turns into the spinner */
-.btn[aria-busy="true"] > .ic:first-child {
+.btn[aria-busy='true'] > .ic:first-child {
   width: 12px;
   height: 12px;
   margin: 2px;
@@ -319,7 +316,7 @@ th,
   border-radius: 50%;
   animation: spin 0.8s linear infinite;
 }
-.btn[aria-busy="true"] > .ic:first-child > * {
+.btn[aria-busy='true'] > .ic:first-child > * {
   display: none;
 }
 .icon-btn {
@@ -421,6 +418,9 @@ h1 {
 }
 .flash.err {
   color: var(--bad);
+}
+.flash.reserved {
+  min-height: 1lh;
 }
 .scroll-box {
   max-height: var(--max, 280px);
@@ -556,7 +556,7 @@ th.num a {
   font-weight: 500;
 }
 .cover::after {
-  content: "";
+  content: '';
   position: absolute;
   inset: 0;
 }
@@ -569,7 +569,7 @@ th.num a {
   text-align: right;
   white-space: nowrap;
 }
-input:not([type="checkbox"]):not([type="radio"]),
+input:not([type='checkbox']):not([type='radio']),
 select,
 textarea {
   width: 100%;
@@ -590,8 +590,8 @@ textarea:focus {
   border-color: var(--acc);
   box-shadow: 0 0 0 3px var(--accbg);
 }
-input[type="checkbox"],
-input[type="radio"] {
+input[type='checkbox'],
+input[type='radio'] {
   accent-color: var(--deep);
   width: 15px;
   height: 15px;
@@ -599,8 +599,8 @@ input[type="radio"] {
   flex: none;
 }
 select:enabled,
-input[type="checkbox"]:enabled,
-input[type="radio"]:enabled {
+input[type='checkbox']:enabled,
+input[type='radio']:enabled {
   cursor: pointer;
 }
 .fields {
@@ -718,7 +718,7 @@ pnext-hole {
   }
 }
 /* add forms: the name stays short, the id takes the room, pickers keep their width */
-.add-grid > .field:has(> input[name="name"]) {
+.add-grid > .field:has(> input[name='name']) {
   flex: 0 1 220px;
 }
 .add-grid > .field:has(> .select) {

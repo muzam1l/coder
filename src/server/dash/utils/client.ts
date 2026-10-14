@@ -1,5 +1,7 @@
 'use client';
 
+import { useEffect, useRef } from 'preact/hooks';
+
 import { ServerClient } from '@coder/client';
 
 export const client = new ServerClient(
@@ -28,7 +30,7 @@ export async function signOut(): Promise<void> {
 }
 
 /** Runs `work` every `ms` once the last run settles, skipping while the tab is hidden; returns its stop. */
-export function poll(work: () => Promise<unknown>, ms: number): () => void {
+function poll(work: () => Promise<unknown>, ms: number): () => void {
   let timer: ReturnType<typeof setTimeout>;
   let stopped = false;
   const next = () => {
@@ -37,7 +39,7 @@ export function poll(work: () => Promise<unknown>, ms: number): () => void {
   const run = () => {
     if (document.visibilityState === 'hidden') return next();
     void work()
-      .catch(() => {})
+      .catch(reason => console.error('coder dashboard: poll', reason))
       .finally(next);
   };
   next();
@@ -46,4 +48,26 @@ export function poll(work: () => Promise<unknown>, ms: number): () => void {
     stopped = true;
     clearTimeout(timer);
   };
+}
+
+/** Polls `work` while it is set, and stops on unmount or when `inputs` change; `signal` says a run's poll has stopped. */
+export function usePoll(
+  work: ((signal: AbortSignal) => Promise<unknown>) | undefined,
+  ms: number,
+  inputs: unknown[] = [],
+) {
+  const latest = useRef(work);
+  latest.current = work;
+  const on = Boolean(work);
+
+  useEffect(() => {
+    if (!on) return;
+    const abort = new AbortController();
+    const stop = poll(async () => latest.current?.(abort.signal), ms);
+
+    return () => {
+      abort.abort();
+      stop();
+    };
+  }, [on, ms, ...inputs]);
 }

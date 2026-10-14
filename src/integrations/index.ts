@@ -3,10 +3,10 @@ import { github } from './github';
 import { linear } from './linear';
 import { slack } from './slack';
 
-/** Catalog order is display order: chat and code first, mail last. */
+/** Catalog order is display order: chat first, then code and issues. */
 export const INTEGRATIONS: Record<string, Integration> = {
-  github,
   slack,
+  github,
   linear,
 };
 

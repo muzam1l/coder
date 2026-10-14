@@ -118,7 +118,6 @@ Connections live in `~/.coder`, or on your Coder server with `--server`; `--acce
 | `coder runner serve --url <public url>` | Run your server's tasks on this machine.                                                       |
 | `coder runner list`                     | Your runners and the workspace's. `add`, `test`, `default`, `rename` and `remove` manage them. |
 | `coder server serve`                    | Run a Coder server. See [Self-hosting](self-host.md).                                          |
-| `coder server migrate`                  | Apply pending database migrations.                                                             |
 | `coder server rotate-key`               | Re-seal stored secrets with a new `SERVER_ENCRYPTION_KEY`.                                     |
 | `coder server app create <integration>` | Create the built-in agent's public app on a platform.                                          |
 | `coder server workflow`                 | Print the GitHub Actions workflow the `github-actions` runner uses.                            |

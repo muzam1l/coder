@@ -11,7 +11,12 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
-import { CLAUDE_PERMISSION_FLAGS, CLAUDE_SIDECAR_FLAGS, claudeTurnSettings } from '../../config';
+import {
+  CLAUDE_PERMISSION_FLAGS,
+  CLAUDE_SIDECAR_FLAGS,
+  MACHINE_SANDBOX_ENV,
+  claudeTurnSettings,
+} from '../../config';
 import { mailboxId, type MailboxKey } from '../../mailbox';
 import { shortPath } from '../../../utils/fsx';
 import { CLI_PATH } from '../../runtime';
@@ -42,13 +47,22 @@ const CLAUDE_VERSION_ENV = 'CODER_CLAUDE_VERSION';
 // Flatten a tool_result block's content (string, or array of text parts) to
 // raw text for progress output.
 function toolResultText(content: any): string {
-  if (typeof content === 'string') {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content.map(part => (typeof part?.text === 'string' ? part.text : '')).join('');
-  }
-  return content == null ? '' : JSON.stringify(content);
+  const binary = (value: any): boolean =>
+    value &&
+    typeof value === 'object' &&
+    (typeof value.data === 'string' ||
+      typeof value.blob === 'string' ||
+      Object.values(value).some(binary));
+  const text = (part: any): string => {
+    if (typeof part === 'string') return part;
+    if (binary(part) || ['image', 'document', 'audio', 'video', 'file'].includes(part?.type))
+      return `[${part?.type ?? 'binary'}]`;
+    if (typeof part?.text === 'string') return part.text;
+
+    return part == null ? '' : JSON.stringify(part);
+  };
+
+  return Array.isArray(content) ? content.map(text).join('') : text(content);
 }
 
 function textLineCount(text: string): number {
@@ -418,9 +432,11 @@ export function buildClaudeTurnArgs(
     }
   } else if (readOnlyAllowedTools.length) {
     // Sidecar: a stricter deny list than plain read-only, then the inspection
-    // tools it is granted. See CLAUDE_SIDECAR_FLAGS for why Bash goes too.
+    // tools it is granted. Machine sandboxes keep Bash for inspection.
     args.push(
-      ...CLAUDE_SIDECAR_FLAGS,
+      ...CLAUDE_SIDECAR_FLAGS.filter(
+        flag => process.env[MACHINE_SANDBOX_ENV] !== '1' || flag !== 'Bash',
+      ),
       ...mcpConfigFlags,
       '--allowedTools',
       ...readOnlyAllowedTools,
@@ -442,14 +458,14 @@ export function buildClaudeTurnArgs(
   ]) {
     args.push('--add-dir', directory);
   }
-  // Read-only is enforced by claude's OS sandbox, scoped to deny writes to this
-  // workspace; passed as a settings JSON string so it needs no on-disk config.
+  // The OS sandbox enforces read-only writes when available.
   const turnSettings = claudeTurnSettings(
     permissions,
     cwd,
     options.allowedNetworkHosts ?? [],
     additionalDirectories,
     writableDirectories,
+    process.env[MACHINE_SANDBOX_ENV] !== '1',
   );
   const settings = {
     ...(turnSettings ? JSON.parse(turnSettings) : {}),
@@ -810,10 +826,11 @@ export async function runClaudeTurn(
       options.onHeartbeat?.();
       if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
         streamSessionId = event.session_id;
-      } else if (event.type === 'assistant') {
+      } else if (event.type === 'assistant' || event.type === 'user') {
         // Each block is logged with its kind, so the text views can tell a
         // command apart from prose without parsing the message back out.
-        const usage = normalizeClaudeUsage(event.message?.usage);
+        const usage =
+          event.type === 'assistant' ? normalizeClaudeUsage(event.message?.usage) : null;
         if (usage) {
           outputSoFar += usage.output;
           const total = usage.input + usage.cachedInput + outputSoFar;
@@ -829,7 +846,7 @@ export async function runClaudeTurn(
           }
         }
         for (const block of event.message?.content ?? []) {
-          if (block?.type === 'tool_use') {
+          if (block?.type === 'tool_use' || block?.type?.endsWith('_tool_use')) {
             const name = String(block.name ?? 'Tool');
             if (block.id) openCalls.set(String(block.id), { name, at: Date.now() });
             if (WRITING_TOOLS.has(name)) {
@@ -843,7 +860,22 @@ export async function runClaudeTurn(
               message: describeClaudeToolUse(name, block.input ?? {}, cwd),
               threadId: streamSessionId,
             });
+          } else if (block?.type === 'tool_result' || block?.type?.endsWith('_tool_result')) {
+            const text = toolResultText(block.content).trim();
+            const failed =
+              block.is_error === true || block.content?.type?.endsWith('_error') === true;
+            const call = block.tool_use_id ? openCalls.get(String(block.tool_use_id)) : undefined;
+            if (block.tool_use_id) openCalls.delete(String(block.tool_use_id));
+            options.onProgress?.({
+              kind: 'tool-result',
+              ...(block.tool_use_id ? { callId: String(block.tool_use_id) } : {}),
+              ...(call ? { tool: call.name, durationMs: Date.now() - call.at } : {}),
+              ...(failed ? { isError: true } : {}),
+              message: text || (failed ? '(tool failed with no output)' : '(no output)'),
+              threadId: streamSessionId,
+            });
           } else if (
+            event.type === 'assistant' &&
             block?.type === 'text' &&
             typeof block.text === 'string' &&
             block.text.trim()
@@ -854,6 +886,7 @@ export async function runClaudeTurn(
               threadId: streamSessionId,
             });
           } else if (
+            event.type === 'assistant' &&
             block?.type === 'thinking' &&
             typeof block.thinking === 'string' &&
             block.thinking.trim()
@@ -864,26 +897,6 @@ export async function runClaudeTurn(
               kind: 'reasoning',
               message: block.thinking.trim(),
               durationMs: Math.max(0, Date.now() - lastEventAt),
-              threadId: streamSessionId,
-            });
-          }
-        }
-      } else if (event.type === 'user') {
-        // Forward tool results raw, so intermediate command output is visible.
-        for (const block of event.message?.content ?? []) {
-          if (block?.type === 'tool_result') {
-            const text = toolResultText(block.content).trim();
-            const failed = block.is_error === true;
-            const call = block.tool_use_id ? openCalls.get(String(block.tool_use_id)) : undefined;
-            if (block.tool_use_id) openCalls.delete(String(block.tool_use_id));
-            // An empty result still closes its call.
-            if (!text && !failed && !call) continue;
-            options.onProgress?.({
-              kind: 'tool-result',
-              ...(block.tool_use_id ? { callId: String(block.tool_use_id) } : {}),
-              ...(call ? { tool: call.name, durationMs: Date.now() - call.at } : {}),
-              ...(failed ? { isError: true } : {}),
-              message: text || (failed ? '(tool failed with no output)' : ''),
               threadId: streamSessionId,
             });
           }

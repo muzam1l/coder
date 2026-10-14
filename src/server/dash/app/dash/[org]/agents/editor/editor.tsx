@@ -7,6 +7,7 @@ import '@/app/dash/[org]/agents/(list)/page.css';
 import { useEffect, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { useAction } from '@/utils/action';
 import { iDown, iPlus, iShuffle, iUpload } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
@@ -22,7 +23,7 @@ import { BrandIcon, DisabledBadge, PlatformLine } from '@/app/dash/[org]/agents/
 import { Hero } from '@/app/dash/[org]/agents/agent/hero';
 import { Back, PageHead } from '@/comps/frame/page-head';
 import { HEADS } from '@/comps/frame/heads';
-import { initial, reasonText } from '@/utils/format';
+import { initial } from '@/utils/format';
 import { Field } from '@/comps/ui/field';
 import { showToast, toastError } from '@/comps/frame/task-toasts';
 import { Badge } from '@/comps/ui/badge';
@@ -261,7 +262,11 @@ export function AgentEditor({
   const [idTouched, setIdTouched] = useState(false);
   const [writing, setWriting] = useState('write');
   const [query, setQuery] = useState('');
-  const [busy, setBusy] = useState(false);
+  const action = useAction({
+    toast: creating ? 'Agent not created' : 'Not published',
+    leaves: true,
+  });
+  const busy = Boolean(action.pending);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft(current => ({ ...current, [key]: value }));
   const access = (id: string, tools = draft.tools[id]) =>
@@ -391,8 +396,7 @@ export function AgentEditor({
     }
     const id = creating ? draft.id : agent.id;
     const name = draft.name.trim();
-    setBusy(true);
-    try {
+    await action.run('publish', async () => {
       const files = agent?.files;
       const { apps = [] } = await client.agents.put(id, {
         definition,
@@ -417,10 +421,7 @@ export function AgentEditor({
       else if (creating && draft.platforms.length)
         nav.push('/dash/[org]/agents/[slug]/platforms', { params: { org, slug: id } });
       else nav.push('/dash/[org]/agents/[slug]', { params: { org, slug: id } });
-    } catch (reason) {
-      setBusy(false);
-      toastError(creating ? 'Agent not created' : 'Not published', reasonText(reason));
-    }
+    });
   };
 
   const actions = (

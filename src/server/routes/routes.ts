@@ -37,6 +37,7 @@ import {
   readMessages,
   refreshCredential,
   reportResult,
+  reportLogs,
 } from '../tasks/callbacks';
 import {
   answerLogin,
@@ -160,6 +161,7 @@ const callbacksRoutes = [
     route('GET', '/:id/messages', readMessages, inboxGuard),
     route('POST', '/:id/ack', ackMessages, inboxGuard),
     route('POST', '/:id/heartbeat', heartbeat, inboxGuard),
+    route('POST', '/:id/logs', reportLogs, completedTaskGuard),
     route('POST', '/:id/result', reportResult, completedTaskGuard),
     route('POST', '/:id/credential', refreshCredential, completedTaskGuard),
     route('GET', '/:id', readContext, taskGuard),

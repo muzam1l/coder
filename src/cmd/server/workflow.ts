@@ -14,8 +14,8 @@ export const commandServerWorkflow = command({
   },
   options: {},
   run: async () => {
-    const { ACTIONS_WORKFLOW_YAML } = await import('../../server/runners/github-actions');
-    return ACTIONS_WORKFLOW_YAML;
+    const { actionsWorkflow } = await import('../../server/runners/github-actions');
+    return actionsWorkflow();
   },
   print: yaml => process.stdout.write(yaml),
 });

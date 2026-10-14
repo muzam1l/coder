@@ -32,6 +32,7 @@ import {
 import { ConnectionsLine, Lead } from './loading';
 import { Notice } from '@/comps/ui/notice';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
+import { CredentialsLink } from '@/comps/nav/back';
 
 const PlatformActions = dynamic(() => import('./platform-actions').then(m => m.PlatformActions));
 const InstallButton = dynamic(() => import('./platform-actions').then(m => m.InstallButton));
@@ -259,7 +260,17 @@ function Platforms({
                           appUpdate={info.appUpdate}
                           failed={
                             failed?.platform === id
-                              ? { name: info?.name ?? id, app: failed.appId, issues }
+                              ? {
+                                  name: info?.name ?? id,
+                                  app: failed.appId,
+                                  issues,
+                                  ...(failed.status === 'failed'
+                                    ? {}
+                                    : {
+                                        title: outcomeTitle(failed, info?.name ?? id),
+                                        text: outcomeText(failed, info?.name ?? id),
+                                      }),
+                                }
                               : undefined
                           }
                         />
@@ -299,8 +310,8 @@ export default async function AgentPlatformsPage({
     .catch(() => undefined);
   const port = new URL(request.url).port || '8787';
   const outcome = readOutcome(new URL(request.url).searchParams);
-  // An unexpected failure opens a dialog on its platform's row instead.
-  const failed = outcome?.status === 'failed' ? outcome : undefined;
+  // A failure worth retrying opens a dialog on its platform's row, where Try again lives.
+  const failed = outcome && RETRY.has(outcome.status) ? outcome : undefined;
   // Apps a publish left needing changes on their platform.
   const updates = new URL(request.url).searchParams.get('update')?.split(',') ?? [];
   const appOn = (apps: AppRow[], integration?: string) =>
@@ -326,7 +337,6 @@ export default async function AgentPlatformsPage({
                   !appOn(own, failed.platform) &&
                   integrations.find(entry => entry.id === failed.platform)?.builtinApp !== 'own'
                 );
-              const platformsPage = `/dash/${orgOf(request)}/agents/${encodeURIComponent(row.id)}/platforms`;
               const entry = integrations.find(item => item.id === outcome?.platform);
               const connected =
                 outcome?.status === 'connected' && entry
@@ -360,7 +370,7 @@ export default async function AgentPlatformsPage({
                   {row.needsModel ? (
                     <NeedsCredential
                       reason="Agents need a model credential to run."
-                      back={platformsPage}
+                      label={row.name}
                     />
                   ) : null}
                   {outcome && !inRow ? (
@@ -383,14 +393,9 @@ export default async function AgentPlatformsPage({
                         </a>
                       ) : null}
                       {connected && !connected.ready ? (
-                        <Link
-                          class="btn"
-                          href="/dash/[org]/settings/[tab]"
-                          params={{ org: orgOf(request), tab: 'credentials' }}
-                          search={{ return: platformsPage }}
-                        >
+                        <CredentialsLink class="btn" label={row.name}>
                           Add a model
-                        </Link>
+                        </CredentialsLink>
                       ) : null}
                       {RETRY.has(outcome.status) && retried(own) ? (
                         <InstallButton app={retried(own)!.id} label="Install again" class="btn" />

@@ -6,6 +6,7 @@ import { dynamic } from '@wular/pnext/dynamic';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { useAction } from '@/utils/action';
 import { formatCount, formatDate, formatDay, formatDuration } from '@/utils/format';
 import {
   iAgent,
@@ -32,9 +33,7 @@ import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { Card, Empty } from '@/comps/ui/card';
 import { Id } from '@/comps/ui/badge';
 import { ConfirmDialog } from '@/comps/ui/confirm';
-import { ErrorText } from '@/comps/ui/field';
 import { approvalParts } from '@/app/dash/[org]/tasks/[id]/task-actions';
-import { reasonText } from '@/utils/format';
 import { Status } from './status';
 import { Icon } from '@/comps/ui/icon';
 import { Filter, type Facet } from '@/comps/ui/filter';
@@ -101,13 +100,11 @@ function TaskRowView({
   tz,
   now,
   onDone,
-  onError,
 }: {
   task: TaskRow;
   /** The source platform's brand art, when it has one. */
   brand?: IntegrationInfo['brand'];
   onDone: (what: RowAction) => void;
-  onError: (message: string) => void;
   /** The list to return to, when it is not the plain Tasks page. */
   back?: string;
   /** On an agent's own list, which names no agent. */
@@ -165,7 +162,7 @@ function TaskRowView({
           {sourceLabel(source)}
         </span>
         <span class="row-acts">
-          <RowActions task={task} onDone={onDone} onError={onError} />
+          <RowActions task={task} onDone={onDone} />
         </span>
       </td>
     </tr>
@@ -175,36 +172,26 @@ function TaskRowView({
 /** Stop, Archive and Delete behind a row's ⋯ menu; the list hears what happened and drops or refreshes the row. */
 type RowAction = 'cancel' | 'archive' | 'delete' | 'approve';
 
-function RowActions({
-  task,
-  onDone,
-  onError,
-}: {
-  task: TaskRow;
-  onDone: (what: RowAction) => void;
-  onError: (message: string) => void;
-}) {
-  const [deleting, setDeleting] = useState<'ask' | 'busy'>();
-  const act = (what: RowAction, decision?: 'accept' | 'decline') => {
-    onError('');
-    const call =
-      what === 'approve'
-        ? client.tasks.approve(
-            task.task.id,
-            approvalParts(task.approval).id ?? '',
-            decision ?? 'decline',
-          )
-        : what === 'delete'
-          ? client.tasks.delete(task.task.id)
-          : client.tasks[what](task.task.id);
-
-    void call
-      .then(
-        () => onDone(what),
-        reason => onError(reasonText(reason)),
+function RowActions({ task, onDone }: { task: TaskRow; onDone: (what: RowAction) => void }) {
+  const action = useAction();
+  const [confirming, setConfirming] = useState(false);
+  const act = (what: RowAction, decision?: 'accept' | 'decline') =>
+    void action
+      .run(what, () =>
+        what === 'approve'
+          ? client.tasks.approve(
+              task.task.id,
+              approvalParts(task.approval).id ?? '',
+              decision ?? 'decline',
+            )
+          : what === 'delete'
+            ? client.tasks.delete(task.task.id)
+            : client.tasks[what](task.task.id),
       )
-      .finally(() => setDeleting(undefined));
-  };
+      .then(ok => {
+        if (ok) onDone(what);
+        setConfirming(false);
+      });
   return (
     <>
       <Menu summary={<Icon d={iDots} />} summaryClass="icon-btn" label="Task actions" align="right">
@@ -214,19 +201,16 @@ function RowActions({
         {task.approval ? <MenuItem title="Deny" onClick={() => act('approve', 'decline')} /> : null}
         {taskActive(task) ? <MenuItem title="Stop" onClick={() => act('cancel')} /> : null}
         {task.archivedAt ? null : <MenuItem title="Archive" onClick={() => act('archive')} />}
-        <MenuItem title="Delete" danger onClick={() => setDeleting('ask')} />
+        <MenuItem title="Delete" danger onClick={() => setConfirming(true)} />
       </Menu>
       <ConfirmDialog
-        open={Boolean(deleting)}
+        open={confirming}
         title="Delete this task?"
         body="Its conversation, activity and diff go with it."
         confirmLabel="Delete"
-        busy={deleting === 'busy'}
-        onConfirm={() => {
-          setDeleting('busy');
-          act('delete');
-        }}
-        onClose={() => setDeleting(undefined)}
+        busy={action.pending === 'delete'}
+        onConfirm={() => act('delete')}
+        onClose={() => setConfirming(false)}
       />
     </>
   );
@@ -310,10 +294,11 @@ export function TasksList({
     counts?: TaskCounts;
     query?: string;
   }>({ rows: {}, added: [] });
-  const [gone, setGone] = useState<string[]>([]);
   // Rows hidden after an archive or delete come back into view when the filters change.
-  useEffect(() => setGone([]), [query]);
-  const [actionError, setActionError] = useState('');
+  const [goneIn, setGoneIn] = useState<{ query: string; ids: string[] }>({ query, ids: [] });
+  const gone = goneIn.query === query ? goneIn.ids : [];
+  const setGone = (next: (ids: string[]) => string[]) =>
+    setGoneIn(now => ({ query, ids: next(now.query === query ? now.ids : []) }));
   const rows = withAdded(list.rows, fresh.query === query ? fresh.added : [], fresh.rows).filter(
     task => !gone.includes(task.task.id),
   );
@@ -397,7 +382,7 @@ export function TasksList({
     era.current++;
     touched.current = {};
     setFresh({ rows: {}, added: [] });
-    setGone([]);
+    setGone(() => []);
     nav.refresh();
   };
 
@@ -501,7 +486,6 @@ export function TasksList({
         actions={
           counts ? (
             <>
-              <ErrorText value={actionError} />
               {counts.active ? (
                 <button type="button" class="badge acc" onClick={() => set('status', 'active')}>
                   {formatCount(counts.active)} active
@@ -538,7 +522,6 @@ export function TasksList({
                     scoped={Boolean(agent)}
                     tz={tz}
                     now={now}
-                    onError={setActionError}
                     onDone={what => {
                       // An archived row leaves every view but the archive; a stopped one just refreshes.
                       if (what === 'delete' || (what === 'archive' && values.status !== 'archived'))

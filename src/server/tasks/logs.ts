@@ -2,7 +2,6 @@
 import type { TaskLogLine, TaskStatus, Store } from '../store/types';
 import type { ServerContext } from '../context';
 import { taskLogSecrets } from './context';
-import { taskRunner } from '../runners';
 import { logEntry } from '../../core/task/log-view';
 import { DrizzleStore } from '../store/pg/store';
 import { DrizzleQueue } from '../store/pg/queue';
@@ -62,7 +61,7 @@ export async function connectionWarnings(
 export async function appendLog(
   store: Store,
   taskId: string,
-  lines: Array<Pick<TaskLogLine, 'level' | 'line'>>,
+  lines: Array<Pick<TaskLogLine, 'level' | 'line'> & { at?: number }>,
   from: number,
   now: number,
   initialBytes = 0,
@@ -76,7 +75,7 @@ export async function appendLog(
 }
 
 function logBatch(
-  lines: Array<Pick<TaskLogLine, 'level' | 'line'>>,
+  lines: Array<Pick<TaskLogLine, 'level' | 'line'> & { at?: number }>,
   from: number,
   now: number,
   initialBytes: number,
@@ -87,7 +86,7 @@ function logBatch(
   for (const entry of lines) {
     const size = Buffer.byteLength(entry.line);
     if (bytes + size > MAX_LOG_BYTES) break;
-    rows.push({ seq, at: now, level: entry.level, line: entry.line });
+    rows.push({ seq, at: entry.at ?? now, level: entry.level, line: entry.line });
     bytes += size;
     seq += 1;
   }
@@ -116,158 +115,91 @@ export async function readLog(
   });
 }
 
-/** Copy the runner's new output into the task's log, then read the log after `after`. */
-export async function copyRunnerLogs(
+export async function storeLogs(
   ctx: ServerContext,
   status: TaskStatus,
-  after = -1,
-  limit?: number,
-): Promise<TaskLogLine[]> {
-  if (!status.handle) return readLog(ctx.store, status.task.id, after, limit);
-  if (status.task.runner !== 'github-actions') return pullRunnerLogs(ctx, status, after, limit);
-  if (
-    status.logsComplete ||
-    (status.logsPulledAt !== undefined &&
-      (ctx.now ?? Date.now)() - status.logsPulledAt < RUNNER_LOG_PULL_MS)
-  )
-    return readLog(ctx.store, status.task.id, after, limit);
-
-  const current = await ctx.store.withAppLock(
-    `runner-logs:${ctx.organizationId}:${status.task.id}`,
-    async store => {
-      const queue = store instanceof DrizzleStore ? new DrizzleQueue(store.db) : ctx.queue;
-      const current = await store.get('task', status.task.id);
-      if (!current || current.logsComplete || !current.handle) return;
-      const now = (ctx.now ?? Date.now)();
-      if (current.logsPulledAt !== undefined && now - current.logsPulledAt < RUNNER_LOG_PULL_MS)
-        return;
-      const fence = {
-        attempts: current.attempts,
-        tokenHash: current.tokenHash ?? null,
-        handle: current.handle,
-        generation: current.generation ?? 0,
-      };
-      if (
-        !(await queue.patchTask(
-          ctx.organizationId,
-          current.task.id,
-          { logsPulledAt: now },
-          now,
-          fence,
-        ))
-      )
-        return;
-      return current;
-    },
-  );
-  if (current)
-    await pullRunnerLogs(ctx, current).catch(error =>
-      console.error(`coder server: runner logs for ${status.task.id} failed`, error),
-    );
-
-  return readLog(ctx.store, status.task.id, after, limit);
-}
-
-export const RUNNER_LOG_PULL_MS = 15_000;
-
-async function pullRunnerLogs(
-  ctx: ServerContext,
-  status: TaskStatus,
-  after = -1,
-  limit?: number,
-): Promise<TaskLogLine[]> {
-  const fence = {
-    attempts: status.attempts,
-    tokenHash: status.tokenHash ?? null,
-    handle: status.handle,
-    generation: status.generation ?? 0,
-  };
-  const runner = await taskRunner(ctx, status.task);
-  if (!runner) {
-    // A deleted runner has no more logs to give.
-    if (['completed', 'failed', 'cancelled'].includes(status.status) && !status.logsComplete)
-      await ctx.queue.patchTask(
-        ctx.organizationId,
-        status.task.id,
-        { logsComplete: true },
-        (ctx.now ?? Date.now)(),
-        fence,
-      );
-
-    return readLog(ctx.store, status.task.id, after, limit);
-  }
-
-  const secrets = await taskLogSecrets(ctx, status).catch(error => {
-    console.error(`coder server: log secrets for ${status.task.id} failed`, error);
-    return undefined;
-  });
-  const current = await ctx.store.get('task', status.task.id);
-  if (!secrets) return readLog(ctx.store, status.task.id, after, limit);
-
-  const sameRun =
-    current &&
-    current.attempts === status.attempts &&
-    current.tokenHash === status.tokenHash &&
-    current.generation === status.generation &&
-    current.handle === status.handle;
-  const state = sameRun ? current : status;
-  const cursor = state.logCursor ?? -1;
-  const seq = state.logSeq ?? 0;
-  const bytes = state.logBytes ?? 0;
-  const completed =
-    status.task.runner === 'github-actions' &&
-    ['completed', 'failed', 'cancelled'].includes(state.status)
-      ? (await runner.status(status.handle!)).state === 'exited'
-      : false;
-  const fetched = await runner.logs(status.handle!, cursor);
-  const now = (ctx.now ?? Date.now)();
-  const redacted = (line: string) =>
-    secrets.reduce(
-      (value, secret) => (secret ? value.replaceAll(secret, '[REDACTED]') : value),
-      line,
-    );
-  const redactValue = (value: unknown): unknown => {
-    if (typeof value === 'string') return redacted(value);
-    if (Array.isArray(value)) return value.map(redactValue);
-    if (value && typeof value === 'object')
-      return Object.fromEntries(
-        Object.entries(value).map(([key, entry]) => [redacted(key), redactValue(entry)]),
-      );
-    return value;
-  };
-
-  const appended = logBatch(
-    fetched.lines.map(({ level, line }) => {
-      const entry = logEntry(line);
-      return { level, line: entry ? JSON.stringify(redactValue(entry)) : redacted(line) };
-    }),
-    seq,
-    now,
-    bytes,
-  );
-
-  const saved = await ctx.queue.appendLogs(
+  entries: TaskLogLine[],
+): Promise<'ok' | 'gap' | 'stale'> {
+  const settings = (ctx.settings ??= {});
+  const cache = (settings.taskLogSecrets ??= new Map<string, Promise<string[]>>());
+  const key = JSON.stringify([
     ctx.organizationId,
     status.task.id,
-    appended.lines,
-    { seq, cursor },
-    {
-      cursor: fetched.next,
-      seq: appended.seq,
-      bytes: appended.bytes,
-    },
-    now,
-    fence,
-  );
-
-  if (saved && completed && fetched.complete !== false)
-    await ctx.queue.patchTask(
-      ctx.organizationId,
-      status.task.id,
-      { logsComplete: true },
-      now,
-      fence,
+    status.attempts,
+    status.generation,
+    status.tokenHash,
+  ]);
+  let pending = cache.get(key);
+  if (!pending) {
+    pending = taskLogSecrets(ctx, status).catch(error => {
+      cache.delete(key);
+      throw error;
+    });
+    cache.set(key, pending);
+    const timer = setTimeout(
+      () => {
+        if (cache.get(key) === pending) cache.delete(key);
+      },
+      (ctx.config.taskTimeoutMs ?? 30 * 60_000) + 60_000,
     );
+    timer.unref?.();
+  }
+  const secrets = (await pending).sort((a, b) => b.length - a.length);
+  const redact = (line: string) =>
+    secrets.reduce((text, secret) => (secret ? text.replaceAll(secret, '[REDACTED]') : text), line);
+  const value = (entry: unknown): unknown => {
+    if (typeof entry === 'string') return redact(entry);
+    if (Array.isArray(entry)) return entry.map(value);
+    if (entry && typeof entry === 'object')
+      return Object.fromEntries(
+        Object.entries(entry).map(([key, entry]) => [redact(key), value(entry)]),
+      );
+    return entry;
+  };
+  const line = (text: string) => {
+    try {
+      return JSON.stringify(value(JSON.parse(text)));
+    } catch {
+      return redact(text);
+    }
+  };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const current = await ctx.store.get('task', status.task.id);
+    if (
+      !current ||
+      current.attempts !== status.attempts ||
+      current.tokenHash !== status.tokenHash ||
+      current.generation !== status.generation
+    )
+      return 'stale';
+    const cursor = current.logCursor ?? -1;
+    const fresh = entries.filter(entry => entry.seq > cursor);
+    if (!fresh.length) return 'ok';
+    if (current.logsComplete || fresh[0]!.seq !== cursor + 1) return 'gap';
+    const now = (ctx.now ?? Date.now)();
+    const batch = logBatch(
+      fresh.map(entry => ({ ...entry, line: line(entry.line) })),
+      current.logSeq ?? 0,
+      now,
+      current.logBytes ?? 0,
+    );
+    if (
+      await ctx.queue.appendLogs(
+        ctx.organizationId,
+        status.task.id,
+        batch.lines,
+        { seq: current.logSeq ?? 0, cursor },
+        { seq: batch.seq, cursor: fresh.at(-1)!.seq, bytes: batch.bytes },
+        now,
+        {
+          attempts: status.attempts,
+          tokenHash: status.tokenHash,
+          generation: status.generation ?? 0,
+        },
+      )
+    )
+      return 'ok';
+  }
 
-  return readLog(ctx.store, status.task.id, after, limit);
+  return 'stale';
 }

@@ -1292,10 +1292,13 @@ export async function engineStatus(): Promise<EngineStatus> {
   };
 }
 
-/** A local server runs tasks with this machine's own logins. */
-export async function machineSignedIn(ctx: ServerContext, engine: string): Promise<boolean> {
-  return (
-    !!ctx.local &&
-    (engine === 'custom' || (await engineStatus())[engine as 'claude' | 'codex']?.signedIn === true)
+/** This machine's own logins; an agent without an engine falls back along the chain. */
+export async function machineSignedIn(ctx: ServerContext, engine?: string): Promise<boolean> {
+  if (!ctx.local) return false;
+  const engines = engine ? [engine] : loadConfig(ctx.local.cwd).chain;
+  const status = await engineStatus();
+
+  return engines.some(
+    name => name === 'custom' || status[name as 'claude' | 'codex']?.signedIn === true,
   );
 }

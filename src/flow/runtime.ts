@@ -812,6 +812,10 @@ function coderDistFile(rel: string): string | null {
 }
 
 function coderSpecifierUrl(spec: string): string | null {
+  if (spec === 'zod' || spec.startsWith('zod/')) {
+    const bundled = coderDistFile('zod.js') ?? new URL('./zod.js', import.meta.url).href;
+    if (fs.existsSync(fileURLToPath(bundled))) return bundled;
+  }
   const known =
     spec === '@wular/coder' ||
     spec === '@wular/coder/flow' ||
@@ -840,6 +844,7 @@ function rewriteSpecifiers(source: string): string {
 }
 
 async function hookFlowImports(dir: string): Promise<void> {
+  dir = fs.realpathSync(dir);
   const scope = scopeALS.getStore()!;
   const imports = (scope.imports ??= { dirs: new Set(), node: false });
   if ((process as any).versions?.bun) {
@@ -872,6 +877,7 @@ async function hookFlowImports(dir: string): Promise<void> {
   );
   const hooks = `const urls = ${JSON.stringify(urls)}, parent = ${JSON.stringify(import.meta.url)};
 export function resolve(spec, ctx, next) {
+  if (spec.startsWith('zod/') && urls.zod) return { url: urls.zod, shortCircuit: true };
   if (urls[spec]) return { url: urls[spec], shortCircuit: true };
   return next(spec, spec.startsWith('zod/') ? { ...ctx, parentURL: parent } : ctx);
 }`;

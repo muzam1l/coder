@@ -135,7 +135,6 @@ export type TaskPatch = Partial<
     | 'logCursor'
     | 'logSeq'
     | 'logBytes'
-    | 'logsPulledAt'
     | 'logsComplete'
     | 'archivedAt'
     | 'autoArchived'
@@ -649,7 +648,7 @@ export class StoreQueue implements TaskQueue {
       await this.store.put('task', id, {
         ...current,
         ...(Object.hasOwn(patch, 'handle') && patch.handle !== current.handle
-          ? { logsPulledAt: undefined, logsComplete: undefined }
+          ? { logsComplete: undefined }
           : {}),
         ...fields,
         ...(answer !== undefined ? { answer: [...(current.answer ?? []), answer] } : {}),

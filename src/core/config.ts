@@ -81,6 +81,7 @@ export const CLAUDE_PERMISSION_FLAGS: Record<Permission, string[]> = {
     '--disallowedTools',
     'Edit',
     'Write',
+    'MultiEdit',
     'NotebookEdit',
   ],
   'workspace-write': ['--permission-mode', 'acceptEdits'],
@@ -102,6 +103,7 @@ export const CLAUDE_SIDECAR_FLAGS: string[] = [
   '--disallowedTools',
   'Edit',
   'Write',
+  'MultiEdit',
   'NotebookEdit',
   'Bash',
   'WebFetch',
@@ -116,6 +118,9 @@ export const CLAUDE_SIDECAR_FLAGS: string[] = [
 // different engine should take over.
 export const CLAUDE_SANDBOX_UNAVAILABLE_PATTERN =
   /failIfUnavailable|sandbox\b[^.\n]*?(?:failed|could ?n[o']t|cannot|unavailable|not available|not supported)/i;
+
+/** Set by runners that use machine isolation for writable turns. */
+export const MACHINE_SANDBOX_ENV = 'CODER_MACHINE_SANDBOX';
 
 // approvals.allowedNetworkHosts entries as claude sandbox allowedDomains:
 // a bare hostname also covers its subdomains (matching the codex policy's
@@ -149,6 +154,8 @@ function claudeAllowedDomains(hosts: string[]): string[] {
  *
  * Writable directories stay writable in every mode: read-only grants them
  * through sandbox.filesystem.allowWrite alone, the other modes as extra directories.
+ *
+ * Without the OS sandbox the machine is the boundary, so Bash runs unprompted as it did sandboxed.
  */
 export function claudeTurnSettings(
   permissions: Permission,
@@ -156,12 +163,24 @@ export function claudeTurnSettings(
   allowedNetworkHosts: string[] = [],
   additionalDirectories: string[] = [],
   writableDirectories: string[] = [],
+  osSandbox = true,
 ): string | null {
   const granted =
     permissions === 'read-only'
       ? additionalDirectories
       : [...additionalDirectories, ...writableDirectories];
   const grant = granted.length ? { permissions: { additionalDirectories: granted } } : {};
+  if (!osSandbox)
+    return JSON.stringify({
+      permissions: {
+        additionalDirectories: granted,
+        allow: ['Bash'],
+        ...(permissions === 'read-only'
+          ? { deny: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] }
+          : {}),
+      },
+      sandbox: { enabled: false },
+    });
   if (permissions === 'read-only') {
     return JSON.stringify({
       ...grant,

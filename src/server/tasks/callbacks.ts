@@ -1,10 +1,12 @@
 import { type Params } from '../routes/match';
 import { type AgentTask } from '../../agent/types';
-import { type TaskStatus, type UsageRecord } from '../store/types';
+import { type TaskStatus, type TaskLogLine, type UsageRecord } from '../store/types';
 import { type ServerContext } from '../context';
 import { taskContext, taskLogSecrets } from './context';
 import { writeBackCodexAuth } from '../settings/credentials';
-import { copyRunnerLogs } from './logs';
+import { storeLogs } from './logs';
+import { stopTaskMachine } from './kick';
+import { taskRunner } from '../runners';
 import { type InboxAck } from './queue';
 import { noteKey, NOTE_TTL_MS } from './thread';
 import { taskClaims, taskTokenHash } from './token';
@@ -109,8 +111,45 @@ export async function ackMessages(
 
   const fence = { tokenHash: hash, attempts: claims.attempt!, generation: ack.generation };
   const accepted = await ctx.queue.ackInbox(ctx.organizationId, id, ack, fence);
+  if (accepted) {
+    const current = await ctx.store.get('task', id);
+    if (current?.status === 'cancelled') await stopTaskMachine(ctx, current);
+  }
 
   return accepted ? json({ ok: true }) : new Response('Unauthorized', { status: 401 });
+}
+
+export async function reportLogs(
+  req: Request,
+  ctx: CallbackContext,
+  params: Params,
+): Promise<Response> {
+  const body = (await req.json().catch(() => undefined)) as { entries?: TaskLogLine[] } | undefined;
+  const entries = body?.entries;
+  if (
+    !Array.isArray(entries) ||
+    entries.length > 100 ||
+    entries.some(
+      (entry, index) =>
+        !entry ||
+        !Number.isSafeInteger(entry.seq) ||
+        entry.seq < 0 ||
+        !Number.isSafeInteger(entry.at) ||
+        entry.at < 0 ||
+        !['out', 'err'].includes(entry.level) ||
+        typeof entry.line !== 'string' ||
+        Buffer.byteLength(entry.line) > 64 * 1024 ||
+        (index > 0 && entry.seq !== entries[index - 1]!.seq + 1),
+    )
+  )
+    return json({ error: 'Invalid task logs' }, 400);
+  const saved = await storeLogs(ctx, ctx.callbackTask!, entries);
+
+  return saved === 'ok'
+    ? json({ ok: true })
+    : saved === 'gap'
+      ? json({ error: 'Task log sequence has a gap' }, 409)
+      : new Response('Unauthorized', { status: 401 });
 }
 
 export async function heartbeat(
@@ -143,8 +182,12 @@ export async function reportResult(
   const id = params.id!;
   const token = bearerToken(req);
   const authorized = ctx.callbackTask!;
-  if (['completed', 'failed', 'cancelled'].includes(authorized.status)) return json({ ok: true });
+  if (['completed', 'failed', 'cancelled'].includes(authorized.status)) {
+    await stopTaskMachine(ctx, authorized);
+    return json({ ok: true });
+  }
 
+  const runner = authorized.handle ? await taskRunner(ctx, authorized.task) : undefined;
   const body = (await req.json().catch(() => undefined)) as TaskCallback | undefined;
   if (
     !body?.status ||
@@ -152,21 +195,19 @@ export async function reportResult(
   )
     return json({ error: 'Invalid task result' }, 400);
 
-  if (authorized.task.connections?.length) {
-    const secrets = (await taskLogSecrets(ctx, authorized)).sort(
-      (left, right) => right.length - left.length,
-    );
-    Object.assign(
-      body,
-      JSON.parse(
-        JSON.stringify(body, (_key, value) =>
-          typeof value === 'string'
-            ? secrets.reduce((text, secret) => text.replaceAll(secret, '[REDACTED]'), value)
-            : value,
-        ),
-      ) as TaskCallback,
-    );
-  }
+  const secrets = (await taskLogSecrets(ctx, authorized)).sort(
+    (left, right) => right.length - left.length,
+  );
+  Object.assign(
+    body,
+    JSON.parse(
+      JSON.stringify(body, (_key, value) =>
+        typeof value === 'string'
+          ? secrets.reduce((text, secret) => text.replaceAll(secret, '[REDACTED]'), value)
+          : value,
+      ),
+    ) as TaskCallback,
+  );
 
   let now = (ctx.now ?? Date.now)();
   if (body.status === 'running' || body.status === 'waiting') {
@@ -193,9 +234,6 @@ export async function reportResult(
 
     return json({ ok: true });
   }
-  await copyRunnerLogs(ctx, authorized).catch(() => {});
-  // Stamped after the log copy, so a reader looking back a fixed time still sees the finish.
-  now = (ctx.now ?? Date.now)();
 
   const output = typeof body.result === 'string' ? body.result : JSON.stringify(body.result ?? '');
   const result = {
@@ -204,7 +242,7 @@ export async function reportResult(
     output,
     ...(typeof body.diff === 'string' ? { diff: body.diff } : {}),
   };
-  await ctx.queue.completeTask(
+  const completed = await ctx.queue.completeTask(
     ctx.organizationId,
     id,
     {
@@ -246,6 +284,8 @@ export async function reportResult(
     },
     now,
   );
+
+  if (completed) await stopTaskMachine(ctx, authorized, false, runner);
 
   return json({ ok: true });
 }
@@ -290,6 +330,12 @@ export async function readContext(
     return json({
       ...context,
       generation: authorized.generation ?? 0,
+      logCursor: authorized.logCursor ?? -1,
+      timeoutMs: Math.max(
+        1,
+        ctx.config.taskTimeoutMs -
+          ((ctx.now ?? Date.now)() - (authorized.startedAt ?? (ctx.now ?? Date.now)())),
+      ),
     });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : String(error) }, 409);

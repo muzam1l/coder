@@ -10,7 +10,6 @@ import { decodeJson, encodeJson } from '../../utils/base64url';
 import type { AgentTask } from '../../agent/types';
 import type { Runner } from '.';
 import { INTEGRATIONS } from '../../integrations';
-import type { TaskLogLine } from '../store/types';
 import type { InboxEntry, InboxAck } from '../tasks/queue';
 import { checkoutCache, releaseCheckout, inboxSocket, sendInbox } from '../../runner/task';
 
@@ -98,13 +97,6 @@ export class LocalRunner implements Runner {
     };
   }
 
-  async logs(handle: string, after = -1) {
-    const { dir } = decode(handle);
-    const output = await fsp.readFile(path.join(dir, 'runner.log'), 'utf8').catch(() => '');
-    const all = logLines(output);
-    return { lines: all.slice(after + 1), next: all.length - 1 };
-  }
-
   async stop(handle: string): Promise<void> {
     const { pid, started } = decode(handle);
     // A reused PID belongs to another process.
@@ -153,11 +145,4 @@ export function toolInstalls(): string[] {
   return Object.values(INTEGRATIONS).flatMap(integration =>
     integration.tools.install ? [`(${integration.tools.install})`] : [],
   );
-}
-
-export function logLines(output: string, level: TaskLogLine['level'] = 'out') {
-  return output
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map(line => ({ level, line }));
 }

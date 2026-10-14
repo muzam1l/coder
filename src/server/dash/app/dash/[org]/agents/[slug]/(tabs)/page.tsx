@@ -163,10 +163,7 @@ export default async function AgentPage({
         Promise.all([agent, versions, config]).then(([row, history, shown]) => (
           <>
             {row.needsModel ? (
-              <NeedsCredential
-                reason="Agents need a model credential to run."
-                back={`/dash/${orgOf(request)}/agents/${encodeURIComponent(row.id)}`}
-              />
+              <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
             ) : null}
             <OverviewBody
               agent={row}

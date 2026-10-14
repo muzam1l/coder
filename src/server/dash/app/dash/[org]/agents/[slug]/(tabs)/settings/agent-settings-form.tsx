@@ -5,6 +5,7 @@ import './agent-settings-form.css';
 import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { useAction } from '@/utils/action';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Link } from '@wular/pnext/link';
@@ -13,8 +14,7 @@ import { ConfirmDialog } from '@/comps/ui/confirm';
 import type { AgentRow, AgentSettings, ConnectionRow, IntegrationInfo } from '@coder/client/types';
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { AgentToggle } from '@/app/dash/[org]/agents/agent/agent-toggle';
-import { reasonText } from '@/utils/format';
-import { ErrorText, Field } from '@/comps/ui/field';
+import { Field } from '@/comps/ui/field';
 import { Chips } from '@/comps/ui/badge';
 import { Select, type Option } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
@@ -89,12 +89,13 @@ export function AgentSettingsForm({
   const nav = useRouter();
   const org = useOrg();
   const [panel, setPanel] = useState<Panel>('run');
-  const [error, setError] = useState('');
+  const action = useAction({ refresh: true });
+  const removing = useAction({ leaves: true });
+  const busy = Boolean(action.pending);
   const [saved, setSaved] = useState('');
-  const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<Panel[]>();
-  const [deleting, setDeleting] = useState<'ask' | 'busy'>();
+  const [deleting, setDeleting] = useState(false);
   const form = useRef<HTMLFormElement>(null);
   const settings = agent.settings ?? {};
   const [model, setModel] = useState(modelValue(settings.engine, settings.model));
@@ -128,17 +129,13 @@ export function AgentSettingsForm({
     if (needle && found.length && !found.includes(panel)) setPanel(found[0]!);
   }, [query]);
 
-  const remove = () => {
-    setDeleting('busy');
-    setError('');
-    void client.agents
-      .remove(agent.id)
-      .then(() => nav.push('/dash/[org]/agents', { params: { org } }))
-      .catch(reason => {
-        setDeleting(undefined);
-        setError(reasonText(reason));
-      });
-  };
+  const remove = () =>
+    void removing
+      .run('delete', async () => {
+        await client.agents.remove(agent.id);
+        nav.push('/dash/[org]/agents', { params: { org } });
+      })
+      .then(ok => ok || setDeleting(false));
 
   const tab = (key: Panel, label: string) => (
     <button
@@ -173,17 +170,9 @@ export function AgentSettingsForm({
       if (Object.keys(entry).length) (next.integrations ??= {})[id] = entry;
     }
     if (agent.settings?.disabled) next.disabled = true;
-    setBusy(true);
-    setError('');
     setSaved('');
-    try {
-      await client.agents.settings(agent.id, next);
-      nav.refresh();
+    if (await action.run('save', () => client.agents.settings(agent.id, next)))
       setSaved('Saved. New tasks use these settings.');
-    } catch (reason) {
-      setError(reasonText(reason));
-    }
-    setBusy(false);
   };
 
   return (
@@ -414,7 +403,7 @@ export function AgentSettingsForm({
                 stops its events and new tasks in this workspace; its apps and tasks stay
               </small>
             </span>
-            <AgentToggle agent={agent} class="btn outline" onError={setError} />
+            <AgentToggle agent={agent} class="btn outline" />
           </div>
           <div class="field row-action">
             <span>
@@ -429,17 +418,15 @@ export function AgentSettingsForm({
               type="button"
               class="btn secondary-danger"
               disabled={!deletable}
-              onClick={() => setDeleting('ask')}
+              onClick={() => setDeleting(true)}
             >
               Delete agent
             </button>
           </div>
-          <ErrorText value={error} />
         </section>
 
         {panel === 'manage' ? null : (
           <div class="form-actions save">
-            <ErrorText value={error} />
             {saved ? (
               <span class="flash" role="status">
                 {saved}
@@ -457,8 +444,8 @@ export function AgentSettingsForm({
           title={`Delete ${agent.name}?`}
           body="It stops answering on every platform. This cannot be undone."
           confirmLabel="Delete agent"
-          busy={deleting === 'busy'}
-          onClose={() => setDeleting(undefined)}
+          busy={Boolean(removing.pending)}
+          onClose={() => setDeleting(false)}
           onConfirm={remove}
         />
       ) : null}

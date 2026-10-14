@@ -150,6 +150,7 @@ export const slack: Integration = {
     },
     serve: SLACK_TOOLS,
   },
+  hosts: ['slack.com'],
   get app() {
     return slackApp;
   },

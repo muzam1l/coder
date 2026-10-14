@@ -23,10 +23,20 @@ export default defineConfig({
     cli: 'src/cli.ts',
     'lib/broker': 'src/core/broker/main.ts',
     sdk: 'src/sdk.ts',
+    schema: 'src/server/store/pg/schema.ts',
+    'schema.config': 'src/server/store/pg/push.config.ts',
+    zod: 'src/flow/zod.ts',
     'flow/index': 'src/flow/index.ts',
     ...builtinFlowEntries,
   },
-  external: ['@wular/coder/flow', 'drizzle-orm', 'postgres'],
+  deps: {
+    neverBundle: ['@wular/coder/flow', '@vercel/sandbox'],
+    alwaysBundle: [/^(?:drizzle-orm|postgres|zod)(?:\/|$)/],
+    dts: {
+      neverBundle: [/^(?:zod|postgres)(?:\/|$)/],
+      alwaysBundle: [/^drizzle-orm(?:\/|$)/],
+    },
+  },
   outDir: OUT,
   // The dashboard build swaps dist/dash in whole; a CLI build leaves it serving.
   clean: [`${OUT}/*`, `!${OUT}/dash`],
@@ -35,10 +45,9 @@ export default defineConfig({
   format: 'esm',
   platform: 'node',
   minify: true,
-  // zod stays external: it's a real `dependencies` entry (installed alongside),
-  // and bundling it would drag its whole type surface into the dts pass.
-  // Types only for the two public entrypoints (exports map).
-  dts: { emitDtsOnly: false },
+  treeshake: { moduleSideEffects: id => id !== 'postgres' },
+  // SDK Zod types stay with its optional peer; runtime code is bundled.
+  dts: { emitDtsOnly: false, sideEffects: false },
   exports: false,
   outExtensions: () => ({ js: '.js', dts: '.d.ts' }),
 });

@@ -142,7 +142,7 @@ async function request(
     if (
       req.method !== 'GET' &&
       response.ok &&
-      !(task && parts.length === 4 && parts[2] && parts[3] === 'heartbeat') &&
+      !(task && parts.length === 4 && parts[2] && ['heartbeat', 'logs'].includes(parts[3]!)) &&
       !(
         adminTask &&
         parts.length === 5 &&

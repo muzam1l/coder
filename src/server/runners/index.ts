@@ -1,7 +1,8 @@
 import { execFile } from 'node:child_process';
+import { readVersion } from '../../core/runtime';
 import type { RunnerSpec, RunnerTest } from '../../client/types';
 import type { AgentTask, RunnerKind } from '../../agent/types';
-import type { RunnerRecord, TaskLogLine } from '../store/types';
+import type { RunnerRecord, Store } from '../store/types';
 import type { ServerContext } from '../context';
 import type { InboxEntry, InboxAck } from '../tasks/queue';
 import { decryptSecret } from '../store/secrets';
@@ -9,7 +10,47 @@ import { DockerRunner, type DockerOptions } from './docker';
 import { GithubActionsRunner } from './github-actions';
 import { HttpRunner } from './http';
 import { LocalRunner } from './local';
-import { VercelSandboxRunner, type VercelSandboxOptions } from './vercel-sandbox';
+import {
+  VercelSandboxRunner,
+  type VercelSandboxOptions,
+  type SnapshotStore,
+} from './vercel-sandbox';
+
+export const RUNNER_IMAGE = 'ghcr.io/muzam1l/coder-runner:latest';
+export const runnerTarball = () =>
+  `https://registry.npmjs.org/@wular/coder/-/coder-${encodeURIComponent(readVersion())}.tgz`;
+
+export const SETUP_FAILED = `
+const [file, id] = process.argv.slice(1);
+const lines = require('fs').readFileSync(file, 'utf8').split('\\n').map(line => line.trim()).filter(Boolean);
+const error = 'The machine failed: ' + lines.slice(-6).join(' ').slice(-800);
+const login = process.env.CODER_LOGIN;
+const url = process.env.CODER_SERVER.replace(/\\/+$/, '') + (login ? '/logins/' : '/tasks/') + encodeURIComponent(id) + (login ? '' : '/result');
+fetch(url, {
+  method: 'POST', signal: AbortSignal.timeout(10000),
+  headers: { authorization: 'Bearer ' + process.env.CODER_TASK_TOKEN, 'content-type': 'application/json' },
+  body: JSON.stringify(login ? { error } : { status: 'failed', error }),
+}).then(response => { if (!response.ok) process.exitCode = 1; }).catch(() => { process.exitCode = 1; });
+`;
+
+export function startCommand(tools = ''): string {
+  const run = [
+    'mkdir -p .coder-runner',
+    `curl -fsSL --retry 2 --connect-timeout 10 --max-time 30 "\${CODER_RUNNER_TARBALL_URL:-${runnerTarball()}}" -o .coder-runner/package.tgz`,
+    'tar -xzf .coder-runner/package.tgz -C .coder-runner',
+    ...(tools ? [tools] : []),
+    'bun .coder-runner/package/bin/coder.mjs agent run --task "$1"',
+  ].join(' && ');
+
+  return [
+    'out=$(mktemp)',
+    `{ (${run}) 2>&1; echo $? >"$out.status"; } | tee "$out"`,
+    'status=$(cat "$out.status")',
+    '[ "$status" = 0 ] || { [ -n "$CODER_PREPARE" ] || node -e "$2" "$out" "$1"; }',
+    'rm -f "$out" "$out.status"',
+    'exit "$status"',
+  ].join('; ');
+}
 
 export const RUNNER_KINDS: RunnerKind[] = [
   'local',
@@ -18,6 +59,20 @@ export const RUNNER_KINDS: RunnerKind[] = [
   'github-actions',
   'http',
 ];
+
+export function runnerSnapshots(store: Store, prefix = ''): SnapshotStore {
+  return {
+    get: key => store.get('snapshot', `${prefix}${key}`),
+    put: (key, value) => store.put('snapshot', `${prefix}${key}`, value),
+    withLock: (key, work) =>
+      store.withAppLock(`snapshot:${prefix}${key}`, locked =>
+        work({
+          get: key => locked.get('snapshot', `${prefix}${key}`),
+          put: (key, value) => locked.put('snapshot', `${prefix}${key}`, value),
+        }),
+      ),
+  };
+}
 
 export function createRunners(opts: {
   kind: RunnerKind;
@@ -100,10 +155,7 @@ export function recordRunner(ctx: ServerContext, record: RunnerRecord, id?: stri
     sandbox: {
       ...(id
         ? {
-            snapshots: {
-              get: key => ctx.store.get('snapshot', `runner:${id}:${key}`),
-              put: (key, value) => ctx.store.put('snapshot', `runner:${id}:${key}`, value),
-            },
+            snapshots: runnerSnapshots(ctx.store, `runner:${id}:`),
           }
         : {}),
     },
@@ -254,12 +306,6 @@ export interface RunnerStatus {
   code?: number;
 }
 
-export interface RunnerLogs {
-  lines: Array<Pick<TaskLogLine, 'level' | 'line'> & { at?: number }>;
-  next: number;
-  complete?: boolean;
-}
-
 export interface Runner {
   readonly kind: RunnerKind;
   /** `credential` is the engine credential's env, for runners that broker it outside the task. */
@@ -267,9 +313,15 @@ export interface Runner {
     task: AgentTask,
     env: Record<string, string>,
     credential?: Record<string, string>,
+    /** `timeoutMs`: how long its machine may live, where the runner starts one. */
+    options?: {
+      timeoutMs?: number;
+      waitUntil?: (work: Promise<unknown>) => void;
+      /** The only hosts a firewalled machine reaches besides its start; absent allows all. */
+      hosts?: string[];
+    },
   ): Promise<string>;
   status(handle: string): Promise<RunnerStatus>;
-  logs(handle: string, after?: number): Promise<RunnerLogs>;
   stop(handle: string): Promise<void>;
   push?(handle: string, entries: InboxEntry[]): Promise<InboxAck>;
 }

@@ -25,10 +25,11 @@ import { Credentials } from './credentials';
 const ADMIN_ROLES = new Set(['owner', 'admin']);
 
 /** What a connection's sign-in says when it comes back with `outcome`. */
+const SIGN_IN_FAILED = 'The sign-in did not finish. Try Reconnect.';
 const SIGN_IN: Record<string, string> = {
   connected: 'Signed in. New tasks can use the connection.',
   denied: 'The sign-in was declined, so nothing changed.',
-  failed: 'The sign-in did not finish. Try Reconnect.',
+  failed: SIGN_IN_FAILED,
   'invalid-state': 'This sign-in link expired or was already used. Try Reconnect.',
 };
 
@@ -103,7 +104,7 @@ export default async function SettingsTabPage({
                 <OutcomeDialog
                   ok={signIn === 'connected'}
                   title={signIn === 'connected' ? 'Signed in' : 'Not signed in'}
-                  text={SIGN_IN[signIn] ?? SIGN_IN.failed}
+                  text={SIGN_IN[signIn] ?? SIGN_IN_FAILED}
                   issues={who.server?.issuesUrl}
                 />
               ) : null}

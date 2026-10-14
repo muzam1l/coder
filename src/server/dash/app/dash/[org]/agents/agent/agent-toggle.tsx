@@ -1,41 +1,25 @@
 'use client';
 
-import { useEffect, useState } from 'preact/hooks';
+import { useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
-import { useRouter } from '@wular/pnext/navigation/client';
+import { useAction } from '@/utils/action';
 import type { AgentRow } from '@coder/client/types';
-import { reasonText } from '@/utils/format';
 
 /** Disable or Enable the agent in this workspace; its other settings stay. */
-export function AgentToggle({
-  agent,
-  class: className,
-  onError,
-}: {
-  agent: AgentRow;
-  class: string;
-  onError?: (message: string) => void;
-}) {
-  const nav = useRouter();
+export function AgentToggle({ agent, class: className }: { agent: AgentRow; class: string }) {
+  const action = useAction({ refresh: true });
+  const busy = Boolean(action.pending);
   const saved = Boolean(agent.settings?.disabled);
-  const [disabled, setDisabled] = useState(saved);
-  const [busy, setBusy] = useState(false);
+  // A toggle shows at once, until the refreshed agent says the same.
+  const [toggled, setToggled] = useState({ saved, disabled: saved });
+  const disabled = toggled.saved === saved ? toggled.disabled : saved;
 
-  useEffect(() => setDisabled(saved), [saved]);
-
-  const toggle = () => {
-    setBusy(true);
-    onError?.('');
-    void client.agents
-      .settings(agent.id, { ...agent.settings, disabled: !disabled })
-      .then(() => {
-        setDisabled(!disabled);
-        nav.refresh();
-      })
-      .catch(reason => onError?.(reasonText(reason)))
-      .finally(() => setBusy(false));
-  };
+  const toggle = () =>
+    void action.run('toggle', async () => {
+      await client.agents.settings(agent.id, { ...agent.settings, disabled: !disabled });
+      setToggled({ saved, disabled: !disabled });
+    });
 
   return (
     <button type="button" class={className} disabled={busy} aria-busy={busy} onClick={toggle}>

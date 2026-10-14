@@ -1,0 +1,18 @@
+FROM oven/bun:1.4.2 AS bun
+FROM node:24-bookworm-slim
+COPY --from=bun /usr/local/bin/bun /usr/local/bin/bun
+ARG CLAUDE_VERSION=latest
+ARG CODEX_VERSION=latest
+ARG GITHUB_MCP_VERSION=latest
+RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates util-linux bubblewrap socat \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install -g @anthropic-ai/claude-code@${CLAUDE_VERSION} @openai/codex@${CODEX_VERSION} \
+    && npm cache clean --force \
+    && arch=$(uname -m) && if [ "$arch" = aarch64 ]; then arch=arm64; fi \
+    && if [ "$GITHUB_MCP_VERSION" = latest ]; then release=latest/download; else release="download/v${GITHUB_MCP_VERSION#v}"; fi \
+    && curl -fsSL "https://github.com/github/github-mcp-server/releases/${release}/github-mcp-server_Linux_${arch}.tar.gz" -o /tmp/github-mcp.tar.gz \
+    && tar -xz -C /usr/local/bin -f /tmp/github-mcp.tar.gz github-mcp-server \
+    && rm /tmp/github-mcp.tar.gz \
+    && mkdir -p /etc/claude-code \
+    && echo '{"sandbox":{"enableWeakerNestedSandbox":true}}' > /etc/claude-code/managed-settings.json
+WORKDIR /work

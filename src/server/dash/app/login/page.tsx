@@ -1,7 +1,6 @@
 import './page.css';
 import { redirect } from '@wular/pnext/navigation';
 
-import { ErrorText } from '@/comps/ui/field';
 import { AuthPanel } from '@/comps/frame/auth-panel';
 import { safeReturnPath } from '@coder/server/auth/sign-in';
 import { load } from '@/api/load';
@@ -37,7 +36,11 @@ function LoginPage({ signIn, error }: { signIn: string; error?: string | null })
           <span>Sign in with Wular Auth</span>
         </a>
       </div>
-      <ErrorText value={error ? (ERRORS[error] ?? 'Sign-in did not finish. Try again.') : ''} />
+      {error ? (
+        <p class="flash err" role="alert">
+          {ERRORS[error] ?? 'Sign-in did not finish. Try again.'}
+        </p>
+      ) : null}
     </AuthPanel>
   );
 }

@@ -5,6 +5,7 @@ import './runners-list.css';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { toastFailure, useAction } from '@/utils/action';
 import {
   iCheck,
   iDots,
@@ -19,11 +20,11 @@ import {
 import { Card, Loading } from '@/comps/ui/card';
 import { Badge } from '@/comps/ui/badge';
 import { CopyLine } from '@/comps/ui/copy';
-import { ErrorText, Field } from '@/comps/ui/field';
+import { Field } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
 import { Menu, MenuItem } from '@/comps/ui/menu';
 import { Select } from '@/comps/ui/select';
-import { formatDuration, reasonText } from '@/utils/format';
+import { formatDuration } from '@/utils/format';
 import { sortedRunners } from '@/app/dash/[org]/tasks/composer-data';
 import { useRunnerEvents } from '@/comps/frame/task-toasts';
 import { useRemove } from './list';
@@ -82,12 +83,10 @@ function RunnerItem({
   runner,
   manage,
   onChange,
-  onError,
 }: {
   runner: RunnerRow;
   manage: boolean;
   onChange: (act: () => Promise<unknown>) => Promise<boolean>;
-  onError: (message: string) => void;
 }) {
   const [making, setMaking] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -108,7 +107,7 @@ function RunnerItem({
     setTested('testing');
     client.runners.test(runner.id).then(setTested, reason => {
       setTested(undefined);
-      onError(reasonText(reason));
+      toastFailure(reason);
     });
   };
   return (
@@ -217,23 +216,23 @@ function AddRunner({
   known: string[];
   onAdded: (rows: Runners) => void;
 }) {
-  const [kind, setKind] = useState<RunnerKind>();
+  const [picked, setKind] = useState<RunnerKind>();
   const [scope, setScope] = useState(personal ? 'personal' : 'workspace');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  const [pairing, setPairing] = useState<RunnerPairing>();
+  const action = useAction();
+  const busy = Boolean(action.pending);
+  const [paired, setPairing] = useState<RunnerPairing>();
+  // A paired machine shows up in the list, through the events stream, once it calls home.
+  const [before, setBefore] = useState(known);
+  const joined = Boolean(paired) && known.some(id => !before.includes(id));
+  const kind = joined ? undefined : picked;
+  const pairing = joined ? undefined : paired;
   const spec = catalog.find(each => each.kind === kind);
 
-  // A paired machine shows up in the list, through the events stream, once it calls home.
-  const before = useRef(known);
   useEffect(() => {
     if (!pairing) return;
     const timer = setTimeout(cancel, Math.min(pairing.expiresAt - Date.now(), 15 * 60_000));
     return () => clearTimeout(timer);
   }, [pairing]);
-  useEffect(() => {
-    if (pairing && known.some(id => !before.current.includes(id))) cancel();
-  }, [known.join(), pairing]);
 
   const cancel = () => {
     setPairing(undefined);
@@ -242,19 +241,15 @@ function AddRunner({
 
   // Picking another kind drops a pairing still waiting.
   const pick = (next: RunnerSpec) => {
-    setError('');
     setPairing(undefined);
     setKind(next.kind);
     if (next.connect !== 'pair') return;
-    before.current = known;
-    setBusy(true);
-    client.runners
-      .pair({ scope: scope as RunnerRow['scope'] })
-      .then(setPairing, reason => {
-        setKind(undefined);
-        setError(reasonText(reason));
-      })
-      .finally(() => setBusy(false));
+    setBefore(known);
+    void action
+      .run('pair', async () =>
+        setPairing(await client.runners.pair({ scope: scope as RunnerRow['scope'] })),
+      )
+      .then(ok => ok || setKind(undefined));
   };
 
   const add = async (event: SubmitEvent) => {
@@ -267,9 +262,7 @@ function AddRunner({
       ]),
     );
     const { name, ...config } = values;
-    setBusy(true);
-    setError('');
-    try {
+    await action.run('add', async () => {
       await client.runners.add({
         kind: spec.kind,
         name: name || spec.name,
@@ -278,10 +271,7 @@ function AddRunner({
       });
       onAdded(await client.runners.list());
       setKind(undefined);
-    } catch (reason) {
-      setError(reasonText(reason));
-    }
-    setBusy(false);
+    });
   };
 
   return (
@@ -347,7 +337,6 @@ function AddRunner({
         ) : null}
         {spec?.connect === 'fields' ? (
           <div class="runner-foot">
-            <ErrorText value={error} />
             {personal ? (
               <Select
                 label="Who can use this runner"
@@ -373,7 +362,6 @@ function AddRunner({
               />
             ) : null}
             {busy && !pairing ? <Loading label="Pairing" inline /> : null}
-            <ErrorText value={error} />
           </>
         )}
       </div>
@@ -385,26 +373,20 @@ function AddRunner({
 /** Where tasks run: every runner by name, the default first, and how to add one. */
 export function RunnersList({ first, me }: { first: Runners; me: Me }) {
   const [rows, setRows] = useState(first);
-  const [error, setError] = useState('');
+  const action = useAction();
   const admin = !me.user || ADMIN_ROLES.has(me.organization?.role ?? '');
   const items = sortedRunners(rows.items);
 
   useRunnerEvents(({ items }) => setRows(current => ({ ...current, items })));
 
-  const change = async (act: () => Promise<unknown>) => {
-    setError('');
-    try {
+  const change = (act: () => Promise<unknown>) =>
+    action.run('change', async () => {
       await act();
       setRows(await client.runners.list());
-      return true;
-    } catch (reason) {
-      setError(reasonText(reason));
-      return false;
-    }
-  };
+    });
 
   return (
-    <Card title="Runners" count={items.length} actions={<ErrorText value={error} />}>
+    <Card title="Runners" count={items.length}>
       <div class="table-scroll">
         <table class="rows settings">
           <tbody>
@@ -414,7 +396,6 @@ export function RunnersList({ first, me }: { first: Runners; me: Me }) {
                 runner={runner}
                 manage={runner.scope === 'personal' || admin}
                 onChange={change}
-                onError={setError}
               />
             ))}
           </tbody>

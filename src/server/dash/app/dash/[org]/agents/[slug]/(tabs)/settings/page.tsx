@@ -52,10 +52,7 @@ export default async function AgentSettingsPage({
           ([row, shape, shown, rows, integrations, workspace]) => (
             <>
               {row.needsModel ? (
-                <NeedsCredential
-                  reason="Agents need a model credential to run."
-                  back={`/dash/${orgOf(request)}/agents/${encodeURIComponent(row.id)}/settings`}
-                />
+                <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
               ) : null}
               <AgentSettingsForm
                 agent={row}

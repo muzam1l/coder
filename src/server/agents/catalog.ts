@@ -269,7 +269,7 @@ export async function readAgent(
     !credentials.some(
       ({ value }) => value.engine === engine && (!value.owner || value.owner === requester),
     ) &&
-    !(await machineSignedIn(ctx, engine));
+    !(await machineSignedIn(ctx, record.settings?.engine ?? current?.definition.engine));
 
   // The names its apps answer to, once each, where the agent wakes on a mention.
   const wired = current?.definition.integrations ?? {};

@@ -39,8 +39,8 @@ import {
 } from './runner';
 import { serveRunner } from './runner/serve';
 import { serverAppLink } from './server/agents/apps';
-import { migrate, rotateKey } from './server/maintenance';
-import { ACTIONS_WORKFLOW_YAML } from './server/runners/github-actions';
+import { rotateKey } from './server/maintenance';
+import { actionsWorkflow } from './server/runners/github-actions';
 import { serve, serverHandler } from './server/serve';
 
 function resolveCwd(cwd?: string): string {
@@ -118,10 +118,9 @@ export const auth = sessions;
 /** Run and host a Coder server. Mirrors `coder server`. */
 export const server = {
   serve,
-  migrate,
   rotateKey,
   /** The GitHub Actions workflow the `github-actions` runner dispatches. */
-  workflow: () => ACTIONS_WORKFLOW_YAML,
+  workflow: actionsWorkflow,
   app: {
     /** A link, valid 10 minutes, to the page that creates the built-in agent's public app on a platform. */
     create: serverAppLink,

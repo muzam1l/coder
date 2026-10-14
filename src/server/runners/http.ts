@@ -4,7 +4,7 @@ import { isIP } from 'node:net';
 import { request as httpsRequest } from 'node:https';
 
 import type { AgentTask } from '../../agent/types';
-import type { Runner, RunnerLogs, RunnerStatus } from '.';
+import type { Runner, RunnerStatus } from '.';
 import type { InboxEntry, InboxAck } from '../tasks/queue';
 
 export interface HttpRunnerOptions {
@@ -194,10 +194,6 @@ export class HttpRunner implements Runner {
 
   status(handle: string): Promise<RunnerStatus> {
     return this.request(`/status/${encodeURIComponent(handle)}`);
-  }
-
-  logs(handle: string, after = -1): Promise<RunnerLogs> {
-    return this.request(`/logs/${encodeURIComponent(handle)}?after=${after}`);
   }
 
   async stop(handle: string): Promise<void> {

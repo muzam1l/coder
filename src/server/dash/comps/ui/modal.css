@@ -67,9 +67,7 @@ dialog.outcome-dialog {
 }
 /* a toned dialog: a bar on top and the title's icon in its color */
 dialog.modal.tone {
-  box-shadow:
-    inset 0 3px 0 var(--tone),
-    0 12px 32px rgba(0, 0, 0, 0.18);
+  border-top: 3px solid var(--tone);
 }
 dialog.modal.neutral {
   --tone: var(--muted);

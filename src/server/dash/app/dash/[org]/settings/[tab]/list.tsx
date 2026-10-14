@@ -6,12 +6,11 @@ import type { ComponentChildren } from 'preact';
 import { useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { toastFailure } from '@/utils/action';
 import type { Config, ConfigPatch } from '@coder/client/types';
 
 import { iDots } from '@/comps/ui/icons';
 import { Card } from '@/comps/ui/card';
-import { reasonText } from '@/utils/format';
-import { ErrorText } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
 import { Menu, MenuItem } from '@/comps/ui/menu';
 import { ConfirmDialog } from '@/comps/ui/confirm';
@@ -31,12 +30,10 @@ function merged<T>(target: T, patch: unknown): T {
 /** Config edits shown at once and sent as merge patches; the newest answer wins and a failure rolls back. */
 export function useConfig(first: Config) {
   const [value, setValue] = useState(first);
-  const [error, setError] = useState('');
   const sent = useRef(0);
   const saved = useRef(first);
   const patch = (body: ConfigPatch) => {
     const seq = ++sent.current;
-    setError('');
     setValue(now => merged(now, body));
     return client.config.patch(body).then(
       answer => {
@@ -47,36 +44,18 @@ export function useConfig(first: Config) {
       reason => {
         if (seq === sent.current) {
           setValue(saved.current);
-          setError(reasonText(reason));
+          toastFailure(reason);
         }
         return false;
       },
     );
   };
-  return { value, error, patch };
+  return { value, patch };
 }
 
 export const EFFORTS = ['low', 'medium', 'high'];
 
 export const PERMISSIONS = ['read-only', 'workspace-write', 'auto'];
-
-/** A change sent to the server; its answer replaces what the list shows. */
-export function useSend<T>(first: T) {
-  const [value, setValue] = useState(first);
-  const [error, setError] = useState('');
-  const send = async <R,>(act: () => Promise<R>, apply?: (answer: R) => T) => {
-    setError('');
-    try {
-      const answer = await act();
-      if (apply) setValue(apply(answer));
-      return true;
-    } catch (reason) {
-      setError(reasonText(reason));
-      return false;
-    }
-  };
-  return { value, setValue, error, setError, send };
-}
 
 /** The add row: its fields, and Enter in any of them adds. */
 export function AddRow({
@@ -192,18 +171,16 @@ export function Row({
 export function List({
   title,
   count,
-  error,
   children,
   add,
 }: {
   title: string;
   count: number;
-  error: string;
   children: ComponentChildren;
   add?: ComponentChildren;
 }) {
   return (
-    <Card title={title} count={count} actions={<ErrorText value={error} />}>
+    <Card title={title} count={count}>
       <div class="table-scroll">
         <table class="rows settings">
           <tbody>{children}</tbody>

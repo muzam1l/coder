@@ -6,13 +6,14 @@ import { useRouter } from '@wular/pnext/navigation/client';
 import type { AppCheck, CreateStart } from '@coder/client/types';
 import type { CreateStep, PlatformPost } from '@coder/integrations/types';
 import { client } from '@/utils/client';
+import { useAction } from '@/utils/action';
 import { iAlert, iDots, iDown, iOut, iPlus, iSpark, iSteer, iUpload, iX } from '@/comps/ui/icons';
 import { Modal } from '@/comps/ui/modal';
 import { reasonText } from '@/utils/format';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 import { Badge } from '@/comps/ui/badge';
 import { CopyButton, CopyLine } from '@/comps/ui/copy';
-import { ErrorText, Field } from '@/comps/ui/field';
+import { Field } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
 import { Menu, MenuItem } from '@/comps/ui/menu';
 import { Segmented } from '@/comps/ui/segmented';
@@ -102,21 +103,13 @@ function Unreachable() {
 
 /** Installs an app and comes back to this page. */
 function useInstall() {
-  const [busy, setBusy] = useState(false);
-  const install = (app: string) => {
-    setBusy(true);
-    void client.apps
-      .install(app, location.pathname)
-      .then(({ url }) => {
-        location.href = url;
-      })
-      .catch(reason => {
-        setBusy(false);
-        toastError('Not installed', reasonText(reason));
-      });
-  };
+  const action = useAction({ toast: 'Not installed', leaves: true });
+  const install = (app: string) =>
+    void action.run('install', async () => {
+      location.href = (await client.apps.install(app, location.pathname)).url;
+    });
 
-  return { busy, install };
+  return { busy: Boolean(action.pending), install };
 }
 
 /** One install button, for the next steps of a flow's outcome. */
@@ -157,22 +150,13 @@ function RemoveDialog({
   name: string;
   onClose: () => void;
 }) {
-  const nav = useRouter();
-  const [busy, setBusy] = useState(false);
-  const remove = () => {
-    setBusy(true);
-    void client.apps
-      .remove(app.id)
-      .then(() => {
-        // An outcome in the address belongs to the removed app.
-        history.replaceState(history.state, '', location.pathname);
-        nav.refresh();
-      })
-      .catch(reason => {
-        setBusy(false);
-        toastError('Not removed', reasonText(reason));
-      });
-  };
+  const action = useAction({ toast: 'Not removed', refresh: true, leaves: true });
+  const remove = () =>
+    void action.run('remove', async () => {
+      await client.apps.remove(app.id);
+      // An outcome in the address belongs to the removed app.
+      history.replaceState(history.state, '', location.pathname);
+    });
 
   return (
     <ConfirmDialog
@@ -197,7 +181,7 @@ function RemoveDialog({
         </>
       }
       confirmLabel="Remove"
-      busy={busy}
+      busy={Boolean(action.pending)}
       onConfirm={remove}
       onClose={onClose}
     />
@@ -219,20 +203,17 @@ export function CreateDialog({
   unreachable?: boolean;
   onClose: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const action = useAction({ leaves: true });
+  const busy = Boolean(action.pending);
   const submit = (event: SubmitEvent) => {
     event.preventDefault();
     const form = event.currentTarget as HTMLFormElement;
-    setBusy(true);
-    setError('');
-    void finishCreate(integration, start, {
-      ...step.hidden,
-      ...(Object.fromEntries(new FormData(form)) as Record<string, string>),
-    }).catch(reason => {
-      setBusy(false);
-      setError(reasonText(reason));
-    });
+    void action.run('create', () =>
+      finishCreate(integration, start, {
+        ...step.hidden,
+        ...(Object.fromEntries(new FormData(form)) as Record<string, string>),
+      }),
+    );
   };
 
   return (
@@ -301,7 +282,6 @@ export function CreateDialog({
           />
         </Field>
       ))}
-      <ErrorText value={error} />
     </Modal>
   );
 }
@@ -325,8 +305,8 @@ function WhereDialog({
   onClose: () => void;
 }) {
   const [who, setWho] = useState<keyof typeof WHO>('private');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
+  const action = useAction({ leaves: true });
+  const busy = Boolean(action.pending);
   const owner = useRef<HTMLInputElement>(null);
 
   // The first organization the workspace already works in, preselected once read.
@@ -351,12 +331,9 @@ function WhereDialog({
   const submit = (event: SubmitEvent) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget as HTMLFormElement);
-    setBusy(true);
-    setError('');
-    void onSubmit(String(form.get('owner') ?? '').trim(), who === 'public').catch(reason => {
-      setBusy(false);
-      setError(reasonText(reason));
-    });
+    void action.run('submit', () =>
+      onSubmit(String(form.get('owner') ?? '').trim(), who === 'public'),
+    );
   };
 
   return (
@@ -398,7 +375,6 @@ function WhereDialog({
           />
         </Field>
       ) : null}
-      <ErrorText value={error} />
     </Modal>
   );
 }
@@ -416,18 +392,15 @@ function UpdateDialog({
   check: AppCheck;
   onClose: () => void;
 }) {
-  const [busy, setBusy] = useState(false);
+  const action = useAction({ toast: `${name} app not updated`, leaves: true });
+  const busy = Boolean(action.pending);
   const current = !check.changed;
   const confirm = (event: MouseEvent) => {
     const dialog = (event.currentTarget as HTMLElement).closest('dialog')!;
-    setBusy(true);
-    void client.apps
-      .update(app.id)
-      .then(() => dialog.close())
-      .catch(reason => {
-        setBusy(false);
-        toastError(`${name} app not updated`, reasonText(reason));
-      });
+    void action.run('confirm', async () => {
+      await client.apps.update(app.id);
+      dialog.close();
+    });
   };
 
   return (
@@ -504,27 +477,29 @@ export function DriftQueue({ apps }: { apps: Array<AppChoice & { platform: strin
   const [left, setLeft] = useState(apps);
   const [check, setCheck] = useState<AppCheck>();
   const app = left[0];
-  const next = () => setLeft(rest => rest.slice(1));
 
-  useEffect(() => {
+  const open = (rest: typeof apps) => {
+    setLeft(rest);
     setCheck(undefined);
+    const [first] = rest;
     // A reload must not open them again; the page refreshes once all are closed.
-    if (!app) {
+    if (!first) {
       history.replaceState(history.state, '', location.pathname);
       nav.refresh();
       return;
     }
     void client.apps
-      .drift(app.id)
+      .drift(first.id)
       .then(setCheck)
       .catch(reason => {
-        toastError(`Not read from ${app.platform}`, reasonText(reason));
-        next();
+        toastError(`Not read from ${first.platform}`, reasonText(reason));
+        open(rest.slice(1));
       });
-  }, [app?.id]);
+  };
+  useEffect(() => open(apps), []);
 
   return app && check ? (
-    <UpdateDialog app={app} name={app.platform} check={check} onClose={next} />
+    <UpdateDialog app={app} name={app.platform} check={check} onClose={() => open(left.slice(1))} />
   ) : null;
 }
 
@@ -532,16 +507,19 @@ export function DriftQueue({ apps }: { apps: Array<AppChoice & { platform: strin
 function FailedDialog({
   name,
   issues,
+  title = `Setting up ${name} failed`,
+  text = 'Coder ran into an unexpected error, so nothing was set up. Try again, and if it fails again, report it on GitHub.',
   onRetry,
 }: {
   name: string;
   /** Where to report it. */
   issues?: string;
+  title?: string;
+  text?: string;
   onRetry: () => void;
 }) {
-  const title = `Setting up ${name} failed`;
   const retry = (event: MouseEvent) => {
-    event.currentTarget!.closest('dialog')!.close();
+    (event.currentTarget as HTMLElement).closest('dialog')!.close();
     onRetry();
   };
 
@@ -560,7 +538,7 @@ function FailedDialog({
           {issues ? (
             <a
               class="btn outline"
-              href={`${issues}?title=${encodeURIComponent(title)}`}
+              href={`${issues}?${new URLSearchParams({ title, body: text })}`}
               target="_blank"
               rel="noreferrer"
             >
@@ -573,10 +551,7 @@ function FailedDialog({
         </>
       }
     >
-      <p>
-        Coder ran into an unexpected error, so nothing was set up. Try again, and if it fails again,
-        report it on GitHub.
-      </p>
+      <p>{text}</p>
     </Modal>
   );
 }
@@ -613,8 +588,8 @@ export function PlatformActions({
   shared?: boolean;
   /** How apps are brought up to date: Coder pushes them, or shows what to change on the platform. */
   appUpdate?: 'push' | 'drift' | 'confirm';
-  /** The platform's last setup failed unexpectedly, on `app` when it was an install. */
-  failed?: { name: string; app?: string; issues?: string };
+  /** The platform's last setup failed, on `app` when it was an install; `title` and `text` say how, else it was unexpected. */
+  failed?: { name: string; app?: string; issues?: string; title?: string; text?: string };
 }) {
   const nav = useRouter();
   const { busy, install } = useInstall();
@@ -706,6 +681,8 @@ export function PlatformActions({
     <FailedDialog
       name={failed.name}
       issues={failed.issues}
+      title={failed.title}
+      text={failed.text}
       onRetry={() => (apps.some(app => app.id === failed.app) ? install(failed.app!) : start())}
     />
   ) : null;

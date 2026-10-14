@@ -2,16 +2,15 @@
 
 import './import-picker.css';
 
-import { useEffect, useState } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { toastFailure, useAction } from '@/utils/action';
 import { iGit } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { held } from '@/utils/paged';
 import { Loading } from '@/comps/ui/card';
-import { reasonText } from '@/utils/format';
-import { ErrorText } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
 import { connectRepositories } from '@/app/dash/[org]/agents/editor/connect-repositories';
 import { Search } from '@/comps/ui/toolbar';
@@ -27,7 +26,7 @@ type Found = {
   taken?: boolean;
   warnings?: string[];
 };
-type Preview = { repo: string; agents?: Found[]; error?: string };
+type Preview = { repo: string; agents?: Found[]; failed?: boolean };
 
 const REPO = /^[\w.-]+\/[\w.-]+$/;
 const short = (commit: string) => (/^[0-9a-f]{12,}$/i.test(commit) ? commit.slice(0, 7) : commit);
@@ -35,10 +34,8 @@ const short = (commit: string) => (/^[0-9a-f]{12,}$/i.test(commit) ? commit.slic
 /** The agents a repository holds, ticked, and one Import; a push to the repository updates them. */
 function Agents({ preview, onDone }: { preview: Preview; onDone: (ids: string[]) => void }) {
   const [off, setOff] = useState<Set<string>>(new Set());
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
-  useEffect(() => setOff(new Set()), [preview.repo]);
-  if (preview.error) return <ErrorText value={preview.error} />;
+  const action = useAction({ leaves: true });
+  if (preview.failed) return null;
   if (!preview.agents) return <Loading label={`Reading ${preview.repo}`} h={180} />;
   if (!preview.agents.length)
     return (
@@ -56,15 +53,9 @@ function Agents({ preview, onDone }: { preview: Preview; onDone: (ids: string[])
       onSubmit={async event => {
         event.preventDefault();
         if (!ticked.length) return;
-        setBusy(true);
-        setError('');
-        try {
-          const { imported } = await client.agents.import(preview.repo, undefined, ticked);
-          onDone(imported);
-        } catch (reason) {
-          setBusy(false);
-          setError(reasonText(reason));
-        }
+        await action.run('import', async () =>
+          onDone((await client.agents.import(preview.repo, undefined, ticked)).imported),
+        );
       }}
     >
       <ul class="picks-list">
@@ -109,8 +100,7 @@ function Agents({ preview, onDone }: { preview: Preview; onDone: (ids: string[])
         Each push to {preview.repo} that changes an agent publishes its new version here.
       </p>
       <div class="form-actions end">
-        <ErrorText value={error} />
-        <button class="btn" disabled={busy || !ticked.length}>
+        <button class="btn" disabled={Boolean(action.pending) || !ticked.length}>
           Import {ticked.length === 1 ? '1 agent' : `${ticked.length} agents`}
         </button>
       </div>
@@ -135,7 +125,7 @@ export function ImportPicker({
   const [repos, setRepos] = useState<string[]>();
   const [query, setQuery] = useState('');
   const [preview, setPreview] = useState<Preview>();
-  const [error, setError] = useState('');
+  const opened = useRef('');
 
   useEffect(() => {
     if (!connected) return;
@@ -145,19 +135,22 @@ export function ImportPicker({
       .then(rows => setRepos(rows.map(row => row.repo)))
       .catch(reason => {
         setRepos([]);
-        setError(reasonText(reason));
+        toastFailure(reason);
       });
   }, []);
 
   const open = (repo: string) => {
+    opened.current = repo;
     setPreview({ repo });
     void client.agents
       .preview(repo)
       .then(held(performance.now()))
-      .then(({ agents }) => setPreview(now => (now?.repo === repo ? { repo, agents } : now)))
-      .catch(reason =>
-        setPreview(now => (now?.repo === repo ? { repo, error: reasonText(reason) } : now)),
-      );
+      .then(({ agents }) => opened.current === repo && setPreview({ repo, agents }))
+      .catch(reason => {
+        if (opened.current !== repo) return;
+        setPreview({ repo, failed: true });
+        toastFailure(reason);
+      });
   };
   const done = (ids: string[]) =>
     ids.length === 1
@@ -182,7 +175,7 @@ export function ImportPicker({
                 class="btn outline sm"
                 onClick={() =>
                   void connectRepositories(`/dash/${org}/agents/new?template=import`).catch(
-                    reason => setError(reasonText(reason)),
+                    toastFailure,
                   )
                 }
               >
@@ -208,7 +201,6 @@ export function ImportPicker({
             </form>
           </>
         )}
-        <ErrorText value={error} />
         {connected ? (
           <div class="repo-list scroll-box" role="list">
             {!repos ? (
@@ -251,7 +243,7 @@ export function ImportPicker({
         {preview ? (
           <>
             <h3>Agents in {preview.repo}</h3>
-            <Agents preview={preview} onDone={done} />
+            <Agents key={preview.repo} preview={preview} onDone={done} />
           </>
         ) : (
           <p class="muted">Pick a repository to see the agents in its .coder/agents folder.</p>

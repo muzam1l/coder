@@ -2,7 +2,6 @@
 
 import { useState } from 'preact/hooks';
 
-import { ErrorText } from '@/comps/ui/field';
 import { client } from '@/utils/client';
 import { reasonText } from '@/utils/format';
 import { AuthPanel } from '@/comps/frame/auth-panel';
@@ -36,7 +35,10 @@ export default function LinkPage() {
           Connect
         </button>
       )}
-      <ErrorText value={error} />
+      {/* The line keeps its height, so an error moves nothing. */}
+      <p class="flash err reserved" role="alert">
+        {error}
+      </p>
     </AuthPanel>
   );
 }

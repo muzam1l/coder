@@ -167,7 +167,11 @@ export class LogView {
       row.title = `${[label, String(entry.decision ?? ''), risk, method].filter(Boolean).join(' ')}${shown ? ` · ${shown}` : ''}`;
       row.detail = stripCwd(entry.reason ? String(entry.reason) : '', this.cwd);
     } else {
-      const raw = entry.message ? String(entry.message) : String(entry.kind ?? '');
+      const raw = entry.message
+        ? String(entry.message)
+        : sourceKind === 'tool-result'
+          ? '(no output)'
+          : String(entry.tool || entry.kind || '');
       if (!raw && !(sourceKind === 'tool-result' && (entry.exitCode != null || entry.isError)))
         return [];
       row.title = stripCwd(raw, this.cwd);
@@ -216,7 +220,7 @@ export class LogView {
       ? this.openCalls.findIndex(call => this.callIds.get(call) === String(entry.callId))
       : -1;
     const index =
-      byId >= 0
+      entry.callId
         ? byId
         : tool
           ? this.openCalls.findIndex(call => call.tool === tool)
@@ -229,6 +233,7 @@ export class LogView {
       typeof entry.durationMs === 'number' ? entry.durationMs : record.at - call!.at || 0;
     return {
       ...call!,
+      title: entry.callMessage ? stripCwd(String(entry.callMessage), this.cwd) : call!.title,
       result: {
         ok: !exitCode && entry.isError !== true,
         exitCode,

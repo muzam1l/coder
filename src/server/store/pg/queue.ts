@@ -362,7 +362,6 @@ export class DrizzleQueue implements TaskQueue {
       archivedAt,
       autoArchived: _auto,
       lastSeenAt,
-      logsPulledAt,
       logsComplete,
       ...fields
     } = patch;
@@ -370,9 +369,9 @@ export class DrizzleQueue implements TaskQueue {
       .update(task)
       .set({
         ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value ?? null])),
-        ...(logsPulledAt !== undefined || logsComplete !== undefined
+        ...(logsComplete !== undefined
           ? {
-              context: sql`jsonb_set(coalesce(${task.context}, '{}'::jsonb), '{runnerLogs}', coalesce(${task.context}->'runnerLogs', '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object('at', ${logsPulledAt ?? null}::bigint, 'complete', ${logsComplete ?? null}::boolean, 'handle', ${task.handle}, 'attempts', ${task.attempts}, 'generation', ${task.generation})))`,
+              context: sql`jsonb_set(coalesce(${task.context}, '{}'::jsonb), '{runnerLogs}', coalesce(${task.context}->'runnerLogs', '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object('complete', ${logsComplete ?? null}::boolean, 'handle', ${task.handle}, 'attempts', ${task.attempts}, 'generation', ${task.generation})))`,
             }
           : {}),
         ...(answer === undefined

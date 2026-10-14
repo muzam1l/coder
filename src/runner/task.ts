@@ -9,26 +9,28 @@ import process from 'node:process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 
-import { execAgent } from '../agent/exec';
+import { execAgent, AGENT_TASK_PREFIX } from '../agent/exec';
 import { INTEGRATIONS } from '../integrations';
 import { tokenEnvName } from '../agent/mcp';
 import type { AgentTask } from '../agent/types';
 import type { EngineCredential } from '../server/store/types';
 import { answerApproval } from '../core/approvals';
-import { WORKSPACE_CONFIG_ENV, type CoderConfig } from '../core/config';
-import { loadTask, resolveTaskDir, coderCache, enqueueSteer, readTaskLog } from '../core/state';
+import { MACHINE_SANDBOX_ENV, WORKSPACE_CONFIG_ENV, type CoderConfig } from '../core/config';
+import { loadTask, listTasks, resolveTaskDir, coderCache, enqueueSteer } from '../core/state';
 import { askTask, steerTask, stopTask } from '../core/task/actions';
 import { connectionVariables } from '../core/connections';
 import type { InboxEntry, InboxAck } from '../server/tasks/queue';
 import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mailbox';
 import type { Task } from '../core/types';
 import type { McpServerSpec } from '../core/types';
-import { readJsonFile, writeJsonFileAtomic } from '../utils/fsx';
+import { readJsonFile, writeJsonFileAtomic, createJsonlTail } from '../utils/fsx';
 
 const exec = promisify(execFile);
 type RemoteTask = {
   task: AgentTask;
   generation: number;
+  logCursor?: number;
+  timeoutMs?: number;
   tokens: Record<string, string>;
   nativeTokens?: Record<string, string>;
   credential: EngineCredential;
@@ -92,6 +94,7 @@ export async function checkout(
   root: string,
   token?: string,
   cache?: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const repo = task.event?.repo;
   if (!repo) return root;
@@ -125,7 +128,7 @@ export async function checkout(
       }
     : undefined;
   try {
-    const gitOptions = { ...options, maxBuffer: 64 * 1024 * 1024 };
+    const gitOptions = { ...options, signal, maxBuffer: 64 * 1024 * 1024 };
     if (cache) {
       await withCheckoutLock(cache, async () => {
         if (!(await fs.stat(path.join(cache, '.git')).catch(() => undefined))) {
@@ -259,7 +262,7 @@ async function applyEnvironment(remote: RemoteTask, root: string): Promise<strin
   delete process.env.CODER_TASK_TOKEN;
   delete process.env.APP_TOKEN;
   for (const id of Object.keys(remote.tokens)) delete process.env[tokenEnvName(id)];
-  const { CODEX_AUTH_JSON: authJson, ...env } = remote.credential.env;
+  const { CODEX_AUTH_JSON: authJson, [MACHINE_SANDBOX_ENV]: _, ...env } = remote.credential.env;
   Object.assign(process.env, env);
   process.env[WORKSPACE_CONFIG_ENV] = JSON.stringify(remote.config ?? {});
   process.env.CODER_MCP_MODE = 'cloud';
@@ -419,7 +422,16 @@ export async function applyTaskMessage(
 
 export async function runTask(id: string, root: string): Promise<unknown> {
   const auth = taskServer();
-  const remote = await taskRequest<RemoteTask>(auth.server, auth.token, id);
+  const remote = await taskRequest<RemoteTask>(auth.server, auth.token, id).catch(async error => {
+    await taskRequest(auth.server, auth.token, id, '/result', {
+      method: 'POST',
+      body: JSON.stringify({
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    }).catch(() => {});
+    throw error;
+  });
   const event = remote.task.event;
   const eventToken = event && remote.tokens[event.integration];
   const polling = process.env.CODER_INBOX_MODE === 'poll';
@@ -427,15 +439,63 @@ export async function runTask(id: string, root: string): Promise<unknown> {
   const cache = process.env.CODER_CHECKOUT_CACHE;
   delete process.env.CODER_CHECKOUT_CACHE;
   const codexHome = await applyEnvironment(remote, root);
+  const timeout = new AbortController();
+  const timer = setTimeout(
+    () => timeout.abort(new Error('timeout')),
+    remote.timeoutMs ?? 30 * 60 * 1000,
+  );
+  const heartbeat = setInterval(() => {
+    void taskRequest(auth.server, auth.token, id, '/heartbeat', {
+      method: 'POST',
+      signal: AbortSignal.timeout(10_000),
+    }).catch(() => {});
+  }, 30_000);
   let cwd: string | undefined;
+  const beforeResult = () => writeBack(auth, id, remote, codexHome);
+  let reportingResult = false;
+  const reportResult = async (body: unknown) => {
+    reportingResult = true;
+    await beforeResult();
+    await taskRequest(auth.server, auth.token, id, '/result', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+  };
   try {
-    cwd = await checkout(remote.task, root, eventToken, cache);
-    return await runCheckedOutTask(id, root, auth, remote, cwd, eventToken, polling);
+    cwd = await Promise.race([
+      checkout(remote.task, root, eventToken, cache, timeout.signal),
+      new Promise<never>((_, reject) =>
+        timeout.signal.addEventListener('abort', () => reject(timeout.signal.reason), {
+          once: true,
+        }),
+      ),
+    ]);
+    timeout.signal.throwIfAborted();
+    return await runCheckedOutTask(
+      id,
+      root,
+      auth,
+      remote,
+      cwd,
+      eventToken,
+      polling,
+      timeout.signal,
+      beforeResult,
+      reportResult,
+    );
+  } catch (error) {
+    if (!reportingResult)
+      await reportResult({
+        status: 'failed',
+        error: error instanceof Error ? error.message : String(error),
+      }).catch(failure => console.error('coder runner: result delivery failed', failure));
+    throw error;
   } finally {
+    clearTimeout(timer);
+    clearInterval(heartbeat);
     try {
       if (cwd) await releaseCheckout(cwd);
     } finally {
-      await writeBack(auth, id, remote, codexHome);
       delete process.env[WORKSPACE_CONFIG_ENV];
       delete process.env.CODER_MCP_MODE;
       delete process.env.CODER_MCP_CONNECTION_ENV;
@@ -451,10 +511,14 @@ async function runCheckedOutTask(
   cwd: string,
   eventToken: string | undefined,
   polling: boolean,
+  timeout: AbortSignal,
+  beforeResult: () => Promise<void>,
+  reportResult: (body: unknown) => Promise<void>,
 ): Promise<unknown> {
   const event = remote.task.event;
   const controller = new AbortController();
   let taskId: string | undefined;
+  let flow: { runId: string; requestStop(): void; runningIds(): string[] } | undefined;
   let cancelled = false;
   const inbox = await receiveInbox({
     root,
@@ -465,6 +529,8 @@ async function runCheckedOutTask(
       if (entry.kind === 'cancel') {
         await stopTask(cwd, task);
         cancelled = true;
+        await flushLogs();
+        await beforeResult();
         return;
       }
       return requestInboxControl(resolveTaskDir(cwd, task.id), id, entry);
@@ -514,24 +580,64 @@ async function runCheckedOutTask(
   const savedTask = readJsonFile<{ generation: number; id: string }>(
     path.join(root, '.runner-task.json'),
   );
-  if (savedTask?.generation !== remote.generation)
-    await fs.writeFile(path.join(root, '.runner-note'), remote.task.context?.note ?? '', {
-      mode: 0o600,
-    });
-  let heartbeat: ReturnType<typeof setInterval> | undefined;
   let logTimer: ReturnType<typeof setInterval> | undefined;
-  const logged = new Map<string, number>();
-  const forwardLogs = () => {
-    for (const [id, after] of logged) {
-      const entries = readTaskLog(cwd, id, Infinity);
-      for (const entry of entries.slice(after)) process.stdout.write(`${JSON.stringify(entry)}\n`);
-      logged.set(id, entries.length);
-    }
+  const logged = new Map<string, () => string[]>();
+  let sequence = (remote.logCursor ?? -1) + 1;
+  let logBytes = 0;
+  const pending: Array<{ seq: number; at: number; level: 'out' | 'err'; line: string }> = [];
+  let forwarding: Promise<void> | undefined;
+  const forwardLogs = (): Promise<void> => {
+    for (const tail of logged.values())
+      for (const line of tail()) {
+        if (logBytes >= 2 * 1024 * 1024) continue;
+        const bounded =
+          Buffer.byteLength(line) > 64 * 1024 ? 'A task log entry exceeded 64 KB' : line;
+        pending.push({ seq: sequence++, at: Date.now(), level: 'out', line: bounded });
+        logBytes += Buffer.byteLength(bounded);
+      }
+    if (forwarding) return forwarding;
+    forwarding = (async () => {
+      while (pending.length) {
+        let size = 0;
+        const entries = pending
+          .slice(0, 100)
+          .filter(entry => (size += Buffer.byteLength(JSON.stringify(entry))) < 512 * 1024);
+        if (!entries.length) throw new Error('Task log batch is too large');
+        let saved = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await taskRequest(auth.server, auth.token, id, '/logs', {
+              method: 'POST',
+              signal: AbortSignal.timeout(5000),
+              body: JSON.stringify({ entries }),
+            });
+            saved = true;
+            break;
+          } catch (error) {
+            if (attempt === 2) throw error;
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        }
+        if (saved) pending.splice(0, entries.length);
+      }
+    })().finally(() => {
+      forwarding = undefined;
+    });
+
+    return forwarding;
   };
+  const flushLogs = () =>
+    forwardLogs().catch(error => {
+      console.error('coder runner: log delivery failed', error);
+    });
   let shortPoll: ReturnType<typeof setInterval> | undefined;
   let fetching: Promise<unknown> | undefined;
   try {
-    const result = await execAgent({
+    if (savedTask?.generation !== remote.generation)
+      await fs.writeFile(path.join(root, '.runner-note'), remote.task.context?.note ?? '', {
+        mode: 0o600,
+      });
+    const running = execAgent({
       cwd,
       ...(savedTask?.generation === remote.generation ? { resumeTaskId: savedTask.id } : {}),
       noteFile: path.join(root, '.runner-note'),
@@ -543,24 +649,31 @@ async function runCheckedOutTask(
       connectionEnv: remote.connectionEnv,
       post: remote.task.source === event?.integration,
       ...(eventToken ? { postToken: eventToken } : {}),
+      onStart(started) {
+        flow = started;
+      },
       async onTask(started) {
         taskId = started;
-        if (!logged.has(started)) logged.set(started, 0);
-        forwardLogs();
-        logTimer ??= setInterval(forwardLogs, 1000);
+        if (timeout.aborted) {
+          const task = loadTask(cwd, started);
+          if (task) await stopTask(cwd, task);
+          throw timeout.reason;
+        }
+        if (!logged.has(started))
+          logged.set(
+            started,
+            createJsonlTail(path.join(resolveTaskDir(cwd, started), 'log.jsonl')),
+          );
+        void forwardLogs().catch(() => {});
+        logTimer ??= setInterval(() => {
+          void forwardLogs().catch(() => {});
+        }, 1000);
         writeJsonFileAtomic(path.join(root, '.runner-task.json'), {
           generation: remote.generation,
           id: started,
         });
         await ack().catch(() => {});
         await fetchMessages().catch(() => {});
-        clearInterval(heartbeat);
-        heartbeat = setInterval(() => {
-          void taskRequest(auth.server, auth.token, id, '/heartbeat', {
-            method: 'POST',
-            signal: controller.signal,
-          }).catch(() => {});
-        }, 30_000);
         clearInterval(shortPoll);
         if (polling)
           shortPoll = setInterval(() => {
@@ -579,42 +692,54 @@ async function runCheckedOutTask(
         });
       },
     });
-    forwardLogs();
+    const result = await Promise.race([
+      running,
+      new Promise<never>((_, reject) => {
+        const abort = () => reject(timeout.reason);
+        timeout.addEventListener('abort', abort, { once: true });
+        if (timeout.aborted) abort();
+      }),
+    ]);
+    await flushLogs();
     while (pendingAck) {
+      timeout.throwIfAborted();
       await ack().catch(() => {});
       if (pendingAck) await new Promise(resolve => setTimeout(resolve, 1000));
     }
-    await taskRequest(auth.server, auth.token, id, '/result', {
-      method: 'POST',
-      body: JSON.stringify({
-        status: cancelled ? 'cancelled' : result.ok ? 'completed' : 'failed',
-        result: result.reply ?? result.result,
-        tokens: result.tokens,
-        ...(result.note !== undefined ? { note: result.note } : {}),
-        ...(cwd !== root ? { diff: await changes(cwd).catch(() => undefined) } : {}),
-      }),
+    await reportResult({
+      status: cancelled ? 'cancelled' : result.ok ? 'completed' : 'failed',
+      result: result.reply ?? result.result,
+      tokens: result.tokens,
+      ...(result.note !== undefined ? { note: result.note } : {}),
+      ...(cwd !== root ? { diff: await changes(cwd).catch(() => undefined) } : {}),
     });
     return result;
   } catch (error) {
-    const value = error as {
-      code?: string;
-      approval?: unknown;
-      message?: string;
-    };
-    forwardLogs();
-    await taskRequest(auth.server, auth.token, id, '/result', {
-      method: 'POST',
-      body: JSON.stringify({
-        status: 'failed',
-        error: value.message ?? String(error),
-      }),
-    });
+    if (timeout.aborted) {
+      flow?.requestStop();
+      const ids = new Set([
+        ...(taskId ? [taskId] : []),
+        ...(flow?.runningIds() ?? []),
+        ...listTasks(cwd)
+          .filter(
+            task =>
+              task.name === `${AGENT_TASK_PREFIX}${id}` || (flow && task.flowRunId === flow.runId),
+          )
+          .map(task => task.id),
+      ]);
+      for (const taskId of ids) {
+        if (!logged.has(taskId))
+          logged.set(taskId, createJsonlTail(path.join(resolveTaskDir(cwd, taskId), 'log.jsonl')));
+        const task = loadTask(cwd, taskId);
+        if (task) await stopTask(cwd, task);
+      }
+    }
+    await flushLogs();
     throw error;
   } finally {
     clearInterval(logTimer);
-    forwardLogs();
+    await forwarding?.catch(() => {});
     clearInterval(ackTimer);
-    clearInterval(heartbeat);
     clearInterval(shortPoll);
     controller.abort();
     await Promise.allSettled([fetching, acknowledging]);

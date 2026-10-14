@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 /** Postgres connection for the server: one driver, drizzle on top. */
-import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js';
+import { drizzle } from 'drizzle-orm/postgres-js';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
@@ -12,8 +12,12 @@ import { DatabaseProfile } from './profile';
 /** Any drizzle Postgres database (postgres-js in production, pglite in tests). */
 export type Db = PgDatabase<PgQueryResultHKT, typeof tables>;
 
+interface RowResult extends PgQueryResultHKT {
+  type: this['row'][];
+}
+
 export interface Connection {
-  db: PostgresJsDatabase<typeof tables>;
+  db: PgDatabase<RowResult, typeof tables>;
   profile: DatabaseProfile;
   /** Runs `work` with Postgres's statement_timeout at `ms` for each statement it sends outside a transaction. */
   statementTimeout<T>(ms: number, work: () => Promise<T>): Promise<T>;
@@ -21,6 +25,16 @@ export interface Connection {
 }
 
 export const CASING = 'snake_case';
+
+/** Host and database of a connection string, for messages; never the credentials. */
+export function describeDatabase(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.hostname}${parsed.pathname}`;
+  } catch {
+    return 'the database';
+  }
+}
 
 function disconnected(error?: { code?: string; severity?: string }): boolean {
   return (

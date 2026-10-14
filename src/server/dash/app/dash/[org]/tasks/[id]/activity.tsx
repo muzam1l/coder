@@ -26,6 +26,7 @@ import {
 import { Icon } from '@/comps/ui/icon';
 import { Loading } from '@/comps/ui/card';
 import { formatDuration, formatTime } from '@/utils/format';
+import { usePoll } from '@/utils/client';
 
 const ICONS: Record<TaskDisplayRow['kind'], string> = {
   assistant: iMessage,
@@ -70,11 +71,7 @@ function useWindowVirtualizer(count: number, list: { current: HTMLElement | null
 /** Renders again every second while `on`. */
 function useTick(on: boolean) {
   const [, tick] = useReducer((n: number) => n + 1, 0);
-  useEffect(() => {
-    if (!on) return;
-    const timer = setInterval(() => tick(0), 1000);
-    return () => clearInterval(timer);
-  }, [on]);
+  usePoll(on ? async () => tick(0) : undefined, 1000);
 }
 
 /** Whether a call or approval still waits; calls the agent has moved on from without a result do not. */

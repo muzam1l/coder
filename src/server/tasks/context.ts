@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
+import net from 'node:net';
 import { eventOptions } from '../../agent/definition';
 import { decryptSecret, encryptSecret } from '../store/secrets';
-import { BROKERED, BROKERED_PLACEHOLDER } from '../runners/vercel-sandbox';
+import { BROKERED, BROKERED_PLACEHOLDER, engineHosts } from '../runners/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
 import type { AgentEvent, InstallationLink, Installation } from '../../agent/types';
 import type { EngineCredential, Store, TaskStatus } from '../store/types';
@@ -19,7 +20,7 @@ import type { McpServerSpec } from '../../core/types';
 import { connectionWarnings } from './logs';
 import { LocalStore } from '../store/local';
 import { mcpSecretValue } from '../../core/mcp';
-import { nativeCredential, nativeApp } from '../connections/records';
+import { findConnection, nativeCredential, nativeApp } from '../connections/records';
 
 /** Installation tokens are encrypted at rest; integrations see plaintext only in memory. */
 export function unsealed(ctx: ServerContext, installation: Installation): Installation {
@@ -449,6 +450,42 @@ export async function taskCredential(
   };
 }
 
+const hostOf = (url: string | undefined) =>
+  url && URL.canParse(url) ? [new URL(url).hostname] : [];
+
+/** Hosts a task below `auto` may reach from its machine: engine, integrations, connections, MCP. */
+export async function taskHosts(
+  ctx: ServerContext,
+  task: TaskStatus['task'],
+  credential: EngineCredential,
+): Promise<string[] | undefined> {
+  if (task.permissions === 'auto') return undefined;
+  const config: Partial<CoderConfig> = ctx.local ? {} : await taskConfig(ctx.store);
+  const integrations = new Set([
+    ...(task.event ? [task.event.integration] : []),
+    ...Object.keys(task.tools),
+  ]);
+  const hosts = engineHosts(credential.engine, credential.env);
+  if (credential.engine === 'custom')
+    for (const entry of Object.values(config.models ?? {}))
+      if ('baseUrl' in entry) hosts.push(...hostOf(entry.baseUrl));
+
+  for (const id of task.connections ?? []) {
+    const connection = await findConnection(ctx, id, task.requester);
+    if (connection?.provider === 'mcp') hosts.push(...hostOf(connection.endpoint?.url));
+    else if (connection) integrations.add(connection.provider);
+  }
+  for (const id of integrations) hosts.push(...(ctx.integrations[id]?.hosts ?? []));
+  for (const entry of Object.values(task.definition.mcp ?? {})) hosts.push(...hostOf(entry.url));
+  for (const name of task.mcp ?? []) hosts.push(...hostOf(config.mcp?.[name]?.url));
+  for (const host of config.approvals?.allowedNetworkHosts ?? []) {
+    const name = host.replace(/^\[(.*)\](?::\d+)?$/, '$1').replace(/^([^:]+):\d+$/, '$1');
+    hosts.push(name, ...(net.isIP(name) ? [] : [`*.${name}`]));
+  }
+
+  return [...new Set(hosts)];
+}
+
 function credentialSecrets(env: Record<string, string>): string[] {
   const secrets: string[] = [];
   for (const [name, value] of Object.entries(env)) {
@@ -501,7 +538,10 @@ export async function taskLogSecrets(ctx: ServerContext, status: TaskStatus): Pr
   const [connections, credential, platform]: [string[], EngineCredential, string[]] =
     await Promise.all([
       readTaskConnectionSecrets(ctx, status.task),
-      taskCredential(ctx, status.task),
+      taskCredential(ctx, status.task).catch(error => {
+        if (error instanceof Error && error.message === 'no-credential') return { engine: 'codex' as const, env: {} };
+        throw error;
+      }),
       storedPlatformSecrets(ctx, status.task),
     ]);
   const recovered =

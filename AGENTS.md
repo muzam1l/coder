@@ -18,7 +18,7 @@
 - Platform code only under `src/integrations/<platform>/`, reached through `integrations/types.ts` and the catalog `integrations/index.ts`.
 - Public SDK mirrors commands; storage, routing, runners and HTTP client stay internal. `server.handler(env)` is the one hosting primitive.
 - Dashboard imports: `@/` inside `src/server/dash`, `@coder/` for the rest. Never `../../..`.
-- One migration until launch, `migrations/0000_initial.sql`, from `drizzle-kit generate`; dev databases use `drizzle-kit push`.
+- Update databases with `drizzle-kit push` as a deploy step; never apply or check schema at server boot or on runners.
 
 ## Gate
 

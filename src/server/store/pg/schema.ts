@@ -8,10 +8,10 @@ import {
   integer,
   jsonb,
   pgSchema,
-  primaryKey,
   text,
   timestamp,
   unique,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 
 import type {
@@ -58,7 +58,10 @@ export const platformLink = pgTable(
     token: text(),
     createdAt: at().notNull().defaultNow(),
   },
-  t => [unique().on(t.platform, t.platformUserId), index().on(t.userId)],
+  t => [
+    uniqueIndex('platform_link_platform_platformUserId_unique').on(t.platform, t.platformUserId),
+    index().on(t.userId),
+  ],
 );
 
 /** An agent owned by an organization; its current version is the one events run. */
@@ -76,7 +79,7 @@ export const agent = pgTable(
     settings: jsonb().$type<AgentUsage>(),
     ...timestamps,
   },
-  t => [unique().on(t.organizationId, t.slug)],
+  t => [uniqueIndex('agent_organizationId_slug_unique').on(t.organizationId, t.slug)],
 );
 
 /** Immutable imported or uploaded content for one agent version. */
@@ -95,7 +98,7 @@ export const agentVersion = pgTable(
     importedFrom: text().notNull(),
     createdAt: at().notNull().defaultNow(),
   },
-  t => [unique().on(t.agentId, t.version)],
+  t => [uniqueIndex('agent_version_agentId_version_unique').on(t.agentId, t.version)],
 );
 
 /** Encrypted values shared by apps, installations, and engine credentials. */
@@ -132,7 +135,10 @@ export const integrationApp = pgTable(
       .references(() => secret.id),
     ...timestamps,
   },
-  t => [unique().on(t.organizationId, t.key), unique().on(t.integration, t.platformAppId)],
+  t => [
+    uniqueIndex('integration_app_organizationId_key_unique').on(t.organizationId, t.key),
+    uniqueIndex('integration_app_integration_platformAppId_unique').on(t.integration, t.platformAppId),
+  ],
 );
 
 /** One grant of an app: a GitHub installation, a Slack workspace. It belongs to exactly one workspace. */
@@ -178,7 +184,12 @@ export const engineCredential = pgTable(
     account: jsonb().$type<{ email?: string; plan?: string }>(),
     ...timestamps,
   },
-  t => [unique().on(t.organizationId, t.owner, t.label).nullsNotDistinct()],
+  t => [
+    uniqueIndex('engine_credential_workspace_label_unique')
+      .on(t.organizationId, t.label).where(sql`${t.owner} is null`),
+    uniqueIndex('engine_credential_owner_label_unique')
+      .on(t.organizationId, t.owner, t.label).where(sql`${t.owner} is not null`),
+  ],
 );
 
 /** A scoped runner with its secret fields sealed separately. */
@@ -200,7 +211,7 @@ export const runner = pgTable(
       .references(() => secret.id),
     ...timestamps,
   },
-  t => [unique().on(t.organizationId, t.publicId)],
+  t => [uniqueIndex('runner_organizationId_publicId_unique').on(t.organizationId, t.publicId)],
 );
 
 /** One run of an agent for one request: queue row while waiting, record afterwards. */
@@ -244,8 +255,8 @@ export const task = pgTable(
     approval: jsonb(),
     answer: jsonb(),
     attempts: integer().notNull().default(0),
-    inboxSeq: integer().notNull().default(-1),
-    inboxAck: integer().notNull().default(-1),
+    inboxSeq: integer().notNull().default(sql`'-1'`),
+    inboxAck: integer().notNull().default(sql`'-1'`),
     generation: integer().notNull().default(0),
     lockedAt: at(),
     startedAt: at(),
@@ -254,7 +265,7 @@ export const task = pgTable(
     ...timestamps,
   },
   t => [
-    unique().on(t.organizationId, t.publicId),
+    uniqueIndex('task_organizationId_publicId_unique').on(t.organizationId, t.publicId),
     index().on(t.publicId),
     index().on(t.organizationId, t.createdAt.desc(), t.publicId.desc()),
     index().on(t.organizationId, t.updatedAt),
@@ -279,7 +290,10 @@ export const taskInbox = pgTable(
     value: jsonb(),
     at: at().notNull(),
   },
-  t => [unique().on(t.taskId, t.seq), index().on(t.taskId, t.generation, t.seq)],
+  t => [
+    uniqueIndex('task_inbox_taskId_seq_unique').on(t.taskId, t.seq),
+    index().on(t.taskId, t.generation, t.seq),
+  ],
 );
 
 /** A task's output, one row per line, streamed while it runs. */
@@ -295,7 +309,7 @@ export const taskLog = pgTable(
     level: text().$type<TaskLogLine['level']>().notNull(),
     line: text().notNull(),
   },
-  t => [unique().on(t.taskId, t.seq)],
+  t => [uniqueIndex('task_log_taskId_seq_unique').on(t.taskId, t.seq)],
 );
 
 /** A deleted task's id for a while, so every server's events streams drop it from their lists. */
@@ -359,7 +373,7 @@ export const chatItem = pgTable(
     expiresAt: at(),
   },
   t => [
-    primaryKey({ columns: [t.key, t.seq] }),
+    uniqueIndex('chat_item_key_seq_pk').on(t.key, t.seq),
     index()
       .on(t.expiresAt)
       .where(sql`${t.expiresAt} is not null`),

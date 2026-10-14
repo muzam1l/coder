@@ -31,6 +31,7 @@ export const linear: Integration = {
     },
   },
   tools: { presets: LINEAR_PRESETS, serve: LINEAR_TOOLS },
+  hosts: ['api.linear.app'],
   get app() {
     return linearApp;
   },

@@ -1,16 +1,15 @@
-/** Operator commands on a server's database: `coder server migrate` and `coder server rotate-key`. */
+/** Re-seal the server's stored secrets with the current encryption key. */
 import process from 'node:process';
 
 import { eq, isNotNull, like } from 'drizzle-orm';
 
 import { CoderError } from '../core/dispatch';
 import { reseal } from './settings/credentials';
-import { describeDatabase, migrateDb } from './store/pg/migrate';
 import { platformLink, secret, chatState } from './store/pg/schema';
 import { stateKey } from './store/pg/tables/shared';
 import { loadServerConfig } from './env';
 import { decryptSecret, encryptSecret, keyVersion, secretKeyVersion } from './store/secrets';
-import { createBackend, database } from './store';
+import { createBackend } from './store';
 
 export interface MaintenanceOptions {
   env?: Record<string, string | undefined>;
@@ -23,24 +22,6 @@ async function asServerError<T>(work: () => Promise<T>): Promise<T> {
     if (error instanceof CoderError) throw error;
     throw new CoderError('server', error instanceof Error ? error.message : String(error));
   }
-}
-
-/** Apply pending server migrations and return how many were applied. */
-export function migrate(options: MaintenanceOptions = {}): Promise<{ applied: number }> {
-  return asServerError(async () => {
-    const config = loadServerConfig(options.env ?? process.env);
-    if (!config.databaseUrl)
-      throw new CoderError('invalid-option', 'No database to migrate.', {
-        hint: 'Set DATABASE_URL to the Postgres the server uses.',
-      });
-
-    const connection = await database(config);
-    try {
-      return await migrateDb(connection, describeDatabase(config.databaseUrl));
-    } finally {
-      await connection.close();
-    }
-  });
 }
 
 /** Re-seal every stored secret with the current encryption key. */

@@ -256,8 +256,7 @@ export function claudeAskOptions(
     // exactly its own task directory so it can read the progress artifacts.
     additionalDirectories: [taskDir],
     taskRoot: taskDir,
-    // Native inspection tools only; everything else (Bash, network, subagents)
-    // is denied by CLAUDE_SIDECAR_FLAGS, since --allowedTools only ever grants.
+    // Machine sandboxes also grant Bash; OS-sandboxed asks use only these inspection tools.
     readOnlyAllowedTools: CLAUDE_SIDECAR_INSPECTION_TOOLS,
   };
 }

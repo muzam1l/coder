@@ -5,13 +5,13 @@ import '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/page.css';
 import { useEffect, useId, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
+import { toastFailure } from '@/utils/action';
 import { ClientError } from '@coder/client';
 import type { OperatorAppRow, OperatorApps as Apps } from '@coder/client/types';
 import { Badge } from '@/comps/ui/badge';
-import { ErrorText, Field } from '@/comps/ui/field';
+import { Field } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
 import { iX } from '@/comps/ui/icons';
-import { reasonText } from '@/utils/format';
 import { List, Row } from '@/app/dash/[org]/settings/[tab]/list';
 
 /** The set-up form for one platform's shared app, as a dialog like an agent's Create app. */
@@ -30,14 +30,12 @@ function SetUpDialog({
   const dialog = useRef<HTMLDialogElement>(null);
   const id = useId();
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState('');
   useEffect(() => dialog.current!.showModal(), []);
   const close = () => !busy && dialog.current!.close();
 
   const submit = (form: FormData) => {
     const value = (key: string) => String(form.get(key) ?? '').trim() || undefined;
     setBusy(true);
-    setError('');
     void client.operator
       .setUp(row.integration, { name: value('name'), owner: value('owner') })
       .then(({ url }) => {
@@ -47,7 +45,7 @@ function SetUpDialog({
         // Operator mode ended; the page asks to sign in again.
         if (reason instanceof ClientError && reason.status === 401) return location.reload();
         setBusy(false);
-        setError(reasonText(reason));
+        toastFailure(reason);
       });
   };
 
@@ -96,7 +94,6 @@ function SetUpDialog({
             <input name="owner" placeholder="your-org" autocomplete="off" />
           </Field>
         ) : null}
-        <ErrorText value={error} />
         <div class="actions">
           <button type="button" class="btn ghost" disabled={busy} onClick={close}>
             Cancel
@@ -116,7 +113,7 @@ export function OperatorApps({ first }: { first: Apps }) {
 
   return (
     <>
-      <List title="Built-in apps" count={first.platforms.length} error="">
+      <List title="Built-in apps" count={first.platforms.length}>
         {first.platforms.map(row => (
           <Row
             key={row.integration}

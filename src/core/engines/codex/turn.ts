@@ -365,38 +365,84 @@ function withCallId(line: ProgressLine | null, item: TurnItem): ProgressLine | n
   return { ...line, extra: { ...line.extra, callId: item.id } };
 }
 
+function itemText(value: unknown): string {
+  return value == null ? '' : typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+function describeGenericItem(item: TurnItem): ProgressLine {
+  const tool = String(item.tool || item.name || item.kind || item.type || 'tool');
+  const input = Object.fromEntries(
+    Object.entries(item).filter(
+      ([key, value]) =>
+        value != null &&
+        ![
+          'id', 'type', 'kind', 'name', 'tool', 'status', 'result', 'results', 'output',
+          'error', 'contentItems', 'success', 'durationMs', 'exitCode',
+        ].includes(key),
+    ),
+  );
+  const detail = Object.keys(input).length ? itemText(input) : '';
+
+  return {
+    message: detail ? `${tool} ${detail}` : tool,
+    phase: 'investigating',
+    extra: { kind: 'tool', tool },
+  };
+}
+
 function describeStartedItem(item: TurnItem, cwd?: string): ProgressLine | null {
   switch (item.type) {
     case 'commandExecution':
       return {
-        message: unwrapShell(String(item.command ?? '').trim()),
+        message: unwrapShell(String(item.command ?? '').trim()) || 'command',
         phase: 'running',
         extra: { kind: 'tool', tool: 'command' },
       };
-    // File changes are reported once on completion. An "applying" or "applied"
-    // pair says the same thing twice.
     case 'fileChange':
-      return null;
+      return {
+        message: describeCodexFileChanges(item, false, cwd) || 'edit',
+        phase: 'editing',
+        extra: { kind: 'tool', tool: 'edit' },
+      };
     case 'mcpToolCall':
       return {
-        message: `${item.server}/${item.tool}`,
+        message: [`${item.server}/${item.tool}`, itemText(item.arguments)]
+          .filter(Boolean)
+          .join(' '),
         phase: 'investigating',
         extra: { kind: 'tool', tool: String(item.tool ?? '') },
       };
     case 'dynamicToolCall':
       return {
-        message: String(item.tool ?? ''),
+        message: [
+          [item.namespace, item.tool || 'tool'].filter(Boolean).join('/'),
+          itemText(item.arguments),
+        ]
+          .filter(Boolean)
+          .join(' '),
         phase: 'investigating',
         extra: { kind: 'tool', tool: String(item.tool ?? '') },
       };
-    case 'webSearch':
+    case 'webSearch': {
+      const action = item.action as Record<string, unknown> | null;
+      const queries = Array.isArray(action?.queries)
+        ? action.queries.filter(query => typeof query === 'string' && query.trim())
+        : [];
+      const detail = queries.length
+        ? queries.join('; ')
+        : String(action?.query || item.query || '').trim() || itemText(action);
       return {
-        message: `search: ${String(item.query ?? '').trim()}`,
+        message: detail ? `search: ${detail}` : 'search',
         phase: 'investigating',
         extra: { kind: 'tool', tool: 'search' },
       };
-    default:
+    }
+    case 'agentMessage':
+    case 'reasoning':
+    case 'userMessage':
       return null;
+    default:
+      return describeGenericItem(item);
   }
 }
 
@@ -422,6 +468,7 @@ function describeCompletedItem(item: TurnItem, cwd?: string): ProgressLine | nul
           kind: 'tool-result',
           tool: 'command',
           command: String(item.command ?? '').trim(),
+          durationMs: item.durationMs,
           ...(exitCode === null ? { isError: item.status !== 'completed' } : { exitCode }),
         },
       };
@@ -430,22 +477,47 @@ function describeCompletedItem(item: TurnItem, cwd?: string): ProgressLine | nul
       return {
         message: describeCodexFileChanges(item, true, cwd) || '(details unavailable)',
         phase: 'editing',
-        extra: { kind: 'tool', tool: 'edit' },
+        extra: { kind: 'tool-result', tool: 'edit', isError: item.status !== 'completed' },
       };
     case 'mcpToolCall':
       return {
-        message: `${item.server}/${item.tool} ${item.status}`,
+        message: itemText(item.error ?? item.result) || `${item.server}/${item.tool} ${item.status}`,
         phase: 'investigating',
-        extra: { kind: 'tool-result', isError: item.status !== 'completed' },
+        extra: {
+          kind: 'tool-result',
+          tool: String(item.tool ?? ''),
+          durationMs: item.durationMs,
+          isError: item.status !== 'completed' || item.error != null,
+        },
       };
     case 'dynamicToolCall':
       return {
-        message: `${item.tool} ${item.status}`,
+        message: itemText(item.contentItems) || `${item.tool} ${item.status}`,
         phase: 'investigating',
-        extra: { kind: 'tool-result', isError: item.status !== 'completed' },
+        extra: {
+          kind: 'tool-result',
+          tool: String(item.tool ?? ''),
+          durationMs: item.durationMs,
+          isError: item.status !== 'completed' || item.success === false,
+        },
       };
-    default:
+    case 'userMessage':
       return null;
+    default:
+      return {
+        message: itemText(
+          item.error ?? item.result ?? item.results ?? item.output ?? item.action ?? item,
+        ),
+        phase: 'investigating',
+        extra: {
+          kind: 'tool-result',
+          tool: describeStartedItem(item, cwd)?.extra?.tool,
+          durationMs: item.durationMs,
+          isError:
+            item.status === 'failed' || item.status === 'declined' ||
+            item.success === false || item.error != null,
+        },
+      };
   }
 }
 
@@ -640,14 +712,21 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
       );
       break;
     case 'item/completed': {
-      recordItem(state, message.params.item, 'completed', message.params.threadId ?? null);
-      const item = message.params.item;
+      const item = { ...state.itemIndex.get(message.params.item.id), ...message.params.item };
+      recordItem(state, item, 'completed', message.params.threadId ?? null);
       if (item?.type === 'fileChange') {
         for (const change of item.changes ?? []) {
           if (change.path) state.reportedChanges.add(shortPath(state.cwd, change.path));
         }
       }
       const line = withCallId(describeCompletedItem(item, state.cwd), item);
+      if (line?.extra?.kind === 'tool-result') {
+        const call = describeStartedItem(item, state.cwd);
+        line.extra = {
+          ...line.extra,
+          callMessage: item.type === 'fileChange' ? line.message : call?.message,
+        };
+      }
       if (item?.type === 'reasoning') {
         const key = `${message.params.threadId}:${item.id}`;
         const startedAt = state.reasoningStartedAt.get(key);

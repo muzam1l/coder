@@ -201,6 +201,8 @@ export interface ServerContext {
 }
 
 export interface ServerSettings {
+  taskLogSecrets?: Map<string, Promise<string[]>>;
+  cancelChecks?: Map<string, { timer: ReturnType<typeof setTimeout>; finish(): void }>;
   runnerInstances?: Map<string, { signature: string; runner: Runner }>;
   configUpdate?: Promise<unknown>;
   registry?: import('../settings/mcp').RegistryIndex;

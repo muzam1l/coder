@@ -24,11 +24,3 @@ export function Field({
     </Tag>
   );
 }
-
-export function ErrorText({ value }: { value?: string }) {
-  return value ? (
-    <p class="flash err" role="alert">
-      {value}
-    </p>
-  ) : null;
-}

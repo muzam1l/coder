@@ -2,14 +2,14 @@ import process from 'node:process';
 
 import type { AgentTask } from '../../agent/types';
 import type { Runner } from '.';
-import { logLines, runProcess } from './local';
+import { runProcess } from './local';
+import { RUNNER_IMAGE, startCommand, SETUP_FAILED } from '.';
 import { INBOX_COMMAND, INBOX_SOCKET } from '../../runner/task';
 import type { InboxEntry, InboxAck } from '../tasks/queue';
 
-const DEFAULT_IMAGE = 'node:22';
-
 export interface DockerOptions {
   image?: string;
+  tarballUrl?: string;
   memory?: string;
   cpus?: string | number;
   pidsLimit?: number;
@@ -23,6 +23,7 @@ export function buildDockerArgs(
   options: DockerOptions = {},
 ): { args: string[]; env: Record<string, string> } {
   const name = `coder-${task.id.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 48)}-${Date.now()}`;
+  if (options.tarballUrl) env = { ...env, CODER_RUNNER_TARBALL_URL: options.tarballUrl };
   const envArgs = Object.keys(env).flatMap(key => ['-e', key]);
   return {
     args: [
@@ -39,12 +40,13 @@ export function buildDockerArgs(
       '--network',
       options.network ?? 'bridge',
       ...envArgs,
-      options.image ?? DEFAULT_IMAGE,
-      'coder',
-      'agent',
-      'run',
-      '--task',
+      options.image ?? RUNNER_IMAGE,
+      'sh',
+      '-c',
+      startCommand(),
+      'coder-task',
       task.id,
+      SETUP_FAILED,
     ],
     env,
   };
@@ -56,7 +58,7 @@ export class DockerRunner implements Runner {
   constructor(private readonly options: DockerOptions = {}) {}
 
   async start(task: AgentTask, env: Record<string, string>): Promise<string> {
-    const image = this.options.image ?? DEFAULT_IMAGE;
+    const image = this.options.image ?? RUNNER_IMAGE;
     const checked = await runProcess(
       'docker',
       [
@@ -68,7 +70,7 @@ export class DockerRunner implements Runner {
         'sh',
         image,
         '-c',
-        'for binary in node coder claude codex; do command -v "$binary" >/dev/null 2>&1 || { printf "%s\\n" "$binary"; exit 127; }; done',
+        'for binary in node bun git curl tar claude codex github-mcp-server; do command -v "$binary" >/dev/null 2>&1 || { printf "%s\\n" "$binary"; exit 127; }; done',
       ],
       { PATH: process.env.PATH ?? '' },
     );
@@ -102,22 +104,6 @@ export class DockerRunner implements Runner {
     return running === 'true'
       ? { state: 'running' as const }
       : { state: 'exited' as const, code: Number(code) || 0 };
-  }
-
-  async logs(handle: string, after = -1) {
-    const result = await runProcess('docker', ['logs', '--timestamps', handle], {
-      PATH: process.env.PATH ?? '',
-    });
-    if (result.code !== 0) throw new Error(result.stderr.trim() || 'docker logs failed');
-    const all = [...logLines(result.stdout), ...logLines(result.stderr, 'err')]
-      .map(({ level, line }) => {
-        const space = line.indexOf(' ');
-        const timestamp = line.slice(0, space);
-        return { level, line: line.slice(space + 1), timestamp, at: Date.parse(timestamp) };
-      })
-      .sort((a, b) => a.timestamp.localeCompare(b.timestamp))
-      .map(({ timestamp, ...line }) => line);
-    return { lines: all.slice(after + 1), next: all.length - 1 };
   }
 
   async stop(handle: string): Promise<void> {

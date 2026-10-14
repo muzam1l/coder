@@ -14,7 +14,7 @@ import { handleRequest } from './routes';
 import { LOOPBACK, serverMode, socketAllowed, type ServerMode } from './routes/guards';
 import { bodyLimit, nodeListener } from './routes/http';
 import { RUNNER_KINDS } from './runners';
-import { describeDatabase } from './store/pg/migrate';
+import { describeDatabase } from './store/pg/client';
 
 const SWEEP_MS = 60 * 60 * 1000;
 

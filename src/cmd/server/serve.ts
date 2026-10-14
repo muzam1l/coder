@@ -65,7 +65,7 @@ export const commandServerServe = command({
     usage:
       'coder server serve [--port <n>] [--host <address>] [--memory] [--runner <name>] [--json] [--cwd <dir>]',
     summary:
-      "Run the Coder server on Bun: the address platforms deliver events to, the dashboard, and the worker that runs tasks. With DATABASE_URL it is a full server with sign-in and workspaces. Without one it is the dashboard for this machine's CLI: its config, agents, tasks and engine logins, on loopback only. --memory makes a throwaway test server that keeps everything in memory. Configured through the environment; every variable is in coder docs self-host. It never migrates the database itself: coder server migrate does.",
+      "Run the Coder server on Bun: the address platforms deliver events to, the dashboard, and the worker that runs tasks. With DATABASE_URL it is a full server with sign-in and workspaces. Without one it is the dashboard for this machine's CLI: its config, agents, tasks and engine logins, on loopback only. --memory makes a throwaway test server that keeps everything in memory. Configured through the environment; every variable is in coder docs self-host.",
     flags: [
       [
         '--port <n>',
@@ -85,7 +85,7 @@ export const commandServerServe = command({
       ],
       ['PORT', 'listen port, as hosts set it (default 8787)'],
       ['HOST', 'listen address, as --host'],
-      ['DATABASE_URL', 'Postgres, set up by coder server migrate; turns on sign-in and workspaces'],
+      ['DATABASE_URL', 'Postgres, set up with drizzle-kit push; turns on sign-in and workspaces'],
       [
         'AUTH_WULAR_URL',
         'the Wular Auth issuer people sign in with (default https://auth.wular.ai)',

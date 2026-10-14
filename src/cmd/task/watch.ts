@@ -41,11 +41,31 @@ async function printWatch(
   cwd: string,
   opts: { json?: boolean; trim?: number | 'none' },
 ): Promise<never> {
+  const trim =
+    opts.trim === undefined ? OUTPUT_PREVIEW_CHARS : opts.trim === 'none' ? Infinity : opts.trim;
   if ('attempts' in watch.task) {
-    for await (const line of watch.events)
-      opts.json
-        ? process.stdout.write(`${JSON.stringify(line, null, 2)}\n`)
-        : printLine(line as TaskLogLine, outStyle);
+    const { logEntry } = await import('../../core/task/log-view');
+    const renderer = await LogRenderer.create({
+      cwd: watch.task.task.cwd ?? cwd,
+      startedAt: watch.task.startedAt ?? watch.task.createdAt,
+      trim,
+      explicitTrim: opts.trim !== undefined,
+      width: termCols(),
+    });
+    for await (const event of watch.events) {
+      const line = event as TaskLogLine;
+      if (opts.json) {
+        process.stdout.write(`${JSON.stringify(line, null, 2)}\n`);
+        continue;
+      }
+      const entry = line.entry ?? logEntry(line.line);
+      if (!entry) {
+        printLine(line, outStyle);
+        continue;
+      }
+      const lines = renderer.render({ ...entry, at: entry.at ?? new Date(line.at).toISOString() });
+      if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
+    }
     const status = (await watch.final()) as TaskStatus;
     if (!opts.json) printOutcome(status, outStyle);
     process.exit(0);
@@ -55,8 +75,6 @@ async function printWatch(
   // Display budget for tool output and thinking, applied to text and JSON
   // alike (the task log keeps full entries). --trim <n> names a budget and
   // lifts the line cap with it; --trim none shows everything.
-  const trim =
-    opts.trim === undefined ? OUTPUT_PREVIEW_CHARS : opts.trim === 'none' ? Infinity : opts.trim;
   const renderer = await LogRenderer.create({
     cwd: task.cwd ?? cwd,
     startedAt: Date.parse(task.createdAt ?? '') || undefined,

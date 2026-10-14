@@ -314,6 +314,7 @@ export class LogRenderer {
   private entryAt: number | null = null;
   private lastTool: string | undefined;
   private lastCall = '';
+  private lastCallSeq = -1;
   private seq = 0;
   private readonly view: LogView;
   private readonly style: Style;
@@ -378,6 +379,7 @@ export class LogRenderer {
     if (row.kind === 'tool' && row.seq === seq) {
       this.lastTool = row.tool;
       this.lastCall = text;
+      this.lastCallSeq = row.seq;
       return this.compose(
         kind,
         this.clip(text.replace(/\s*\n\s*/g, ' '), TOOL_ROWS, s.light),
@@ -385,7 +387,17 @@ export class LogRenderer {
       );
     }
     if (row.kind === 'tool' || row.kind === 'tool-result') {
-      // The call is already on screen; print what it returned under it.
+      const call =
+        row.kind === 'tool' &&
+        (entry.callId || entry.callMessage) &&
+        (row.seq !== this.lastCallSeq || text !== this.lastCall)
+          ? this.compose('tool', this.clip(text.replace(/\s*\n\s*/g, ' '), TOOL_ROWS, s.light), false)
+          : [];
+      if (call.length) {
+        this.lastTool = row.tool;
+        this.lastCall = text;
+        this.lastCallSeq = row.seq;
+      }
       const result = row.result ?? {
         ok: row.tone !== 'error',
         exitCode: row.exitCode,
@@ -393,7 +405,11 @@ export class LogRenderer {
         detail: text,
       };
       const notes = [
-        row.tool && row.tool !== this.lastTool ? s.dim(`from ${row.tool}`) : '',
+        row.kind === 'tool-result' && entry.callId
+          ? s.dim(`from ${row.tool || 'tool'} (${String(entry.callId)})`)
+          : row.tool && row.tool !== this.lastTool
+            ? s.dim(`from ${row.tool}`)
+            : '',
         result.ok
           ? ''
           : s.red(result.exitCode !== undefined ? `exit ${result.exitCode}` : 'failed'),
@@ -401,7 +417,7 @@ export class LogRenderer {
       ].filter(Boolean);
       const body = capBody(result.detail, trim, lineCap, s);
       const lines = [...(notes.length ? [notes.join(s.dim(' · '))] : []), ...(body ? [body] : [])];
-      return lines.length ? this.compose('tool-result', lines.join('\n'), false) : [];
+      return [...call, ...(lines.length ? this.compose('tool-result', lines.join('\n'), false) : [])];
     }
     return this.compose(kind, this.clip(text, STATUS_ROWS, s.dim), false);
   }

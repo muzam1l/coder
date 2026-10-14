@@ -36,8 +36,8 @@
   font-size: 12px;
   color: var(--muted);
 }
-/* stuck: the back link shrinks to its arrow before the title */
-.stuck > div:first-child:has(> .back) {
+/* stuck: the back link shrinks to its arrow before the title, also when a client component renders it */
+.stuck > div:first-child:has(> .back, > * > .back) {
   display: flex;
   align-items: center;
   gap: 8px;

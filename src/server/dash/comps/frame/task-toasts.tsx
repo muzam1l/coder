@@ -308,12 +308,27 @@ export function ActiveCount() {
   ) : null;
 }
 
-function Item({ toast, dismiss }: { toast: Toast; dismiss: (key: string) => void }) {
+function Item({
+  toast,
+  paused,
+  dismiss,
+}: {
+  toast: Toast;
+  paused: boolean;
+  dismiss: (key: string) => void;
+}) {
   const org = useOrg();
+  // Paused, it keeps the time it has left.
+  const left = useRef(TTL);
   useEffect(() => {
-    const timer = setTimeout(() => dismiss(toast.key), TTL);
-    return () => clearTimeout(timer);
-  }, []);
+    if (paused) return;
+    const started = Date.now();
+    const timer = setTimeout(() => dismiss(toast.key), left.current);
+    return () => {
+      clearTimeout(timer);
+      left.current -= Date.now() - started;
+    };
+  }, [paused]);
   return (
     <div class={toast.tone ? `toast ${toast.tone}` : 'toast'} onClick={() => dismiss(toast.key)}>
       <p class="toast-head">
@@ -338,6 +353,10 @@ export function TaskToasts() {
   const nav = useRouter();
   const [watched, setWatched] = useState<Record<string, Watched>>({});
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // Every toast waits while the pointer or focus is on the stack, or the window is in the background.
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [away, setAway] = useState(false);
   const open = useRef(openTask(path));
   open.current = openTask(path);
   // Each tab's own last status per task, so every tab toasts a change once.
@@ -439,6 +458,17 @@ export function TaskToasts() {
     org,
   );
 
+  useEffect(() => {
+    const leave = () => setAway(true);
+    const back = () => setAway(false);
+    addEventListener('blur', leave);
+    addEventListener('focus', back);
+    return () => {
+      removeEventListener('blur', leave);
+      removeEventListener('focus', back);
+    };
+  }, []);
+
   return (
     <section
       ref={stack}
@@ -446,9 +476,17 @@ export function TaskToasts() {
       popover="manual"
       aria-label="Task updates"
       aria-live="polite"
+      onPointerOver={() => setHovered(true)}
+      onPointerOut={event =>
+        setHovered(Boolean(stack.current?.contains(event.relatedTarget as Node | null)))
+      }
+      onFocusIn={() => setFocused(true)}
+      onFocusOut={event =>
+        setFocused(Boolean(stack.current?.contains(event.relatedTarget as Node | null)))
+      }
     >
       {toasts.map(toast => (
-        <Item key={toast.key} toast={toast} dismiss={dismiss} />
+        <Item key={toast.key} toast={toast} paused={hovered || focused || away} dismiss={dismiss} />
       ))}
     </section>
   );

@@ -169,7 +169,7 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
     ...(context.runnerLogs?.handle === r.handle &&
     context.runnerLogs?.attempts === r.attempts &&
     context.runnerLogs?.generation === r.generation
-      ? { logsPulledAt: context.runnerLogs?.at, logsComplete: context.runnerLogs?.complete }
+      ? { logsComplete: context.runnerLogs?.complete }
       : {}),
     archivedAt: optionalMs(r.archivedAt),
     approval: r.approval,

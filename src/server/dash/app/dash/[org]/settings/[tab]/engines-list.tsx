@@ -47,7 +47,7 @@ export function EnginesList({
   );
   return (
     <>
-      <List title="Engines" count={chain.length} error={config.error}>
+      <List title="Engines" count={chain.length}>
         {rows.map(name => (
           <Row
             key={name}
@@ -105,7 +105,6 @@ export function EnginesList({
       <List
         title="Allowed network hosts"
         count={hosts.length}
-        error=""
         add={
           <AddRow
             fields={[['host', 'Host, like registry.npmjs.org']]}

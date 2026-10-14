@@ -53,7 +53,7 @@ export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
     { usage: 'flow <cmd>', blurb: 'run, list, watch, result, resume, stop, discover, ...' },
     { usage: 'agent <cmd>', blurb: 'list, show, init, push, run, usage, integrations' },
     { usage: 'credentials <cmd>', blurb: 'engine credentials: list, add, login, remove, default' },
-    { usage: 'server <cmd>', blurb: 'self-host Coder: serve, migrate, rotate-key' },
+    { usage: 'server <cmd>', blurb: 'self-host Coder: serve, rotate-key' },
     { usage: 'runner <cmd>', blurb: "run your server's tasks on this machine: serve, list, ..." },
     { usage: 'auth <cmd>', blurb: 'sign in to Coder: login, logout, status' },
     {

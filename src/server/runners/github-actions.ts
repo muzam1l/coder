@@ -1,9 +1,10 @@
 import { decodeJson, encodeJson } from '../../utils/base64url';
 import type { AgentTask } from '../../agent/types';
 import type { Runner } from '.';
-import { logLines, toolInstalls } from './local';
+import { RUNNER_IMAGE, startCommand, SETUP_FAILED, runnerTarball } from '.';
 
-export const ACTIONS_WORKFLOW_YAML = `name: Coder agent
+export function actionsWorkflow(): string {
+  return `name: Coder agent
 run-name: Coder agent \${{ inputs.task }}
 on:
   workflow_dispatch:
@@ -12,24 +13,25 @@ on:
       server: { required: true, type: string }
       token: { required: true, type: string }
       mode: { required: true, type: string }
+      tarball: { required: true, type: string }
 jobs:
   run:
     runs-on: ubuntu-latest
+    container: ${RUNNER_IMAGE}
     steps:
-      - uses: actions/setup-node@v4
-        with: { node-version: 22 }
-      - run: npm i -g @wular/coder @anthropic-ai/claude-code @openai/codex
-${toolInstalls()
-  .map(install => `      - run: sudo sh -c '${install}'\n`)
-  .join('')}      - run: coder agent run --task "$TASK"
+      - run: |
+          sh -c '${startCommand().replaceAll("'", "'\\''")}' coder-task "$TASK" '${SETUP_FAILED.replaceAll("'", "'\\''").trim().replaceAll('\n', ' ')}'
         env:
           TASK: \${{ inputs.task }}
           CODER_SERVER: \${{ inputs.server }}
           CODER_TASK_TOKEN: \${{ inputs.token }}
           CODER_INBOX_MODE: \${{ inputs.mode }}
+          CODER_RUNNER_TARBALL_URL: \${{ inputs.tarball }}
 `;
+}
 
 export interface GithubActionsOptions {
+  tarballUrl?: string;
   token?: string;
   repo?: string;
   workflow?: string;
@@ -132,13 +134,24 @@ export class GithubActionsRunner implements Runner {
             server: env.CODER_SERVER,
             token: env.CODER_TASK_TOKEN,
             mode: env.CODER_INBOX_MODE,
+            tarball: this.options.tarballUrl ?? runnerTarball(),
           },
         }),
       },
       Math.max(1, deadline - Date.now()),
     );
-    if (dispatched.status !== 204)
+    if (dispatched.status !== 204) {
+      const body = (await dispatched.json().catch(() => ({}))) as { message?: string };
+      if (
+        dispatched.status === 422 &&
+        /unexpected inputs provided/i.test(body.message ?? '') &&
+        /\btarball\b/i.test(body.message ?? '')
+      )
+        throw new Error(
+          'The saved GitHub workflow lacks the tarball input; regenerate it with coder server workflow.',
+        );
       throw new Error(`GitHub workflow dispatch failed: ${dispatched.status}`);
+    }
     do {
       for (let page = 1; Date.now() < deadline; page++) {
         const runs = await this.request(
@@ -179,41 +192,6 @@ export class GithubActionsRunner implements Runner {
     return {
       state: 'exited' as const,
       code: body.conclusion === 'success' ? 0 : 1,
-    };
-  }
-
-  async logs(handle: string, after = -1) {
-    const { repo, run } = decode(handle);
-    const list: Array<{ id: number }> = [];
-    for (let page = 1; ; page++) {
-      const jobs = await this.request(
-        `/repos/${repo}/actions/runs/${run}/jobs?per_page=100&page=${page}`,
-      );
-      if (!jobs.ok) throw new Error(`GitHub workflow jobs failed: ${jobs.status}`);
-      const body = (await jobs.json()) as { jobs: Array<{ id: number }> };
-      list.push(...body.jobs);
-      if (!jobs.headers.get('link')?.includes('rel="next"')) break;
-    }
-
-    const output: string[] = [];
-    for (const job of list.sort((a, b) => a.id - b.id)) {
-      const response = await this.request(`/repos/${repo}/actions/jobs/${job.id}/logs`);
-      if (response.status === 404) return { lines: [], next: after, complete: false };
-      if (response.status === 302 && response.headers.get('location')) {
-        const downloaded = await this.fetcher(response.headers.get('location')!, {
-          redirect: 'manual',
-          signal: AbortSignal.timeout(10_000),
-        });
-        if (!downloaded.ok) throw new Error(`GitHub job log download failed: ${downloaded.status}`);
-        output.push(await downloaded.text());
-      } else if (response.ok) output.push(await response.text());
-      else throw new Error(`GitHub job logs failed: ${response.status}`);
-    }
-    const all = logLines(output.join('\n'));
-    return {
-      lines: all.slice(after + 1),
-      next: Math.max(after, all.length - 1),
-      complete: list.length > 0,
     };
   }
 

@@ -32,6 +32,8 @@ export interface IntegrationTools {
   serve?: ToolSet;
   /** Shell command a Linux runner runs as root to install `server`'s binary. */
   install?: string;
+  /** Hosts `install` downloads from, redirects included. */
+  installHosts?: string[];
   server?(tools: string[], event: AgentEvent | undefined, token: string): McpServerSpec;
 }
 
@@ -433,6 +435,8 @@ export interface Integration {
   readonly auth: IntegrationAuth;
   readonly tools: IntegrationTools;
   readonly repos?: Repositories;
+  /** Hosts a task's machine reaches for it: clones, API calls and its tool server. */
+  readonly hosts: readonly string[];
   /** A webhook's target, or the answer to a handshake that names no app (Slack URL verification). */
   target(req: Request, raw: string): WebhookTarget | Response | undefined;
   /** The app's Chat SDK adapter, built per request; every secret is passed explicitly, never read from the environment. */

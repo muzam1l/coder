@@ -22,7 +22,8 @@ import {
   startLocalTask,
 } from './local';
 import { scheduleKick } from './kick';
-import { copyRunnerLogs, readLog } from './logs';
+import { readLog } from './logs';
+import { inspectTask, scheduleCancel } from './kick';
 import {
   ACTIVE_STATES,
   addInbox,
@@ -128,12 +129,7 @@ export async function readTask(
     });
   }
 
-  const logs =
-    status.task.runner === 'github-actions' && status.handle
-      ? await copyRunnerLogs(ctx, status, cursor, lines ?? 500).catch(() => stored!)
-      : await stored!;
-
-  return json({ ...redactTask(status), logs });
+  return json({ ...redactTask(await inspectTask(ctx, status)), logs: await stored! });
 }
 
 export async function removeTask(
@@ -228,14 +224,9 @@ export async function taskLogs(
     return json(localLog(cwd, taskId, cursor, lines));
   }
 
-  return json(
-    (['running', 'waiting'].includes(status.status) || status.task.runner === 'github-actions') &&
-      status.handle
-      ? await copyRunnerLogs(ctx, status, cursor, lines).catch(() =>
-          readLog(ctx.store, taskId, cursor, lines),
-        )
-      : await stored!,
-  );
+  await inspectTask(ctx, status);
+
+  return json(await stored!);
 }
 
 export async function steerTask(
@@ -397,7 +388,11 @@ export async function cancelTask(
     tokenHash: status.tokenHash ?? null,
     generation: status.generation ?? 0,
   });
-  if (cancelled && status.status !== 'queued') await pushInbox(ctx, taskId);
+  if (cancelled && status.status !== 'queued') {
+    await pushInbox(ctx, taskId);
+    const current = await ctx.store.get('task', taskId);
+    if (current && !DONE.has(current.status)) scheduleCancel(ctx, status);
+  }
 
   return cancelled
     ? json({ ok: true })

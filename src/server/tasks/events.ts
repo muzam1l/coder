@@ -334,6 +334,11 @@ export async function dispatchEvent(
     )
       return {};
     try {
+      const receipt = await ctx.store.get('delivery', delivery);
+      if (receipt && (!receipt.pending || ('owner' in receipt && receipt.owner))) {
+        await ctx.store.updateDelivery(claim, owner, undefined);
+        return {};
+      }
       const result = await claimed(
         ctx,
         integration,
@@ -345,8 +350,11 @@ export async function dispatchEvent(
         replies,
         delivery,
       );
+      // The handoff receipt owns dedupe and renewal once its work starts.
+      await ctx.store.updateDelivery(claim, owner, result.work ? undefined : { at: now() }, {
+        ttlMs: DELIVERY_TTL_MS,
+      });
       await result.work;
-      await ctx.store.updateDelivery(claim, owner, { at: now() }, { ttlMs: DELIVERY_TTL_MS });
 
       return result.taskId ? { taskId: result.taskId } : {};
     } catch (error) {
@@ -625,11 +633,7 @@ async function claimed(
       ? requesterToken(ctx, integration, event, credentials).catch(() => undefined)
       : undefined,
   ]);
-  if (
-    !credential &&
-    route.runner !== 'http' &&
-    !(await machineSignedIn(ctx, settings.engine ?? DEFAULT_ENGINE))
-  ) {
+  if (!credential && route.runner !== 'http' && !(await machineSignedIn(ctx, settings.engine))) {
     if ((!ctx.local || event.repo) && steers) {
       const forwarded = await ctx.queue.deliver(
         ctx.organizationId,
