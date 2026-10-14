@@ -280,6 +280,7 @@ function SignIn({
         <Button
           href={login.url}
           external
+          variant={opened ? 'outline' : 'primary'}
           loading={!ready}
           autoFocus
           onClick={() => setOpenedUrl(login.url)}
@@ -327,7 +328,9 @@ function SignIn({
               ) : (
                 'Paste the code it shows.'
               )}
+              {/* A new link after a rejected code starts an empty field. */}
               <input
+                key={login.url}
                 class="mono"
                 autocomplete="off"
                 aria-label={`Code from the ${engine.signIn} sign-in page`}
@@ -337,14 +340,13 @@ function SignIn({
                   const code = event.clipboardData?.getData('text').trim();
                   if (code) {
                     event.preventDefault();
+                    event.currentTarget.value = code;
                     onCode(code);
                   }
                 }}
                 onKeyDown={event => {
                   const code = event.currentTarget.value.trim();
-                  if (event.key !== 'Enter' || !code) return;
-                  event.currentTarget.value = '';
-                  onCode(code);
+                  if (event.key === 'Enter' && code) onCode(code);
                 }}
               />
               {verifying ? <Loading label="Checking the code…" inline /> : null}

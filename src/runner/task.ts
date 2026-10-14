@@ -420,18 +420,36 @@ export async function applyTaskMessage(
   await fs.appendFile(transcript, JSON.stringify({ command, result: null }) + '\n');
 }
 
+/** A request a task cannot do without, its start and its result: a dropped connection or 5xx gets paced tries. */
+async function landing<T>(send: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await send();
+    } catch (error) {
+      const status = (error as { status?: number }).status;
+      if ((status !== undefined && status < 500) || attempt >= 6) throw error;
+      console.error(
+        `coder runner: Coder server did not take the request, trying again: ${error instanceof Error ? error.message : error}`,
+      );
+      await new Promise(resolve => setTimeout(resolve, 1000 * 2 ** (attempt - 1)));
+    }
+  }
+}
+
 export async function runTask(id: string, root: string): Promise<unknown> {
   const auth = taskServer();
-  const remote = await taskRequest<RemoteTask>(auth.server, auth.token, id).catch(async error => {
-    await taskRequest(auth.server, auth.token, id, '/result', {
-      method: 'POST',
-      body: JSON.stringify({
-        status: 'failed',
-        error: error instanceof Error ? error.message : String(error),
-      }),
-    }).catch(() => {});
-    throw error;
-  });
+  const remote = await landing(() => taskRequest<RemoteTask>(auth.server, auth.token, id)).catch(
+    async error => {
+      await taskRequest(auth.server, auth.token, id, '/result', {
+        method: 'POST',
+        body: JSON.stringify({
+          status: 'failed',
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      }).catch(() => {});
+      throw error;
+    },
+  );
   const event = remote.task.event;
   const eventToken = event && remote.tokens[event.integration];
   const polling = process.env.CODER_INBOX_MODE === 'poll';
@@ -456,10 +474,12 @@ export async function runTask(id: string, root: string): Promise<unknown> {
   const reportResult = async (body: unknown) => {
     reportingResult = true;
     await beforeResult();
-    await taskRequest(auth.server, auth.token, id, '/result', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    });
+    await landing(() =>
+      taskRequest(auth.server, auth.token, id, '/result', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      }),
+    );
   };
   try {
     cwd = await Promise.race([

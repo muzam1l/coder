@@ -68,6 +68,100 @@ export function signInLink(
   return { url, ...(code ? { code } : {}) };
 }
 
+const TOKEN = /sk-ant-oat[\w-]+/;
+/** A screen for the log, with links, codes and tokens blanked out. */
+const blank = (text: string) =>
+  text.replace(/[\w#.%-]{20,}|\b[A-Z0-9]{4,}-[A-Z0-9]{4,}\b/g, '…').slice(-600);
+const SEQUENCE =
+  /\x1b(?:\[([0-9;?<>=]*)[ -/]*([@-~])|\][^\x07\x1b]*(?:\x07|\x1b\\)|[()][\s\S]|[^[\]()])/y;
+
+/** Claude's terminal as it looks: claude redraws only the cells that change, so its raw output skips text. */
+export class Screen {
+  private rows: string[][] = [[]];
+  private row = 0;
+  private col = 0;
+  private saved = [0, 0];
+  private rest = '';
+
+  constructor(private height = 50) {}
+
+  write(chunk: string) {
+    const text = this.rest + chunk;
+    this.rest = '';
+    for (let i = 0; i < text.length;) {
+      if (text[i] === '\x1b') {
+        SEQUENCE.lastIndex = i;
+        const match = SEQUENCE.exec(text);
+        if (!match) {
+          this.rest = text.slice(i, i + 4096);
+          return;
+        }
+        if (match[2] && !/^[?<>=]/.test(match[1]!)) this.csi(match[1]!.split(';'), match[2]);
+        else if (match[0] === '\x1b7') this.saved = [this.row, this.col];
+        else if (match[0] === '\x1b8') [this.row, this.col] = this.saved;
+        i += match[0].length;
+        continue;
+      }
+      const code = text.codePointAt(i)!;
+      const char = String.fromCodePoint(code);
+      i += char.length;
+      if (char === '\r') this.col = 0;
+      else if (char === '\n') this.down();
+      else if (char === '\b') this.col = Math.max(0, this.col - 1);
+      else if (code >= 0x20 && code !== 0x7f) this.line()[this.col++] = char;
+    }
+  }
+
+  text() {
+    return this.rows
+      .map(line =>
+        Array.from(line, char => char ?? ' ')
+          .join('')
+          .trimEnd(),
+      )
+      .join('\n');
+  }
+
+  private line() {
+    return (this.rows[this.row] ??= []);
+  }
+
+  private down() {
+    if (this.row < this.height - 1) this.row++;
+    else this.rows.splice(0, this.rows.length - this.height + 1);
+  }
+
+  private csi(params: string[], final: string) {
+    const n = (at = 0) => Number(params[at]) || 1;
+    const mode = Number(params[0]) || 0;
+    const last = this.height - 1;
+    if (final === 'A') this.row = Math.max(0, this.row - n());
+    else if (final === 'B') this.row = Math.min(last, this.row + n());
+    else if (final === 'C') this.col += n();
+    else if (final === 'D') this.col = Math.max(0, this.col - n());
+    else if (final === 'E' || final === 'F') {
+      this.row = Math.max(0, Math.min(last, this.row + (final === 'E' ? n() : -n())));
+      this.col = 0;
+    } else if (final === 'G') this.col = n() - 1;
+    else if (final === 'd') this.row = Math.min(last, n() - 1);
+    else if (final === 'H' || final === 'f') {
+      this.row = Math.min(last, n() - 1);
+      this.col = n(1) - 1;
+    } else if (final === 'K') {
+      const line = this.line();
+      if (mode === 0) line.length = Math.min(line.length, this.col);
+      else if (mode === 1) line.fill(' ', 0, this.col + 1);
+      else line.length = 0;
+    } else if (final === 'J') {
+      if (mode === 0) {
+        this.line().length = Math.min(this.line().length, this.col);
+        this.rows.length = Math.min(this.rows.length, this.row + 1);
+      } else if (mode >= 2) this.rows = [];
+    } else if (final === 's') this.saved = [this.row, this.col];
+    else if (final === 'u') [this.row, this.col] = this.saved;
+  }
+}
+
 export async function runLogin(id: string, root: string): Promise<void> {
   const { server, token } = taskServer();
   delete process.env.CODER_TASK_TOKEN;
@@ -75,17 +169,19 @@ export async function runLogin(id: string, root: string): Promise<void> {
   const stopped = new AbortController();
   // Only the Coder server is called; a restart or dropped connection gets a few paced tries.
   const call = async <T>(suffix: string, body?: unknown): Promise<T> => {
+    const signal = suffix ? stopped.signal : undefined;
     for (let tries = 1; ; tries++) {
       const response = await fetch(`${server}/logins/${encodeURIComponent(id)}${suffix}`, {
         method: body === undefined ? 'GET' : 'POST',
-        ...(suffix ? { signal: stopped.signal } : {}),
+        ...(signal ? { signal } : {}),
         headers: {
           authorization: `Bearer ${token}`,
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       }).catch((error: Error) => {
-        if (stopped.signal.aborted || tries >= TRIES) throw error;
+        // A dropped wait for the code may have taken it already; only a new sign-in recovers.
+        if (signal?.aborted || suffix === '/input' || tries >= TRIES) throw error;
         console.error(`coder runner: Coder server did not answer: ${error.message}`);
       });
       if (response?.ok) return (await response.json()) as T;
@@ -111,7 +207,8 @@ export async function runLogin(id: string, root: string): Promise<void> {
     } catch {}
   };
   let raw = '';
-  let output = '';
+  const screen = new Screen();
+  let shown = false;
   let reported = false;
   // Where the current sign-in screen starts, and where the last pasted code went in.
   let from = 0;
@@ -129,13 +226,25 @@ export async function runLogin(id: string, root: string): Promise<void> {
       const { code } = await call<{ code?: string }>('/input');
       if (code) {
         sent = raw.length;
-        return void child.stdin.write(`${code}\r`);
+        child.stdin.write(code);
+        // Claude takes a long code as a paste, where Enter only adds a line, so Enter goes alone.
+        await new Promise(resolve => setTimeout(resolve, 500));
+        child.stdin.write('\r');
+        process.stdout.write('Sign-in code typed\n');
+        const typed = sent;
+        setTimeout(() => {
+          if (sent === typed && !shown)
+            console.error(
+              `coder runner: claude has not answered the code: ${JSON.stringify(blank(screen.text()))}`,
+            );
+        }, 20000).unref();
+        return;
       }
     }
   };
-  const read = (chunk: Buffer) => {
-    raw += chunk.toString();
-    output = raw.replace(ANSI, '');
+  const read = (chunk: string) => {
+    raw += chunk;
+    screen.write(chunk);
     if (!reported) {
       const link = signInLink(engine, raw.slice(from));
       if (link) {
@@ -149,25 +258,32 @@ export async function runLogin(id: string, root: string): Promise<void> {
           });
       }
     }
-    if (engine === 'claude' && /sk-ant-oat[\w-]+\s/.test(output)) kill();
+    // Claude exits once it shows the token; this stops it if it waits.
+    if (engine === 'claude' && !shown && TOKEN.test(screen.text())) {
+      shown = true;
+      process.stdout.write('Sign-in token shown\n');
+      setTimeout(kill, 2000);
+    }
     // A rejected code: Enter makes claude show a new link, which the dialog then offers.
     // Claude redraws in place and skips the spaces, so the prompt is matched without them.
     // It also takes keys a moment after the prompt draws, so Enter repeats until the link shows.
     const after = sent === undefined ? '' : raw.slice(sent).replace(ANSI, '').replace(/\s/g, '');
     if (after.includes('PressEntertoretry')) {
+      process.stdout.write('Sign-in code rejected; asking claude for a new link\n');
       sent = undefined;
       from = raw.length;
       reported = false;
       retry = setInterval(() => child.stdin.write('\r'), 1000);
     }
   };
-  child.stdout.on('data', read);
-  child.stderr.on('data', read);
+  child.stdout.setEncoding('utf8').on('data', read);
+  child.stderr.setEncoding('utf8').on('data', read);
 
   try {
     const code = await finished;
     stopped.abort();
-    const oauth = /sk-ant-oat[A-Za-z0-9_-]+/.exec(output)?.[0];
+    const output = screen.text();
+    const oauth = TOKEN.exec(output)?.[0];
     if (engine === 'claude' && oauth) {
       const email = /[\w.+-]+@[\w-]+(?:\.[\w-]+)+/.exec(output)?.[0];
       await call('', {
@@ -184,12 +300,17 @@ export async function runLogin(id: string, root: string): Promise<void> {
           account: codexAccount(authJson),
         },
       });
-    } else
+    } else {
+      // Its last screen says why.
+      console.error(
+        `coder runner: ${engine} sign-in ended (exit ${code}): ${JSON.stringify(blank(output))}`,
+      );
       await call('', {
         error: reported
           ? 'Sign-in did not finish. Start again.'
           : `${engine} sign-in could not start.`,
       }).catch(() => {});
+    }
     process.stdout.write('Sign-in finished\n');
   } finally {
     clearTimeout(timer);

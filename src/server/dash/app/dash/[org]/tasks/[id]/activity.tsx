@@ -303,7 +303,7 @@ export function runSummary(rows: TaskDisplayRow[], elapsed?: number) {
   );
 
   return [
-    `${calls} tool ${calls === 1 ? 'call' : 'calls'}`,
+    calls ? `${calls} tool ${calls === 1 ? 'call' : 'calls'}` : '',
     approved ? `${approved} approved` : '',
     denied ? `${denied} denied` : '',
     failed ? `${failed} failed` : '',
