@@ -65,6 +65,14 @@ export interface SessionInfo {
   stale?: boolean;
 }
 
+/** The session in the organization a request names by slug or id; denied when the user is not a member. */
+export function chosenOrganization(info: SessionInfo, wanted: string): SessionInfo {
+  const org = info.organizations.find(o => o.slug === wanted || o.id === wanted);
+  return org
+    ? { ...info, organizationId: org.id, role: org.role }
+    : { ...info, organizationId: undefined, role: undefined, organizationDenied: true };
+}
+
 /** What a link remembers besides the user: their workspaces then, and the encrypted platform user token. */
 export interface LinkExtra {
   organizations?: string[];
@@ -83,11 +91,14 @@ export interface AuthApi {
   session(headers: Headers, fresh?: boolean, cookies?: string[]): Promise<SessionInfo | undefined>;
   /** The user of a live operator session, whose idle timer restarts; `cookies` receives its renewed or cleared cookie. */
   operator(headers: Headers, cookies?: string[]): Promise<string | undefined>;
-  /** Switches the session's organization; `cookies` store the session for the response. */
+  /** Makes the organization the session's active one; `cookies` receives the Set-Cookie values that store it. */
   setOrganization(
     headers: Headers,
     slug: string,
-  ): Promise<(OrganizationInfo & { cookies: string[] }) | undefined>;
+    cookies?: string[],
+  ): Promise<OrganizationInfo | undefined>;
+  /** An organization's slug and name as Wular last gave them at a member's sign-in. */
+  organization?(id: string): Promise<{ slug: string; name: string } | undefined>;
   /** Connect a platform user to a Wular user; `taken` when another user already holds that identity. */
   link(
     user: SessionInfo['user'],
@@ -184,6 +195,7 @@ export interface ServerContext {
   /** Repository listings in flight, one per installation. */
   repositoryLists?: Map<string, Promise<Installation | undefined>>;
   runnerExec?: typeof import('node:child_process').execFile;
+  runnerTimeoutMs?: number;
   now?: () => number;
   waitUntil?: (work: Promise<unknown>) => void;
 }

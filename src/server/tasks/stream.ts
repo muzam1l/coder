@@ -254,6 +254,8 @@ export class TaskWatcher {
       pollMs?: number;
       heartbeatMs?: number;
       lifeMs?: number;
+      localScanMs?: number;
+      archiveScanMs?: number;
     } = {},
   ) {}
 
@@ -487,9 +489,9 @@ export class TaskWatcher {
       const queued = [...(rows.get(organizationId)?.values() ?? [])];
       let scan = this.scans.get(ctx.local.cwd);
       // A queue change since the last scan rescans, so an older CLI row never wins over it.
-      if (!scan || at - scan.at >= LOCAL_SCAN_MS || queued.some(row => row.updatedAt > scan!.at)) {
+      if (!scan || at - scan.at >= (this.options.localScanMs ?? LOCAL_SCAN_MS) || queued.some(row => row.updatedAt > scan!.at)) {
         // Archived tasks too, so an archive list hears a running one finish.
-        const fresh = !scan || at - scan.archivedAt >= ARCHIVE_SCAN_MS;
+        const fresh = !scan || at - scan.archivedAt >= (this.options.archiveScanMs ?? ARCHIVE_SCAN_MS);
         await sweepLocalQueue(ctx, ctx.local.cwd);
         const shelf = fresh ? localTasks(ctx.local.cwd, true) : scan!.archived;
         const active = localTasks(ctx.local.cwd, false);

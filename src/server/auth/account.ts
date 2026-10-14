@@ -1,7 +1,10 @@
 import { type Params } from '../routes/match';
 import { type ServerContext } from '../context';
 import { operator, serverMode } from '../routes/guards';
-import { json, redirect } from '../routes/http';
+import { json } from '../routes/http';
+
+/** A server without accounts has one workspace, at `/dash/local`. */
+export const LOCAL_SLUG = 'local';
 
 export async function meRoute(
   req: Request,
@@ -12,7 +15,7 @@ export async function meRoute(
   if (!ctx.auth) {
     return json({
       mode: serverMode(ctx),
-      organization: { id: ctx.organizationId },
+      organization: { id: ctx.organizationId, slug: LOCAL_SLUG },
       server: serverInfo(ctx),
       operator: operator(ctx),
     });
@@ -45,37 +48,25 @@ function serverInfo(ctx: ServerContext) {
   };
 }
 
-export async function organizationRoute(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-) {
-  const contentType = req.headers.get('content-type') ?? '';
-  const body = (
-    contentType.includes('application/json')
-      ? await req.json().catch(() => undefined)
-      : await req.formData().then(
-          form => Object.fromEntries(form.entries()),
-          () => undefined,
-        )
-  ) as
-    | {
-        organization?: unknown;
-      }
-    | undefined;
-  if (!body || typeof body !== 'object')
-    return json({ error: 'Send the workspace as a form or JSON body.' }, 400);
+/** The slug of `ctx`'s organization from its session, else of the session's active one; else the organization id, which the dashboard sends on to the slug. */
+export function sessionSlug(ctx: ServerContext): string {
+  const organizations = ctx.session?.organizations ?? [];
+  const org =
+    organizations.find(entry => entry.id === ctx.organizationId) ??
+    organizations.find(entry => entry.id === ctx.session?.organizationId);
 
-  const slug = typeof body.organization === 'string' ? body.organization : '';
-  const selected = slug ? await ctx.auth!.setOrganization(req.headers, slug) : undefined;
-  if (!selected) return json({ error: 'You are not a member of that workspace.' }, 403);
-
-  const { cookies, ...organization } = selected;
-  const response = contentType.includes('application/json')
-    ? json({ organization })
-    : redirect('/dash', 303);
-  for (const cookie of cookies) response.headers.append('set-cookie', cookie);
-
-  return response;
+  return org?.slug ?? (ctx.auth ? ctx.organizationId : LOCAL_SLUG);
 }
+
+/** The same without a session, such as for a link posted to a platform: the slug as Wular last named it. */
+export async function organizationSlug(ctx: ServerContext): Promise<string> {
+  const known = ctx.session?.organizations.find(org => org.id === ctx.organizationId)?.slug;
+
+  if (known || !ctx.auth) return known ?? LOCAL_SLUG;
+
+  return (await ctx.auth.organization?.(ctx.organizationId))?.slug ?? ctx.organizationId;
+}
+
+/** A dashboard page of the organization `slug`, such as `/tasks/<id>`; without one, the dashboard opens it in the active organization. */
+export const dashPath = (slug: string, page = '') =>
+  slug ? `/dash/${encodeURIComponent(slug)}${page}` : `/dash${page}`;

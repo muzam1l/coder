@@ -4,6 +4,7 @@ import { EncryptJWT, createRemoteJWKSet, jwtDecrypt, jwtVerify, type JWTPayload 
 import * as oidc from 'openid-client';
 
 import type { AuthApi, ServerConfig, OrganizationInfo, SessionInfo } from '../context';
+import { chosenOrganization } from '../context';
 import type { Db } from '../store/pg/client';
 import type { Store } from '../store/types';
 import { DrizzleStore } from '../store/pg/store';
@@ -17,7 +18,6 @@ import { COOKIE_PREFIX, safeReturnPath } from './sign-in';
 const SESSION_COOKIE = `${COOKIE_PREFIX}.session`;
 const FLOW_COOKIE = `${COOKIE_PREFIX}.oidc`;
 const OPERATOR_COOKIE = `${COOKIE_PREFIX}.operator`;
-const OPERATOR_PATH = '/dash/operator';
 // Browsers cap a cookie near 4 KB; larger sessions split into numbered chunks.
 const CHUNK_SIZE = 3800;
 /** Admin, agent, credential and member changes act on roles at most this old, in seconds. */
@@ -107,14 +107,19 @@ function organizations(value: unknown): OrganizationInfo[] {
   );
 }
 
+/** The operator page in the session's active organization. */
+function operatorPath(claims?: Claims): string {
+  const slug = (claims?.orgs.find(org => org.id === claims.org) ?? claims?.orgs[0])?.slug;
+
+  return slug ? `/dash/${encodeURIComponent(slug)}/operator` : '/dash/operator';
+}
+
 /** The request's organization: an explicit header, else the session's active one, else the first. */
 function withOrganization(headers: Headers, info: SessionInfo, active?: string): SessionInfo {
   const wanted = headers.get('x-coder-organization');
-  const org = wanted
-    ? info.organizations.find(o => o.slug === wanted || o.id === wanted)
-    : (info.organizations.find(o => o.id === active) ?? info.organizations[0]);
-  if (!org) return wanted ? { ...info, organizationDenied: true } : info;
-  return { ...info, organizationId: org.id, role: org.role };
+  if (wanted) return chosenOrganization(info, wanted);
+  const org = info.organizations.find(o => o.id === active) ?? info.organizations[0];
+  return org ? { ...info, organizationId: org.id, role: org.role } : info;
 }
 
 export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi> {
@@ -210,6 +215,19 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
     };
   }
 
+  /** Keeps each organization's slug and name in its own state, for dashboard links made without a session; sign-in never fails on it. */
+  const remember = async (orgs: OrganizationInfo[]) => {
+    try {
+      await Promise.all(
+        orgs.map(({ id, slug, name }) =>
+          new DrizzleStore(db, id).put('delivery', 'workspace', { slug, name }),
+        ),
+      );
+    } catch (error) {
+      console.error('coder server: saving organizations failed', error);
+    }
+  };
+
   const refreshed = new Map<string, Promise<Claims | false | undefined>>();
   /** New claims from the refresh grant; false when Wular rejects the token, undefined when it cannot answer. */
   function refresh(claims: Claims): Promise<Claims | false | undefined> {
@@ -220,6 +238,11 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
       found = configuration()
         .then(wular => oidc.refreshTokenGrant(wular, token))
         .then(tokens => fromTokens(tokens, claims))
+        .then(next => {
+          // A request waits on Wular here already; the names are saved beside it.
+          void remember(next.orgs);
+          return next;
+        })
         .catch((error: unknown) => {
           refreshed.delete(token);
           return error instanceof oidc.ResponseBodyError && error.error === 'invalid_grant'
@@ -229,7 +252,10 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
       refreshed.set(token, found);
       setTimeout(() => refreshed.delete(token), REFRESHED_TTL_MS).unref?.();
     }
-    return found;
+    // Requests share one refresh per token; each keeps the organization its own cookie has active.
+    return found.then(next =>
+      next && next.orgs.some(org => org.id === claims.org) ? { ...next, org: claims.org } : next,
+    );
   }
 
   async function bearerSession(
@@ -265,17 +291,20 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
     const wular = await configuration().catch(() => undefined);
     if (!wular) return Response.redirect(`${publicUrl}/login?error=unavailable`, 302);
     const operator = url.searchParams.get('operator') === '1';
+    // Signing in again, possibly as someone else, as from another workspace's link.
+    const again = url.searchParams.get('prompt') === 'login';
     const flow: Flow = {
       verifier: oidc.randomPKCECodeVerifier(),
       state: oidc.randomState(),
       nonce: oidc.randomNonce(),
-      return: operator ? OPERATOR_PATH : safeReturnPath(url.searchParams.get('return'), resource),
+      return: operator ? '/dash' : safeReturnPath(url.searchParams.get('return'), resource),
       ...(operator ? { operator } : {}),
     };
     const target = oidc.buildAuthorizationUrl(wular, {
       redirect_uri: redirectUri,
       // Operator mode re-authenticates and takes only the identity, so no refresh token exists for it.
       ...(operator ? { scope: 'openid', prompt: 'login' } : { scope: SCOPE }),
+      ...(again ? { prompt: 'login' } : {}),
       code_challenge: await oidc.calculatePKCECodeChallenge(flow.verifier),
       code_challenge_method: 'S256',
       state: flow.state,
@@ -321,6 +350,7 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
       return failed('sign_in_failed');
     }
     if (flow.operator) return enterOperator(req, claims.sub, authTime);
+    await remember(claims.orgs);
     const headers = new Headers({ location: flow.return });
     headers.append('set-cookie', cookie(FLOW_COOKIE, '', 0));
     for (const value of await storeSession(req.headers, claims))
@@ -340,7 +370,9 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
     const fresh = typeof authTime === 'number' && now - authTime <= PRIVILEGED_FRESHNESS_S;
     const allowed = fresh && session?.sub === sub && config.operators?.includes(sub);
     const headers = new Headers({
-      location: allowed ? OPERATOR_PATH : `${OPERATOR_PATH}?error=${fresh ? 'denied' : 'stale'}`,
+      location: allowed
+        ? operatorPath(session)
+        : `${operatorPath(session)}?error=${fresh ? 'denied' : 'stale'}`,
     });
     headers.append('set-cookie', cookie(FLOW_COOKIE, '', 0));
     if (allowed)
@@ -415,14 +447,20 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
       cookies.push(await sealOperator({ ...entered, seen: now }));
       return entered.sub;
     },
-    async setOrganization(headers, slug) {
-      const claims = await open<Claims>(readSession(headers));
+    async setOrganization(headers, slug, cookies = []) {
+      let claims = await open<Claims>(readSession(headers));
+      if (claims && claims.exp_at <= epoch()) claims = (await refresh(claims)) || undefined;
       const org = claims?.orgs.find(candidate => candidate.slug === slug);
       if (!claims || !org) return undefined;
-      return {
-        ...org,
-        cookies: await storeSession(headers, { ...claims, org: org.id }),
-      };
+
+      if (claims.org !== org.id)
+        cookies.push(...(await storeSession(headers, { ...claims, org: org.id })));
+      return org;
+    },
+    async organization(id) {
+      const named = await new DrizzleStore(db, id).get('delivery', 'workspace');
+
+      return named && 'slug' in named ? named : undefined;
     },
     async link(user, platform, platformUserId, extra = {}, store) {
       const known = {

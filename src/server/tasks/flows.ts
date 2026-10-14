@@ -9,8 +9,17 @@ import { type AgentApp } from '../../agent/types';
 import { type Integration, type OwnEvent } from '../../integrations/types';
 import { importAgents, pushedFiles, sourceEvent } from '../agents/repo';
 import { storeInstallation } from '../agents/install';
-import { chatFor, deliver, eventReplies, later } from '../chat';
+import {
+  adapterContext,
+  chatFor,
+  dashUrl,
+  deliver,
+  eventReplies,
+  later,
+  type Target,
+} from '../chat';
 import { dropTokens } from './context';
+import { recordFailure } from './failures';
 import { updateMetadata } from '../store';
 import { decryptSecret } from '../store/secrets';
 import { InstallationBoundError } from '../store/types';
@@ -149,7 +158,26 @@ async function ownEvent(
   credentials: unknown,
   own: Exclude<OwnEvent, { invalid: true }>,
   now: number,
+  target?: Target,
 ): Promise<Response> {
+  if ('ack' in own) return new Response(null, { status: 200 });
+  if ('unhandled' in own) {
+    console.warn(`coder server: ${app.id} sent ${own.unhandled}, which Coder does not handle yet`);
+    return new Response(null, { status: 200 });
+  }
+  if ('work' in own) {
+    if (target) {
+      const work = dashUrl(ctx)
+        .then(dash => own.work(adapterContext(ctx, integration, app, credentials, target, dash)))
+        .catch(error => {
+          console.error(`coder server: webhook work failed for ${app.id}`, error);
+
+          return recordFailure(ctx, app, error, target.id);
+        });
+      (ctx.waitUntil ?? (() => {}))(work);
+    }
+    return json({ ok: true });
+  }
   if ('installation' in own) {
     // Only installs bound from the dashboard are tracked; the platform's payload never binds one.
     const tenant = await forInstallation(ctx, own.installation.installation.id);
@@ -274,22 +302,23 @@ export async function hook(req: Request, base: ServerContext, id: string): Promi
   if (!owner) return new Response('Unknown app', { status: 404 });
   const { ctx, app } = owner;
   const credentials = decryptSecret(ctx.config, app.credentials);
+  const bound = target.installation ? { ...target, id: target.installation } : undefined;
   const own = integration.ownEvents?.(req, raw, app, credentials);
   if (own && 'invalid' in own) return new Response('Invalid signature', { status: 401 });
-  if (own) return ownEvent(ctx, integration, app, credentials, own, (ctx.now ?? Date.now)());
-  const chat = await chatFor(
-    ctx,
-    app,
-    target.installation ? { ...target, id: target.installation } : undefined,
-  );
+  if (own) return ownEvent(ctx, integration, app, credentials, own, (ctx.now ?? Date.now)(), bound);
+  const chat = await chatFor(ctx, app, bound);
   const webhook = chat.webhooks[integration.id]!;
   // Coder claims each delivery by installation and conversation; Chat's own check knows only the message id.
   return webhook(new Request(req.url, { method: 'POST', headers: req.headers, body: raw }), {
     deduplicate: false,
+    // Handler failures reach the catch below instead of only Chat's own log.
+    propagateHandlerErrors: true,
     waitUntil: pending => {
-      const logged = pending.catch(error =>
-        console.error(`coder server: webhook work failed for ${app.id}`, error),
-      );
+      const logged = pending.catch(error => {
+        console.error(`coder server: webhook work failed for ${app.id}`, error);
+
+        return recordFailure(ctx, app, error, target.installation);
+      });
       if (ctx.waitUntil) ctx.waitUntil(logged);
     },
   });

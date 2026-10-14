@@ -4,11 +4,13 @@ import { assertNotReserved, agentsFromSources, repoAgentOverride } from '../../a
 import { parseAgentsUsage } from '../../agent/definition';
 import { type ServerContext } from '../context';
 import { getAgent, getVersion, publishAgent, setAgentSettings, toAgent } from './records';
-import { updateApps } from './repo';
+import { syncApps } from './repo';
 import { deleteLocalAgent, syncLocalAgents, writeLocalAgent } from '../store/local';
 import { updateConfig } from '../settings/config';
 import { json, notFound } from '../routes/http';
 import { prepareAgent } from './catalog';
+import type { AppSync } from '../../client/types';
+import type { AgentVersionRecord } from '../store/types';
 
 const FILE_LIMIT = 256 * 1024;
 
@@ -33,6 +35,17 @@ function validFiles(value: unknown): value is Record<string, string> {
     size += Buffer.byteLength(name) + Buffer.byteLength(content);
   }
   return size <= FILE_LIMIT;
+}
+
+/** The agent's apps after a publish: pushed to their platform, failed, or needing changes there by hand. */
+async function publishedApps(ctx: ServerContext, version: AgentVersionRecord): Promise<AppSync[]> {
+  return (await syncApps(ctx, [version])).flatMap(({ app, error, check }): AppSync[] => {
+    const row = { id: app.id, integration: app.integration, name: app.name };
+    if (error) return [{ ...row, error }];
+    if (!check) return [{ ...row, updated: true }];
+
+    return check.changed ? [{ ...row, drift: true }] : [];
+  });
 }
 
 export async function updateSettings(
@@ -187,7 +200,7 @@ export async function publish(
     const unchanged =
       published?.unchanged ??
       isDeepStrictEqual(previous && { ...previous, createdAt: 0 }, { ...version, createdAt: 0 });
-    await updateApps(ctx, [version]);
+    const apps = await publishedApps(ctx, version);
 
     const record = published?.record ?? (await getAgent(ctx.store, slug))!;
 
@@ -196,6 +209,7 @@ export async function publish(
       definition: version.definition,
       version: version.version,
       unchanged,
+      apps,
     });
   } catch (error) {
     return json({ error: error instanceof Error ? error.message : String(error) }, 400);

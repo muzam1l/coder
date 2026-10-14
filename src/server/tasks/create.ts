@@ -3,6 +3,7 @@ import { narrowConnections } from '../../core/connections';
 import { checkFolder } from '../settings/folders';
 import { repositorySnapshot } from '../agents/connections';
 import { getApps } from '../store';
+import { dashPath, sessionSlug } from '../auth/account';
 /** Tasks started from the dashboard, the CLI, or a schedule: a prompt or a flow, optionally on a workspace repo. */
 import { randomBytes } from 'node:crypto';
 
@@ -28,6 +29,7 @@ import { credentialFix, resolveCredential } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { installationToken } from './context';
 import { chooseRunner } from '../runners';
+import { DEFAULT_ENGINE } from '../../core/defaults';
 
 export interface NewTask {
   cwd?: string;
@@ -67,7 +69,7 @@ export function assertEnabled(ctx: ServerContext, slug: string, record?: AgentRe
   throw new TaskInputError(
     `Agent "${slug}" is disabled in this workspace. Enable it in its settings to start tasks.`,
     409,
-    `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}/dash/agents/${encodeURIComponent(slug)}/settings`,
+    `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${dashPath(sessionSlug(ctx), `/agents/${encodeURIComponent(slug)}/settings`)}`,
   );
 }
 
@@ -236,12 +238,12 @@ export async function createTask(
   const credential = ctx.store.taskInputs
     ? (loaded as { credential?: string }).credential
     : (await resolveCredential(ctx.store, settings.engine, requester))?.id;
-  const engine = settings.engine ?? 'claude';
+  const engine = settings.engine ?? DEFAULT_ENGINE;
   if (!credential && chosen.runner !== 'http' && !(await machineSignedIn(ctx, engine)))
     throw new TaskInputError(
       `No ${engine} credential is connected`,
       409,
-      credentialFix(ctx, engine),
+      await credentialFix(ctx, engine),
     );
 
   const id = `${now.toString(36)}-${randomBytes(4).toString('hex')}`;

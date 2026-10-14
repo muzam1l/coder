@@ -1,0 +1,120 @@
+'use client';
+
+import type { ComponentChildren } from 'preact';
+
+import { client } from '@/utils/client';
+import { Link } from '@wular/pnext/link';
+import { usePaged } from '@/utils/paged';
+import type { AgentCardRow, IntegrationInfo, Paged } from '@coder/client/types';
+import { Empty } from '@/comps/ui/card';
+import { initial } from '@/utils/format';
+import { AgentPills, BrandIcon, PlatformLine } from '@/app/dash/[org]/agents/agent/agent-pills';
+import { Filter } from '@/comps/ui/filter';
+import { NewAgentMenu } from './agent-menu';
+import { Search, Toolbar, queryOf, useFilters } from '@/comps/ui/toolbar';
+import { Tail } from '@/comps/ui/tail';
+import { useOrg } from '@/comps/nav/org';
+
+type Keys = 'q' | 'platform' | 'type';
+
+function AgentCard({ agent, catalog }: { agent: AgentCardRow; catalog: IntegrationInfo[] }) {
+  const org = useOrg();
+
+  return (
+    <li class="agent-card">
+      <div class="bc-head">
+        <span class="mark">{initial(agent.name)}</span>
+        <div class="grow">
+          <h3>
+            <Link class="cover" href="/dash/[org]/agents/[slug]" params={{ org, slug: agent.id }}>
+              {agent.name}
+            </Link>
+          </h3>
+          <span class="pills">
+            <AgentPills agent={agent} />
+          </span>
+        </div>
+      </div>
+      <div class="lead-clamp">
+        <span>{agent.description ?? 'No description yet.'}</span>
+      </div>
+      {agent.platforms.length ? (
+        <PlatformLine platforms={agent.platforms} catalog={catalog} agent={agent.id} />
+      ) : (
+        <span class="pfs muted">No handles yet</span>
+      )}
+    </li>
+  );
+}
+
+/** Every agent in pages, searched and filtered on the server. */
+/** Agent kinds a list filters by. */
+export const KINDS: Array<[string, string]> = [
+  ['', 'All agents'],
+  ['dashboard', 'Dashboard agents'],
+  ['repository', 'Repository agents'],
+  ['builtin', 'Built-in'],
+];
+
+export function AgentsGrid({
+  first,
+  limit,
+  filters,
+  catalog,
+  head,
+  children,
+}: {
+  first: Paged<AgentCardRow>;
+  /** Agent cards per page. */
+  limit: number;
+  filters: Record<Keys, string>;
+  catalog: IntegrationInfo[];
+  head: { title: string; lead: string };
+  /** What shows between the toolbar and the agents. */
+  children?: ComponentChildren;
+}) {
+  const { values, set, query } = useFilters<Keys>(filters);
+  const list = usePaged<AgentCardRow>({
+    name: 'agents',
+    fetchPage: cursor => client.agents.list({ cursor, limit, ...values }),
+    query,
+    first,
+    initial: queryOf(filters),
+  });
+
+  return (
+    <>
+      <Toolbar head={head} action={<NewAgentMenu />}>
+        <Search value={values.q} label="Search agents" onInput={value => set('q', value, 250)} />
+        <Filter
+          name="agents"
+          facets={[
+            {
+              key: 'platform',
+              label: 'Platform',
+              options: catalog.map((entry): [string, string] => [entry.id, entry.name]),
+              icon: value => {
+                const entry = catalog.find(item => item.id === value);
+                return entry ? <BrandIcon brand={entry.brand} /> : undefined;
+              },
+            },
+            { key: 'type', label: 'Source', options: KINDS },
+          ]}
+          values={values}
+          onChange={set}
+        />
+      </Toolbar>
+      {children}
+      {list.rows.length ? (
+        <ul class="agent-grid" aria-busy={list.stale}>
+          {list.rows.map(agent => (
+            <AgentCard key={agent.id} agent={agent} catalog={catalog} />
+          ))}
+        </ul>
+      ) : list.stale ? null : (
+        <Empty title="No agents match">Try another search or filter.</Empty>
+      )}
+      <Tail noun="agents" {...list} />
+    </>
+  );
+}

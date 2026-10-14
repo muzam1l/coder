@@ -19,9 +19,9 @@ function deadline<T>(work: Promise<T>, ms: number, operation: string): Promise<T
   ]).finally(() => clearTimeout(timer));
 }
 
-async function stop(runner: Runner, handle: string, taskId: string): Promise<void> {
+async function stop(ctx: ServerContext, runner: Runner, handle: string, taskId: string): Promise<void> {
   try {
-    await deadline(runner.stop(handle), 10_000, 'runner stop');
+    await deadline(runner.stop(handle), ctx.runnerTimeoutMs ?? 10_000, 'runner stop');
   } catch (error) {
     console.error(`coder server: runner stop ${taskId} failed`, error);
   }
@@ -34,7 +34,7 @@ async function fail(
   fence: TaskFence = {},
 ): Promise<boolean> {
   try {
-    await deadline(copyRunnerLogs(ctx, status), 10_000, 'runner logs');
+    await deadline(copyRunnerLogs(ctx, status), ctx.runnerTimeoutMs ?? 10_000, 'runner logs');
   } catch (error) {
     console.error(`coder server: runner logs ${status.task.id} failed`, error);
   }
@@ -76,13 +76,13 @@ async function inspect(ctx: ServerContext, status: TaskStatus, now: number): Pro
   }
   const runner = await taskRunner(ctx, status.task);
   if (status.startedAt !== undefined && now - status.startedAt >= ctx.config.taskTimeoutMs) {
-    if (runner) await stop(runner, status.handle, status.task.id);
+    if (runner) await stop(ctx, runner, status.handle, status.task.id);
     return fail(ctx, status, 'timeout');
   }
   if (!runner) return false;
   const seen = status.lastSeenAt ?? status.startedAt ?? status.updatedAt;
   if (now - seen < (ctx.config.taskStallMs ?? 5 * 60 * 1000)) return false;
-  const state = await deadline(runner.status(status.handle), 10_000, 'runner status');
+  const state = await deadline(runner.status(status.handle), ctx.runnerTimeoutMs ?? 10_000, 'runner status');
   if (state.state === 'exited')
     return fail(
       ctx,
@@ -171,9 +171,9 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
           ? (await taskCredential(taskCtx, status.task)).env
           : undefined,
       );
-      handle = await deadline(start, 30_000, 'runner start').catch(error => {
+      handle = await deadline(start, taskCtx.runnerTimeoutMs ?? 30_000, 'runner start').catch(error => {
         void start.then(
-          handle => stop(runner, handle, status.task.id),
+          handle => stop(taskCtx, runner, handle, status.task.id),
           () => {},
         );
         throw error;
@@ -187,11 +187,11 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
           active,
         ))
       )
-        await stop(runner, handle, status.task.id);
+        await stop(taskCtx, runner, handle, status.task.id);
       knownWork = claimed.more;
       if (!claimed.more) break;
     } catch (error) {
-      if (handle !== undefined) await stop(runner, handle, status.task.id);
+      if (handle !== undefined) await stop(taskCtx, runner, handle, status.task.id);
       const message = error instanceof Error ? error.message : String(error);
       if (status.attempts < (taskCtx.config.taskAttempts ?? 2)) {
         retries.push({ ...claimed, status: pending });

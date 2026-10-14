@@ -109,6 +109,9 @@ textarea {
 .muted {
   color: var(--muted);
 }
+.bad {
+  color: var(--bad);
+}
 .mono {
   font-family: var(--mono);
 }
@@ -445,21 +448,31 @@ h1 {
 .approval {
   font-size: 14px;
 }
+/* an alert bar in one of three tones: neutral, warning or error */
 .notice {
   display: flex;
   align-items: center;
   gap: 12px;
   flex-wrap: wrap;
   padding: 12px 16px;
-  border: 1px solid var(--warn);
-  background: var(--warnbg);
+  border: 1px solid var(--line);
 }
 .notice .ic {
+  color: var(--dim);
+}
+.notice.warning {
+  border-color: var(--warn);
+  background: var(--warnbg);
+}
+.notice.warning .ic {
   color: var(--warn);
 }
-.notice.soft {
-  border-color: var(--line);
-  background: none;
+.notice.error {
+  border-color: var(--bad);
+  background: var(--badbg);
+}
+.notice.error .ic {
+  color: var(--bad);
 }
 /* a one-line notice, as beside the composer or in a form */
 .notice.slim {
@@ -475,9 +488,6 @@ h1 {
 }
 .card > .notice.slim {
   margin: 12px 16px 0;
-}
-.notice.soft .ic {
-  color: var(--dim);
 }
 
 /* tables */

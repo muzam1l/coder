@@ -1,6 +1,6 @@
 import './tabs.css';
 import { CurrentLink } from '@/comps/nav/current-link';
-import type { To } from '@/comps/nav/to';
+import { linkOf, type To } from '@/comps/nav/to';
 
 type TabItem = To & { label: string; count?: number };
 
@@ -11,7 +11,7 @@ export function Tabs({ label, items }: { label: string; items: TabItem[] }) {
   return (
     <nav class="tabs" aria-label={label}>
       {items.map(({ label, count, ...to }) => (
-        <CurrentLink key={label} {...to} prefetch="intent">
+        <CurrentLink key={label} {...linkOf(to)} prefetch="intent">
           {label}
           {count !== undefined ? <span class="count">{compact.format(count)}</span> : null}
         </CurrentLink>

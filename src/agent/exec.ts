@@ -53,6 +53,24 @@ export function taskFromEvent(agent: Agent, flow: string, event: AgentEvent): Ag
   };
 }
 
+/** The thread's reply when a run ends: its answer, else what stopped a cancelled one, else the task's failure line as a problem. */
+export function threadReply(
+  task: AgentTask,
+  result: { finalMessage?: string | null; error?: { message?: string } | null } | null | undefined,
+  cancelled: boolean,
+): { text: string; problem: boolean } {
+  const answer = result?.finalMessage?.trim();
+  if (answer) return { text: answer, problem: false };
+  const error = result?.error?.message?.trim() ?? '';
+
+  return cancelled
+    ? { text: error, problem: false }
+    : { text: task.failureReply ?? error, problem: true };
+}
+
+/** An adapter that can mark a reply as a failure, as Linear's error activity does. */
+type ProblemAdapter = { postProblem?(threadId: string, text: string): Promise<unknown> };
+
 /** Post into the event's Chat SDK thread through its integration's adapter, on the task's own token. */
 export async function postReply(
   integration: Integration,
@@ -60,6 +78,7 @@ export async function postReply(
   text: string,
   token: string,
   author = integration.id,
+  problem = false,
 ): Promise<void> {
   if (!event.chat) throw new Error(`The ${event.integration} event has no thread to reply in`);
   const [{ Chat }, { LocalChatState }] = await Promise.all([
@@ -82,7 +101,9 @@ export async function postReply(
   });
   await chat.initialize();
   const thread = chat.thread(event.chat.thread.id);
-  if (adapter.reply && event.chat.message?.id) await thread.reply(event.chat.message.id, text);
+  const marks = (adapter as ProblemAdapter).postProblem;
+  if (problem && marks) await marks.call(adapter, event.chat.thread.id, text);
+  else if (adapter.reply && event.chat.message?.id) await thread.reply(event.chat.message.id, text);
   else await thread.post(text);
 }
 
@@ -210,10 +231,14 @@ export async function execAgent(options: {
         });
     await options.onTask?.(dispatched.taskId);
     const completed = await waitForAgentTask(cwd, dispatched.taskId, options.onApproval);
-    const reply = (completed.result?.finalMessage ?? completed.result?.error?.message ?? '').trim();
+    const { text: reply, problem } = threadReply(
+      task,
+      completed.result,
+      completed.status === 'cancelled',
+    );
     const note = (await fs.readFile(noteFile, 'utf8').catch(() => '')).trim();
     if (noteDir) await fs.rm(noteDir, { recursive: true, force: true });
-    const posted = options.post !== false && Boolean(integration);
+    const posted = options.post !== false && Boolean(integration) && Boolean(reply);
     if (posted)
       await postReply(
         integration!,
@@ -221,6 +246,7 @@ export async function execAgent(options: {
         reply,
         options.postToken ?? process.env.APP_TOKEN!,
         task.author,
+        problem,
       );
     return {
       ok: completed.status === 'completed',

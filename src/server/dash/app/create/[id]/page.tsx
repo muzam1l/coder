@@ -1,9 +1,9 @@
 import { dynamic } from '@wular/pnext/dynamic';
 
 import { AuthPanel } from '@/comps/frame/auth-panel';
-import { Outcome, readOutcome } from '@/app/dash/setup/outcome';
+import { Outcome, readOutcome } from '@/app/dash/[org]/setup/outcome';
 
-const CreateLink = dynamic(() => import('@/app/dash/setup/create-link').then(m => m.CreateLink));
+const CreateLink = dynamic(() => import('@/app/dash/[org]/setup/create-link').then(m => m.CreateLink));
 
 /** A signed link from `coder server app create`: its transaction alone authorizes it, with no workspace, and shows how it ended. */
 export default async function ServerAppPage({

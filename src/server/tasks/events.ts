@@ -36,13 +36,16 @@ import {
 import { generateRunId } from '../../flow/runs';
 import { steerTask } from '../../core/task/actions';
 import { connectionWarnings } from './logs';
+import { DEFAULT_ENGINE } from '../../core/defaults';
+import { dashPath, organizationSlug } from '../auth/account';
 
 const PENDING_TTL_MS = 60_000;
 
-const SETUP_MARKER = '<!-- coder:setup -->';
 export const DELIVERY_TTL_MS = 24 * 60 * 60 * 1000;
 const CONTEXT_LIMIT = 256 * 1024;
 const LINK_PROMPT_TTL_MS = 24 * 60 * 60 * 1000;
+/** A thread hears that no model is configured once in this long. */
+const SETUP_NOTICE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SETTING_KEYS = ['model', 'engine', 'effort'] as const;
 
 const SETTINGS_HELP = [
@@ -54,6 +57,8 @@ const SETTINGS_HELP = [
 /** Where dispatch answers an event: its thread in public, the actor in private, and the thread's recent messages. */
 export interface Replies {
   post(text: string): Promise<unknown>;
+  /** A reply that reports a failure; Linear marks the session failed, elsewhere it is a plain reply. */
+  problem(text: string): Promise<unknown>;
   /** Resolves without posting where the platform has no private messages. */
   whisper(text: string): Promise<unknown>;
   recent?(): Promise<TaskContext['messages']>;
@@ -235,9 +240,20 @@ async function frozenToolScopes(
   return scopes;
 }
 
-function setupText(ctx: ServerContext, engine: string): string {
-  return `${SETUP_MARKER}\nCoder is installed, but no engine is connected. [Connect ${engine}](${credentialFix(ctx, engine)}).`;
+async function setupText(ctx: ServerContext, engine: string): Promise<string> {
+  return `No model is configured yet. If you have access to it, [add one here](${await credentialFix(ctx, engine)}).`;
 }
+
+/** What the thread gets when a run ends without an answer. */
+async function failureText(ctx: ServerContext, engine: string): Promise<string> {
+  return `There was a problem with your connected model. If you have access to it, [check it here](${await credentialFix(ctx, engine)}).`;
+}
+
+/** Someone spoke to the agent: a mention, a direct message, or a message that @-mentions it. */
+const direct = (integration: Integration, event: AgentEvent) =>
+  integration.events[event.type]?.on === 'mention' ||
+  event.chat?.thread.isDM === true ||
+  event.chat?.message?.isMention === true;
 
 /** The session's task still running for this app, agent and requester in the event's thread. */
 async function runningIn(
@@ -508,7 +524,9 @@ async function claimed(
     ctx.auth && event.actor.id ? linkedMember(ctx, integration, event) : undefined,
   ]);
   // Someone asking the agent directly is a linked member of this workspace, or someone the platform lets write there.
-  const addressed = Boolean(ctx.auth && event.actor.id && integration.events[event.type]?.addressed);
+  const addressed = Boolean(
+    ctx.auth && event.actor.id && integration.events[event.type]?.addressed,
+  );
   const trusted =
     addressed && !member ? await writeCheck(ctx, integration, event, tokens) : undefined;
   if (addressed && !member && !trusted)
@@ -610,7 +628,7 @@ async function claimed(
   if (
     !credential &&
     route.runner !== 'http' &&
-    !(await machineSignedIn(ctx, settings.engine ?? 'claude'))
+    !(await machineSignedIn(ctx, settings.engine ?? DEFAULT_ENGINE))
   ) {
     if ((!ctx.local || event.repo) && steers) {
       const forwarded = await ctx.queue.deliver(
@@ -634,7 +652,28 @@ async function claimed(
       );
       if (forwarded.steered) return {};
     }
-    return effect(() => replies.post(setupText(ctx, settings.engine ?? 'claude')).then(() => {}));
+    if (!direct(integration, event)) return {};
+    return effect(async () => {
+      // Once per thread, unless every prompt waits for an answer; a retry of the delivery that holds the mark may post again.
+      const key = `setup:${app.id}:${event.chat?.thread.id ?? event.deliveryId}`;
+      const owner = event.deliveryId;
+      const first =
+        integration.answersEveryPrompt ||
+        (await ctx.store.create(
+          'delivery',
+          key,
+          { at: now(), owner },
+          { ttlMs: SETUP_NOTICE_TTL_MS },
+        ));
+      if (!first && (await ctx.store.get<{ owner?: string }>('delivery', key))?.owner !== owner)
+        return;
+      try {
+        await replies.problem(await setupText(ctx, settings.engine ?? DEFAULT_ENGINE));
+      } catch (error) {
+        if (!integration.answersEveryPrompt) await ctx.store.updateDelivery(key, owner, undefined);
+        throw error;
+      }
+    });
   }
 
   const reads = new Set(integration.tools.presets.observe);
@@ -652,7 +691,7 @@ async function claimed(
     trusted ?? (check ? await writeCheck(ctx, integration, event, tokens) : undefined);
   const outsider = outsiderEvent(ctx, member || trusted, canWrite);
   const fallbackText = fallback
-    ? `Acting as the app because the requester's account has no usable ${integration.name} token. ${canWrite === true && !outsider ? 'The platform write check passed.' : 'Only reads are allowed.'} [Connect your account](${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}/dash/settings/connections).`
+    ? `Acting as the app because the requester's account has no usable ${integration.name} token. ${canWrite === true && !outsider ? 'The platform write check passed.' : 'Only reads are allowed.'} [Connect your account](${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${dashPath(await organizationSlug(ctx), '/settings/connections')}).`
     : undefined;
   if (fallbackText)
     context.instructions = [
@@ -695,6 +734,7 @@ async function claimed(
     ...route,
     permissions: match.permissions ?? settings.permissions,
     event,
+    failureReply: await failureText(ctx, settings.engine ?? DEFAULT_ENGINE),
     author: integration.author?.(app.name) ?? app.name,
     definition: agent.definition,
     ...(credential ? { credential: credential.id } : {}),

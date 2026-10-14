@@ -9,12 +9,13 @@ import { consumeNonce, inspectNonce } from '../auth/nonce';
 import { type SetupOutcome } from '../../client/types';
 import { type ServerContext } from '../context';
 import { decodeParam, redirect } from '../routes/http';
+import { dashPath, sessionSlug } from '../auth/account';
 
 export const OPERATOR = '*';
 
 export type AppsContext = ServerContext & { fetch?: typeof fetch; operatorApp?: boolean };
 
-/** Ends a create, install or link flow in the dashboard: `back` when the flow knows it, else `/dash/setup`. */
+/** Ends a create, install or link flow in the dashboard: `back` when the flow knows it, else the setup page. */
 export function outcome(
   ctx: ServerContext,
   status: SetupOutcome['status'],
@@ -27,7 +28,9 @@ export function outcome(
   // Only a platform's short error code travels, never its free text.
   if (!/^[\w.-]{1,64}$/.test(query.get('error') ?? '')) query.delete('error');
 
-  return redirect(`${dashOrigin(ctx)}${(back ?? '/dash/setup').replace(/[?#].*$/, '')}?${query}`);
+  const page = back ?? dashPath(sessionSlug(ctx), '/setup');
+
+  return redirect(`${dashOrigin(ctx)}${page.replace(/[?#].*$/, '')}?${query}`);
 }
 
 /** Where this server's dashboard is open: a local server's tunnel serves only platform paths. */
@@ -35,8 +38,8 @@ export const dashOrigin = (ctx: ServerContext) =>
   ctx.local ? `http://localhost:${ctx.local.port}` : '';
 
 /** An agent's Platforms tab. */
-export const platformsPath = (agent: string) =>
-  `/dash/agents/${encodeURIComponent(agent)}/platforms`;
+export const platformsPath = (ctx: ServerContext, agent: string) =>
+  dashPath(sessionSlug(ctx), `/agents/${encodeURIComponent(agent)}/platforms`);
 
 export function readState(
   source: URLSearchParams,

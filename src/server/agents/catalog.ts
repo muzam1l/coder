@@ -19,7 +19,10 @@ import {
 } from './records';
 import { syncLocalAgents } from '../store/local';
 import { agentApps } from './connections';
+import { failedDeliveries } from '../tasks/failures';
 import { decodeCursor, json, notFound, page, pageLimit, paged } from '../routes/http';
+import { DEFAULT_ENGINE } from '../../core/defaults';
+import { machineSignedIn } from '../tasks/local';
 
 export async function sourceUrl(
   ctx: ServerContext,
@@ -75,7 +78,10 @@ export async function agentRecords(
     local ??
     (platform
       ? await agentsWithVersions(ctx.store)
-      : (await ctx.store.list('agent')).map(({ value: record }) => ({ record, version: undefined })))
+      : (await ctx.store.list('agent')).map(({ value: record }) => ({
+          record,
+          version: undefined,
+        })))
   )
     .filter(({ version }) => !platform || Boolean(version?.definition?.integrations?.[platform]))
     .map(({ record }) => record)
@@ -232,7 +238,8 @@ export async function readAgent(
   const withVersions = url.searchParams.get('versions') !== '0';
   const withContent = url.searchParams.get('content') !== '0';
   const withHandles = url.searchParams.get('handles') === '1';
-  const [{ record, version: current }, rows, apps] = await Promise.all([
+  const requester = ctx.session?.user.id;
+  const [{ record, version: current }, rows, apps, deliveries, credentials] = await Promise.all([
     !withContent && !local && ctx.store.listAgentSummaries && !builtinDefinitions()[slug]
       ? ctx.store
           .listAgentSummaries({ slug })
@@ -246,8 +253,23 @@ export async function readAgent(
           : ctx.store.list('agentversion', { prefix: `${slug}:` })
       : [],
     withHandles ? agentApps(ctx, slug) : [],
+    withHandles ? failedDeliveries(ctx.store, slug) : undefined,
+    withHandles
+      ? ctx.store.listCredentials
+        ? ctx.store.listCredentials({ owner: requester })
+        : ctx.store.list('credential')
+      : undefined,
   ]);
   if (!record) return json({ error: `No agent named "${slug}"` }, 404);
+
+  // No credential of the caller's or the workspace's runs its engine, and this machine is not signed in to it.
+  const engine = record.settings?.engine ?? current?.definition.engine ?? DEFAULT_ENGINE;
+  const needsModel =
+    credentials !== undefined &&
+    !credentials.some(
+      ({ value }) => value.engine === engine && (!value.owner || value.owner === requester),
+    ) &&
+    !(await machineSignedIn(ctx, engine));
 
   // The names its apps answer to, once each, where the agent wakes on a mention.
   const wired = current?.definition.integrations ?? {};
@@ -301,6 +323,21 @@ export async function readAgent(
     ...(source ? { sourceUrl: source } : {}),
     ...(withVersions ? { versions } : {}),
     ...(handles.length ? { handles } : {}),
+    ...(deliveries?.failed
+      ? {
+          deliveries: {
+            failed: deliveries.failed,
+            recent: deliveries.recent.map(failure => ({
+              at: failure.at,
+              platform: ctx.integrations[failure.integration]?.name ?? failure.integration,
+              ...(failure.type ? { type: failure.type } : {}),
+              error: failure.error,
+              ...(failure.url ? { url: failure.url } : {}),
+            })),
+          },
+        }
+      : {}),
+    ...(needsModel ? { needsModel: true } : {}),
   });
 }
 

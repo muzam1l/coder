@@ -3,7 +3,7 @@ import type { ComponentChildren } from 'preact';
 
 import { iLeft } from '@/comps/ui/icons';
 import { Link } from '@wular/pnext/link';
-import type { To } from '@/comps/nav/to';
+import { linkOf, type To } from '@/comps/nav/to';
 import { HEADS } from '@/comps/frame/heads';
 import { Icon } from '@/comps/ui/icon';
 import { Sentinel } from '@/comps/ui/sentinel';
@@ -17,7 +17,7 @@ function backTo(back: string | null | undefined): { to: To; label: string } | un
   if (!back?.startsWith('/')) return;
   const url = new URL(back, 'http://dash');
   if (url.origin !== 'http://dash' || !/^\/dash(\/|$)/.test(url.pathname)) return;
-  const [, , section, slug] = url.pathname.split('/');
+  const [, , , section, slug] = url.pathname.split('/');
   let label: string = HEADS[section as keyof typeof HEADS]?.title ?? 'Back';
   if (section === 'agents' && slug)
     try {
@@ -27,11 +27,16 @@ function backTo(back: string | null | undefined): { to: To; label: string } | un
 }
 
 /** Back to the logical parent, wherever the visitor came from; a `back` search param wins. */
-export function Back({ label, back, ...to }: To & { label: string; back?: string | null }) {
+export function Back({
+  label,
+  back,
+  named,
+  ...to
+}: To & { label: string; back?: string | null; named?: string }) {
   const param = backTo(back);
-  const name = param?.label ?? label;
+  const name = named ?? param?.label ?? label;
   return (
-    <Link class="back" aria-label={name} {...(param?.to ?? to)}>
+    <Link class="back" aria-label={name} {...linkOf(param?.to ?? to)}>
       <Icon d={iLeft} />
       <span>{name}</span>
     </Link>

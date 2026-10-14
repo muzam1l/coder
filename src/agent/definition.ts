@@ -96,7 +96,7 @@ export function parseAgentsUsage(json: unknown): Record<string, boolean | AgentU
 }
 
 /** Event names a definition wires for one integration. */
-function definitionEvents(wiring: AgentDefinitionIntegration | undefined): string[] {
+export function definitionEvents(wiring: AgentDefinitionIntegration | undefined): string[] {
   if (!wiring?.events) return [];
   return Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events);
 }

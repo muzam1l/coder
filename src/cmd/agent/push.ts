@@ -21,11 +21,18 @@ export const commandAgentPush = command({
     return agents.push(id, { ...options, cwd, organization: options.workspace });
   },
   print: results => {
-    for (const result of results)
+    for (const result of results) {
       process.stdout.write(
         result.unchanged
           ? `Pushed ${outStyle.bold(result.id)} unchanged (version ${result.version})\n`
           : `Pushed ${outStyle.bold(result.id)} as version ${result.version}\n`,
       );
+      for (const app of result.apps ?? [])
+        if (app.error) process.stderr.write(`${app.error}\n`);
+        else if (app.drift)
+          process.stderr.write(
+            `${app.name} needs changes on ${app.integration}; see Update on the agent's Platforms tab.\n`,
+          );
+    }
   },
 });

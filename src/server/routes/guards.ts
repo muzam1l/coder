@@ -1,5 +1,5 @@
 import { redirect, json, forbidden, toLogin, notFound, decodeParam } from './http';
-import { pagesFallback, toSignIn } from '../dash/serve';
+import { dashPage, pagesFallback, toSignIn } from '../dash/serve';
 import { registration } from '../settings/runners';
 import { authorizeTask } from '../tasks/callbacks';
 import { OPERATOR, type AppsContext } from '../agents/platform';
@@ -12,6 +12,7 @@ import { decryptSecret } from '../store/secrets';
 import { safeEqual } from '../../utils/crypto';
 import { scoped, type ServerContext } from '../context';
 import { MCP_CLIENT_PATH } from '../connections/oauth';
+import { LOCAL_SLUG } from '../auth/account';
 
 export async function signedIn(
   req: Request,
@@ -405,19 +406,6 @@ export async function accountAllowed(req: Request, ctx: ServerContext, params: P
   if (!session) return json({ error: 'Sign in first.', hint: 'coder auth login' }, 401);
   return { ...ctx, session };
 }
-export async function organizationAllowed(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-) {
-  if (!ctx.auth) return notFound();
-  if (req.method !== 'POST') return ctx;
-  const session = await ctx.auth.session(req.headers);
-  if (!session) return json({ error: 'Sign in first.' }, 401);
-  if (req.headers.has('cookie') && !sameOriginProof(req, ctx.config.publicUrl)) return forbidden();
-  return { ...ctx, session };
-}
 export function dashboardTokenAllowed(req: Request, ctx: ServerContext, params: Params, url: URL) {
   if (req.method !== 'POST') return ctx;
   if (ctx.auth || ctx.config.store !== 'memory' || !loopbackRequest(req)) return notFound();
@@ -433,7 +421,12 @@ export async function signInAllowed(req: Request, ctx: ServerContext, params: Pa
 }
 export async function dashboardAllowed(req: Request, ctx: ServerContext, params: Params, url: URL) {
   if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return ctx;
-  const session = await ctx.auth?.session(req.headers);
+  // `/dash/<org>/…` shows that organization; the page's own loads ask for it the same way, so the session resolves once.
+  const segment = url.pathname.split('/')[2] ?? '';
+  const headers = new Headers(req.headers);
+  headers.delete('x-coder-organization');
+  if (segment) headers.set('x-coder-organization', segment);
+  const session = await ctx.auth?.session(headers);
   if (session && !session.organizations.length)
     return ctx.auth!.handler(
       new Request(
@@ -441,8 +434,32 @@ export async function dashboardAllowed(req: Request, ctx: ServerContext, params:
       ),
     );
   if (ctx.auth && !session) return toSignIn(req, ctx, url, url.pathname + url.search);
-  if (ctx.auth && !(await signedIn(req, ctx))?.session) return toLogin(url);
-  return ctx;
+
+  const organizations = session?.organizations ?? [
+    { id: ctx.organizationId, slug: LOCAL_SLUG, name: '', role: 'owner' },
+  ];
+  const org = organizations.find(entry => encodeURIComponent(entry.slug) === segment);
+  // A path without one opens in the active organization, an id at its slug.
+  if (!org) {
+    const named = organizations.find(entry => encodeURIComponent(entry.id) === segment);
+    const active = (await ctx.auth?.session(req.headers))?.organizationId;
+    const to = named ?? organizations.find(entry => entry.id === active) ?? organizations[0]!;
+    const home = `/dash/${encodeURIComponent(to.slug)}`;
+    const page = url.pathname.slice(`/dash/${segment}`.length);
+    if (named) return redirect(`${home}${page}${url.search}`);
+    const target = `${home}${url.pathname.slice('/dash'.length)}`;
+    if (await dashPage(target, ctx.dashboardHosts)) return redirect(`${target}${url.search}`);
+
+    // Another workspace's page, or one that does not exist: the active one says so and offers another account.
+    return ctx.auth && req.method === 'GET' && (await dashPage(`${home}${page}`, ctx.dashboardHosts))
+      ? redirect(`${home}/agents?${new URLSearchParams({ link: url.pathname + url.search })}`)
+      : notFound();
+  }
+  if (!ctx.auth) return ctx;
+
+  // It becomes the session's active organization, so the page's own API calls act on it.
+  await ctx.auth.setOrganization(req.headers, org.slug);
+  return { ...scoped(ctx, org.id), session: session! };
 }
 export function credentialAllowed(req: Request, ctx: ServerContext, params: Params, url: URL) {
   return req.method === 'POST' && ctx.local ? json({ error: LOCAL_LOGINS }, 400) : ctx;

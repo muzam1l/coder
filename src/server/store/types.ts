@@ -7,7 +7,7 @@ import type {
   Connection,
   Installation,
 } from '../../agent/types';
-import type { AuditRow, TaskTurn } from '../../client/types';
+import type { AppSync, AuditRow, TaskTurn } from '../../client/types';
 import { type EngineLogin } from '../settings/logins';
 import type { StoredCredential } from '../settings/credentials';
 import type { StoredConfig } from '../settings/config';
@@ -16,7 +16,7 @@ import type { LocalCompletion, LocalStart } from '../tasks/local';
 import type { SessionBinding, PendingHandoff } from '../tasks/events';
 import { type PairingRecord } from '../settings/runners';
 import type { SnapshotState } from '../runners/vercel-sandbox';
-import type { RepoFile, RepoPush } from '../agents/repo';
+import type { RepoFile, RepoPush, SyncMarker } from '../agents/repo';
 import type { HeldToken, TokenDrop } from '../tasks/context';
 
 export interface StoreRecords {
@@ -68,7 +68,29 @@ export type DeliveryRecord =
         | PendingHandoff
         | { task?: AgentTask; inbox?: { taskId: string; id: string; entry: InboxEntry } };
     }
-  | { version: number; definition: unknown; pending: boolean; error?: string };
+  | SyncMarker
+  /** How Wular names the organization, under `workspace`, for links made without a session. */
+  | { slug: string; name: string; pending?: never }
+  | (FailedDelivery & { pending?: never });
+
+/** A platform event Coder failed to handle, kept a day under `failed:<agent>:<delivery>`. */
+export interface FailedDelivery {
+  at: number;
+  organization: string;
+  integration: string;
+  app: string;
+  agent: string;
+  /** The catalog event; absent when the platform's adapter failed before raising one. */
+  type?: string;
+  delivery?: string;
+  /** The error's first line. */
+  error: string;
+  /** The Chat SDK thread it came from. */
+  thread?: string;
+  repo?: string;
+  /** The thread or issue on the platform. */
+  url?: string;
+}
 
 export interface UsageQuery {
   by: 'agent' | 'installation' | 'engine' | 'day';
@@ -329,7 +351,13 @@ export type AgentDetail = AgentRecord & {
   versions: Array<Omit<AgentVersionRecord, 'systemPrompt' | 'files'>>;
 };
 
-export type PushResult = { id: string; version: number; unchanged: boolean };
+export type PushResult = {
+  id: string;
+  version: number;
+  unchanged: boolean;
+  /** The agent's apps publishing pushed, failed to push, or found needing changes on their platform. */
+  apps?: AppSync[];
+};
 
 export interface TaskOutcome {
   ok: boolean;

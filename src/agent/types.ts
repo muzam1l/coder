@@ -241,6 +241,8 @@ export interface AgentTask {
   >;
   /** Conversation context gathered by the receiver: recent thread messages and the stored note. */
   context?: TaskContext;
+  /** What the platform thread gets when the run ends without an answer. */
+  failureReply?: string;
 }
 
 export interface TaskContext {

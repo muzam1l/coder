@@ -412,6 +412,7 @@ export const github: Integration = {
   featured: true,
   description: 'Pull requests, issues, and comments on GitHub repositories',
   installLabel: 'Connect GitHub',
+  use: 'Mention @{handle} in an issue or pull request.',
   organizationApps: true,
   publicApps: true,
   hint: 'Cite repository file paths when discussing code. After making changes, link the pull request.',
@@ -495,6 +496,12 @@ export const github: Integration = {
     };
   },
   adapter: async ctx => (await import('./adapter')).githubAdapter(ctx),
+  link(event) {
+    const thread = /^github:([^:]+):(issue:)?(\d+)(?::|$)/.exec(event.chat?.thread.id ?? '');
+    return thread
+      ? `https://github.com/${thread[1]}/${thread[2] ? 'issues' : 'pull'}/${thread[3]}`
+      : undefined;
+  },
   ownEvents(req, raw, app, credentials) {
     const name = req.headers.get('x-github-event');
     if (!name || ADAPTER_EVENTS.includes(name)) return undefined;

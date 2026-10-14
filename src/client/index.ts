@@ -20,6 +20,7 @@ import type {
   TasksPage,
   VersionRow,
   IntegrationInfo,
+  AppCheck,
   CreateStart,
   AppRow,
   AuditRow,
@@ -289,6 +290,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         id: slug,
         version: result.version,
         unchanged: result.unchanged,
+        ...(result.apps?.length ? { apps: result.apps } : {}),
       })),
     settings: (slug: string, settings: AgentSettings): Promise<D['record']> =>
       this.request(`/admin/agents/${encodeURIComponent(slug)}/settings`, {
@@ -496,6 +498,12 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     /** Forgets a workspace app and its installs; the app itself stays on the platform. */
     remove: (id: string): Promise<{ ok: true }> =>
       this.request(`/admin/apps/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+    /** Pushes a workspace app to its platform as its agent needs it now, or records that its values were entered there by hand. */
+    update: (id: string): Promise<{ updated: true }> =>
+      this.post(`/admin/apps/${encodeURIComponent(id)}/update`, {}),
+    /** Checks an app Coder cannot push: what to change on its platform by hand. */
+    drift: (id: string): Promise<AppCheck> =>
+      this.request(`/admin/apps/${encodeURIComponent(id)}/drift`),
     /** The transaction a create form posts with to `/create/<integration>/callback`, or the platform's own form to post. */
     create: (integration: string, state: Record<string, string>): Promise<CreateStart> =>
       this.post(`/admin/apps/create/${encodeURIComponent(integration)}`, state),

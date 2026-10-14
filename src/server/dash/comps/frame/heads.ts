@@ -24,18 +24,19 @@ export function backFrom(
   from: string | null,
   list: To & { label: string },
 ): To & { label: string } {
-  const task = from?.match(/^\/dash\/tasks\/([^\/?]+)$/);
+  const task = from?.match(/^\/dash\/([^\/?]+)\/tasks\/([^\/?]+)$/);
   if (task)
     return {
-      href: '/dash/tasks/[id]',
-      params: { id: decodeURIComponent(task[1]!) },
+      href: '/dash/[org]/tasks/[id]',
+      params: { org: decodeURIComponent(task[1]!), id: decodeURIComponent(task[2]!) },
       label: 'Task',
     };
-  const section = from?.match(/^\/dash\/(usage|agents|tasks)(?:\?(.*))?$/);
+  const section = from?.match(/^\/dash\/([^\/?]+)\/(usage|agents|tasks)(?:\?(.*))?$/);
   if (!section) return list;
-  const search = new URLSearchParams(section[2] ?? '');
-  const label = HEADS[section[1] as keyof typeof HEADS].title;
-  if (section[1] === 'usage') return { href: '/dash/usage', params: {}, search, label };
-  if (section[1] === 'agents') return { href: '/dash/agents', params: {}, search, label };
-  return { href: '/dash/tasks', params: {}, search, label };
+  const params = { org: decodeURIComponent(section[1]!) };
+  const search = new URLSearchParams(section[3] ?? '');
+  const label = HEADS[section[2] as keyof typeof HEADS].title;
+  if (section[2] === 'usage') return { href: '/dash/[org]/usage', params, search, label };
+  if (section[2] === 'agents') return { href: '/dash/[org]/agents', params, search, label };
+  return { href: '/dash/[org]/tasks', params, search, label };
 }

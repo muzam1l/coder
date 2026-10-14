@@ -3,10 +3,10 @@ import { createHash } from 'node:crypto';
 
 import { Chat, Message, type SerializedMessage, type SerializedThread, type Thread } from 'chat';
 
-import { eventOptions } from '../agent/definition';
+import { definitionEvents, eventOptions } from '../agent/definition';
 import { type AgentApp, type AgentEvent, type TaskContext } from '../agent/types';
 import { agentWithVersion } from './agents/records';
-import type { ChatRoute, Integration, TokenBound } from '../integrations/types';
+import type { AdapterContext, ChatRoute, Integration, TokenBound } from '../integrations/types';
 import { forInstallation, type ServerContext } from './context';
 import { appChatState, LocalChatState } from './store/chat';
 import { decryptSecret } from './store/secrets';
@@ -14,7 +14,9 @@ import { updateMetadata } from './store';
 import { installationToken } from './tasks/context';
 import { DELIVERY_TTL_MS, dispatchEvent, type Replies } from './tasks/events';
 import { conversationKey } from './tasks/thread';
+import { dashPath, organizationSlug } from './auth/account';
 import { kick } from './tasks/kick';
+import { recordFailure } from './tasks/failures';
 
 const HISTORY_LIMIT = 10;
 /** Messages read at most to reach a long thread's end. */
@@ -123,16 +125,26 @@ async function hears(
   );
 }
 
-/** Dispatch after the platform has its answer: a failure is logged with its app and event, since nothing else will see it. */
+/** Dispatch after the platform has its answer: a failure is logged, kept for the agent's Usage page, and told to its thread. */
 export function later(
   ctx: ServerContext,
   app: AgentApp,
   event: AgentEvent,
   work: Promise<unknown>,
+  replies?: Replies,
 ): void {
-  const logged = work.catch(error =>
-    console.error(`coder server: dispatch failed for ${app.id} event ${event.deliveryId}`, error),
-  );
+  const logged = work.catch(error => {
+    console.error(`coder server: dispatch failed for ${app.id} event ${event.deliveryId}`, error);
+
+    return recordFailure(
+      ctx,
+      app,
+      error,
+      event.installationId,
+      event,
+      () => replies ?? eventReplies(ctx, app, event),
+    );
+  });
   if (ctx.waitUntil) ctx.waitUntil(logged);
 }
 
@@ -176,10 +188,16 @@ export function threadReplies(
   user?: Message['author'] | string,
   message?: Message | string,
 ): Replies {
+  // Where the platform answers one message, the reply goes to the one that raised the event, not the thread's newest.
+  const post = (text: string) =>
+    message && thread.adapter.reply ? thread.reply(message, text) : thread.post(text);
+  const marks = (
+    thread.adapter as { postProblem?(threadId: string, text: string): Promise<unknown> }
+  ).postProblem;
+
   return {
-    // Where the platform answers one message, the reply goes to the one that raised the event, not the thread's newest.
-    post: text =>
-      message && thread.adapter.reply ? thread.reply(message, text) : thread.post(text),
+    post,
+    problem: text => (marks ? marks.call(thread.adapter, thread.id, text) : post(text)),
     whisper: text =>
       user ? thread.postEphemeral(user, text, { fallbackToDM: false }) : Promise.resolve(null),
     // Oldest first through every page: an adapter's newest-first read may stop at its first page (Slack's at 200).
@@ -206,7 +224,8 @@ export async function eventReplies(
   app: AgentApp,
   event: AgentEvent,
 ): Promise<Replies> {
-  if (!event.chat) return { post: async () => {}, whisper: async () => {} };
+  if (!event.chat)
+    return { post: async () => {}, problem: async () => {}, whisper: async () => {} };
   const chat = await chatFor(ctx, app, {
     id: event.installationId,
     ...(event.repo ? { repo: event.repo } : {}),
@@ -268,12 +287,33 @@ function chatEvent(
   };
 }
 
-/** A Chat for one app, built per request so no adapter cache outlives it. */
-export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target): Promise<Chat> {
-  const integration = ctx.integrations[app.integration];
-  if (!integration) throw new Error(`Unknown integration "${app.integration}"`);
-  const credentials = decryptSecret(ctx.config, app.credentials);
-  const adapter = await integration.adapter({
+/** The workspace a target's installation is bound to, when it may read it: a workspace's own app reads only its own, and an install only its granted accounts. */
+async function workspace(ctx: ServerContext, app: AgentApp, target: Target) {
+  const { tenant, installation } = await boundInstallation(ctx, app, target.id);
+  const allowed =
+    (app.builtin || tenant?.organizationId === ctx.organizationId) &&
+    (!installation?.covers || installation.covers.includes(target.within ?? ''));
+
+  return installation && allowed ? tenant : undefined;
+}
+
+/** The dashboard of `ctx`'s organization, for links an integration posts. */
+export async function dashUrl(ctx: ServerContext): Promise<string | undefined> {
+  const base = ctx.config.publicUrl?.replace(/\/$/, '');
+
+  return base && `${base}${dashPath(await organizationSlug(ctx))}`;
+}
+
+/** What an app's integration gets for one request: tokens, and with a target, its workspace's agents and tasks; `dash` for its links. */
+export function adapterContext(
+  ctx: ServerContext,
+  integration: Integration,
+  app: AgentApp,
+  credentials: unknown,
+  target?: Target,
+  dash?: string,
+): AdapterContext {
+  return {
     fetch: ctx.fetch ?? fetch,
     appId: app.id.slice(integration.id.length + 1),
     name: app.name,
@@ -305,10 +345,64 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
 
             return Boolean(await tenant?.store.get('delivery', key));
           },
+          agent: async slug => {
+            const tenant = await workspace(ctx, app, target);
+            const { record, version } = tenant
+              ? await agentWithVersion(tenant.store, slug ?? app.agent)
+              : {};
+            if (!record || !version) return undefined;
+            const { definition } = version;
+            const description = record.description ?? definition.description;
+
+            return {
+              slug: record.id,
+              name: record.name,
+              ...(description ? { description } : {}),
+              listens: Object.entries(definition.integrations).flatMap(([id, wiring]) => {
+                const events = definitionEvents(wiring);
+                const known = ctx.integrations[id];
+                return known && events.length
+                  ? [{ integration: id, name: known.name, events }]
+                  : [];
+              }),
+            };
+          },
+          task: async id => {
+            const tenant = await workspace(ctx, app, target);
+            const row = tenant && (await tenant.store.get('task', id));
+            if (!row) return undefined;
+            const { task } = row;
+            const from = task.event?.integration;
+
+            return {
+              id: task.id,
+              title:
+                task.name?.trim() ||
+                task.prompt?.trim() ||
+                task.event?.text?.trim() ||
+                `${task.event?.type ?? 'task'} on ${task.agent}`,
+              agent: task.agent,
+              status: row.status,
+              from: (from && ctx.integrations[from]?.name) || task.source,
+              startedAt: row.startedAt ?? row.createdAt,
+            };
+          },
         }
       : {}),
     privateState: () => new LocalChatState(),
-  });
+    ...(ctx.config.publicUrl ? { publicUrl: ctx.config.publicUrl } : {}),
+    ...(dash ? { dashUrl: dash } : {}),
+  };
+}
+
+/** A Chat for one app, built per request so no adapter cache outlives it. */
+export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target): Promise<Chat> {
+  const integration = ctx.integrations[app.integration];
+  if (!integration) throw new Error(`Unknown integration "${app.integration}"`);
+  const credentials = decryptSecret(ctx.config, app.credentials);
+  const adapter = await integration.adapter(
+    adapterContext(ctx, integration, app, credentials, target),
+  );
   const state = appChatState(ctx.chatState ?? new LocalChatState(), app.id);
   const chat = new Chat({
     userName: app.name,
@@ -323,20 +417,9 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
   // Dispatch continues after the handler so no webhook waits on it.
   const receive = async (route: ChatRoute, thread: Thread, message: Message, delivery?: string) => {
     const event = chatEvent(integration, app, target, route, thread, message, delivery);
-    if (event)
-      later(
-        ctx,
-        app,
-        event,
-        deliver(
-          ctx,
-          integration,
-          app,
-          credentials,
-          event,
-          threadReplies(thread, message.author, message),
-        ),
-      );
+    if (!event) return;
+    const replies = threadReplies(thread, message.author, message);
+    later(ctx, app, event, deliver(ctx, integration, app, credentials, event, replies), replies);
   };
   chat.onNewMention((thread, message) => receive('mention', thread, message));
   chat.onNewMessage(/[\s\S]*/, (thread, message) => receive('message', thread, message));
@@ -385,12 +468,8 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
       text: command.text.trim(),
       ...(target.within ? { within: target.within } : {}),
     };
-    later(
-      ctx,
-      app,
-      event,
-      deliver(ctx, integration, app, credentials, event, { post: whisper, whisper }),
-    );
+    const replies = { post: whisper, problem: whisper, whisper };
+    later(ctx, app, event, deliver(ctx, integration, app, credentials, event, replies), replies);
   });
   return chat;
 }

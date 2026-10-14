@@ -3,7 +3,7 @@ import { createHmac } from 'node:crypto';
 import * as z from 'zod/mini';
 
 import { safeEqual } from '../../utils/crypto';
-import type { Integration } from '../types';
+import type { Integration, OwnEvent } from '../types';
 import { canWriteSlack } from './api';
 import { slackApp, type SlackAppCredentials } from './app';
 import { SLACK_READ_METHODS, SLACK_TOOLS, SLACK_WRITE_METHODS } from './tools';
@@ -37,6 +37,28 @@ const access = z.object({
   }),
 });
 
+/** The Home tab opened, and links shared under Coder's domain. */
+const home = z.object({
+  type: z.literal('app_home_opened'),
+  user: z.string(),
+  tab: z.literal('home'),
+});
+const shared = z.object({
+  type: z.literal('link_shared'),
+  channel: z.string(),
+  message_ts: z.string(),
+  unfurl_id: z.optional(z.string()),
+  source: z.optional(z.string()),
+  links: z.array(z.object({ url: z.string() })),
+});
+
+/** Action ids of buttons that only open a page, such as on the Home tab. */
+export const LINK_ACTION = 'link:';
+const clicks = z.object({
+  type: z.literal('block_actions'),
+  actions: z.array(z.object({ action_id: z.string() })),
+});
+
 /** The Events API envelope, a slash command's form, or an interaction's `payload` field, read unverified. */
 function fields(
   raw: string,
@@ -53,6 +75,31 @@ function fields(
       return {};
     }
   }
+}
+
+/** What Coder handles itself, before verification: the Home tab, shared links, interactions, and an org install's workspace grants. */
+function ownEvent(value: { type?: string; event?: unknown }, app: string): OwnEvent | undefined {
+  const opened = home.safeParse(value.event).data;
+  if (opened) return { work: async ctx => (await import('./views')).publishHome(ctx, opened.user) };
+  const links = shared.safeParse(value.event).data;
+  if (links) return { work: async ctx => (await import('./views')).unfurl(ctx, links) };
+  const clicked = clicks.safeParse(value).data?.actions;
+  if (clicked?.length && clicked.every(action => action.action_id.startsWith(LINK_ACTION)))
+    return { ack: true };
+  // Buttons and other interactions come as a form whose payload has its own type.
+  if (value.type && value.type !== 'event_callback' && value.type !== 'url_verification')
+    return { unhandled: `Slack interaction ${value.type}` };
+
+  const body = access.safeParse(value).data;
+  const enterprise = body?.enterprise_id ?? body?.authorizations?.[0]?.enterprise_id;
+  if (!body || !enterprise) return undefined;
+  const teams = body.event.team_ids;
+  return {
+    covers: {
+      installation: `${app}:${enterprise}`,
+      ...(body.event.type === 'team_access_granted' ? { add: teams } : { remove: teams }),
+    },
+  };
 }
 
 /** Slack's v0 request signature, within five minutes. */
@@ -79,6 +126,7 @@ export const slack: Integration = {
   featured: true,
   description: 'Mentions, messages, and reactions in a Slack workspace',
   installLabel: 'Add to Slack',
+  use: 'Message {handle} or mention it in a channel.',
   covered: 'Slack workspace',
   sample: 'slack:C0000000000:1700000000.000100',
   hint: 'Do not use Markdown headings. Use short paragraphs and code spans, and reply only in the thread where you were addressed.',
@@ -127,20 +175,19 @@ export const slack: Integration = {
         }
       : undefined;
   },
+  welcome: async (ctx, installer, links) =>
+    (await import('./views')).welcome(ctx, installer, links),
+  link(event) {
+    const thread = /^slack:([^:]+):(\d+)\.(\d+)$/.exec(event.chat?.thread.id ?? '');
+    return thread ? `https://slack.com/archives/${thread[1]}/p${thread[2]}${thread[3]}` : undefined;
+  },
   ownEvents(req, raw, app, credentials) {
-    const body = access.safeParse(fields(raw)).data;
-    const enterprise = body?.enterprise_id ?? body?.authorizations?.[0]?.enterprise_id;
-    if (!body || !enterprise) return undefined;
-    if (!verified(req, raw, (credentials as SlackAppCredentials | undefined)?.signingSecret))
-      return { invalid: true };
+    const own = ownEvent(fields(raw), app.id);
+    if (!own) return undefined;
 
-    const teams = body.event.team_ids;
-    return {
-      covers: {
-        installation: `${app.id}:${enterprise}`,
-        ...(body.event.type === 'team_access_granted' ? { add: teams } : { remove: teams }),
-      },
-    };
+    return verified(req, raw, (credentials as SlackAppCredentials | undefined)?.signingSecret)
+      ? own
+      : { invalid: true };
   },
   adapter: async ctx => (await import('./adapter')).slackAdapter(ctx),
   reactionId: reaction => (reaction.raw as { event_ts?: string }).event_ts,

@@ -141,6 +141,17 @@ export function knownRoute(pathname: string, manifest: Manifest): boolean {
   );
 }
 
+/** Whether `pathname` is a page of the dashboard build being served. */
+export async function dashPage(pathname: string, cache = new DashboardHosts()): Promise<boolean> {
+  const host = await dashHost(import.meta.url, cache).catch(() => {
+    cache.hosts.delete(import.meta.url);
+  });
+  const normalized =
+    pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
+
+  return Boolean(host?.manifest.routes.some(route => match(route.route, normalized)));
+}
+
 const INLINE_SCRIPT = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi;
 
 const sha256 = (script: string) =>
@@ -390,6 +401,10 @@ export async function dashboard(
 export function dashRequest(req: Request, ctx: ServerContext): Request {
   const headers = new Headers(req.headers);
   headers.set('x-coder-mode', serverMode(ctx));
+  // The page's organization, for its reads.
+  const org = ctx.session?.organizations.find(entry => entry.id === ctx.organizationId);
+  if (org) headers.set('x-coder-organization', org.slug);
+  else headers.delete('x-coder-organization');
   return new Request(req, { headers });
 }
 

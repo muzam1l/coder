@@ -45,7 +45,11 @@ export const redirect = (location: string, status = 302) =>
 
 export const forbidden = () => new Response('Forbidden', { status: 403 });
 
-export const notFound = () => new Response('Not found', { status: 404 });
+export const notFound = () =>
+  new Response('Not found', {
+    status: 404,
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+  });
 
 export const notAllowed = () => new Response('Method not allowed', { status: 405 });
 

@@ -5,7 +5,8 @@ import { issueNonce } from '../auth/nonce';
 import { type ServerContext } from '../context';
 import { sharedApps } from './apps';
 import { nativeApp } from '../connections/records';
-import { getAgent } from './records';
+import { getAgent, getVersion } from './records';
+import { checkApp, inSync, syncApps, syncKey, syncManifest, type SyncMarker } from './repo';
 import { json, pageLimit } from '../routes/http';
 import { LOOPBACK } from '../routes/guards';
 import { updateMetadata } from '../store';
@@ -75,6 +76,39 @@ function appRow(ctx: ServerContext, app: AgentApp) {
   };
 }
 
+/** Apps changed since their last update, from their sync markers alone; no platform call. */
+async function changedApps(ctx: ServerContext, apps: AgentApp[]): Promise<Set<string>> {
+  const publicUrl = ctx.config.publicUrl;
+  const own = apps.filter(
+    app => !app.builtin && !app.shared && ctx.integrations[app.integration]?.app,
+  );
+  if (!publicUrl || !own.length) return new Set();
+
+  const [markers, versions] = await Promise.all([
+    ctx.store.list('delivery', { ids: own.map(app => syncKey(app.id)) }),
+    Promise.all([...new Set(own.map(app => app.agent))].map(agent => getVersion(ctx.store, agent))),
+  ]);
+  const marker = (id: string) =>
+    markers.find(entry => entry.id === syncKey(id))?.value as SyncMarker | undefined;
+
+  return new Set(
+    own
+      .filter(app => {
+        const platform = ctx.integrations[app.integration]!.app;
+        const version = versions.find(entry => entry?.agent === app.agent);
+        if (!version?.definition.integrations[app.integration]) return false;
+        if (!platform.update) return marker(app.id)?.changed === true;
+
+        return !inSync(
+          marker(app.id),
+          version.version,
+          syncManifest(platform, app, publicUrl, version.definition),
+        );
+      })
+      .map(app => app.id),
+  );
+}
+
 export async function listApps(
   req: Request,
   ctx: ServerContext,
@@ -82,8 +116,17 @@ export async function listApps(
   url: URL,
 ): Promise<Response> {
   const rows = await agentApps(ctx, url.searchParams.get('agent'));
+  const changed = await changedApps(
+    ctx,
+    rows.map(({ value }) => value),
+  );
 
-  return json(rows.map(({ id, value }) => ({ id, value: appRow(ctx, value) })));
+  return json(
+    rows.map(({ id, value }) => ({
+      id,
+      value: { ...appRow(ctx, value), ...(changed.has(id) ? { changed: true } : {}) },
+    })),
+  );
 }
 
 /** `DELETE /admin/apps/<id>`: forgets a workspace app; its installations end as a platform uninstall ends them. */
@@ -117,6 +160,78 @@ export async function removeApp(
   await dropTokens(ctx.store, app.id);
 
   return json({ ok: true });
+}
+
+/** A workspace app with its agent's current version, or why Coder cannot bring it up to date. */
+async function outdatedApp(ctx: ServerContext, id: string) {
+  const app = await ctx.store.get('app', id);
+  if (!app) return json({ error: 'Unknown app' }, 404);
+  if (app.builtin || app.shared)
+    return json({ error: 'Only whoever runs this server can update its shared apps.' }, 403);
+
+  if (!ctx.config.publicUrl) return json({ error: 'PUBLIC_URL is not set on this server' }, 400);
+  const integration = ctx.integrations[app.integration];
+  if (!integration || !(integration.app.update || integration.app.drift || integration.app.values))
+    return json(
+      { error: `Coder cannot update ${integration?.name ?? app.integration} apps.` },
+      400,
+    );
+  const version = await getVersion(ctx.store, app.agent);
+  if (!version?.definition.integrations[app.integration])
+    return json({ error: `The agent no longer listens on ${integration.name}.` }, 400);
+
+  return { app, version, integration };
+}
+
+/** `GET /admin/apps/<id>/drift`: what to change on the platform by hand, checked now. */
+export async function readDrift(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+): Promise<Response> {
+  const found = await outdatedApp(ctx, params.id!);
+  if (found instanceof Response) return found;
+  if (found.integration.app.update)
+    return json({ error: `Coder updates ${found.integration.name} apps itself.` }, 400);
+
+  try {
+    return json(await checkApp(ctx, ctx.store, found.app, found.version));
+  } catch (error) {
+    console.error(
+      `coder server: reading ${found.app.id} on ${found.integration.name} failed`,
+      error,
+    );
+    return json({ error: error instanceof Error ? error.message : String(error) }, 502);
+  }
+}
+
+/** `POST /admin/apps/<id>/update`: pushes the app to its platform now, or records that its values were entered there by hand. */
+export async function updateApp(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+): Promise<Response> {
+  const found = await outdatedApp(ctx, params.id!);
+  if (found instanceof Response) return found;
+  const { app, version, integration } = found;
+
+  if (integration.app.values) {
+    const { lines } = integration.app.values(app, {
+      publicUrl: ctx.config.publicUrl!,
+      definition: version.definition,
+    });
+    await ctx.store.put('delivery', syncKey(app.id), {
+      version: version.version,
+      manifest: lines,
+      changed: false,
+    });
+    return json({ updated: true });
+  }
+  if (!integration.app.update)
+    return json({ error: `Change the app on ${integration.name}; Coder cannot.` }, 400);
+
+  const [synced] = await syncApps(ctx, [version], app.id);
+  return synced?.error ? json({ error: synced.error }, 502) : json({ updated: true });
 }
 
 export async function listInstallations(
@@ -165,6 +280,7 @@ export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<
         brand: integration.brand,
         description: integration.description,
         installLabel: integration.installLabel ?? `Connect ${integration.id}`,
+        ...(integration.use ? { use: integration.use } : {}),
         ...(integration.covered ? { covered: integration.covered } : {}),
         ...(integration.featured ? { featured: true } : {}),
         builtinApp: integration.app.builtin,
@@ -195,6 +311,13 @@ export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<
             }
           : {}),
         ...(unreachable ? { unreachable: true } : {}),
+        ...(integration.app.update
+          ? { appUpdate: 'push' }
+          : integration.app.drift
+            ? { appUpdate: 'drift' }
+            : integration.app.values
+              ? { appUpdate: 'confirm' }
+              : {}),
       })),
     ),
   );

@@ -16,6 +16,7 @@ import {
   secretKeyVersion,
   type EncryptedCredential,
 } from '../store/secrets';
+import { dashPath, organizationSlug } from '../auth/account';
 
 /** Engine credentials stored for a workspace or a member; every row change goes through `store.withCredential`. */
 
@@ -497,8 +498,10 @@ export async function reseal(
 }
 
 /** The one-click fix for a missing credential: the Credentials page, open at that engine. */
-export function credentialFix(ctx: ServerContext, engine: string): string {
-  return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}/dash/settings/credentials?engine=${encodeURIComponent(engine)}`;
+export async function credentialFix(ctx: ServerContext, engine: string): Promise<string> {
+  const page = dashPath(await organizationSlug(ctx), '/settings/credentials');
+
+  return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${page}?engine=${encodeURIComponent(engine)}`;
 }
 
 const credentialSchema = z.object({

@@ -63,22 +63,22 @@
   white-space: nowrap;
   color: var(--muted);
 }
-.toast.err {
-  border-color: color-mix(in srgb, var(--bad) 40%, var(--line2));
-  background: linear-gradient(var(--badbg), var(--badbg)), var(--tile);
+/* success, warning or error: a bar on top in its tone, as on dialogs */
+.toast:is(.success, .warning, .error) {
   box-shadow:
-    inset 3px 0 0 var(--bad),
+    inset 0 3px 0 var(--tone),
     0 12px 32px rgba(0, 0, 0, 0.18);
 }
-.toast.err:hover {
-  background:
-    linear-gradient(var(--wash), var(--wash)), linear-gradient(var(--badbg), var(--badbg)),
-    var(--tile);
+.toast.success {
+  --tone: var(--ok);
 }
-.toast.err .toast-head .cover {
-  color: var(--bad);
+.toast.warning {
+  --tone: var(--warn);
 }
-.toast.err .toast-line {
+.toast.error {
+  --tone: var(--bad);
+}
+.toast.error .toast-line {
   white-space: normal;
 }
 @keyframes toast-in {

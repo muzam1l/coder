@@ -1,6 +1,11 @@
 import type { SerializedMessage, SerializedThread } from 'chat';
 import type { TaskLogEntry } from '../core/task/log-view';
-import type { CreateStep, IntegrationErrorCode, PlatformPost } from '../integrations/types';
+import type {
+  AppDrift,
+  CreateStep,
+  IntegrationErrorCode,
+  PlatformPost,
+} from '../integrations/types';
 
 export type TaskState = 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled';
 
@@ -102,6 +107,20 @@ export interface AgentRow {
   /** The names its platform apps answer to where it wakes on a mention. */
   /** The names it answers to, one per app that wakes on mentions, with the platform's display name. */
   handles?: Array<{ name: string; integration: string; platform: string }>;
+  /** Platform events it failed to handle in the last day, with the newest; absent when none. */
+  deliveries?: { failed: number; recent: FailedDeliveryRow[] };
+  /** Nothing can run its engine for the caller: no credential of theirs or the workspace's, no sign-in on this machine. */
+  needsModel?: true;
+}
+
+/** A platform event Coder failed to handle. */
+export interface FailedDeliveryRow {
+  at: number;
+  platform: string;
+  type?: string;
+  error: string;
+  /** The thread or issue it came from. */
+  url?: string;
 }
 
 /** What an agent can listen to and do on an integration. */
@@ -111,6 +130,8 @@ export interface IntegrationInfo {
   brand: { color: string; icon: string; dark?: string; svg?: string };
   description: string;
   installLabel: string;
+  /** How people reach an installed agent there, `{handle}` standing for its handle. */
+  use?: string;
   /** What one account an installation covers is called. */
   covered?: string;
   /** Listed first among an agent's handles. */
@@ -131,6 +152,26 @@ export interface IntegrationInfo {
   create?: CreateStep;
   /** PUBLIC_URL is loopback, so platforms cannot reach this server and `create` shows a placeholder address. */
   unreachable?: true;
+  /** How apps are brought up to date: Coder pushes them, reads what to change on the platform, or lists values to confirm by hand. */
+  appUpdate?: 'push' | 'drift' | 'confirm';
+}
+
+/** An app Coder cannot push, checked against what its agent needs now: every line, the changed ones marked. */
+export type AppCheck = Omit<AppDrift, 'lines'> & {
+  changed: boolean;
+  lines: Array<AppDrift['lines'][number] & { changed?: true }>;
+  /** The lines are Coder's values, confirmed by hand since the platform cannot be read. */
+  confirm?: true;
+};
+
+/** What publishing did to one of the agent's apps: pushed it, failed to, or found it needs changes on the platform. */
+export interface AppSync {
+  id: string;
+  integration: string;
+  name: string;
+  updated?: true;
+  error?: string;
+  drift?: true;
 }
 
 /** A started create: its transaction, where the browser goes when creation happens on the platform, and an operator link's form. */
@@ -268,6 +309,8 @@ export interface AppRow {
   createdAt: number;
   /** The app's settings page on the platform. */
   settingsUrl?: string;
+  /** The last sync or check found the app needing an update on its platform. */
+  changed?: true;
 }
 
 export interface InstallationRow {
@@ -686,7 +729,13 @@ export interface ClientTypes {
     tokens?: unknown;
   };
 }
-export type PushResult = { id: string; version: number; unchanged: boolean };
+export type PushResult = {
+  id: string;
+  version: number;
+  unchanged: boolean;
+  /** The agent's apps publishing pushed, failed to push, or found needing changes on their platform. */
+  apps?: AppSync[];
+};
 
 export interface TaskTurn {
   prompt: string;

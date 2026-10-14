@@ -47,13 +47,20 @@ export function Menu({
         class={wide ? 'pop wide' : 'pop'}
         popover="auto"
         onBeforeToggle={event => {
-          // A tall menu scrolls within the room on its side of the button instead of leaving the viewport.
+          // Opens on its side of the button when it fits there, else on the roomier side, scrolling only within that room.
           if ((event as ToggleEvent).newState !== 'open') return;
           const pop = event.currentTarget as HTMLElement;
           const box = pop.parentElement?.querySelector('button')?.getBoundingClientRect();
           if (!box) return;
-          const room = align === 'up' ? box.top - 20 : window.innerHeight - box.bottom - 20;
-          pop.style.maxHeight = `${Math.max(120, Math.round(room))}px`;
+          pop.style.cssText = 'display: block; visibility: hidden; max-height: none';
+          const height = pop.offsetHeight;
+          pop.style.cssText = '';
+          const below = window.innerHeight - box.bottom - 20;
+          const above = box.top - 20;
+          const [own, other] = align === 'up' ? [above, below] : [below, above];
+          const flip = height > own && other > own;
+          pop.classList.toggle('flip', flip);
+          pop.style.maxHeight = `${Math.max(120, Math.round(flip ? other : own))}px`;
         }}
         onClick={event => {
           if ((event.target as Element).closest('a, button:not([data-keep])'))

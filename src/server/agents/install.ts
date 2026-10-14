@@ -7,6 +7,10 @@ import { type Integration, IntegrationError } from '../../integrations/types';
 import { consumeNonce, inspectNonce, issueNonce, nonceOrganization } from '../auth/nonce';
 import { memberOf } from '../auth/connect';
 import { encodeJson } from '../../utils/base64url';
+import { agentWithVersion } from './records';
+import { credentialFix, resolveCredential } from '../settings/credentials';
+import { machineSignedIn } from '../tasks/local';
+import { DEFAULT_ENGINE } from '../../core/defaults';
 import { decodeParam, redirect } from '../routes/http';
 import {
   type AppsContext,
@@ -159,16 +163,6 @@ export async function completeInstall(
       ? memberOf(entry, entry.session, nonceOrganization(entry, linkState.tx))
       : undefined;
   const ctx = issued ? { ...entry, ...issued } : entry;
-  // An install bound in another of the person's workspaces opens the dashboard there.
-  const landed = async (response: Response) => {
-    const slug = entry.session?.organizations.find(
-      org => org.id === issued?.organizationId && org.id !== entry.session!.organizationId,
-    )?.slug;
-    const switched = slug ? await ctx.auth!.setOrganization(req.headers, slug) : undefined;
-    for (const cookie of switched?.cookies ?? []) response.headers.append('set-cookie', cookie);
-
-    return response;
-  };
   const stated = backPath(linkState?.back);
   const integration = ctx.integrations[id!];
   if (!integration) return outcome(ctx, 'unknown-integration', { platform: id }, stated);
@@ -210,9 +204,7 @@ export async function completeInstall(
       ? outcome(ctx, 'connected', { platform: id }, stated)
       : outcome(ctx, 'unknown-app', { platform: id }, stated);
 
-  return landed(
-    await bindInstall(req, ctx, integration, target, linked, stated, linkState?.installation),
-  );
+  return bindInstall(req, ctx, integration, target, linked, stated, linkState?.installation);
 }
 
 /** Finish the install with the platform and bind the installation to `target` in this workspace. */
@@ -232,7 +224,7 @@ async function bindInstall(
   if (target.builtin && integration.app.builtin !== 'shared')
     return outcome(ctx, 'unknown-app', { platform: id }, stated);
 
-  const back = stated ?? (target.builtin ? undefined : platformsPath(target.agent));
+  const back = stated ?? (target.builtin ? undefined : platformsPath(ctx, target.agent));
 
   const credentials = decryptSecret(ctx.config, target.credentials);
   const result = await integration.app
@@ -313,6 +305,51 @@ async function bindInstall(
       : outcome(ctx, 'installation-taken', { platform: id }, back);
   }
   if (sibling) await ctx.store.put('installation', sibling.id, link(sibling, id!, installationId));
+  if (installation.installer && integration.welcome)
+    await greet(
+      ctx,
+      integration,
+      target,
+      credentials,
+      result.platformInstallId,
+      installation.installer,
+    );
 
   return outcome(ctx, 'connected', { platform: id, account: installation.account.login }, back);
+}
+
+/** The integration's greeting to its installer, with the model step while nothing can run the agent. */
+async function greet(
+  ctx: AppsContext,
+  integration: Integration,
+  app: AgentApp,
+  credentials: unknown,
+  installationId: string,
+  installer: string,
+): Promise<void> {
+  try {
+    const [{ adapterContext, dashUrl }, { record, version }] = await Promise.all([
+      import('../chat'),
+      agentWithVersion(ctx.store, app.agent),
+    ]);
+    const engine = record?.settings?.engine ?? version?.definition.engine ?? DEFAULT_ENGINE;
+    const ready =
+      Boolean(await resolveCredential(ctx.store, engine, ctx.session?.user.id)) ||
+      (await machineSignedIn(ctx, engine));
+    const adapter = adapterContext(
+      ctx,
+      integration,
+      app,
+      credentials,
+      { id: installationId },
+      await dashUrl(ctx),
+    );
+    const open = `${ctx.config.publicUrl!.replace(/\/$/, '')}${platformsPath(ctx, app.agent)}`;
+    await integration.welcome!(adapter, installer, {
+      open,
+      ...(ready ? {} : { setup: await credentialFix(ctx, engine) }),
+    });
+  } catch (error) {
+    console.error(`coder server: could not greet the installer of ${app.id}`, error);
+  }
 }

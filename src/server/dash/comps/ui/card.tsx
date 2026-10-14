@@ -5,12 +5,14 @@ import { Icon } from './icon';
 import { iPlus } from './icons';
 
 export function Card({
+  id,
   title,
   count,
   actions,
   tone,
   children,
 }: {
+  id?: string;
   title?: ComponentChildren;
   count?: number | string;
   actions?: ComponentChildren;
@@ -18,7 +20,7 @@ export function Card({
   children: ComponentChildren;
 }) {
   return (
-    <section class={tone ? `card frame ${tone}` : 'card frame'}>
+    <section id={id} class={tone ? `card frame ${tone}` : 'card frame'}>
       {title ? (
         <div class="bar">
           <h2>

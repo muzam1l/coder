@@ -3,6 +3,8 @@ import {
   IntegrationError,
   PRESETS,
   type AgentApp,
+  type AgentDefinition,
+  type AppDrift,
   type IntegrationApp,
   type IntegrationUserAuth,
   type PlatformUser,
@@ -25,6 +27,7 @@ export interface GithubAppCredentials {
 
 export interface GithubManifest {
   name: string;
+  description?: string;
   url: string;
   hook_attributes: { url: string; active: boolean };
   redirect_url: string;
@@ -51,11 +54,13 @@ export function buildGithubManifest(
   publicUrl: string,
   {
     name,
+    description,
     permissions,
     events,
     isPublic = false,
   }: {
     name: string;
+    description?: string;
     permissions: Record<string, string>;
     events: string[];
     isPublic?: boolean;
@@ -64,6 +69,7 @@ export function buildGithubManifest(
   const base = publicUrl.replace(/\/$/, '');
   return {
     name,
+    ...(description ? { description } : {}),
     url: base,
     hook_attributes: { url: `${base}/hooks/github`, active: true },
     redirect_url: `${base}/create/github/callback`,
@@ -216,17 +222,24 @@ export async function userInstallation(
   return undefined;
 }
 
+/** The app's own JWT, for `/app` endpoints. */
+async function appToken(credentials: GithubAppCredentials): Promise<string> {
+  const { createAppAuth } = await import('@octokit/auth-app');
+  const { token } = await createAppAuth({
+    appId: credentials.appId,
+    privateKey: credentials.privateKey,
+  })({ type: 'app' });
+
+  return token;
+}
+
 /** Whether this app owns the installation, from `GET /app/installations/{id}` as the app itself; GitHub answers 404 for another app's. */
 export async function appInstallation(
   credentials: GithubAppCredentials,
   installationId: string,
   request: Fetcher = fetch,
 ): Promise<boolean> {
-  const { createAppAuth } = await import('@octokit/auth-app');
-  const { token } = await createAppAuth({
-    appId: credentials.appId,
-    privateKey: credentials.privateKey,
-  })({ type: 'app' });
+  const token = await appToken(credentials);
   const response = await request(`${API}/app/installations/${encodeURIComponent(installationId)}`, {
     headers: githubHeaders(token),
   });
@@ -320,18 +333,97 @@ export function githubAppEvents(events: string[]): string[] {
   return [...new Set([...names, 'push'])];
 }
 
+/** The manifest a definition asks for, named `name` unless the definition names itself. */
+function agentManifest(
+  publicUrl: string,
+  definition: AgentDefinition,
+  name: string,
+  isPublic?: boolean,
+): GithubManifest {
+  const wiring = definition.integrations.github ?? {};
+  const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
+
+  return buildGithubManifest(publicUrl, {
+    name: definition.name ?? name,
+    description: definition.description,
+    permissions: githubAppPermissions(wiring.tools),
+    events: githubAppEvents(events),
+    isPublic,
+  });
+}
+
+const settingsPage = (slug: string, owner?: { login: string; type?: string }) =>
+  owner?.type === 'Organization'
+    ? `https://github.com/organizations/${encodeURIComponent(owner.login)}/settings/apps/${slug}`
+    : `https://github.com/settings/apps/${slug}`;
+
+const LEVELS: Record<string, number> = { read: 1, write: 2, admin: 3 };
+const LEVEL_NAMES: Record<string, string> = {
+  read: 'Read-only',
+  write: 'Read and write',
+  admin: 'Admin',
+};
+/** GitHub's label for an event or permission key, as its settings page shows it. */
+const uiLabel = (key: string) => key[0]!.toUpperCase() + key.slice(1).replaceAll('_', ' ');
+
+/** The app as GitHub has it, from `GET /app`, against the manifest Coder would create it with now. */
+async function githubDrift(
+  app: AgentApp,
+  credentials: GithubAppCredentials,
+  {
+    publicUrl,
+    definition,
+    fetch: request,
+  }: { publicUrl: string; definition: AgentDefinition; fetch: Fetcher },
+): Promise<AppDrift> {
+  const response = await request(`${API}/app`, {
+    headers: githubHeaders(await appToken(credentials)),
+  });
+  if (!response.ok) throw new Error(`GitHub app lookup failed: ${response.status}`);
+  const live = (await response.json()) as {
+    slug?: string;
+    name?: string;
+    description?: string | null;
+    owner?: { login?: string; type?: string };
+    events?: string[];
+    permissions?: Record<string, string>;
+  };
+  const wanted = agentManifest(publicUrl, definition, app.agent);
+  const events = new Set(live.events ?? []);
+  const permissions = live.permissions ?? {};
+  const lines: AppDrift['lines'] = [];
+
+  if (wanted.name !== live.name)
+    lines.push({ text: `Rename the app to **${wanted.name}**`, copy: wanted.name });
+  const description = wanted.description ?? '';
+  if (description !== (live.description ?? ''))
+    lines.push(
+      description
+        ? { text: 'Set the **Description**', copy: description }
+        : { text: 'Clear the **Description**' },
+    );
+  for (const [key, level] of Object.entries(wanted.default_permissions))
+    if ((LEVELS[permissions[key] ?? ''] ?? 0) < (LEVELS[level] ?? 0))
+      lines.push({ text: `Set **${uiLabel(key)}** to **${LEVEL_NAMES[level] ?? level}**` });
+  for (const event of wanted.default_events)
+    if (!events.has(event)) lines.push({ text: `Check the **${uiLabel(event)}** event` });
+  for (const event of events)
+    if (!wanted.default_events.includes(event))
+      lines.push({ text: `Uncheck the **${uiLabel(event)}** event` });
+
+  const owner = live.owner?.login
+    ? { login: live.owner.login, type: live.owner.type }
+    : credentials.owner;
+  const settings = settingsPage(live.slug ?? credentials.slug, owner);
+
+  return { url: `${settings}/permissions`, label: 'Open app settings', lines };
+}
+
 export const githubApp: IntegrationApp = {
   builtin: 'shared',
   postOrigins: ['https://github.com'],
   createPost({ publicUrl, state, definition, encodedState }) {
-    const wiring = definition.integrations.github ?? {};
-    const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
-    const manifest = buildGithubManifest(publicUrl, {
-      name: definition.name ?? state.agent,
-      permissions: githubAppPermissions(wiring.tools),
-      events: githubAppEvents(events),
-      isPublic: state.public === true,
-    });
+    const manifest = agentManifest(publicUrl, definition, state.agent, state.public === true);
     return {
       url: githubNewAppUrl(state.owner, encodedState),
       fields: { manifest: JSON.stringify(manifest) },
@@ -355,11 +447,9 @@ export const githubApp: IntegrationApp = {
   accountUrl: ({ login }) => `https://github.com/${encodeURIComponent(login)}`,
   settingsUrl(_app, credentials) {
     const { slug, owner } = credentials as GithubAppCredentials;
-    if (!owner) return undefined;
-    return owner.type === 'Organization'
-      ? `https://github.com/organizations/${encodeURIComponent(owner.login)}/settings/apps/${slug}`
-      : `https://github.com/settings/apps/${slug}`;
+    return owner ? settingsPage(slug, owner) : undefined;
   },
+  drift: (app, credentials, input) => githubDrift(app, credentials as GithubAppCredentials, input),
   installUrl(_app: AgentApp, credentials, { publicUrl, state, installation }) {
     const { slug } = credentials as GithubAppCredentials;
     if (!installation)

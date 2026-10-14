@@ -7,10 +7,14 @@ import { useEffect, useId, useRef } from 'preact/hooks';
 import { iX } from './icons';
 import { Icon } from './icon';
 
+/** A dialog's tone: a bar on top and the title's icon in its color. */
+export type Tone = 'neutral' | 'success' | 'warning' | 'error';
+
 /** A modal with a title, a body and its actions after a cancel button; Escape, Cancel or a backdrop click closes it, never while busy. */
 export function Modal({
   open = true,
   class: className,
+  tone,
   title,
   icon,
   dismiss,
@@ -25,6 +29,7 @@ export function Modal({
   /** Shown on mount unless controlled. */
   open?: boolean;
   class?: string;
+  tone?: Tone;
   title: ComponentChildren;
   /** Marks the title, for an outcome. */
   icon?: string;
@@ -57,7 +62,7 @@ export function Modal({
   return (
     <dialog
       ref={dialog}
-      class={className ? `modal ${className}` : 'modal'}
+      class={['modal', className, tone && `tone ${tone}`].filter(Boolean).join(' ')}
       aria-labelledby={id}
       onClose={onClose}
       onCancel={event => {

@@ -15,9 +15,10 @@ import type {
 import { client } from '@/utils/client';
 import { Link } from '@wular/pnext/link';
 import { usePathname, useRouter } from '@wular/pnext/navigation/client';
-import { Status, STATUS_LABEL } from '@/app/dash/tasks/list/status';
+import { Status, STATUS_LABEL } from '@/app/dash/[org]/tasks/list/status';
+import { useOrg } from '@/comps/nav/org';
 
-type Watched = { title: string; status: TaskState; at: number };
+type Watched = { title: string; status: TaskState; at: number; org: string };
 type Live = Pick<TaskRow, 'status' | 'result' | 'error' | 'approval'>;
 type Toast = {
   key: string;
@@ -25,8 +26,9 @@ type Toast = {
   title: string;
   status?: TaskState;
   line: string;
-  err?: boolean;
+  tone?: Tone;
 };
+type Tone = 'success' | 'warning' | 'error';
 
 const WATCHED = 'coder:watched';
 export const NOTIFY = 'coder:notify';
@@ -67,22 +69,27 @@ const save = (all: Record<string, Watched>) => {
 };
 
 /** A toast for an action whose page has no room for its outcome. */
-export const showToast = (title: string, line: string, err?: boolean) =>
-  dispatchEvent(new CustomEvent(TOAST, { detail: { title, line, err } }));
+export const showToast = (title: string, line: string, tone?: Tone) =>
+  dispatchEvent(new CustomEvent(TOAST, { detail: { title, line, tone } }));
 
-export const toastError = (title: string, line: string) => showToast(title, line, true);
+export const toastError = (title: string, line: string) => showToast(title, line, 'error');
 
-/** Remembers a task this browser started or opened, so its finish shows a toast on any page. */
+/** Remembers a task this browser started or opened, so its finish shows a toast on any page of its organization. */
 export function watchTask(id: string, status: TaskState, title?: string) {
   const all = read();
   const entry = all[id];
   if (!entry && DONE.has(status)) return;
   if (entry?.status === status && (!title || entry.title === title)) return;
-  all[id] = { title: title || entry?.title || id, status, at: entry?.at ?? Date.now() };
+  all[id] = {
+    title: title || entry?.title || id,
+    status,
+    at: entry?.at ?? Date.now(),
+    org: entry?.org ?? location.pathname.split('/')[2]!,
+  };
   save(all);
 }
 
-const openTask = (path: string) => /^\/dash\/tasks\/([^/]+)$/.exec(path)?.[1];
+const openTask = (path: string) => /^\/dash\/[^/]+\/tasks\/([^/]+)$/.exec(path)?.[1];
 
 function lineOf(live: Live): string {
   const text = (value: unknown) => (typeof value === 'string' ? value.trim().split('\n')[0]! : '');
@@ -135,8 +142,8 @@ type Message = {
   resync?: true;
 };
 
-/** One events stream per browser: the tab holding the lock reads it, shares it on a channel, and a tab that takes over resumes from the last event id. */
-function useEventsStream(ids: string[], leading: { current: boolean }) {
+/** One events stream per browser and organization: the tab holding the lock reads it, shares it on a channel, and a tab that takes over resumes from the last event id. */
+function useEventsStream(ids: string[], leading: { current: boolean }, org: string) {
   const asked = useRef(ids);
   asked.current = ids;
   const current = useRef<{ key: string; abort: AbortController }>();
@@ -161,7 +168,7 @@ function useEventsStream(ids: string[], leading: { current: boolean }) {
     addEventListener(COUNTS_REPLAY, replayCounts);
     const channel =
       typeof BroadcastChannel !== 'undefined' && navigator.locks
-        ? new BroadcastChannel(EVENTS)
+        ? new BroadcastChannel(`${EVENTS}:${org}`)
         : undefined;
     const abort = new AbortController();
     let last: string | undefined;
@@ -182,7 +189,7 @@ function useEventsStream(ids: string[], leading: { current: boolean }) {
     };
     channel?.addEventListener('message', ({ data }: MessageEvent<Message>) => {
       if (!data.hello) return receive(data);
-      // A tab that just loaded, maybe into another workspace: the next stream resumes for it too.
+      // A tab that just loaded: the next stream resumes for it too.
       soon ??= setTimeout(() => {
         soon = undefined;
         current.current?.abort.abort();
@@ -249,7 +256,9 @@ function useEventsStream(ids: string[], leading: { current: boolean }) {
     };
 
     if (channel)
-      void navigator.locks.request(EVENTS, { signal: abort.signal }, lead).catch(() => {});
+      void navigator.locks
+        .request(`${EVENTS}:${org}`, { signal: abort.signal }, lead)
+        .catch(() => {});
     else void lead();
     return () => {
       abort.abort();
@@ -300,15 +309,16 @@ export function ActiveCount() {
 }
 
 function Item({ toast, dismiss }: { toast: Toast; dismiss: (key: string) => void }) {
+  const org = useOrg();
   useEffect(() => {
     const timer = setTimeout(() => dismiss(toast.key), TTL);
     return () => clearTimeout(timer);
   }, []);
   return (
-    <div class={toast.err ? 'toast err' : 'toast'} onClick={() => dismiss(toast.key)}>
+    <div class={toast.tone ? `toast ${toast.tone}` : 'toast'} onClick={() => dismiss(toast.key)}>
       <p class="toast-head">
         {toast.id ? (
-          <Link class="cover" href="/dash/tasks/[id]" params={{ id: toast.id }}>
+          <Link class="cover" href="/dash/[org]/tasks/[id]" params={{ org, id: toast.id }}>
             {toast.title}
           </Link>
         ) : (
@@ -323,6 +333,7 @@ function Item({ toast, dismiss }: { toast: Toast; dismiss: (key: string) => void
 
 /** Toasts at the bottom right when a watched task finishes or needs approval, except on its own page. */
 export function TaskToasts() {
+  const org = useOrg();
   const path = usePathname();
   const nav = useRouter();
   const [watched, setWatched] = useState<Record<string, Watched>>({});
@@ -377,7 +388,7 @@ export function TaskToasts() {
   useTaskEvents(event => {
     const all = read();
     const seen = all[event.id];
-    if (!seen) return;
+    if (seen?.org !== org) return;
     if (event.deleted) {
       delete all[event.id];
       return save(all);
@@ -416,15 +427,16 @@ export function TaskToasts() {
     });
     notice.onclick = () => {
       focus();
-      nav.push('/dash/tasks/[id]', { params: { id } });
+      nav.push('/dash/[org]/tasks/[id]', { params: { org, id } });
     };
   };
 
   useEventsStream(
     Object.entries(watched)
-      .filter(([, entry]) => !DONE.has(entry.status))
+      .filter(([, entry]) => entry.org === org && !DONE.has(entry.status))
       .map(([id]) => id),
     leading,
+    org,
   );
 
   return (

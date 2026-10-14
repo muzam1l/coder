@@ -5,8 +5,16 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { agentsFromSources, assertNotReserved, loadAgents } from '../../agent/load';
 import { INTEGRATIONS, repositoryReader } from '../../integrations';
-import type { Integration, Pushed } from '../../integrations/types';
-import type { Agent, AgentApp, AgentEvent, AgentUsage, Installation } from '../../agent/types';
+import type { AppDrift, Integration, IntegrationApp, Pushed } from '../../integrations/types';
+import type { AppCheck } from '../../client/types';
+import type {
+  Agent,
+  AgentApp,
+  AgentDefinition,
+  AgentEvent,
+  AgentUsage,
+  Installation,
+} from '../../agent/types';
 import type { AgentVersionRecord, Store } from '../store/types';
 import type { ServerConfig, ServerContext } from '../context';
 import type { PlatformAccess, TokenSource } from '../tasks/context';
@@ -387,46 +395,124 @@ export async function importRepoAgents(
   return imported;
 }
 
-/** Sync each app under its store lock, retaining failed versions for a publish retry. */
-export async function updateApps(
+/** What Coder last knew an app to have on its platform, stored as delivery `app-sync:<app id>`. */
+export interface SyncMarker {
+  version: number;
+  /** What the last push sent, or the values a person last confirmed by hand. */
+  manifest?: unknown;
+  pending?: boolean;
+  error?: string;
+  /** The last check found the app needing changes on its platform. */
+  changed?: boolean;
+}
+
+export const syncKey = (app: string) => `app-sync:${app}`;
+
+/** What a push sends for a definition, so a new manifest reaches the app without a definition change. */
+export const syncManifest = (
+  platform: IntegrationApp,
+  app: AgentApp,
+  publicUrl: string,
+  definition: AgentDefinition,
+) => platform.manifest?.(app, { publicUrl, definition }) ?? definition;
+
+/** Whether the app already has `manifest` as of `version`. */
+export const inSync = (marker: SyncMarker | undefined, version: number, manifest: unknown) =>
+  Boolean(
+    marker &&
+    !marker.pending &&
+    marker.version >= version &&
+    isDeepStrictEqual(marker.manifest, manifest),
+  );
+
+/** Checks an app Coder cannot push and stores what it found on the app's sync marker; reads the platform only where it can be read. */
+export async function checkApp(
+  ctx: ServerContext,
+  store: Store,
+  app: AgentApp,
+  version: AgentVersionRecord,
+): Promise<AppCheck | undefined> {
+  const platform = ctx.integrations[app.integration]?.app;
+  const publicUrl = ctx.config.publicUrl!;
+  const marker = await store.get<SyncMarker>('delivery', syncKey(app.id));
+
+  if (platform?.values) {
+    const drift = platform.values(app, { publicUrl, definition: version.definition });
+    const known = (marker?.manifest ?? []) as AppDrift['lines'];
+    const lines = drift.lines.map(line =>
+      known.some(seen => seen.text === line.text && seen.copy === line.copy)
+        ? line
+        : { ...line, changed: true as const },
+    );
+    const changed = lines.some(line => 'changed' in line);
+    if (changed !== marker?.changed)
+      await store.put('delivery', syncKey(app.id), {
+        ...marker,
+        version: version.version,
+        changed,
+      });
+
+    return { ...drift, lines, changed, confirm: true };
+  }
+  if (!platform?.drift) return undefined;
+
+  const drift = await platform.drift(app, decryptSecret(ctx.config, app.credentials), {
+    publicUrl,
+    definition: version.definition,
+    fetch: ctx.fetch ?? fetch,
+  });
+  const changed = drift.lines.length > 0;
+  await store.put('delivery', syncKey(app.id), { version: version.version, changed });
+
+  return { ...drift, changed };
+}
+
+/** An app a sync pushed or checked, or the error it failed with. */
+export type AppSynced = { app: AgentApp; error?: string; check?: AppCheck };
+
+/** Sync each app under its store lock, retaining failed versions for a publish retry; `force` pushes that one app even when it looks synced. */
+export async function syncApps(
   ctx: ServerContext,
   versions: AgentVersionRecord[],
-): Promise<void> {
+  force?: string,
+): Promise<AppSynced[]> {
   const publicUrl = ctx.config.publicUrl;
-  if (!publicUrl || !versions.length) return;
+  if (!publicUrl || !versions.length) return [];
 
   const agents = new Map(versions.map(version => [version.agent, version]));
   const apps = await ctx.store.list('app');
   const results = await Promise.all(
     apps
-      .filter(({ value }) => agents.has(value.agent))
+      .filter(({ id, value }) => agents.has(value.agent) && (!force || id === force))
       .map(async ({ id }) => {
         return ctx.store.withAppLock(id, async store => {
           const app = await store.get('app', id);
           if (!app || !agents.has(app.agent)) return;
 
           const version = (await getVersion(store, app.agent)) ?? agents.get(app.agent)!;
-          const update = ctx.integrations[app.integration]?.app.update;
-          if (!update || !version.definition.integrations[app.integration]) return;
+          const platform = ctx.integrations[app.integration]?.app;
+          if (!platform || !version.definition.integrations[app.integration]) return;
+          // The server's shared apps are its operator's to change.
+          if (!platform.update && (app.builtin || app.shared)) return;
+          if (!platform.update)
+            return checkApp(ctx, store, app, version).then(
+              check => check && { app, check },
+              (error: unknown) => {
+                console.error(`coder server: checking ${app.id} on its platform failed`, error);
+                return { app, error: error instanceof Error ? error.message : String(error) };
+              },
+            );
+          const { update } = platform;
 
-          const key = `app-sync:${id}`;
-          const synced = await store.get<{
-            version: number;
-            definition: unknown;
-            pending: boolean;
-          }>('delivery', key);
-          if (
-            synced &&
-            !synced.pending &&
-            synced.version >= version.version &&
-            isDeepStrictEqual(synced.definition, version.definition)
-          )
-            return;
+          const manifest = syncManifest(platform, app, publicUrl, version.definition);
+          const key = syncKey(id);
+          const synced = await store.get<SyncMarker>('delivery', key);
+          if (!force && inSync(synced, version.version, manifest)) return;
           if (synced && synced.version > version.version) return;
 
           const marker = {
             version: version.version,
-            definition: version.definition,
+            manifest,
             pending: true,
           };
 
@@ -449,15 +535,28 @@ export async function updateApps(
                 credentials: encryptSecret(ctx.config, credentials),
               });
             await store.put('delivery', key, { ...marker, pending: false });
+            return { app };
           } catch (error) {
             const message = `Could not sync ${app.integration} app ${app.id}. ${error instanceof Error ? error.message : String(error)}`;
             await store.put('delivery', key, { ...marker, error: message });
-            return message;
+            return { app, error: message };
           }
         });
       }),
   );
-  const errors = results.filter(Boolean);
+
+  return results.filter(result => result !== undefined);
+}
+
+/** `syncApps`, failing with every push's error; a check that failed is only logged. */
+export async function updateApps(
+  ctx: ServerContext,
+  versions: AgentVersionRecord[],
+): Promise<void> {
+  const synced = await syncApps(ctx, versions);
+  const errors = synced.flatMap(({ app, error }) =>
+    error && ctx.integrations[app.integration]?.app.update ? [error] : [],
+  );
   if (errors.length) throw new Error(errors.join('\n'));
 }
 

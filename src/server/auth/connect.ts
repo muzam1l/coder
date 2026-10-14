@@ -170,11 +170,13 @@ export async function startOAuth(
     session,
     key ? await ctx.installationOrganization?.(key) : undefined,
   );
-  if (!member) return outcome(ctx, 'not-member', { platform: integration.id });
+  // Outcomes open in the workspace the flow is for, else the session's own.
+  const landing = member ?? { ...ctx, session };
+  if (!member) return outcome(landing, 'not-member', { platform: integration.id });
 
   const app = await appOf(member, key);
   if (!app || app.integration !== integration.id)
-    return outcome(ctx, 'disconnected', { platform: integration.id });
+    return outcome(landing, 'disconnected', { platform: integration.id });
 
   const state = await issueNonce(member, 'link-oauth', session.user.id, key);
 
@@ -198,13 +200,14 @@ export async function completeOAuth(
   const session = (ctx as ServerContext & { linkContext: ServerContext }).linkContext.session!;
   const state = url.searchParams.get('state') ?? '';
   const member = memberOf(ctx, session, nonceOrganization(ctx, state));
+  const landing = member ?? { ...ctx, session };
   const native =
     member && (await consumeBoundNonce(member, state, 'native-oauth', session.user.id));
   if (member && native) {
     const target = JSON.parse(native) as { connection: Connection; app: string; attempt?: string };
     const original = target.connection;
     if (original.provider !== integration.id)
-      return outcome(ctx, 'link-expired', { platform: integration.id });
+      return outcome(landing, 'link-expired', { platform: integration.id });
     if (!original.owner) {
       const allowed = requireWorkspaceAdmin(
         member,
@@ -212,14 +215,14 @@ export async function completeOAuth(
       );
       if (allowed instanceof Response) return allowed;
     } else if (original.owner !== session.user.id)
-      return outcome(ctx, 'link-expired', { platform: integration.id });
+      return outcome(landing, 'link-expired', { platform: integration.id });
     const app = await nativeApp(member, integration.id, target.app);
-    if (!app) return outcome(ctx, 'link-expired', { platform: integration.id });
+    if (!app) return outcome(landing, 'link-expired', { platform: integration.id });
 
     return member.store.withAppLock(`connection:${original.id}`, async store => {
       const current = await store.get('connection', original.id);
       if (!current || JSON.stringify(current) !== JSON.stringify(original))
-        return outcome(ctx, 'link-expired', { platform: integration.id });
+        return outcome(landing, 'link-expired', { platform: integration.id });
       const user = await userAuth
         .exchange(req, decryptSecret(ctx.config, app.credentials), {
           publicUrl,
@@ -234,7 +237,7 @@ export async function completeOAuth(
         .catch((error: unknown) => {
           console.error(`coder server: ${integration.id} connection sign-in failed`, error);
         });
-      if (!user?.token) return outcome(ctx, 'failed', { platform: integration.id });
+      if (!user?.token) return outcome(landing, 'failed', { platform: integration.id });
       if (current.owner) {
         const result = await ctx.auth!.link(
           session.user,
@@ -246,7 +249,8 @@ export async function completeOAuth(
           },
           store,
         );
-        if (result === 'taken') return outcome(ctx, 'account-taken', { platform: integration.id });
+        if (result === 'taken')
+          return outcome(landing, 'account-taken', { platform: integration.id });
       }
       await store.put('connection', current.id, {
         ...current,
@@ -261,13 +265,16 @@ export async function completeOAuth(
       if (target.attempt)
         await completeAuthorization({ ...member, store }, current, target.attempt);
 
-      return outcome(ctx, 'linked', { platform: integration.id, account: user.login ?? user.id });
+      return outcome(landing, 'linked', {
+        platform: integration.id,
+        account: user.login ?? user.id,
+      });
     });
   }
   const key = member && (await consumeBoundNonce(member, state, 'link-oauth', session.user.id));
   const app = member && key ? await appOf(member, key) : undefined;
   if (!member || !app || app.integration !== integration.id)
-    return outcome(ctx, 'link-expired', { platform: integration.id });
+    return outcome(landing, 'link-expired', { platform: integration.id });
 
   const user = await userAuth
     .exchange(req, decryptSecret(ctx.config, app.credentials), {
@@ -276,19 +283,19 @@ export async function completeOAuth(
     })
     .catch((error: unknown) => (error instanceof Error ? error : new Error(String(error))));
   if (user instanceof IntegrationError)
-    return outcome(ctx, user.code, { platform: integration.id, error: user.error });
+    return outcome(landing, user.code, { platform: integration.id, error: user.error });
   if (user instanceof Error) {
     console.error(`coder server: ${integration.id} sign-in failed`, user);
 
-    return outcome(ctx, 'failed', { platform: integration.id });
+    return outcome(landing, 'failed', { platform: integration.id });
   }
 
   const result = await ctx.auth!.link(session.user, integration.id, user.id, {
     organizations: session.organizations.map(entry => entry.id),
     ...(user.token ? { token: encryptSecret(ctx.config, { app: app.id, token: user.token }) } : {}),
   });
-  if (result === 'taken') return outcome(ctx, 'account-taken', { platform: integration.id });
+  if (result === 'taken') return outcome(landing, 'account-taken', { platform: integration.id });
   await completeNativeConnection(member, session.user.id, integration.id, user.id);
 
-  return outcome(ctx, 'linked', { platform: integration.id, account: user.login ?? user.id });
+  return outcome(landing, 'linked', { platform: integration.id, account: user.login ?? user.id });
 }

@@ -24,6 +24,9 @@ export const DEFAULT_CONFIG: CoderConfig = {
   },
 };
 
+/** The engine an agent runs on when its settings name none. */
+export const DEFAULT_ENGINE = DEFAULT_CONFIG.chain[0]!;
+
 /** The default task list's groups: failed first, then active, then other stopped, then completed. */
 export const listRank = (status: string) =>
   status === 'failed' ? 0 : status === 'completed' ? 3 : status === 'cancelled' ? 2 : 1;

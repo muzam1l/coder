@@ -1,4 +1,6 @@
 /** Slack app creation from a manifest plus the OAuth install dance for that app. */
+import { isIP } from 'node:net';
+
 import { IntegrationError, type AgentDefinition, type IntegrationApp, type Preset } from '../types';
 import { SLACK_READ_METHODS } from './tools';
 
@@ -26,11 +28,13 @@ export function slackManifest(
   publicUrl: string,
   {
     name,
+    description,
     scopes,
     events,
     extras,
   }: {
     name: string;
+    description?: string;
     scopes: string[];
     events: string[];
     /** `slackManifestExtras(...)`: slash commands and the agent view. */
@@ -38,9 +42,23 @@ export function slackManifest(
   },
 ): Record<string, unknown> {
   const base = baseUrl(publicUrl);
+  const host = new URL(base).hostname;
   return {
-    display_information: { name },
-    features: { bot_user: { display_name: name }, ...extras },
+    display_information: {
+      name,
+      ...(description ? { description: description.slice(0, 140) } : {}),
+    },
+    features: {
+      bot_user: { display_name: name, always_online: true },
+      app_home: {
+        home_tab_enabled: true,
+        messages_tab_enabled: true,
+        messages_tab_read_only_enabled: false,
+      },
+      // Slack unfurls only named domains, never an IP address or a host without a dot.
+      ...(host.includes('.') && !isIP(host) ? { unfurl_domains: [host] } : {}),
+      ...extras,
+    },
     oauth_config: {
       redirect_urls: [`${base}/install/slack/callback`],
       scopes: { bot: scopes },
@@ -51,13 +69,14 @@ export function slackManifest(
         request_url: `${base}/hooks/slack`,
         bot_events: events,
       },
+      interactivity: { is_enabled: true, request_url: `${base}/hooks/slack` },
     },
   };
 }
 
 /** `apps.manifest.create` with an app configuration token. */
 /** One Slack Web API call through the adapter's fetch-based client; Slack's own error when it is not ok. */
-async function slackApi<T>(
+export async function slackApi<T>(
   method: string,
   body: Record<string, unknown>,
   token: string,
@@ -96,6 +115,7 @@ function agentManifest(publicUrl: string, name: string, definition: AgentDefinit
   const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
   return slackManifest(publicUrl, {
     name,
+    description: definition.description,
     scopes: agentScopes(definition),
     events: slackAppEvents(events),
     extras: slackManifestExtras(publicUrl, definition),
@@ -207,14 +227,6 @@ async function grantedTeams(token: string, request: Fetcher): Promise<string[]> 
   return teams;
 }
 
-/** DM sent to the installer right after a Slack install. */
-export function welcomeMessage(agentName: string): string {
-  return [
-    `Hi, I'm ${agentName}. Ask me here or mention me in any channel; a thread keeps its context for follow-ups.`,
-    'Use `/setup show` to see my settings. Workspace admins configure connected repositories in the Coder dashboard.',
-  ].join('\n\n');
-}
-
 export const slackApp: IntegrationApp = {
   builtin: 'own',
   createStep: () => ({
@@ -270,6 +282,7 @@ export const slackApp: IntegrationApp = {
       credentials: { ...created, ...rotated, scopes: agentScopes(definition) },
     };
   },
+  manifest: (app, { publicUrl, definition }) => agentManifest(publicUrl, app.name, definition),
   // Configuration tokens last 12 hours; an expired one is rotated and the new pair saved first.
   async update(app, credentials, { publicUrl, definition, fetch: request, saveCredentials }) {
     let current = credentials as SlackAppCredentials;
@@ -306,13 +319,6 @@ export const slackApp: IntegrationApp = {
       publicUrl,
       request,
     );
-    if (result.installer)
-      await slackApi(
-        'chat.postMessage',
-        { channel: result.installer, text: welcomeMessage(app.name) },
-        result.accessToken,
-        request,
-      ).catch(() => undefined);
     // The workspace address, for the dashboard's link; `auth.test` needs no scope.
     const url = await slackApi<{ url?: string }>('auth.test', {}, result.accessToken, request)
       .then(value => value.url?.replace(/\/$/, ''))
@@ -345,6 +351,8 @@ const OBSERVE_SCOPES = [
   'users:read',
   'reactions:read',
   'commands',
+  'links:read',
+  'links:write',
 ];
 /** Bot token scopes for a Slack app manifest; anything beyond observe can post and react. */
 export function slackAppScopes(tools: Preset | string[] = 'observe'): string[] {
@@ -361,12 +369,14 @@ const APP_EVENTS: Record<string, string[]> = {
   message: ['message.channels', 'message.groups', 'message.im'],
   reaction: ['reaction_added'],
 };
-/** Slack manifest agent events for catalog event names, plus the workspace grants of an org install. */
+/** Slack manifest agent events for catalog event names, plus the workspace grants of an org install, the Home tab and shared links. */
 export function slackAppEvents(events: string[]): string[] {
   return [
     ...new Set(events.flatMap(event => APP_EVENTS[event] ?? [])),
     'team_access_granted',
     'team_access_revoked',
+    'app_home_opened',
+    'link_shared',
   ];
 }
 

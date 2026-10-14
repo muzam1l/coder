@@ -9,6 +9,8 @@ import { sha256 } from '../../utils/crypto';
 import { decodeParam, json, redirect } from '../routes/http';
 import { serveDash } from '../dash/serve';
 import { sharedApps } from './apps';
+import { syncKey } from './repo';
+import { dashPath, sessionSlug } from '../auth/account';
 import { audit } from '../operator';
 import {
   type AppsContext,
@@ -112,7 +114,7 @@ export async function createPage(
   const query = new URLSearchParams(url.searchParams);
   query.set('create', params.id!);
 
-  return redirect(`${dashOrigin(ctx)}/dash/setup?${query}`);
+  return redirect(`${dashOrigin(ctx)}${dashPath(sessionSlug(ctx), '/setup')}?${query}`);
 }
 
 /** The transaction a create starts with, and where the browser goes when creation happens on the platform. */
@@ -140,7 +142,7 @@ async function startedCreate(ctx: AppsContext, id: string, source: URLSearchPara
       },
       400,
     );
-  const back = ctx.operatorApp ? undefined : platformsPath(started.state.agent);
+  const back = ctx.operatorApp ? undefined : platformsPath(ctx, started.state.agent);
   const post = app.createPost?.({
     publicUrl,
     ...started,
@@ -209,7 +211,7 @@ async function finishCreate(
       { at: ctx.now?.() ?? Date.now(), target: id },
       { ttlMs: FINISHED_TTL_MS },
     );
-  const back = operator ? `/create/${id}` : platformsPath(parsed.state.agent);
+  const back = operator ? `/create/${id}` : platformsPath(ctx, parsed.state.agent);
   const spent = operator ? { tx: transaction! } : {};
   const shared = operator
     ? undefined
@@ -251,6 +253,13 @@ async function finishCreate(
     createdAt: ctx.now?.() ?? Date.now(),
   };
   await ctx.store.put('app', app.id, app);
+  // The values the platform's form was filled with, so a later change shows as one.
+  if (integration.app.values)
+    await ctx.store.put('delivery', syncKey(app.id), {
+      version: 0,
+      manifest: integration.app.values(app, { publicUrl, definition: parsed.definition }).lines,
+      changed: false,
+    });
   if (operator) {
     await audit(ctx, 'Created the shared app', `${created.name} on ${integration.name}`);
     return outcome(ctx, 'created', { platform: id, app: created.name, ...spent }, back);

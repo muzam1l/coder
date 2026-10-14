@@ -169,7 +169,7 @@ export async function testRunner(ctx: ServerContext, record?: RunnerRecord): Pro
     timer = setTimeout(() => {
       controller.abort();
       reject(new RunnerCheckError('Runner check timed out'));
-    }, 5000);
+    }, ctx.runnerTimeoutMs ?? 5000);
   });
   try {
     const detail = await Promise.race([

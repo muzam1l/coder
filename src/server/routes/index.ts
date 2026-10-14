@@ -4,7 +4,7 @@ import { pagesFallback } from '../dash/serve';
 import { bodyLimit, limitBody, notFound } from './http';
 import { heartbeat } from '../tasks/callbacks';
 import { review } from '../tasks/flows';
-import { type ServerContext, type SessionInfo } from '../context';
+import { chosenOrganization, type ServerContext, type SessionInfo } from '../context';
 import { DashboardHosts } from '../dash/serve';
 import { randomUUID } from 'node:crypto';
 import { ServerLimits, admit, type Admitted } from '../limits';
@@ -44,18 +44,25 @@ function shareSessions(
     ...ctx,
     auth: {
       ...auth,
+      // One lookup per credential; an organization the request names is picked from it.
       session(headers, fresh) {
         const key = JSON.stringify([
-          ...['cookie', 'authorization', 'x-coder-organization'].map(name => headers.get(name)),
+          ...['cookie', 'authorization'].map(name => headers.get(name)),
           Boolean(fresh),
         ]);
         let found = sessions.get(key);
         if (!found) {
-          found = auth.session(headers, fresh, cookies);
+          const own = new Headers(headers);
+          own.delete('x-coder-organization');
+          found = auth.session(own, fresh, cookies);
           sessions.set(key, found);
         }
-        return found;
+        const wanted = headers.get('x-coder-organization');
+        return wanted
+          ? found.then(info => info && (info.stale ? info : chosenOrganization(info, wanted)))
+          : found;
       },
+      setOrganization: (headers, slug) => auth.setOrganization(headers, slug, cookies),
       operator(headers) {
         const key = headers.get('cookie') ?? '';
         let found = operators.get(key);

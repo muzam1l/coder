@@ -121,6 +121,10 @@ An integration gives an agent two things:
 | Slack           | A [Slack app](https://api.slack.com/reference/manifests) per agent                                                                                                               | `mention`, `message`, `reaction`, `command`                | `slack_api(method, args)` over the [Web API](https://api.slack.com/methods), with writes limited to the event's thread |
 | Linear          | Your [Linear OAuth app](https://linear.app/developers/agents), with webhooks to `<PUBLIC_URL>/hooks/linear?app=<client id>`                                                      | `mention`: an agent session                                | None yet                                                                                                               |
 
+A Slack app's Home tab shows the agent and how to use it, and links to this server's tasks and agents unfurl into a short card.
+
+When an agent's app needs other events, permissions or settings, publishing the agent brings it up to date. Coder updates a Slack app itself and lists the changes to make on GitHub and Linear, and **Update on <platform>** in the handle's menu on the Platforms tab does the same later.
+
 `coder agent integrations show <id>` lists each event and each preset's exact tools or scopes. A host turns platforms off with `SERVER_INTEGRATIONS` ([Self-hosting](../self-host.md)).
 
 Need another integration or a missing event or tool? [Open an issue](https://github.com/muzam1l/coder/issues).

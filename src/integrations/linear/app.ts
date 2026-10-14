@@ -69,12 +69,11 @@ function exchange(req: Request, credentials: unknown, redirect: string, request:
   );
 }
 
-/** Linear's prefilled OAuth application form: name, callback URLs, the agent session webhook and, if asked, public distribution. */
-function creationLink(publicUrl: string, key: string, name?: string, isPublic?: boolean): string {
+/** Linear's prefilled OAuth application form: name, callback URLs and the agent session webhook. */
+function creationLink(publicUrl: string, key: string, name?: string): string {
   const params = new URLSearchParams(name ? { 'oauth.client_name': name } : {});
   params.set('developer.name', base(publicUrl).replace(/^https?:\/\//, ''));
   params.set('oauth.client_uri', base(publicUrl));
-  if (isPublic) params.set('distribution', 'public');
   params.append('oauth.redirect_uris', `${base(publicUrl)}/install/linear/callback`);
   params.append('oauth.redirect_uris', `${base(publicUrl)}/connect/linear/callback`);
   params.set('webhook.enabled', 'true');
@@ -85,9 +84,9 @@ function creationLink(publicUrl: string, key: string, name?: string, isPublic?: 
 
 export const linearApp: IntegrationApp = {
   builtin: 'shared',
-  createStep: (publicUrl, { name, public: isPublic } = {}, key = randomUUID()) => ({
+  createStep: (publicUrl, { name } = {}, key = randomUUID()) => ({
     intro: 'Linear runs the agent as an app of your own OAuth application.',
-    link: creationLink(publicUrl, key, name, isPublic),
+    link: creationLink(publicUrl, key, name),
     steps: [
       { text: 'Open the link signed in to Linear, check the form and click **Create**.' },
       {
@@ -125,6 +124,21 @@ export const linearApp: IntegrationApp = {
   // The webhook URL in the prefilled form names the app by `key`, chosen before Linear knows the client ID.
   // Linear's app pages use its own app id, not the client ID; the API page lists them in the current workspace.
   settingsUrl: () => 'https://linear.app/settings/api',
+  // Linear has no API to read or change an OAuth application.
+  values: (app, { publicUrl, definition }) => ({
+    url: 'https://linear.app/settings/api',
+    label: 'Open application',
+    lines: [
+      { text: 'Application name', copy: definition.name ?? app.agent },
+      { text: 'Callback URL', copy: `${base(publicUrl)}/install/linear/callback` },
+      { text: 'Callback URL', copy: `${base(publicUrl)}/connect/linear/callback` },
+      {
+        text: 'Webhook URL',
+        copy: `${base(publicUrl)}/hooks/linear?app=${app.id.slice(app.id.indexOf(':') + 1)}`,
+      },
+      { text: 'Webhook resource types', copy: 'AgentSessionEvent' },
+    ],
+  }),
   async createCallback(req, { state, definition }) {
     const { key, ...credentials }: LinearAppCredentials & { key: string } = await postedFields(
       req,

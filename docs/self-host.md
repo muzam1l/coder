@@ -88,7 +88,7 @@ An agent's handle on a platform is its app. The built-in agent `coder` uses shar
 
 Installs start from the dashboard. "Connect GitHub" adds the shared GitHub app, and the Platforms tab creates or installs an agent's workspace app. The server binds an install to the workspace that started it with a one-time, expiring state. On GitHub it also requires the installer to authorize the app and checks that the installation appears in their own `GET /user/installations`; on Slack it uses "Add to Slack" OAuth keyed by team. An install started on GitHub asks the installer to sign in and binds only if they are a member of the app's workspace. An install belongs to exactly one workspace, and webhooks route by installation. Removing or suspending an install on the platform stops it.
 
-Operators set up the shared apps in the dashboard's Operator area at `/dash/operator`, one per platform, named `SERVER_NAME` or Wular unless they pick a name, and every operator action lands in its audit log. Entering it asks for a fresh Wular Auth sign-in and lasts an hour, or 15 minutes without activity; on local and memory servers the admin token holder is the operator.
+Operators set up the shared apps in the dashboard's Operator area at `/dash/<workspace>/operator`, one per platform, named `SERVER_NAME` or Wular unless they pick a name, and every operator action lands in its audit log. Entering it asks for a fresh Wular Auth sign-in and lasts an hour, or 15 minutes without activity; on local and memory servers the admin token holder is the operator.
 
 Each task gets the narrowest platform token: on GitHub an installation token for the event's repository with only the permissions its tools need, on Slack the install's bot token.
 

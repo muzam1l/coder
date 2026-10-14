@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 
-import { AGENT_TASK_PREFIX, execAgent, agentTaskOptions } from '../../agent/exec';
+import { AGENT_TASK_PREFIX, execAgent, agentTaskOptions, threadReply } from '../../agent/exec';
 import type { AgentTask, TaskSource } from '../../agent/types';
 import { defaultAgent } from '../../agent/load';
 import type { TaskTurn } from '../../client/types';
@@ -512,6 +512,7 @@ function watchCompletion(ctx: ServerContext, id: string, saved: LocalCompletion)
       for (let attempt = 0; attempt < 5; attempt++) {
         try {
           let result: ReturnType<typeof readResultJson> = null;
+          let cancelled = false;
 
           for (;;) {
             if (watch.stopped) return;
@@ -530,6 +531,7 @@ function watchCompletion(ctx: ServerContext, id: string, saved: LocalCompletion)
             if (!found) return;
             const task = reconcileTask(saved.cwd, found);
             if (!ACTIVE_STATUSES.includes(task.status)) {
+              cancelled = task.status === 'cancelled';
               const file = path.join(resolveTaskDir(saved.cwd, id), 'result.json');
               const finished = Math.max(
                 at(task.completedAt) ?? 0,
@@ -570,7 +572,8 @@ function watchCompletion(ctx: ServerContext, id: string, saved: LocalCompletion)
             const replies = await eventReplies(ctx, app, saved.task.event);
             if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
 
-            await replies.post((result.finalMessage ?? result.error?.message ?? '').trim());
+            const reply = threadReply(saved.task, result, cancelled);
+            if (reply.text) await (reply.problem ? replies.problem : replies.post)(reply.text);
             receipt = { ...receipt, posted: true };
             if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
           }
@@ -600,9 +603,10 @@ function watchCompletion(ctx: ServerContext, id: string, saved: LocalCompletion)
             `coder server: local completion ${id} attempt ${attempt + 1} failed, retrying`,
             error,
           );
-          const retryAt = Date.now() + 5000 * 2 ** attempt;
-          while (!watch.stopped && Date.now() < retryAt)
-            await new Promise(resolve => setTimeout(resolve, Math.min(100, retryAt - Date.now())));
+          const now = ctx.now ?? Date.now;
+          const retryAt = now() + 5000 * 2 ** attempt;
+          while (!watch.stopped && now() < retryAt)
+            await new Promise(resolve => setTimeout(resolve, Math.min(100, retryAt - now())));
         }
       }
     } finally {

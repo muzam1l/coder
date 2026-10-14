@@ -11,6 +11,7 @@ import { decryptSecret, encryptSecret } from '../store/secrets';
 import type { Store } from '../store/types';
 import { json, notFound, redirect } from '../routes/http';
 import { workspaceAdmin } from '../routes/guards';
+import { dashPath, sessionSlug } from '../auth/account';
 
 export const MCP_CLIENT_PATH = '/connections/oauth/client.json';
 const CALLBACK_PATH = '/connections/oauth/callback';
@@ -332,7 +333,10 @@ export async function authorizeUrl(
 
 /** The redirect back from the authorization server: stores the tokens sealed on the connection, then returns to the dashboard. */
 export async function oauthCallback(req: Request, ctx: ServerContext, url: URL): Promise<Response> {
-  const outcome = (value: string) => redirect(`/dash/settings/connections?outcome=${value}`);
+  // Back on the Connections page of the workspace the connection belongs to, once that is known.
+  let landing = ctx;
+  const outcome = (value: string) =>
+    redirect(`${dashPath(sessionSlug(landing), '/settings/connections')}?outcome=${value}`);
   try {
     const state = url.searchParams.get('state') ?? '';
     const organization = nonceOrganization(ctx, state);
@@ -352,6 +356,7 @@ export async function oauthCallback(req: Request, ctx: ServerContext, url: URL):
           },
         }
       : ctx;
+    landing = member;
     const target = await consumeBoundNonce(member, state, 'connection-oauth', userOf(member));
     if (!target) return outcome('invalid-state');
     const claim = decryptSecret<{

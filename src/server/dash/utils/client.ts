@@ -6,6 +6,15 @@ export const client = new ServerClient(
   '',
   { cookie: true },
   {
+    // The page's organization, so a tab open in another one never changes what this one acts on.
+    fetch(input, init) {
+      const org = /^\/dash\/([^/]+)/.exec(globalThis.location?.pathname ?? '')?.[1];
+      if (!org) return fetch(input, init);
+      const headers = new Headers(init?.headers);
+      headers.set('x-coder-organization', decodeURIComponent(org));
+
+      return fetch(input, { ...init, headers });
+    },
     onError(error) {
       if (error.status === 401 && (error.authenticate || /^Sign in/.test(error.message)))
         location.href = `/login?return=${encodeURIComponent(location.pathname + location.search)}`;

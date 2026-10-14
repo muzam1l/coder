@@ -19,10 +19,10 @@ export interface AgentSource {
   default?: true;
 }
 
-/** Built-in agent folders: `builtin/` next to this module in src, `dist/builtin/` once bundled. */
+/** Built-in agent folders: `builtin/` next to this module in src, `dist/builtin/` once bundled; a literal URL so bundlers ship the folder. */
 function builtinRoot(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
-  for (const candidate of [path.join(here, 'builtin'), here]) {
+  for (const candidate of [fileURLToPath(new URL('./builtin/', import.meta.url)), here]) {
     if (Object.keys(definitionsIn(candidate)).length) return candidate;
   }
   return here;

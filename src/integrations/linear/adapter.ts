@@ -64,6 +64,20 @@ class BoundLinearAdapter extends LinearAdapter {
   override startTyping(threadId: string, status?: string) {
     return this.bound(() => super.startTyping(threadId, status));
   }
+
+  /** An error activity, so Linear shows the session as failed; outside a session, a comment. */
+  postProblem(threadId: string, text: string) {
+    const { agentSessionId } = this.decodeThreadId(threadId);
+    if (!agentSessionId) return this.postMessage(threadId, text);
+
+    return this.bound(async () => {
+      await this.ensureValidToken();
+      await this.getClient().createAgentActivity({
+        agentSessionId,
+        content: { type: 'error' as never, body: text },
+      });
+    });
+  }
 }
 
 export function linearAdapter(ctx: AdapterContext): Adapter {

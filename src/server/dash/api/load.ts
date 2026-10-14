@@ -13,7 +13,7 @@ export function encodeDefinition(definition: unknown): string {
 const clientKey = Symbol('coder.dashboard.client');
 type RenderRequest = Request & { [clientKey]?: ServerClient };
 
-/** One client per render request, with shared in-process GETs and the caller's cookie and scope. */
+/** One client per render request, with shared in-process GETs and the caller's cookie, scope and organization. */
 export function load(request: Request): ServerClient {
   const render = request as RenderRequest;
   let client = render[clientKey];
@@ -32,6 +32,8 @@ export function load(request: Request): ServerClient {
         headers.set('cookie', request.headers.get('cookie') ?? '');
         const scope = request.headers.get('x-coder-request-scope');
         if (scope) headers.set('x-coder-request-scope', scope);
+        const org = request.headers.get('x-coder-organization');
+        if (org) headers.set('x-coder-organization', org);
         const read = !init?.method || init.method === 'GET';
         let pending = read ? reads.get(url) : undefined;
         if (!pending) {
@@ -55,8 +57,14 @@ export const signedOut = (error: unknown) =>
   !/^Bearer(?:\s|$)/i.test(error.authenticate ?? '');
 
 export const unwrap = <T>(rows: Array<StoredRow<T>>) => rows.map(row => row.value);
+
+/** The organization a dashboard page shows, `/dash/<org>/…`, read from the address so frames render before params resolve. */
+export const orgOf = (request: Request) =>
+  decodeURIComponent(new URL(request.url).pathname.split('/')[2]!);
 export function loadAgent(request: Request, slug: string) {
   const path = new URL(request.url).pathname;
-  const content = path === `/dash/agents/${encodeURIComponent(slug)}` || path.endsWith('/edit');
+  const content =
+    path === `/dash/${encodeURIComponent(orgOf(request))}/agents/${encodeURIComponent(slug)}` ||
+    path.endsWith('/edit');
   return load(request).agents.get(slug, { versions: false, content, handles: true });
 }

@@ -100,6 +100,15 @@ export interface PlatformPost {
   fields: Record<string, string>;
 }
 
+/** Where an app is changed on its platform, and what to change there; UI names marked **like this**. */
+export interface AppDrift {
+  url: string;
+  /** The link's words, such as `Open app settings`. */
+  label: string;
+  /** One setting each, with the value to enter. */
+  lines: Array<{ text: string; copy?: string }>;
+}
+
 /** Creating one app per agent on the user's account, then installing it; all browser-driven. */
 export interface IntegrationApp {
   /** Built-in agents install the server's one shared app (`shared`), or create their own in each workspace like any agent (`own`). */
@@ -132,6 +141,8 @@ export interface IntegrationApp {
   ): Promise<
     { platformAppId: string; name: string } & ({ credentials: unknown } | { shared: true })
   >;
+  /** What `update` sends for a definition, such as the app manifest; an app is updated again only when it changes. */
+  manifest?(app: AgentApp, input: { publicUrl: string; definition: AgentDefinition }): unknown;
   /** Bring the platform's copy of the app in line with a new definition; returns credentials to store when they rotated. */
   update?(
     app: AgentApp,
@@ -143,6 +154,14 @@ export interface IntegrationApp {
       saveCredentials(credentials: unknown): Promise<void>;
     },
   ): Promise<unknown | undefined>;
+  /** Changes the app on the platform needs for a definition, read from the platform; none when it is up to date. */
+  drift?(
+    app: AgentApp,
+    credentials: unknown,
+    input: { publicUrl: string; definition: AgentDefinition; fetch: typeof fetch },
+  ): Promise<AppDrift>;
+  /** Every value the app needs for a definition, where the platform can neither be read nor updated; the person confirms them by hand. */
+  values?(app: AgentApp, input: { publicUrl: string; definition: AgentDefinition }): AppDrift;
   /** The app's settings page on the platform, where it is deleted. */
   settingsUrl?(app: AgentApp, credentials: unknown): string | undefined;
   /** An installed account's page on the platform. */
@@ -236,6 +255,35 @@ export interface AdapterContext {
   hears?(text: string): Promise<boolean>;
   /** Whether Coder answered in this Chat SDK thread lately; only mentions, direct messages and such threads look up users. */
   active?(thread: string): Promise<boolean>;
+  /** Coder's public address. */
+  publicUrl?: string;
+  /** The dashboard of the installation's workspace, for links to its pages. */
+  dashUrl?: string;
+  /** An agent of the workspace the installation is bound to, the app's own by default. */
+  agent?(slug?: string): Promise<AgentSummary | undefined>;
+  /** A task of the workspace the installation is bound to; none for any other. */
+  task?(id: string): Promise<TaskSummary | undefined>;
+}
+
+/** An agent as a platform shows it: its current version. */
+export interface AgentSummary {
+  slug: string;
+  name: string;
+  description?: string;
+  /** Platforms its definition wires, with the events on each. */
+  listens: Array<{ integration: string; name: string; events: string[] }>;
+}
+
+/** A task as a platform shows it. */
+export interface TaskSummary {
+  id: string;
+  title: string;
+  agent: string;
+  status: string;
+  /** The platform that raised it, or `dashboard`, `cli` or `schedule`. */
+  from: string;
+  /** Epoch milliseconds; when it was queued if it has not started. */
+  startedAt: number;
 }
 
 /** Chat SDK handlers that raise Coder events. */
@@ -267,7 +315,13 @@ export type OwnEvent =
     }
   | { covers: { installation: string; add?: string[]; remove?: string[] } }
   | { changes: { repo: string; ref: string; branch: string; paths?: string[] }; pushed?: Pushed }
-  | { pushed: Pushed };
+  | { pushed: Pushed }
+  /** Platform calls made after the webhook is answered, with the installation's adapter context. */
+  | { work(ctx: AdapterContext): Promise<void> }
+  /** A delivery that needs only an answer, such as a click on a button that opens a page. */
+  | { ack: true }
+  /** A delivery Coder does not act on yet, such as a button click; logged and acknowledged. */
+  | { unhandled: string };
 
 /** A push to a branch: repository files Coder holds for it are read again. */
 export interface Pushed {
@@ -356,6 +410,10 @@ export interface Integration {
   readonly description: string;
   /** The button that installs an app, in the platform's own words. */
   readonly installLabel?: string;
+  /** How people reach an installed agent there, `{handle}` standing for its handle. */
+  readonly use?: string;
+  /** Every prompt waits for its own answer, as a Linear agent session does, so notices repeat instead of going out once per thread. */
+  readonly answersEveryPrompt?: true;
   /** What one account an installation covers is called, such as a Slack workspace of an org install. */
   readonly covered?: string;
   /** Apps may live under an organization instead of the creator's own account. */
@@ -381,6 +439,14 @@ export interface Integration {
   adapter(ctx: AdapterContext): Promise<Adapter>;
   /** The platform delivery or activity that raised a reaction. */
   reactionId?(reaction: ReactionEvent): string | undefined;
+  /** The platform page of the thread or issue an event came from. */
+  link?(event: AgentEvent): string | undefined;
+  /** Greets the person who installed the app, right after the install: `open` is the agent in Coder, `setup` the missing model. */
+  welcome?(
+    ctx: AdapterContext,
+    installer: string,
+    links: { open: string; setup?: string },
+  ): Promise<void>;
   /** Signed webhooks the adapter does not handle (GitHub pull requests, issues, installs and pushes); `undefined` leaves it to the adapter. */
   ownEvents?(req: Request, raw: string, app: AgentApp, credentials: unknown): OwnEvent | undefined;
   /** What core cannot read from a Chat SDK message, such as the actor's role; `undefined` drops it. */

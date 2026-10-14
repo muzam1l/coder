@@ -1,6 +1,6 @@
 # Dashboard
 
-The dashboard is Coder's web UI at `/dash`. `coder dash` runs it on this machine as a UI over the CLI's own config, agents and tasks, with no account and no database.
+The dashboard is Coder's web UI at `/dash`, which opens the current workspace at `/dash/<workspace>`. `coder dash` runs it on this machine as a UI over the CLI's own config, agents and tasks, with no account and no database.
 
 To self-host your own Coder in the cloud, see [Self-hosting](self-host.md). There the same dashboard serves a workspace.
 
@@ -18,7 +18,7 @@ coder dash --port 3100
 
 ## Pages
 
-**Agents**: agents from two sources. Give one its own app from its Platforms tab.
+**Agents**: agents from two sources. Give one its own app from its Platforms tab. Its Usage tab lists the platform events it failed to handle in the last day.
 
 - **Dashboard agents** are made in the editor.
   - **Local**: saved in `~/.coder/agents/<id>/`.

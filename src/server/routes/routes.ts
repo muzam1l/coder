@@ -19,7 +19,6 @@ import {
   oauthAllowed,
   operatorOnly,
   operatorPageAllowed,
-  organizationAllowed,
   pageSession,
   requireWorkspaceAdmin,
   signInAllowed,
@@ -29,7 +28,7 @@ import {
 import { group, mount, route, type Params } from './match';
 import { dashboard, dashboardToken, home, loginPage, signIn } from '../dash/serve';
 import { health, metrics } from '../health';
-import { meRoute, organizationRoute } from '../auth/account';
+import { meRoute } from '../auth/account';
 import { json, notFound } from './http';
 import {
   ackMessages,
@@ -87,7 +86,9 @@ import {
   integrationCatalog,
   listApps,
   listInstallations,
+  readDrift,
   removeApp,
+  updateApp,
 } from '../agents/connections';
 import { importAgent, previewImport } from '../agents/import';
 import { listAgents, listVersions, readAgent, readVersion } from '../agents/catalog';
@@ -144,7 +145,7 @@ const pagesRoutes = [
   route('GET', '/login', signIn, signInAllowed),
   ...mount('/login', loginPage, signInAllowed).filter(entry => entry.method !== 'GET'),
   route('POST', '/dash/token', dashboardToken, dashboardTokenAllowed),
-  ...mount('/dash/operator', dashboard, operatorPageAllowed),
+  ...mount('/dash/:org/operator', dashboard, operatorPageAllowed),
   ...mount('/dash', dashboard, dashboardAllowed),
 ];
 
@@ -152,7 +153,6 @@ const authRoutes = [
   route('GET', '/api/auth/capabilities', (req, ctx) => json({ wular: ctx.auth?.issuer ?? null })),
   ...mount('/api/auth', (req, ctx) => ctx.auth!.handler(req), apiAllowed),
   route('GET', '/me', meRoute, accountAllowed),
-  route('POST', '/me/organization', organizationRoute, organizationAllowed),
 ];
 
 const callbacksRoutes = [
@@ -254,6 +254,8 @@ const appsRoutes = [
   route('POST', '/apps/create/:integration', adminCreateTransaction),
   route('GET', '/apps', listApps),
   route('DELETE', '/apps/:id', removeApp),
+  route('GET', '/apps/:id/drift', readDrift),
+  route('POST', '/apps/:id/update', updateApp),
   route('GET', '/installations', listInstallations),
   route('GET', '/connections', listConnections, connectionAllowed),
   route('POST', '/connections', createConnection, connectionAllowed),
