@@ -22,6 +22,8 @@ export interface TaskRow {
       integration: string;
       type: string;
       text?: string;
+      actor?: { id: string; login?: string };
+      mustReply?: boolean;
       thread?: { number?: number };
     };
     /** The agent's engine settings, and what this task ran with over them. */

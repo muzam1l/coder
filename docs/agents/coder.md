@@ -4,17 +4,17 @@ The built-in agent. On the hosted service it has an install link per platform; s
 
 ## On GitHub
 
-- A pull request opening, updating, or becoming ready runs the [review flow](../review.md) read-only and posts inline comments with a sticky summary. Reruns update the summary and never repeat a finding.
+- A pull request opening, updating, or becoming ready runs the [review flow](../review.md) read-only and posts inline comments with a sticky summary. Reruns update the summary and never repeat a finding, and a new push replaces a review that has not started yet.
 - A review request for the agent does the same.
-- A mention (`@<app>` from a repository owner or member) answers from the diff and the repository, or makes the requested change on a branch and links the pull request.
+- A mention (`@<app>` from a repository owner or member), in the conversation or in a finding's thread, answers from the diff and the repository, or makes the requested change on a branch and links the pull request.
 - An issue opening or edit reads the issue and the repository, then answers, makes the change and links the pull request, or asks one clarifying question.
 - An issue or pull-request comment that says "coder" does the same as a mention.
 
 ## On Slack
 
-- A mention, a direct message, or a message that says "coder" reads the thread and the linked repository, then answers, makes the change and links the pull request, or asks one clarifying question.
-- Slash commands and reactions wake it too.
-- Replies stay in the thread they were asked in, in Slack's style, with short paragraphs and code spans and no headings.
+- A mention, a direct message, or a channel message that says "coder" reads the thread and the linked repository, then answers, makes the change and links the pull request, or asks one clarifying question.
+- Slash commands wake it too.
+- Replies stay in the thread they were asked in.
 - When the workspace has connected GitHub from the [dashboard](../dash.md), it can read and change code there.
 
 ## On Linear

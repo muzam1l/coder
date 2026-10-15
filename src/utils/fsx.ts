@@ -104,8 +104,8 @@ export async function moveDirectoryAsync(from: string, to: string): Promise<void
  * (truncated for a fresh attempt) resets to the start. A trailing partial
  * line (append in progress) is carried until its newline lands.
  */
-export function createJsonlTail(file: string): () => string[] {
-  let pos = 0;
+export function createJsonlTail(file: string, from = 0): () => string[] {
+  let pos = from;
   let carry = '';
   return () => {
     let size: number;

@@ -9,21 +9,54 @@ import process from 'node:process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 
-import { execAgent, AGENT_TASK_PREFIX } from '../agent/exec';
+import {
+  AGENT_TASK_PREFIX,
+  execAgent,
+  threadReply,
+  postReply,
+  postReaction,
+  waitForAgentTask,
+  serveTaskReplies,
+} from '../agent/exec';
 import { INTEGRATIONS } from '../integrations';
 import { tokenEnvName } from '../agent/mcp';
 import type { AgentTask } from '../agent/types';
 import type { EngineCredential } from '../server/store/types';
 import { answerApproval } from '../core/approvals';
-import { MACHINE_SANDBOX_ENV, WORKSPACE_CONFIG_ENV, type CoderConfig } from '../core/config';
-import { loadTask, listTasks, resolveTaskDir, coderCache, enqueueSteer } from '../core/state';
-import { askTask, steerTask, stopTask } from '../core/task/actions';
+import {
+  loadConfig,
+  MACHINE_SANDBOX_ENV,
+  WORKSPACE_CONFIG_ENV,
+  type CoderConfig,
+} from '../core/config';
+import {
+  loadTask,
+  listTasks,
+  resolveTaskDir,
+  coderCache,
+  enqueueSteer,
+  readTurnResults,
+  hasQueuedSteers,
+  appendTaskLog,
+} from '../core/state';
+import {
+  askTask,
+  heldConnections,
+  steerTask,
+  stopTask,
+  type ConnectionResolver,
+} from '../core/task/actions';
+import { waitForRollover } from '../core/task/worker';
+import { addTokens } from '../core/task/log-view';
+import { readResultJson, resolveTaskOptions } from '../core/dispatch';
+import { SKIPPED } from '../core/defaults';
 import { connectionVariables } from '../core/connections';
 import type { InboxEntry, InboxAck } from '../server/tasks/queue';
 import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mailbox';
 import type { Task } from '../core/types';
 import type { McpServerSpec } from '../core/types';
 import { readJsonFile, writeJsonFileAtomic, createJsonlTail } from '../utils/fsx';
+import { CLAUDE_PROJECT, taskHistory } from './history';
 
 const exec = promisify(execFile);
 type RemoteTask = {
@@ -33,6 +66,7 @@ type RemoteTask = {
   timeoutMs?: number;
   tokens: Record<string, string>;
   nativeTokens?: Record<string, string>;
+  postToken?: string;
   credential: EngineCredential;
   config?: Partial<CoderConfig>;
   connections?: Record<string, McpServerSpec>;
@@ -276,6 +310,53 @@ async function applyEnvironment(remote: RemoteTask, root: string): Promise<strin
   return home;
 }
 
+/** A Claude credential gets its own config folder, so transcripts land where the runner saves them from. */
+async function applyClaudeHome(remote: RemoteTask, root: string): Promise<string | undefined> {
+  const { ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN } = remote.credential.env;
+  if (remote.credential.engine !== 'claude' || (!ANTHROPIC_API_KEY && !CLAUDE_CODE_OAUTH_TOKEN))
+    return undefined;
+  const home = await fs.mkdtemp(path.join(root, '.claude-'));
+  process.env.CLAUDE_CONFIG_DIR = home;
+  process.env.CLAUDE_CODE_PROJECT_DIR_NAME = CLAUDE_PROJECT;
+  return home;
+}
+
+/** Every secret value the runner was given, stripped from engine history before it leaves. */
+async function historySecrets(
+  remote: RemoteTask,
+  token: string,
+  codexHome: string | undefined,
+): Promise<string[]> {
+  const rotated = codexHome
+    ? await fs.readFile(path.join(codexHome, 'auth.json'), 'utf8').catch(() => '')
+    : '';
+  const tokens = (authJson = '') => {
+    const found: string[] = [];
+    try {
+      JSON.parse(authJson, (key, value) => {
+        if (typeof value === 'string' && /token|key/i.test(key)) found.push(value);
+        return value;
+      });
+    } catch (error) {
+      if (authJson) console.error('coder runner: history credentials could not be parsed');
+    }
+    return found;
+  };
+
+  return [
+    token,
+    ...Object.values(remote.tokens),
+    ...(remote.postToken ? [remote.postToken] : []),
+    ...Object.values(remote.nativeTokens ?? {}),
+    ...Object.values(remote.connectionEnv ?? {}),
+    ...Object.entries(remote.credential.env)
+      .filter(([name]) => /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH/i.test(name))
+      .map(([, value]) => value),
+    ...tokens(remote.credential.env.CODEX_AUTH_JSON),
+    ...tokens(rotated),
+  ];
+}
+
 /** Codex rotates its tokens; hand the new `auth.json` back so the next task starts from it. */
 async function writeBack(
   auth: { server: string; token: string },
@@ -374,6 +455,8 @@ export async function applyTaskMessage(
   cwd: string,
   task: Task,
   entry: InboxEntry,
+  // A runner's turn resumes with the connections its task already resolved, not this machine's.
+  resolveConnections: ConnectionResolver = heldConnections(task.mcp),
 ): Promise<unknown> {
   const command: MailboxKey = {
     task: task.name?.slice(6) ?? task.id,
@@ -404,7 +487,7 @@ export async function applyTaskMessage(
   if (entry.kind === 'steer') {
     const text = String(value?.text ?? entry.value ?? '');
     if (!task.threadId) enqueueSteer(cwd, task.id, text);
-    else await steerTask(cwd, task, text, { command });
+    else await steerTask(cwd, task, text, { command, resolveConnections });
   } else if (entry.kind === 'ask') {
     const result = await askTask(cwd, task, String(value?.question ?? entry.value ?? ''), {
       command,
@@ -457,6 +540,14 @@ export async function runTask(id: string, root: string): Promise<unknown> {
   const cache = process.env.CODER_CHECKOUT_CACHE;
   delete process.env.CODER_CHECKOUT_CACHE;
   const codexHome = await applyEnvironment(remote, root);
+  const claudeHome = await applyClaudeHome(remote, root);
+  const history =
+    remote.task.flow === 'default'
+      ? taskHistory(
+          (suffix, init) => taskRequest(auth.server, auth.token, id, suffix, init),
+          () => historySecrets(remote, auth.token, codexHome),
+        )
+      : undefined;
   const timeout = new AbortController();
   const timer = setTimeout(
     () => timeout.abort(new Error('timeout')),
@@ -469,7 +560,18 @@ export async function runTask(id: string, root: string): Promise<unknown> {
     }).catch(() => {});
   }, 30_000);
   let cwd: string | undefined;
-  const beforeResult = () => writeBack(auth, id, remote, codexHome);
+  const beforeResult = async () => {
+    const started = readJsonFile<{ generation: number; id: string }>(
+      path.join(root, '.runner-task.json'),
+    );
+    const current =
+      cwd && started?.generation === remote.generation ? loadTask(cwd, started.id) : undefined;
+    await history
+      ?.save(current ?? undefined)
+      .catch(error => console.error('coder runner: history upload failed', error));
+    if (claudeHome) await fs.rm(claudeHome, { recursive: true, force: true });
+    await writeBack(auth, id, remote, codexHome);
+  };
   let reportingResult = false;
   const reportResult = async (body: unknown) => {
     reportingResult = true;
@@ -491,6 +593,7 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       ),
     ]);
     timeout.signal.throwIfAborted();
+    const resumed = await history?.restore();
     return await runCheckedOutTask(
       id,
       root,
@@ -502,6 +605,7 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       timeout.signal,
       beforeResult,
       reportResult,
+      resumed,
     );
   } catch (error) {
     if (!reportingResult)
@@ -534,8 +638,10 @@ async function runCheckedOutTask(
   timeout: AbortSignal,
   beforeResult: () => Promise<void>,
   reportResult: (body: unknown) => Promise<void>,
+  resumed?: Awaited<ReturnType<ReturnType<typeof taskHistory>['restore']>>,
 ): Promise<unknown> {
   const event = remote.task.event;
+  const postToken = remote.task.flow === 'default' ? remote.postToken : eventToken;
   const controller = new AbortController();
   let taskId: string | undefined;
   let flow: { runId: string; requestStop(): void; runningIds(): string[] } | undefined;
@@ -652,28 +758,84 @@ async function runCheckedOutTask(
     });
   let shortPoll: ReturnType<typeof setInterval> | undefined;
   let fetching: Promise<unknown> | undefined;
+  let inboxClosed = false;
+  let stopReplies: (() => void) | undefined;
+  const savedTurns =
+    savedTask?.generation === remote.generation ? readTurnResults(cwd, savedTask.id, true) : [];
+  const previousTurns = savedTurns.length;
+  let deliveredTurns = savedTurns.filter(turn => !turn.internal).length + 1;
+  const onApproval = async (approval: unknown) => {
+    await taskRequest(auth.server, auth.token, id, '/result', {
+      method: 'POST',
+      body: JSON.stringify({ status: 'waiting', approval }),
+    });
+  };
   try {
-    if (savedTask?.generation !== remote.generation)
-      await fs.writeFile(path.join(root, '.runner-note'), remote.task.context?.note ?? '', {
-        mode: 0o600,
-      });
+    const restored =
+      resumed?.restored &&
+      resumed.resume?.engine ===
+        resolveTaskOptions(
+          {
+            engine: remote.task.usage?.engine ?? remote.task.definition.engine,
+            model: remote.task.usage?.model ?? remote.task.definition.model,
+          },
+          loadConfig(cwd),
+        ).engine;
+    const workers = new Map<string, Promise<void>>();
     const running = execAgent({
       cwd,
       ...(savedTask?.generation === remote.generation ? { resumeTaskId: savedTask.id } : {}),
-      noteFile: path.join(root, '.runner-note'),
+      ...(resumed?.resume ? { resume: resumed.resume } : {}),
       agent: remote.task.agent,
       flow: remote.task.flow,
-      task: remote.task,
+      // A resumed conversation already holds the earlier messages.
+      task: restored
+        ? { ...remote.task, context: { ...remote.task.context, messages: undefined } }
+        : remote.task,
       toolEnvironment: { tokens: { ...remote.tokens, ...remote.nativeTokens } },
       connections: remote.connections,
       connectionEnv: remote.connectionEnv,
       post: remote.task.source === event?.integration,
-      ...(eventToken ? { postToken: eventToken } : {}),
+      ...(postToken ? { postToken } : {}),
       onStart(started) {
         flow = started;
       },
+      onWorker(started, exited) {
+        workers.set(started, exited);
+      },
       async onTask(started) {
         taskId = started;
+        if (event && remote.task.source === event.integration) {
+          stopReplies?.();
+          stopReplies = serveTaskReplies(
+            cwd,
+            started,
+            async text => {
+              const postedMessages = await postReply(
+                INTEGRATIONS[event.integration]!,
+                event,
+                text,
+                postToken!,
+                remote.task.author,
+                false,
+                true,
+              );
+              await taskRequest(auth.server, auth.token, id, '/result', {
+                method: 'POST',
+                body: JSON.stringify({ status: 'running', postedMessages }),
+              });
+            },
+            (emoji, message) =>
+              postReaction(
+                INTEGRATIONS[event.integration]!,
+                event,
+                emoji,
+                postToken!,
+                remote.task.author,
+                message,
+              ),
+          );
+        }
         if (timeout.aborted) {
           const task = loadTask(cwd, started);
           if (task) await stopTask(cwd, task);
@@ -705,21 +867,81 @@ async function runCheckedOutTask(
                 });
           }, 4000);
       },
-      onApproval(approval) {
-        return taskRequest(auth.server, auth.token, id, '/result', {
-          method: 'POST',
-          body: JSON.stringify({ status: 'waiting', approval }),
-        });
-      },
+      onApproval,
     });
-    const result = await Promise.race([
-      running,
-      new Promise<never>((_, reject) => {
-        const abort = () => reject(timeout.reason);
-        timeout.addEventListener('abort', abort, { once: true });
-        if (timeout.aborted) abort();
-      }),
-    ]);
+    const aborted = new Promise<never>((_, reject) => {
+      const abort = () => reject(timeout.reason);
+      timeout.addEventListener('abort', abort, { once: true });
+      if (timeout.aborted) abort();
+    });
+    const result = await Promise.race([running, aborted]);
+    if (taskId && remote.task.flow === 'default') {
+      const postedMessages = [...(result.postedMessages ?? [])];
+      let pollMs = 100;
+      for (;;) {
+        const exited = workers.get(taskId);
+        if (exited) {
+          await Promise.race([exited, aborted]);
+          if (workers.get(taskId) === exited) workers.delete(taskId);
+        } else {
+          await waitForRollover(cwd, taskId, timeout);
+        }
+        const turns = readTurnResults(cwd, taskId);
+        for (const turn of turns.slice(deliveredTurns)) {
+          const reply = threadReply(
+            remote.task,
+            {
+              finalMessage: turn.finalMessage,
+              error: turn.error,
+            },
+            cancelled,
+            turn,
+          );
+          if (reply.skipped) appendTaskLog(cwd, taskId, { kind: 'status', message: SKIPPED });
+          if (remote.task.source === event?.integration && reply.text && !reply.duplicate)
+            postedMessages.push(
+              ...(await postReply(
+                INTEGRATIONS[event.integration]!,
+                event,
+                reply.text,
+                postToken!,
+                remote.task.author,
+                reply.problem,
+              )),
+            );
+          result.reply = reply.text;
+          result.ok = turn.status === 0;
+        }
+        deliveredTurns = Math.max(deliveredTurns, turns.length);
+        const queued = hasQueuedSteers(cwd, taskId);
+        const current = loadTask(cwd, taskId);
+        if (current?.status === 'running' || current?.status === 'queued') {
+          await Promise.race([waitForAgentTask(cwd, taskId, onApproval), aborted]);
+          continue;
+        }
+        if (current?.rollingOver || (queued && current?.status === 'completed')) {
+          timeout.throwIfAborted();
+          await new Promise(resolve => setTimeout(resolve, pollMs));
+          pollMs = Math.min(1000, pollMs * 2);
+          continue;
+        }
+        if (!inboxClosed) {
+          clearInterval(shortPoll);
+          await fetching;
+          await inbox.close();
+          inboxClosed = true;
+          continue;
+        }
+        if (readTurnResults(cwd, taskId).length <= deliveredTurns) break;
+      }
+      const usage = readTurnResults(cwd, taskId, true)
+        .slice(previousTurns)
+        .flatMap(turn => (turn.tokens ? [turn.tokens] : []));
+      result.tokens = usage.length
+        ? usage.reduce((total, tokens) => addTokens(total, tokens)!)
+        : (readResultJson(cwd, taskId)?.tokens ?? result.tokens);
+      if (postedMessages.length) result.postedMessages = postedMessages;
+    }
     await flushLogs();
     while (pendingAck) {
       timeout.throwIfAborted();
@@ -730,7 +952,7 @@ async function runCheckedOutTask(
       status: cancelled ? 'cancelled' : result.ok ? 'completed' : 'failed',
       result: result.reply ?? result.result,
       tokens: result.tokens,
-      ...(result.note !== undefined ? { note: result.note } : {}),
+      ...(result.postedMessages?.length ? { postedMessages: result.postedMessages } : {}),
       ...(cwd !== root ? { diff: await changes(cwd).catch(() => undefined) } : {}),
     });
     return result;
@@ -757,13 +979,14 @@ async function runCheckedOutTask(
     await flushLogs();
     throw error;
   } finally {
+    stopReplies?.();
     clearInterval(logTimer);
     await forwarding?.catch(() => {});
     clearInterval(ackTimer);
     clearInterval(shortPoll);
     controller.abort();
     await Promise.allSettled([fetching, acknowledging]);
-    await inbox.close();
+    if (!inboxClosed) await inbox.close();
   }
 }
 

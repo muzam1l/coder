@@ -55,10 +55,17 @@ import {
   type ResolvedTaskOptions,
   type TurnResult,
   ACTIVE_STATUSES,
+  HISTORY_LOST,
   TERMINAL_STATUSES,
 } from './types';
 import { listPendingApprovals } from './approvals';
 import { mcpApproved, mcpWarnings } from './mcp';
+import {
+  FALLBACK_INSTRUCTIONS,
+  FALLBACK_NOTE,
+  taskSystemPrompt,
+  type AgentPromptParts,
+} from './prompts';
 
 const STARTUP_ERROR_PATTERN =
   /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|not available|ENOENT/i;
@@ -504,11 +511,15 @@ export interface DispatchOptions {
   permissions?: string;
   name?: string | null;
   system?: string | null;
+  /** The agent's part of the engine's system prompt. */
+  agentPrompt?: AgentPromptParts;
   wait?: boolean;
   simulateApproval?: boolean;
   /** Tags the created task as belonging to a flow run (for `coder list` grouping). */
   flowRunId?: string;
   agentId?: string;
+  /** A conversation's task, whose history rolls over past the context budget. */
+  conversation?: boolean;
   source?: string;
   /** Handle an agent task posts as. */
   author?: string;
@@ -519,6 +530,7 @@ export interface DispatchOptions {
   mcpWarnings?: string[];
   nativeMcp?: boolean;
   connectionEnv?: Record<string, string>;
+  onWorker?: (taskId: string, exited: Promise<void>) => void;
   connections?: string[];
   mcpBindings?: Task['mcpBindings'];
   connectionSource?: Task['connectionSource'];
@@ -530,6 +542,11 @@ export interface DispatchOptions {
   onNote?: (note: string) => void;
   /** A durable local delivery retries the same task. */
   taskId?: string;
+  /** An engine conversation and its chain to continue, used only when the task runs on that engine. */
+  resume?: Pick<Task, 'previousThreadIds' | 'pendingRollover'> & {
+    engine: string;
+    threadId: string;
+  };
 }
 
 const PERMISSION_ORDER = ['read-only', 'workspace-write', 'auto'];
@@ -563,7 +580,7 @@ export function spawnWorker(
   cwd: string,
   taskId: string,
   connectionEnv: Record<string, string> = {},
-): void {
+): Promise<void> {
   const taskDir = resolveTaskDir(cwd, taskId);
   const logFd = fs.openSync(path.join(taskDir, 'worker.log'), 'a');
   const env = { ...process.env, ...connectionEnv };
@@ -573,9 +590,15 @@ export function spawnWorker(
     stdio: ['ignore', logFd, logFd],
     env: { ...env, ...claudeVersionEnvironment(env, cwd), [WORKER_ENV]: '1' },
   });
+  const exited = new Promise<void>(resolve => {
+    child.once('exit', () => resolve());
+    child.once('error', () => resolve());
+  });
   child.unref();
   fs.closeSync(logFd);
   writeTask(cwd, taskId, { pid: child.pid ?? null });
+
+  return exited;
 }
 
 // One attempt on one engine: availability gate, task create, spawn, startup wait.
@@ -615,24 +638,40 @@ async function attemptOnce(
   const addDirs = opts.addDirs ?? [];
 
   const taskId = opts.taskId ?? generateTaskId();
+  const resume = opts.resume?.engine === resolved.engine ? opts.resume : undefined;
   const task = writeTask(cwd, taskId, {
     status: 'queued',
     ...(opts.taskId ? { dispatchId: randomUUID() } : {}),
     kind: 'task',
     name: taskExtras.name ?? null,
     system: opts.system ?? null,
+    systemPrompt: taskSystemPrompt({
+      ...opts.agentPrompt,
+      instructions: opts.system ?? undefined,
+      conversation: opts.conversation,
+      agent: Boolean(opts.agentId),
+      local: process.env.CODER_MCP_MODE !== 'cloud',
+    }),
     engine: resolved.engine,
     prompt: opts.prompt,
     ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
     model: resolved.model,
     effort: resolved.effort,
     permissions: resolved.permissions,
-    resumeThreadId: null,
+    resumeThreadId: resume?.threadId ?? null,
+    ...(resume
+      ? {
+          threadId: resume.threadId,
+          ...(resume.previousThreadIds ? { previousThreadIds: resume.previousThreadIds } : {}),
+          ...(resume.pendingRollover ? { pendingRollover: resume.pendingRollover } : {}),
+        }
+      : {}),
     cwd,
     background: !opts.wait,
     ...(taskExtras.simulateApproval ? { simulateApproval: true } : {}),
     ...(opts.flowRunId ? { flowRunId: opts.flowRunId } : {}),
     ...(opts.agentId ? { agentId: opts.agentId } : {}),
+    ...(opts.conversation ? { conversation: true } : {}),
     ...(opts.source ? { source: opts.source } : {}),
     ...(opts.author ? { author: opts.author } : {}),
     ...(opts.repo ? { repo: opts.repo } : {}),
@@ -648,7 +687,10 @@ async function attemptOnce(
   // kills the task.
   for (const message of new Set(opts.mcpWarnings ?? []))
     appendTaskLog(cwd, taskId, { kind: 'warning', message });
-  spawnWorker(cwd, taskId, opts.connectionEnv);
+  if (opts.resume && !resume)
+    appendTaskLog(cwd, taskId, { kind: 'warning', message: HISTORY_LOST });
+  const exited = spawnWorker(cwd, taskId, opts.connectionEnv);
+  opts.onWorker?.(taskId, exited);
 
   if (!waitForStartup)
     return {
@@ -728,9 +770,8 @@ export function buildFallbackPayload(
       action: 'run-native-subagent',
       reason: 'no-engine-available',
       permissions,
-      instructions:
-        'Mention the engine failure to the user, including any limit reset time. If your harness has a native subagent facility, spawn one subagent with fallback.task verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If fallback.permissions is "read-only", append: "Investigate and report without modifying anything." If it is "workspace-write", append: "Never touch anything outside the workspace." Relay its output when it completes. If your harness has no native subagent facility, report the failure and stop; do not implement the task yourself.',
-      note: 'Every coder engine failed to start. Spawn your own native subagent and forward the task verbatim; tell it to never run git write operations (commit, checkout, stash, reset, push, ...) and to honor the permissions.',
+      instructions: FALLBACK_INSTRUCTIONS,
+      note: FALLBACK_NOTE,
       ...(system ? { system } : {}),
       task,
     },

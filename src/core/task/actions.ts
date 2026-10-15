@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 
 import {
   appendTaskLog,
@@ -11,6 +12,7 @@ import {
   unarchiveTask,
   writeTask,
   resolveTaskDir,
+  LIVE_STEER,
   listTasks,
   archiveDue,
   listArchivedTasks,
@@ -18,6 +20,7 @@ import {
   queueOwnedTasks,
   resolveWorkspaceRoot,
   reconcileTask,
+  processStartMs,
   tailSteps,
   type TaskLogEntry,
   archiveTask,
@@ -28,14 +31,15 @@ import { steerTurn, runTurn, interruptTurn } from '../engines/codex';
 import { steerClaudeTurn, runClaudeTurn, type ClaudeTurnOptions } from '../engines/claude';
 import {
   ACTIVE_STATUSES,
+  type McpServerSpec,
   type Task,
   type Effort,
   type TurnResult,
   TERMINAL_STATUSES,
 } from '../types';
 import { byListKey, listRank } from '../defaults';
-import { CoderError, selectMcpServers, spawnWorker } from '../dispatch';
-import { localConnections } from '../connections';
+import { CoderError, resolveMcpServers, selectMcpServers, spawnWorker } from '../dispatch';
+import { connectionEnvironment, localConnections } from '../connections';
 import { isEndpointModel, loadConfig, resolveCodexModel, resolveCustomModel } from '../config';
 import { startChatBridge } from '../engines/codex/chat-bridge';
 import { listPendingApprovals } from '../approvals';
@@ -45,10 +49,32 @@ import { mailboxId, type MailboxKey } from '../mailbox';
 import { CLI_PATH } from '../runtime';
 import { deleteCodexSession } from '../engines/codex/sessions';
 import { deleteClaudeSession } from '../engines/claude/sessions';
+import { conversationIds } from '../engines/history';
+import { askPrompt } from '../prompts';
 
-type ConnectionResolver = (
+export type ConnectionResolver = (
   granted: string[],
 ) => Promise<Pick<Awaited<ReturnType<typeof localConnections>>, 'mcp' | 'env' | 'warnings'>>;
+
+/** The granted connections among servers a task already resolved, their values from this process's env. */
+export function heldConnections(
+  servers: McpServerSpec[] | undefined,
+  cwd?: string,
+  pin = (server: McpServerSpec) => server,
+): ConnectionResolver {
+  return async granted => ({
+    ...connectionEnvironment(
+      Object.fromEntries(
+        resolveMcpServers(servers, process.env, cwd).flatMap(server => {
+          const id = server.connection ?? server.name;
+
+          return granted.includes(id) ? [[id, pin(server)]] : [];
+        }),
+      ),
+    ),
+    warnings: [],
+  });
+}
 
 /** How a steer was applied to a task. */
 export type SteerOutcome = 'live' | 'queued' | 'resumed';
@@ -82,7 +108,7 @@ async function trySteerRunning(
   if (result.steered) {
     appendTaskLog(cwd, task.id, {
       kind: 'steer',
-      message: `Steer accepted live:\n${text}`,
+      message: `${LIVE_STEER}${text}`,
     });
     return { taskId: task.id, steered: 'live' };
   }
@@ -98,14 +124,15 @@ async function trySteerRunning(
   // for the worker to run when the current turn ends.
   const fresh = loadTask(cwd, task.id) ?? task;
   if (ACTIVE_STATUSES.includes(fresh.status)) {
-    enqueueSteer(cwd, fresh.id, text);
-    appendTaskLog(cwd, fresh.id, {
-      kind: 'steer',
-      message: `Steer queued for the next turn:\n${text}`,
-    });
+    queueSteer(cwd, fresh.id, text);
     return { taskId: fresh.id, steered: 'queued' };
   }
   return null;
+}
+
+function queueSteer(cwd: string, id: string, text: string): void {
+  enqueueSteer(cwd, id, text);
+  appendTaskLog(cwd, id, { kind: 'steer', message: `Steer queued for the next turn:\n${text}` });
 }
 
 // Print-free core (SDK `task.steer`).
@@ -126,6 +153,11 @@ export async function steerTask(
     claude?: typeof steerClaudeTurn;
   } = {},
 ): Promise<{ taskId: string; steered: SteerOutcome }> {
+  const current = loadTask(cwd, task.id) ?? task;
+  if (current.rollingOver && reconcileTask(cwd, current).rollingOver) {
+    queueSteer(cwd, task.id, text);
+    return { taskId: task.id, steered: 'queued' };
+  }
   if (!task.threadId) {
     throw new CoderError(
       'invalid-option',
@@ -141,8 +173,58 @@ export async function steerTask(
     if (current.archived) unarchiveTask(cwd, current);
     return running;
   }
-  await resumeInPlace(cwd, task, text, opts);
-  return { taskId: task.id, steered: 'resumed' };
+  return { taskId: task.id, steered: await resumeInPlace(cwd, task, text, opts) };
+}
+
+function claimResume(claim: string): boolean {
+  const staging = fs.mkdtempSync(`${claim}-`);
+  const owner = `${process.pid}-${processStartMs(process.pid) ?? 0}-${randomUUID()}`;
+  fs.mkdirSync(path.join(staging, owner));
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        fs.renameSync(staging, claim);
+        return true;
+      } catch (error) {
+        if (
+          !['EEXIST', 'ENOTEMPTY', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')
+        )
+          throw error;
+      }
+      try {
+        if (fs.statSync(claim).isFile()) {
+          if (Date.now() - fs.statSync(claim).mtimeMs < 60_000) return false;
+          fs.unlinkSync(claim);
+          continue;
+        }
+        for (const entry of fs.readdirSync(claim)) {
+          const parts = entry.split('-');
+          const pid = Number(parts[0]);
+          const started = Number(parts[1]);
+          let alive = false;
+          if (Number.isInteger(pid) && pid > 0) {
+            try {
+              process.kill(pid, 0);
+              alive = true;
+            } catch (error) {
+              alive = (error as NodeJS.ErrnoException).code === 'EPERM';
+            }
+          }
+          const actual = alive ? processStartMs(pid) : null;
+          if (alive && (!started || actual === null || actual === started)) return false;
+          // Remove only the observed owner, so a racing takeover cannot lose its marker.
+          fs.rmdirSync(path.join(claim, entry));
+        }
+        fs.rmdirSync(claim);
+      } catch (error) {
+        if (!['ENOENT', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? ''))
+          throw error;
+      }
+    }
+    return false;
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
 }
 
 // A stopped task resumes on the SAME task record (never a stray new task id),
@@ -158,88 +240,87 @@ async function resumeInPlace(
     outputSchema?: object;
     resolveConnections?: ConnectionResolver;
   },
-): Promise<void> {
+): Promise<'resumed' | 'queued'> {
   if (task.connectionSource === 'server' && !opts.resolveConnections)
     throw new Error('Server connection resolver is required to resume this task');
-  const connected = opts.resolveConnections
-    ? await opts.resolveConnections(task.connections ?? [])
-    : await localConnections(undefined, task.connections ?? []);
-  const servers =
-    task.mcp?.map(server => {
-      const connection =
-        server.connection ??
-        (server.resolved && task.connections?.includes(server.name) ? server.name : undefined);
-      return connection ? { ...server, connection, resolved: false } : server;
-    }) ?? [];
-  const bindings =
-    task.mcpBindings ??
-    servers
-      .filter(server => server.connection)
-      .map(({ name, connection, tools }) => ({ name, connection, ...(tools ? { tools } : {}) }));
-  const declared = new Set(bindings.map(server => server.connection));
-  const selected = selectMcpServers(
-    [...bindings, ...servers.filter(server => !declared.has(server.connection))],
-    {},
-    {},
-    connected.mcp,
-  );
-  if (task.archived) unarchiveTask(cwd, task);
-  writeTask(cwd, task.id, {
-    mcp: selected.mcp,
-    mcpBindings: bindings,
-    status: 'queued',
-    resumedAt: new Date().toISOString(),
-    currentPrompt: text,
-    ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
-    resumeThreadId: task.threadId,
-    steerEndpoint: null,
-    model: (opts.model ?? task.model ?? null) as Task['model'],
-    effort: (opts.effort ?? task.effort ?? null) as Task['effort'],
-    permissions: (opts.permissions ?? task.permissions) as Task['permissions'],
-    error: undefined,
-  });
-  appendTaskLog(cwd, task.id, {
-    kind: 'steer',
-    message: `Resuming with steer:\n${text}`,
-  });
-  for (const warning of [...connected.warnings, ...(selected.warnings ?? [])])
-    appendTaskLog(cwd, task.id, { kind: 'status', message: warning });
-  spawnWorker(task.cwd ?? cwd, task.id, connected.env);
+  // One resume per finished turn: a steer racing it, or reaching it before it runs, waits for the next turn.
+  const fresh = loadTask(cwd, task.id);
+  const turn = [fresh?.completedAt, fresh?.resumedAt].map(at => Date.parse(at ?? '') || 0);
+  const claim = path.join(resolveTaskDir(cwd, task.id), `resume-${turn.join('-')}`);
+  if ((fresh && ACTIVE_STATUSES.includes(fresh.status)) || !claimResume(claim)) {
+    queueSteer(cwd, task.id, text);
+    return 'queued';
+  }
+  let published = false;
+  try {
+    for (const name of fs.readdirSync(resolveTaskDir(cwd, task.id)))
+      if (/^resume-\d+-\d+$/.test(name) && name !== path.basename(claim))
+        fs.rmSync(path.join(resolveTaskDir(cwd, task.id), name), { recursive: true, force: true });
+    const connected = opts.resolveConnections
+      ? await opts.resolveConnections(task.connections ?? [])
+      : await localConnections(undefined, task.connections ?? []);
+    const servers =
+      task.mcp?.map(server => {
+        const connection =
+          server.connection ??
+          (server.resolved && task.connections?.includes(server.name) ? server.name : undefined);
+        return connection ? { ...server, connection, resolved: false } : server;
+      }) ?? [];
+    const bindings =
+      task.mcpBindings ??
+      servers
+        .filter(server => server.connection)
+        .map(({ name, connection, tools }) => ({ name, connection, ...(tools ? { tools } : {}) }));
+    const declared = new Set(bindings.map(server => server.connection));
+    const selected = selectMcpServers(
+      [...bindings, ...servers.filter(server => !declared.has(server.connection))],
+      {},
+      {},
+      connected.mcp,
+    );
+    if (task.archived) unarchiveTask(cwd, task);
+    writeTask(cwd, task.id, {
+      mcp: selected.mcp,
+      mcpBindings: bindings,
+      status: 'queued',
+      resumedAt: new Date().toISOString(),
+      currentPrompt: text,
+      ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
+      resumeThreadId: task.threadId,
+      steerEndpoint: null,
+      model: (opts.model ?? task.model ?? null) as Task['model'],
+      effort: (opts.effort ?? task.effort ?? null) as Task['effort'],
+      permissions: (opts.permissions ?? task.permissions) as Task['permissions'],
+      error: undefined,
+    });
+    published = true;
+    appendTaskLog(cwd, task.id, {
+      kind: 'steer',
+      message: `Resuming with steer:\n${text}`,
+    });
+    for (const warning of [...connected.warnings, ...(selected.warnings ?? [])])
+      appendTaskLog(cwd, task.id, { kind: 'status', message: warning });
+    spawnWorker(task.cwd ?? cwd, task.id, connected.env);
+  } catch (error) {
+    if (published)
+      writeTask(cwd, task.id, {
+        status: fresh?.status ?? task.status,
+        resumedAt: fresh?.resumedAt,
+        currentPrompt: fresh?.currentPrompt ?? null,
+        resumeThreadId: fresh?.resumeThreadId ?? null,
+        error: fresh?.error,
+      });
+    fs.rmSync(path.join(resolveTaskDir(cwd, task.id), path.basename(claim)), {
+      recursive: true,
+      force: true,
+    });
+    throw error;
+  }
+
+  return 'resumed';
 }
 
 const CLAUDE_SIDECAR_INSPECTION_TOOLS = ['Read', 'Glob', 'Grep'];
-
-// Read-only sidecar: answers ABOUT a task from its on-disk state, never
-// touching its thread or creating a task record.
-export function sidecarPrompt(task: Task, taskDir: string, question: string): string {
-  const meta = [
-    `id: ${task.id}`,
-    ...(task.name ? [`name: ${task.name}`] : []),
-    `status: ${task.status}`,
-    `engine: ${task.engine}${task.model ? `/${task.model}` : ''}${task.effort ? `/${task.effort}` : ''}`,
-    ...(task.cwd ? [`workspace: ${task.cwd}`] : []),
-    ...(task.createdAt ? [`created: ${task.createdAt}`] : []),
-    ...(task.completedAt ? [`finished: ${task.completedAt}`] : []),
-  ].join('\n');
-  return `You are a read-only sidecar answering a question ABOUT a coder task.
-You are not the task. Never continue, redo, or fix its work. Only answer the question. The task never sees this question or your answer.
-
-Task metadata:
-${meta}
-
-Task prompt:
-${task.prompt ?? '(unknown)'}
-
-Inspect as needed (grep/read selectively; events can be large):
-- progress log (jsonl, one event per line): ${path.join(taskDir, 'log.jsonl')}
-- final result: ${path.join(taskDir, 'result.json')}
-- worker output: ${path.join(taskDir, 'worker.log')}
-${task.cwd ? `- the task's workspace (its code and changes): ${task.cwd}` : ''}
-
-Question: ${question}
-
-Answer the question directly and concisely.`;
-}
 
 export function claudeAskOptions(
   task: Task,
@@ -269,9 +350,12 @@ export async function askTask(
   opts: { model?: string; effort?: string; command?: MailboxKey } = {},
 ): Promise<TurnResult> {
   const taskDir = resolveTaskDir(cwd, task.id);
-  const prompt =
-    sidecarPrompt(task, taskDir, question) +
-    (opts.command ? `\n\nCoder command ${mailboxId(opts.command)}` : '');
+  const prompt = askPrompt(
+    task,
+    taskDir,
+    question,
+    opts.command ? mailboxId(opts.command) : undefined,
+  );
   const onResult = opts.command
     ? (result: TurnResult) => {
         const dir = path.join(taskDir, 'inbox-control');
@@ -521,9 +605,9 @@ export function spawnArchiveSweep(cwd: string, ids: string[], opts: { flows?: bo
 
 /** Delete a task: the engine session behind it (best-effort, so it leaves codex and claude too), then its state dir. */
 export function deleteTask(cwd: string, task: Task): boolean {
-  if (task.threadId) {
-    if (task.engine !== 'claude') void deleteCodexSession(cwd, task.threadId);
-    else deleteClaudeSession(task.threadId);
+  for (const threadId of conversationIds(task)) {
+    if (task.engine !== 'claude') void deleteCodexSession(cwd, threadId);
+    else deleteClaudeSession(threadId);
   }
   return removeTaskDir(cwd, task.id);
 }

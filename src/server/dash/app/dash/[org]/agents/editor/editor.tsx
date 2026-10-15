@@ -402,7 +402,7 @@ export function AgentEditor({
       const { apps = [] } = await client.agents.put(id, {
         definition,
         ...(files ? { files } : {}),
-        systemPrompt: draft.systemPrompt.trim() ? draft.systemPrompt : `You are ${name || id}.\n`,
+        systemPrompt: draft.systemPrompt,
         ...(name ? { name } : {}),
         ...(draft.description.trim() ? { description: draft.description.trim() } : {}),
       });

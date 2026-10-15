@@ -1,6 +1,6 @@
 .tasks {
   table-layout: fixed;
-  min-width: 720px;
+  min-width: 756px;
 }
 .tasks th:nth-child(2) {
   width: 160px;
@@ -8,8 +8,9 @@
 .tasks th:nth-child(3) {
   width: 130px;
 }
+/* fits "Not available" */
 .tasks th:nth-child(4) {
-  width: 100px;
+  width: 136px;
 }
 .tasks th:nth-child(5) {
   width: 204px;

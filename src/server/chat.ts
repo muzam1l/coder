@@ -4,8 +4,10 @@ import { createHash } from 'node:crypto';
 import { Chat, Message, type SerializedMessage, type SerializedThread, type Thread } from 'chat';
 
 import { definitionEvents, eventOptions } from '../agent/definition';
-import { type AgentApp, type AgentEvent, type TaskContext } from '../agent/types';
+import { postReplyParts, reactToMessage } from '../agent/exec';
+import { type AgentApp, type AgentEvent } from '../agent/types';
 import { agentWithVersion } from './agents/records';
+import { syncLocalAgents } from './store/local';
 import type { AdapterContext, ChatRoute, Integration, TokenBound } from '../integrations/types';
 import { forInstallation, type ServerContext } from './context';
 import { appChatState, LocalChatState } from './store/chat';
@@ -14,13 +16,10 @@ import { updateMetadata } from './store';
 import { installationToken } from './tasks/context';
 import { DELIVERY_TTL_MS, dispatchEvent, type Replies } from './tasks/events';
 import { conversationKey } from './tasks/thread';
+import { knownKey, reactToConversation, recordUnseen } from './tasks/conversation';
 import { dashPath, organizationSlug } from './auth/account';
 import { kick } from './tasks/kick';
 import { recordFailure } from './tasks/failures';
-
-const HISTORY_LIMIT = 10;
-/** Messages read at most to reach a long thread's end. */
-const HISTORY_SCAN = 1000;
 
 /** The installation a webhook names, and its repository when it has one. */
 export interface Target {
@@ -30,6 +29,8 @@ export interface Target {
   self?: string;
   /** The covered account it happened in. */
   within?: string;
+  /** The message's position in its conversation, when the webhook states it. */
+  index?: number;
 }
 
 /** One of the app's installations in the workspace it is bound to; a removed one is none. */
@@ -76,7 +77,7 @@ function stored<T extends SerializedThread | SerializedMessage>(value: T): T {
 
 const escape = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-/** The integration's event a Chat SDK handler raises. */
+/** The integration's event a Chat SDK handler raises; where several share a handler, the first, which the integration's `event()` refines. */
 const raisedBy = (integration: Integration, route: ChatRoute) =>
   Object.keys(integration.events).find(name => integration.events[name]!.on === route);
 
@@ -107,14 +108,18 @@ async function hears(
   integration: Integration,
   app: AgentApp,
   target: Target,
+  type: string,
   text: string,
 ): Promise<boolean> {
   if (app.builtin) return addressedTo(text, app.agent) !== undefined;
-  const type = raisedBy(integration, 'message');
   const tenant = await forInstallation(ctx, `${app.id}:${target.id}`);
-  if (!type || !tenant) return false;
-  // A local server reads its agents from disk at dispatch.
-  if (tenant.local) return true;
+  if (integration.events[type]?.on !== 'message' || !tenant) return false;
+  // A local server's agents live on disk.
+  if (tenant.local)
+    await (
+      tenant.syncAgent?.(app.agent) ??
+      syncLocalAgents(tenant.store, tenant.local.cwd, tenant.integrations, app.agent)
+    ).catch(error => console.error('coder server: local agent sync failed', error));
 
   const { record, version } = await agentWithVersion(tenant.store, app.agent);
   if (!record || !version) return true;
@@ -148,7 +153,7 @@ export function later(
   if (ctx.waitUntil) ctx.waitUntil(logged);
 }
 
-/** One event into the workspace its installation is bound to, answered in its thread; a queued task is kicked once it lands. */
+/** One event into the workspace its installation is bound to, answered in its thread; a queued task is kicked once it lands, after `accepted`. */
 export async function deliver(
   ctx: ServerContext,
   integration: Integration,
@@ -156,6 +161,7 @@ export async function deliver(
   credentials: unknown,
   event: AgentEvent,
   replies: Replies,
+  accepted?: () => Promise<void>,
 ): Promise<string | undefined> {
   if (app.builtin && integration.app.builtin !== 'shared') return;
   const key = `${app.id}:${event.installationId}`;
@@ -178,43 +184,43 @@ export async function deliver(
     replies,
   );
   await dispatched.work;
-  if (dispatched.taskId) await kick(tenant, true, false, true);
+  if (!dispatched.taskId) return;
+
+  await accepted?.();
+  await kick(tenant, true, false, true);
   return dispatched.taskId;
 }
 
-/** Replies through a Chat SDK thread: public posts, and private ones only where the platform has them. */
+/** Replies through a Chat SDK thread: public posts as Markdown in parts the platform accepts, and private ones only where the platform has them. */
 export function threadReplies(
   thread: Thread,
   user?: Message['author'] | string,
   message?: Message | string,
+  limit?: number,
 ): Replies {
   // Where the platform answers one message, the reply goes to the one that raised the event, not the thread's newest.
-  const post = (text: string) =>
-    message && thread.adapter.reply ? thread.reply(message, text) : thread.post(text);
+  const post = async (text: string, progress = false) => {
+    const sent = await postReplyParts(thread, text, limit, message, progress);
+
+    return { id: sent.at(-1)?.id, ids: sent.map(message => message.id) };
+  };
   const marks = (
-    thread.adapter as { postProblem?(threadId: string, text: string): Promise<unknown> }
+    thread.adapter as {
+      postProblem?(threadId: string, text: string): Promise<{ id?: string } | null | void>;
+    }
   ).postProblem;
 
   return {
     post,
+    react: (emoji, target) =>
+      reactToMessage(
+        thread,
+        emoji,
+        target ?? (typeof message === 'string' ? message : message?.id),
+      ),
     problem: text => (marks ? marks.call(thread.adapter, thread.id, text) : post(text)),
     whisper: text =>
       user ? thread.postEphemeral(user, text, { fallbackToDM: false }) : Promise.resolve(null),
-    // Oldest first through every page: an adapter's newest-first read may stop at its first page (Slack's at 200).
-    async recent() {
-      const messages: NonNullable<TaskContext['messages']> = [];
-      let read = 0;
-      for await (const message of thread.allMessages) {
-        messages.push({
-          user: message.author.userName || message.author.userId,
-          text: message.text,
-          ts: message.metadata.dateSent.toISOString(),
-        });
-        if (messages.length > HISTORY_LIMIT) messages.shift();
-        if (++read === HISTORY_SCAN) break;
-      }
-      return messages;
-    },
   };
 }
 
@@ -235,6 +241,7 @@ export async function eventReplies(
     chat.thread(event.chat.thread.id),
     event.actor.id || undefined,
     event.chat.message?.id || undefined,
+    ctx.integrations[app.integration]?.replyLimit,
   );
 }
 
@@ -281,10 +288,37 @@ function chatEvent(
     },
     text,
     chat: { thread: stored(thread.toJSON()), message: stored(message.toJSON()) },
+    ...(target.index !== undefined ? { conversation: { index: target.index } } : {}),
     ...(target.within ? { within: target.within } : {}),
     ...(target.repo ? { repo: target.repo } : {}),
     ...extra,
   };
+}
+
+/** A message the app does not take, in a conversation with a task: kept for the agent's next turn under `since`. */
+async function unseen(
+  ctx: ServerContext,
+  app: AgentApp,
+  target: Target,
+  thread: Thread,
+  message: Message,
+): Promise<void> {
+  const tenant = await workspace(ctx, app, target).catch(error => {
+    console.error('coder server: conversation workspace lookup failed', error);
+    return undefined;
+  });
+  if (!tenant) return;
+  const event: Pick<AgentEvent, 'appId' | 'installationId' | 'chat'> = {
+    appId: app.id,
+    installationId: target.id,
+    chat: { thread: stored(thread.toJSON()) },
+  };
+
+  await recordUnseen(tenant, event as AgentEvent, {
+    author: message.author.userName || message.author.userId,
+    text: message.text,
+    sentAt: message.metadata.dateSent.toISOString(),
+  }).catch(error => console.error(`coder server: could not keep a message for ${app.id}`, error));
 }
 
 /** The workspace a target's installation is bound to, when it may read it: a workspace's own app reads only its own, and an install only its granted accounts. */
@@ -334,14 +368,20 @@ export function adapterContext(
     },
     ...(target
       ? {
-          hears: text =>
-            hears(ctx, integration, app, target, text).catch(error => {
+          hears: (type, text) =>
+            hears(ctx, integration, app, target, type, text).catch(error => {
               console.error(`coder server: could not read ${app.id}'s agent for a message`, error);
               return true;
             }),
           active: async thread => {
             const tenant = await forInstallation(ctx, `${app.id}:${target.id}`);
             const key = conversationKey(app.id, target.id, thread);
+
+            return Boolean(await tenant?.store.get('delivery', key));
+          },
+          knows: async (channel, message) => {
+            const tenant = await forInstallation(ctx, `${app.id}:${target.id}`);
+            const key = knownKey(app.id, target.id, channel, message);
 
             return Boolean(await tenant?.store.get('delivery', key));
           },
@@ -399,6 +439,17 @@ export function adapterContext(
 export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target): Promise<Chat> {
   const integration = ctx.integrations[app.integration];
   if (!integration) throw new Error(`Unknown integration "${app.integration}"`);
+  const synced = new Map<string, Promise<unknown>>();
+  ctx = {
+    ...ctx,
+    fetch:
+      integration.requestFetch?.(ctx.fetch ?? fetch, target?.within ?? target?.id) ?? ctx.fetch,
+    syncAgent: slug => {
+      if (!synced.has(slug))
+        synced.set(slug, syncLocalAgents(ctx.store, ctx.local!.cwd, ctx.integrations, slug));
+      return synced.get(slug)!;
+    },
+  };
   const credentials = decryptSecret(ctx.config, app.credentials);
   const adapter = await integration.adapter(
     adapterContext(ctx, integration, app, credentials, target),
@@ -417,32 +468,52 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
   // Dispatch continues after the handler so no webhook waits on it.
   const receive = async (route: ChatRoute, thread: Thread, message: Message, delivery?: string) => {
     const event = chatEvent(integration, app, target, route, thread, message, delivery);
-    if (!event) return;
-    const replies = threadReplies(thread, message.author, message);
+    if (!event) {
+      if (message.author.isBot !== true) await unseen(ctx, app, target, thread, message);
+      return;
+    }
+    const replies = threadReplies(thread, message.author, message, integration.replyLimit);
     later(ctx, app, event, deliver(ctx, integration, app, credentials, event, replies), replies);
   };
   chat.onNewMention((thread, message) => receive('mention', thread, message));
   chat.onNewMessage(/[\s\S]*/, (thread, message) => receive('message', thread, message));
-  chat.onReaction(async reaction => {
-    if (!reaction.added) return;
-    const identity = integration.reactionId?.(reaction);
-    if (!identity) return;
-    const message = new Message({
-      id: reaction.messageId,
-      threadId: reaction.threadId,
-      text: reaction.message?.text ?? '',
-      formatted: reaction.message?.formatted ?? { type: 'root', children: [] },
-      raw: reaction.raw,
-      author: reaction.user,
-      metadata: reaction.message?.metadata ?? { dateSent: new Date(), edited: false },
-      attachments: [],
-    });
-    await receive(
-      'reaction',
-      reaction.thread as Thread,
+  // An edit steers like a new message.
+  chat.onMessageUpdated((thread, message) =>
+    receive(
+      message.isMention ? 'mention' : 'message',
+      thread,
       message,
-      `reaction\n${identity}\n${reaction.user.userId}\n${reaction.rawEmoji}`,
+      `edit\n${message.id}\n${message.metadata.editedAt?.toISOString() ?? ''}`,
+    ),
+  );
+  // Reactions raise no event; those in a running task's conversation are gathered into one steer.
+  chat.onReaction(async reaction => {
+    if (!reaction.added || reaction.user.isBot === true) return;
+    const thread = reaction.thread as Thread;
+    const tenant = await workspace(ctx, app, target);
+    if (!tenant) return;
+    const event: AgentEvent = {
+      integration: integration.id,
+      type: 'reactions',
+      appId: app.id,
+      installationId: target.id,
+      deliveryId: `reaction-${reaction.messageId}-${reaction.user.userId}-${reaction.rawEmoji}`,
+      actor: { id: reaction.user.userId, login: reaction.user.userName },
+      text: '',
+      chat: { thread: stored(thread.toJSON()) },
+      ...(target.within ? { within: target.within } : {}),
+    };
+    const work = reactToConversation(
+      tenant,
+      event,
+      {
+        emoji: `:${reaction.emoji.name}:`,
+        by: reaction.user.userName || reaction.user.userId,
+        on: reaction.message?.text ?? reaction.messageId,
+      },
+      ctx.now ?? Date.now,
     );
+    later(ctx, app, event, work);
   });
   // `/setup` is the one command Coder registers.
   chat.onSlashCommand('/setup', async command => {

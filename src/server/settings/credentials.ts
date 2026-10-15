@@ -498,8 +498,12 @@ export async function reseal(
 }
 
 /** The one-click fix for a missing credential: the Credentials page, open at that engine. */
-export async function credentialFix(ctx: ServerContext, engine: string): Promise<string> {
-  const page = dashPath(await organizationSlug(ctx), '/settings/credentials');
+export async function credentialFix(
+  ctx: ServerContext,
+  engine: string,
+  slug?: string,
+): Promise<string> {
+  const page = dashPath(slug ?? (await organizationSlug(ctx)), '/settings/credentials');
 
   return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${page}?engine=${encodeURIComponent(engine)}`;
 }

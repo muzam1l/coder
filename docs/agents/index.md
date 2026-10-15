@@ -1,8 +1,8 @@
 # Agents
 
-An agent is a reusable teammate. Its `system.md` holds the standing instructions every task starts from: who it is, what it knows, how it answers. Its definition adds engine, model, effort and permissions defaults, the MCP servers it attaches and the [flows](../flows.md) it may run. Run it from the CLI with `coder task run --agent <id> "…"`, where flags override the defaults, from the [dashboard](../dash.md), or from platform events like a Slack DM or a GitHub pull request.
+An agent is a reusable teammate. Its `system.md` holds the standing instructions every task starts from: who it is, what it knows, how it answers. Its definition adds engine, model, effort and permissions defaults, the MCP servers it attaches and the [flows](../flows.md) it may run. Run it from the CLI with `coder task run --agent <id> "…"`, where flags override the defaults, from the [dashboard](../dash.md), or from platform events like a Slack DM or a GitHub pull request. [Prompt](prompt.md) shows everything its engine gets, per task kind.
 
-Connected to a platform, an agent listens for the events it names. Each event runs as a task with a fresh checkout, the agent's instructions, the event as its request, and only the platform tools the agent declared; the reply goes back to the thread. A bigger task can run a flow instead, with the event as its `args`.
+Connected to a platform, an agent listens for the events it names. Each event runs as a task with a fresh checkout, the agent's instructions, the event as its request, and only the platform tools the agent declared; the reply goes back to the thread. Later messages in that conversation, from anyone, steer its task while it runs and resume it once it has finished. A bigger task can run a flow instead, with the event as its `args`.
 
 On each platform an agent is its own app, a GitHub App or a Slack app for example, so it has its own handle and permissions and runs only where it is installed. Agents run on a Coder server: the hosted one, [your own](../self-host.md), or this machine's [dashboard](../dash.md).
 
@@ -32,7 +32,7 @@ Here is a helper that answers in Slack and on GitHub issues:
   "permissions": "read-only",
   "integrations": {
     "slack": {
-      "events": { "mention": true, "message": { "match": "^help\\b" } },
+      "events": { "mention": true, "channel": { "match": "^help\\b" } },
       "tools": "comment"
     },
     "github": { "events": ["mention"], "tools": "observe" }
@@ -118,10 +118,10 @@ An integration gives an agent two things:
 | Platform        | App                                                                                                                                                                              | Events                                                     | Tools                                                                                                                  |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | GitHub          | A [GitHub App](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) per agent                                                           | `mention`, `pull_request`, `issue`, `comment`              | GitHub's [MCP server](https://github.com/github/github-mcp-server); `observe` runs it read-only                        |
-| Slack           | A [Slack app](https://api.slack.com/reference/manifests) per agent                                                                                                               | `mention`, `message`, `reaction`, `command`                | `slack_api(method, args)` over the [Web API](https://api.slack.com/methods), with writes limited to the event's thread |
+| Slack           | A [Slack app](https://api.slack.com/reference/manifests) per agent                                                                                                               | `mention`, `dm`, `channel`, `command`                      | `slack_api(method, args)` over the [Web API](https://api.slack.com/methods), with writes limited to the event's thread |
 | Linear          | Your [Linear OAuth app](https://linear.app/developers/agents), with webhooks to `<PUBLIC_URL>/hooks/linear?app=<client id>`                                                      | `mention`: an agent session                                | None yet                                                                                                               |
 
-A Slack app's Home tab shows the agent and how to use it, and links to this server's tasks and agents unfurl into a short card.
+On Slack, `dm` takes every message in direct and group DMs with the agent, and `channel` every message in channels it is in, up to Slack's 30,000 events per workspace per app per hour. A Slack app's Home tab shows the agent and how to use it, and links to this server's tasks and agents unfurl into a short card.
 
 When an agent's app needs other events, permissions or settings, publishing the agent brings it up to date. Coder updates a Slack app itself and lists the changes to make on GitHub and Linear, and **Update on <platform>** in the handle's menu on the Platforms tab does the same later.
 

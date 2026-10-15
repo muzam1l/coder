@@ -48,6 +48,7 @@ type Issue = {
   body?: string | null;
   user?: User;
   pull_request?: unknown;
+  comments?: number;
 };
 type Payload = {
   action?: string;
@@ -415,7 +416,13 @@ export const github: Integration = {
   use: 'Mention @{handle} in an issue or pull request.',
   organizationApps: true,
   publicApps: true,
-  hint: 'Cite repository file paths when discussing code. After making changes, link the pull request.',
+  prompt: [
+    'A conversation is an issue or pull request with its comments, or one inline review comment thread.',
+    'issue_read reads an issue and its comments. pull_request_read reads a pull request: get, get_diff and get_files for the change, get_comments for its conversation, get_reviews and get_review_comments for reviews and inline comments.',
+    'Review findings are inline review comments marked coder-review:fp.',
+    "A task on a pull request starts on the default branch; check out the pull request's head before changing code.",
+    'Replies are GitHub Markdown. Cite repository file paths when discussing code; link the pull request after making changes.',
+  ].join('\n'),
   sample: 'github:owner/repo:1',
   author: name => `${name}[bot]`,
   events: {
@@ -428,7 +435,7 @@ export const github: Integration = {
     pull_request: { description: 'Opened, updated, or ready non-draft pull request.' },
     issue: { description: 'Opened or edited issue.' },
     comment: {
-      description: 'New non-agent issue or pull-request comment.',
+      description: 'New non-agent issue, pull request, or inline review comment.',
       on: 'message',
       noisy: true,
     },
@@ -487,21 +494,30 @@ export const github: Integration = {
   target(req, raw) {
     const app = req.headers.get('x-github-hook-installation-target-id');
     if (!app) return undefined;
-    const payload = value(json(raw));
+    const payload = value(json(raw)) as Payload & { comment?: { in_reply_to_id?: number } };
     const repo = checkout(payload);
+    // A comment's position is the conversation's comment count; a review thread knows only that its finding is the root.
+    const index = payload.issue
+      ? payload.issue.comments
+      : payload.comment && payload.comment.in_reply_to_id === undefined
+        ? 0
+        : undefined;
     return {
       app,
       ...(payload.installation?.id !== undefined
         ? { installation: String(payload.installation.id) }
         : {}),
       ...(repo ? { repo } : {}),
+      ...(index !== undefined ? { index } : {}),
     };
   },
   adapter: async ctx => (await import('./adapter')).githubAdapter(ctx),
   link(event) {
-    const thread = /^github:([^:]+):(issue:)?(\d+)(?::|$)/.exec(event.chat?.thread.id ?? '');
+    const thread = /^github:([^:]+):(issue:)?(\d+)(?::rc:(\d+))?(?::|$)/.exec(
+      event.chat?.thread.id ?? '',
+    );
     return thread
-      ? `https://github.com/${thread[1]}/${thread[2] ? 'issues' : 'pull'}/${thread[3]}`
+      ? `https://github.com/${thread[1]}/${thread[2] ? 'issues' : 'pull'}/${thread[3]}${thread[4] ? `#discussion_r${thread[4]}` : ''}`
       : undefined;
   },
   ownEvents(req, raw, app, credentials) {

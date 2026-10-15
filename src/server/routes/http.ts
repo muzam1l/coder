@@ -57,7 +57,11 @@ export const toLogin = (url: URL) =>
   redirect(`/login?return=${encodeURIComponent(`${url.pathname}${url.search}`)}`);
 
 export const bodyLimit = (path: string): number =>
-  path.startsWith('/api/auth') ? 64 * 1024 : 1024 * 1024;
+  path.startsWith('/api/auth')
+    ? 64 * 1024
+    : /\/tasks\/[^/]+\/history$/.test(path)
+      ? 4 * 1024 * 1024
+      : 1024 * 1024;
 
 export async function readLimited(
   body: AsyncIterable<Uint8Array>,

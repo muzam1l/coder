@@ -1,4 +1,4 @@
-/** A local server's records in the CLI's own home: apps, installations and runners in `apps.json`, connections and API key credentials with their secrets in the keychain, notes and deliveries under `state/global`. */
+/** A local server's records in the CLI's own home: apps, installations and runners in `apps.json`, connections and API key credentials with their secrets in the keychain, deliveries under `state/global`. */
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFile } from 'node:child_process';
@@ -7,11 +7,16 @@ import { LocalConnections } from '../../core/connections';
 import { coderHome, resolveStateDir, resolveRunnerUsageFile } from '../../core/state';
 import {
   checkBinding,
+  batchValue,
+  availableBatch,
+  finishedBatch,
+  unseenValue,
   credentialLock,
   matchesStoreRow,
   MemoryStore,
   writeCredentials,
 } from './memory';
+import { BATCH_LEASE_MS, type Batch, type Unseen } from '../tasks/conversation';
 import type {
   CredentialScope,
   CredentialWork,
@@ -23,7 +28,7 @@ import type {
 } from './types';
 import { loadAgents } from '../../agent/load';
 import type { AgentApp, Installation } from '../../agent/types';
-import type { Integration } from '../../integrations/types';
+import type { Integration, SinceMessage } from '../../integrations/types';
 import type { AgentRecord, AgentVersionRecord } from './types';
 import { agentWithVersion, diskFiles, listAgents, versionKey } from '../agents/records';
 
@@ -31,7 +36,7 @@ type Records = Partial<Record<'app' | 'installation' | 'runner', Record<string, 
 type Deliveries = Record<string, { value: unknown; expiresAt?: number }>;
 
 const APPS = new Set<StoreKind>(['app', 'installation', 'runner']);
-const QUEUED = new Set<StoreKind>(['task', 'tasklog', 'inbox', 'usage']);
+const QUEUED = new Set<StoreKind>(['task', 'history', 'tasklog', 'inbox', 'usage']);
 const KEYCHAIN = new Set<StoreKind>(['connection', 'credential']);
 // Rebuilt from agent folders and CLI tasks on each request, never the only copy.
 const DERIVED = new Set<StoreKind>(['agent', 'agentversion']);
@@ -97,14 +102,6 @@ export class LocalStore implements Store {
     return path.join(resolveStateDir(''), 'deliveries.json');
   }
 
-  private get notesDir() {
-    return path.join(resolveStateDir(''), 'notes');
-  }
-
-  private noteFile(id: string) {
-    return path.join(this.notesDir, `${encodeURIComponent(id)}.md`);
-  }
-
   /** One write at a time inside this process; the server is the only writer of these files. */
   private serial<T>(work: () => T, connection = false): Promise<T> {
     const next = this.writes.then(() =>
@@ -158,16 +155,6 @@ export class LocalStore implements Store {
     }
     if (kind === 'delivery' || kind === 'snapshot' || QUEUED.has(kind))
       return Object.entries(this.deliveries(kind)).map(([id, entry]) => [id, entry.value]);
-    if (kind === 'note') {
-      let names: string[] = [];
-      try {
-        names = fs.readdirSync(this.notesDir).filter(name => name.endsWith('.md'));
-      } catch {}
-      return names.map(name => [
-        decodeURIComponent(name.slice(0, -3)),
-        fs.readFileSync(path.join(this.notesDir, name), 'utf8'),
-      ]);
-    }
     return [];
   }
 
@@ -181,13 +168,6 @@ export class LocalStore implements Store {
   async get(kind: StoreKind, id: string): Promise<StoreRecords[StoreKind] | undefined> {
     if (kind === 'connection') return this.connections().get(id);
     if (DERIVED.has(kind)) return this.derived.get(kind, id);
-    if (kind === 'note') {
-      try {
-        return fs.readFileSync(this.noteFile(id), 'utf8');
-      } catch {
-        return undefined;
-      }
-    }
 
     return this.entries(kind).find(([key]) => key === id)?.[1] as
       StoreRecords[StoreKind] | undefined;
@@ -235,8 +215,7 @@ export class LocalStore implements Store {
       const deliveries = this.deliveries(kind);
       deliveries[id] = { value, ...(ttlMs === undefined ? {} : { expiresAt: this.now() + ttlMs }) };
       writeAtomic(this.recordsFile(kind), `${JSON.stringify(deliveries)}\n`);
-    } else if (kind === 'note') writeAtomic(this.noteFile(id), String(value));
-    else this.refuse(kind);
+    } else this.refuse(kind);
   }
 
   private remove(kind: StoreKind, id: string): boolean {
@@ -265,13 +244,13 @@ export class LocalStore implements Store {
       if (!(id in deliveries)) return false;
       delete deliveries[id];
       writeAtomic(this.recordsFile(kind), `${JSON.stringify(deliveries)}\n`);
+      if (kind === 'task') {
+        const histories = this.deliveries('history');
+        for (const key of Object.keys(histories))
+          if (key.startsWith(`${id}:`)) delete histories[key];
+        writeAtomic(this.recordsFile('history'), `${JSON.stringify(histories)}\n`);
+      }
       return true;
-    }
-    if (kind === 'note') {
-      const file = this.noteFile(id);
-      const found = fs.existsSync(file);
-      fs.rmSync(file, { force: true });
-      return found;
     }
     return false;
   }
@@ -279,8 +258,9 @@ export class LocalStore implements Store {
   async putMany<K extends StoreKind>(
     kind: K,
     entries: Array<{ id: string; value: StoreRecords[K] }>,
+    opts: { ttlMs?: number } = {},
   ): Promise<void> {
-    for (const entry of entries) await this.put(kind, entry.id, entry.value);
+    for (const entry of entries) await this.put(kind, entry.id, entry.value, opts);
   }
 
   list<K extends StoreKind>(
@@ -396,6 +376,110 @@ export class LocalStore implements Store {
       if (receipt?.owner !== owner) return false;
       if (value === undefined) this.remove('delivery', id);
       else this.write('delivery', id, value, opts.ttlMs);
+      return true;
+    });
+  }
+
+  async appendUnseen(key: string, message: SinceMessage, ttlMs: number): Promise<void> {
+    return this.serial(() => {
+      const entries = this.deliveries();
+      if (!entries[key]) return;
+      const id = `since:${key}`;
+      this.write(
+        'delivery',
+        id,
+        unseenValue(entries[id]?.value as Unseen | undefined, message),
+        ttlMs,
+      );
+    });
+  }
+
+  async acknowledgeUnseen(key: string, through: number, epoch?: string): Promise<void> {
+    return this.serial(() => {
+      const id = `since:${key}`;
+      const entry = this.deliveries()[id];
+      if (!entry) return;
+      this.write(
+        'delivery',
+        id,
+        unseenValue(entry.value as Unseen, undefined, through, epoch),
+        entry.expiresAt === undefined ? undefined : entry.expiresAt - this.now(),
+      );
+    });
+  }
+
+  async appendBatch(
+    id: string,
+    owner: string,
+    items: unknown[],
+    at: number,
+    ttlMs: number,
+  ): Promise<void> {
+    return this.serial(() => {
+      const entry = this.deliveries()[id];
+      const current = entry?.value as Batch | undefined;
+      const next = batchValue(current, owner, items, at);
+      const expiresAt = this.now() + ttlMs;
+      this.write(
+        'delivery',
+        id,
+        next,
+        expiresAt === undefined ? undefined : expiresAt - this.now(),
+      );
+    });
+  }
+
+  async claimBatch(id: string, owner: string): Promise<Batch | null | undefined> {
+    return this.withAppLock(`batch:${id}`, () =>
+      this.serial(() => {
+        const entry = this.deliveries()[id];
+        let current = entry?.value as Batch | undefined;
+        if (current?.owner !== owner || !current.items.length) return undefined;
+        if (current.sending && (current.sending.until ?? 0) > this.now()) return null;
+        if (current.sending) current = availableBatch(current);
+        const next = {
+          ...current,
+          more: 0,
+          mustReply: false,
+          sending: {
+            owner,
+            until: this.now() + BATCH_LEASE_MS,
+            count: current.items.length,
+            more: current.more,
+            mustReply: current.mustReply,
+          },
+        };
+        const expiresAt = entry!.expiresAt;
+        this.write(
+          'delivery',
+          id,
+          next,
+          expiresAt === undefined ? undefined : expiresAt - this.now(),
+        );
+        return current;
+      }),
+    );
+  }
+
+  async finishBatch(
+    id: string,
+    owner: string,
+    accepted: boolean,
+    through?: string,
+  ): Promise<boolean> {
+    return this.serial(() => {
+      const entry = this.deliveries()[id];
+      const current = entry?.value as Batch | undefined;
+      if (current?.sending?.owner !== owner) return false;
+      const next = finishedBatch(current, accepted, through, this.now());
+      const expiresAt = entry!.expiresAt;
+      this.write(
+        'delivery',
+        id,
+        next,
+        expiresAt === undefined ? undefined : expiresAt - this.now(),
+      );
+
       return true;
     });
   }

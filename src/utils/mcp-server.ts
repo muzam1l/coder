@@ -4,6 +4,12 @@ import readline from 'node:readline';
 export interface McpTool<C> {
   description: string;
   inputSchema: Record<string, unknown>;
+  annotations?: {
+    readOnlyHint?: boolean;
+    destructiveHint?: boolean;
+    idempotentHint?: boolean;
+    openWorldHint?: boolean;
+  };
   handler: (args: Record<string, any>, ctx: C) => Promise<unknown>;
 }
 
@@ -48,6 +54,7 @@ export async function serveTools<C>(
             name: toolName,
             description: tool.description,
             inputSchema: tool.inputSchema,
+            ...(tool.annotations ? { annotations: tool.annotations } : {}),
           })),
         },
       });
@@ -78,10 +85,16 @@ export async function serveTools<C>(
 export function schema(
   props: Record<string, 'string' | 'number' | 'boolean' | 'array' | 'object'>,
   required: string[] = Object.keys(props),
+  descriptions: Record<string, string> = {},
 ): Record<string, unknown> {
   return {
     type: 'object',
-    properties: Object.fromEntries(Object.entries(props).map(([k, type]) => [k, { type }])),
-    required,
+    properties: Object.fromEntries(
+      Object.entries(props).map(([k, type]) => [
+        k,
+        { type, ...(descriptions[k] === undefined ? {} : { description: descriptions[k] }) },
+      ]),
+    ),
+    ...(required.length ? { required } : {}),
   };
 }

@@ -1,4 +1,6 @@
 /** `Store` over the server tables: today's string ids live in key columns, the bodies in typed columns. */
+import { randomUUID } from 'node:crypto';
+
 import {
   and,
   asc,
@@ -17,8 +19,17 @@ import {
 } from 'drizzle-orm';
 import { alias, type PgColumn } from 'drizzle-orm/pg-core';
 
-import type { AgentApp } from '../../../agent/types';
-import type { AgentVersionRecord, DeliveryLease, TaskLogLine } from '../types';
+import {
+  BATCH_LEASE_MS,
+  type Batch,
+  type Conversation,
+  type ConversationState,
+  type Unseen,
+} from '../../tasks/conversation';
+import { SINCE_LIMIT } from '../../../core/prompts';
+import type { SinceMessage } from '../../../integrations/types';
+import type { AgentApp, Installation } from '../../../agent/types';
+import type { AgentVersionRecord, DeliveryLease, TaskHistory, TaskLogLine } from '../types';
 import type { ServerConfig } from '../../context';
 import { type EngineLogin } from '../../settings/logins';
 import {
@@ -62,7 +73,7 @@ import {
   writeCredential,
 } from './tables/apps';
 import { state, runners } from './tables/resources';
-import { writeCredentials } from '../memory';
+import { batchValue, writeCredentials } from '../memory';
 import {
   agentValue,
   app,
@@ -75,10 +86,12 @@ import {
   versionColumns,
   versionSummary,
   stateKey,
+  taskRecord,
+  rows,
   type Kind,
   type Rows,
 } from './tables/shared';
-import { inboxes, logs, tasks, usages } from './tables/tasks';
+import { histories, historySummaries, inboxes, logs, tasks, usages } from './tables/tasks';
 import type {
   Store,
   StoreListOptions,
@@ -113,11 +126,11 @@ export class DrizzleStore implements Store {
       installation: installations(this),
       credential: credentials(this),
       task: tasks(this),
+      history: histories(this),
       tasklog: logs(this),
       inbox: inboxes(this),
       usage: usages(this),
       delivery: state(this, 'delivery'),
-      note: state(this, 'note'),
       login: state(this, 'login'),
       config: state(this, 'config'),
       runner: runners(this),
@@ -679,10 +692,27 @@ export class DrizzleStore implements Store {
   async putMany<K extends StoreKind>(
     kind: K,
     entries: Array<{ id: string; value: StoreRecords[K] }>,
+    opts: { ttlMs?: number } = {},
   ): Promise<void> {
     if (!entries.length) return;
+    if (kind === 'delivery') {
+      await this.db
+        .insert(chatState)
+        .values(
+          entries.map(({ id, value }) => ({
+            key: stateKey(this.organizationId, kind, id),
+            value,
+            expiresAt: opts.ttlMs === undefined ? null : date(this.now() + opts.ttlMs),
+          })),
+        )
+        .onConflictDoUpdate({
+          target: chatState.key,
+          set: { value: sql`excluded.value`, expiresAt: sql`excluded.expires_at` },
+        });
+      return;
+    }
     if (kind !== 'tasklog') {
-      await Promise.all(entries.map(entry => this.put(kind, entry.id, entry.value)));
+      await Promise.all(entries.map(entry => this.put(kind, entry.id, entry.value, opts)));
       return;
     }
 
@@ -894,6 +924,253 @@ export class DrizzleStore implements Store {
             .where(where)
             .returning({ key: chatState.key });
     return rows.length > 0;
+  }
+
+  listHistory(id: string): Promise<Array<Omit<TaskHistory, 'data' | 'state'>>> {
+    return historySummaries(this, id);
+  }
+
+  async installationApp(
+    id: string,
+  ): Promise<{ installation: Installation; app: AgentApp } | undefined> {
+    const token = alias(secret, 'installation_secret');
+    const [row] = await readQuery(this.db, () =>
+      this.db
+        .select({ installation: install, app, credentials: secret, token })
+        .from(install)
+        .innerJoin(app, and(eq(app.id, install.appId), this.mine(app.organizationId)))
+        .innerJoin(secret, eq(secret.id, app.credentialsSecretId))
+        .leftJoin(token, and(eq(token.id, install.tokenSecretId), this.mine(token.organizationId)))
+        .where(
+          and(this.mine(install.organizationId), eq(install.key, id), isNull(install.deletedAt)),
+        ),
+    );
+
+    return (
+      row && {
+        installation: installationValue(row.installation, row.app, row.token),
+        app: appValue(row.app, row.credentials),
+      }
+    );
+  }
+
+  async conversationState(key: string): Promise<ConversationState> {
+    const unseen = alias(chatState, 'unseen');
+    const batch = alias(chatState, 'batch');
+    const [row] = await readQuery(this.db, () =>
+      this.db
+        .select({ record: chatState.value, unseen: unseen.value, batch: batch.value, task })
+        .from(sql`(select 1) as anchor`)
+        .leftJoin(
+          chatState,
+          and(
+            eq(chatState.key, stateKey(this.organizationId, 'delivery', key)),
+            this.live(chatState.expiresAt),
+          ),
+        )
+        .leftJoin(
+          unseen,
+          and(
+            eq(unseen.key, stateKey(this.organizationId, 'delivery', `since:${key}`)),
+            this.live(unseen.expiresAt),
+          ),
+        )
+        .leftJoin(
+          batch,
+          and(
+            eq(batch.key, stateKey(this.organizationId, 'delivery', `batch:${key}`)),
+            this.live(batch.expiresAt),
+          ),
+        )
+        .leftJoin(
+          task,
+          and(
+            this.mine(task.organizationId),
+            eq(task.publicId, sql`${chatState.value}->>'taskId'`),
+            eq(task.flow, 'default'),
+          ),
+        ),
+    );
+
+    return {
+      ...(row?.record ? { record: row.record as Conversation } : {}),
+      ...(row?.unseen ? { unseen: row.unseen as Unseen } : {}),
+      ...(row?.batch ? { batch: row.batch as Batch } : {}),
+      ...(row?.task ? { status: taskRecord(row.task) } : {}),
+    };
+  }
+
+  async markConversation(
+    key: string,
+    taskId: string,
+    seen: string,
+    at: number,
+    ttlMs: number,
+  ): Promise<void> {
+    await this.db
+      .update(chatState)
+      .set({
+        value: sql`${chatState.value} || ${JSON.stringify({ at, seen })}::jsonb`,
+        expiresAt: date(this.now() + ttlMs),
+      })
+      .where(
+        and(
+          eq(chatState.key, stateKey(this.organizationId, 'delivery', key)),
+          sql`${chatState.value}->>'taskId' = ${taskId}`,
+          this.live(chatState.expiresAt),
+        ),
+      );
+  }
+
+  async appendUnseen(key: string, message: SinceMessage, ttlMs: number): Promise<void> {
+    const version = sql`coalesce((${chatState.value}->>'version')::bigint, jsonb_array_length(${chatState.value}->'messages') + (${chatState.value}->>'more')::bigint)`;
+    const value = {
+      messages: [{ ...message, sequence: 1 }],
+      more: 0,
+      version: 1,
+      epoch: randomUUID(),
+    };
+    await this.db.execute(sql`
+      insert into ${chatState} (key, value, expires_at)
+      select ${stateKey(this.organizationId, 'delivery', `since:${key}`)}, ${JSON.stringify(value)}::jsonb, ${date(this.now() + ttlMs).toISOString()}::timestamptz
+      where exists (select 1 from ${chatState} where key = ${stateKey(this.organizationId, 'delivery', key)} and ${this.live(chatState.expiresAt)})
+      on conflict (key) do update set value = case when ${chatState.expiresAt} <= ${this.at().toISOString()}::timestamptz then excluded.value else
+        ${chatState.value} || jsonb_build_object('version', ${version} + 1,
+          'messages', case when jsonb_array_length(${chatState.value}->'messages') < ${SINCE_LIMIT} then
+            (${chatState.value}->'messages') || jsonb_build_array(${JSON.stringify(message)}::jsonb || jsonb_build_object('sequence', ${version} + 1)) else ${chatState.value}->'messages' end,
+          'more', (${chatState.value}->>'more')::int + case when jsonb_array_length(${chatState.value}->'messages') < ${SINCE_LIMIT} then 0 else 1 end) end,
+        expires_at = excluded.expires_at
+    `);
+  }
+
+  async acknowledgeUnseen(key: string, through: number, epoch?: string): Promise<void> {
+    const version = sql`coalesce((${chatState.value}->>'version')::bigint, jsonb_array_length(${chatState.value}->'messages') + (${chatState.value}->>'more')::bigint)`;
+    const acknowledged = sql`greatest(coalesce((${chatState.value}->>'acknowledged')::bigint, 0), least(${through}, ${version}))`;
+    await this.db
+      .update(chatState)
+      .set({
+        value: sql`(select ${chatState.value} || jsonb_build_object('version', ${version}, 'acknowledged', ${acknowledged},
+        'messages', remaining, 'more', ${version} - ${acknowledged} - jsonb_array_length(remaining))
+        from (select coalesce(jsonb_agg(item order by n) filter (where coalesce((item->>'sequence')::bigint, n) > ${acknowledged}), '[]'::jsonb) as remaining
+          from jsonb_array_elements(${chatState.value}->'messages') with ordinality e(item,n)) as pending)`,
+      })
+      .where(
+        and(
+          eq(chatState.key, stateKey(this.organizationId, 'delivery', `since:${key}`)),
+          sql`${chatState.value}->>'epoch' is not distinct from ${epoch ?? null}::text`,
+          this.live(chatState.expiresAt),
+        ),
+      );
+  }
+
+  async appendBatch(
+    id: string,
+    owner: string,
+    items: unknown[],
+    at: number,
+    ttlMs: number,
+  ): Promise<void> {
+    const value = batchValue(undefined, owner, items, at);
+    const expiresAt = date(this.now() + ttlMs);
+    await this.db
+      .insert(chatState)
+      .values({
+        key: stateKey(this.organizationId, 'delivery', id),
+        value,
+        expiresAt,
+      })
+      .onConflictDoUpdate({
+        target: chatState.key,
+        set: {
+          value: sql`case when ${chatState.expiresAt} <= ${this.at().toISOString()}::timestamptz then excluded.value else
+          (select ${chatState.value} || excluded.value || jsonb_build_object(
+            'items', prefix || coalesce((select jsonb_agg(item order by n) from jsonb_array_elements(pending) with ordinality e(item,n) where n > greatest(jsonb_array_length(pending) - 50, 0)), '[]'::jsonb),
+            'more', coalesce((${chatState.value}->>'more')::int, 0) + coalesce((excluded.value->>'more')::int, 0) + greatest(jsonb_array_length(pending) - 50, 0),
+            'mustReply', coalesce((${chatState.value}->>'mustReply')::boolean, false) or coalesce((excluded.value->>'mustReply')::boolean, false) or exists(select 1 from jsonb_array_elements(pending) with ordinality e(item,n) where n <= greatest(jsonb_array_length(pending) - 50, 0) and item->'event'->>'mustReply' = 'true'))
+            from (select coalesce(jsonb_agg(item order by n) filter (where n <= coalesce((${chatState.value}->'sending'->>'count')::int, 0)), '[]'::jsonb) as prefix,
+              coalesce(jsonb_agg(item order by n) filter (where n > coalesce((${chatState.value}->'sending'->>'count')::int, 0)), '[]'::jsonb) || (excluded.value->'items') as pending
+              from jsonb_array_elements(${chatState.value}->'items') with ordinality e(item,n)) queued) end`,
+          expiresAt,
+        },
+      });
+  }
+
+  async claimBatch(id: string, owner: string): Promise<Batch | null | undefined> {
+    const key = stateKey(this.organizationId, 'delivery', id);
+    const result = await rows<{ value: Batch; claimed: boolean }>(
+      this.db,
+      sql`
+      with held as materialized (
+        select key as batch_key, value as previous from ${chatState}
+        where key = ${key} and value->>'owner' = ${owner} and ${this.live(chatState.expiresAt)} for update
+      ), claimed as (
+        update ${chatState} set value = (
+          select ready || jsonb_build_object('more', 0, 'mustReply', false, 'sending', jsonb_build_object(
+            'owner', ${owner}::text, 'until', ${this.now() + BATCH_LEASE_MS}::bigint,
+            'count', jsonb_array_length(ready->'items'), 'more', ready->'more', 'mustReply', ready->'mustReply'))
+          from (select (value - 'sending') || jsonb_build_object(
+            'items', coalesce((select jsonb_agg(item order by n) from jsonb_array_elements(value->'items') with ordinality e(item,n)
+              where n > greatest(jsonb_array_length(value->'items') - 50, 0)), '[]'::jsonb),
+            'more', coalesce((value->>'more')::int, 0) + coalesce((value->'sending'->>'more')::int, 0) + greatest(jsonb_array_length(value->'items') - 50, 0),
+            'mustReply', coalesce((value->>'mustReply')::boolean, false) or coalesce((value->'sending'->>'mustReply')::boolean, false) or exists(
+              select 1 from jsonb_array_elements(value->'items') with ordinality e(item,n)
+              where n <= greatest(jsonb_array_length(value->'items') - 50, 0) and item->'event'->>'mustReply' = 'true')) as ready) as available)
+        from held where key = held.batch_key and coalesce((value->'sending'->>'until')::bigint, 0) <= ${this.now()}
+          and jsonb_array_length(value->'items') > 0
+        returning value
+      ) select value, true as claimed from claimed
+      union all select previous, false from held where not exists (select 1 from claimed)
+    `,
+    );
+    const row = result[0];
+    return row?.claimed
+      ? { ...row.value, more: row.value.sending?.more, mustReply: row.value.sending?.mustReply }
+      : row?.value.sending
+        ? null
+        : undefined;
+  }
+
+  async finishBatch(
+    id: string,
+    owner: string,
+    accepted: boolean,
+    through?: string,
+  ): Promise<boolean> {
+    const reserved = sql`(${chatState.value}->'sending'->>'count')::int`;
+    const admitted =
+      through === undefined
+        ? reserved
+        : sql`coalesce((select n from jsonb_array_elements(${chatState.value}->'items') with ordinality e(item,n)
+          where n <= ${reserved} and item->>'admission' = ${through} limit 1), 0)`;
+    const result = await this.db
+      .update(chatState)
+      .set({
+        value: sql`case when ${accepted} and ${reserved} > ${admitted} then
+          ${chatState.value} || jsonb_build_object('items',
+            coalesce((select jsonb_agg(item order by n) from jsonb_array_elements(${chatState.value}->'items') with ordinality e(item,n)
+              where n > ${admitted}), '[]'::jsonb),
+            'sending', (${chatState.value}->'sending') || jsonb_build_object(
+              'count', ${reserved} - ${admitted},
+              'until', ${this.now() + BATCH_LEASE_MS}::bigint))
+        else (${chatState.value} - 'sending') || jsonb_build_object('items',
+        case when ${accepted} then coalesce((select jsonb_agg(item order by n) from jsonb_array_elements(${chatState.value}->'items') with ordinality as entries(item, n)
+          where n > ${reserved}), '[]'::jsonb) else
+          coalesce((select jsonb_agg(item order by n) from jsonb_array_elements(${chatState.value}->'items') with ordinality e(item,n)
+            where n > greatest(jsonb_array_length(${chatState.value}->'items') - 50, 0)), '[]'::jsonb) end,
+        'more', coalesce((${chatState.value}->>'more')::int, 0) + case when ${accepted} then 0 else coalesce((${chatState.value}->'sending'->>'more')::int, 0) + greatest(jsonb_array_length(${chatState.value}->'items') - 50, 0) end,
+        'mustReply', coalesce((${chatState.value}->>'mustReply')::boolean, false) or (not ${accepted} and (coalesce((${chatState.value}->'sending'->>'mustReply')::boolean, false) or exists(select 1 from jsonb_array_elements(${chatState.value}->'items') with ordinality e(item,n)
+          where n <= greatest(jsonb_array_length(${chatState.value}->'items') - 50, 0) and item->'event'->>'mustReply' = 'true')))) end`,
+      })
+      .where(
+        and(
+          eq(chatState.key, stateKey(this.organizationId, 'delivery', id)),
+          sql`${chatState.value}->'sending'->>'owner' = ${owner}`,
+          this.live(chatState.expiresAt),
+        ),
+      )
+      .returning({ key: chatState.key });
+
+    return result.length > 0;
   }
 
   async take(kind: StoreKind, id: string): Promise<boolean> {

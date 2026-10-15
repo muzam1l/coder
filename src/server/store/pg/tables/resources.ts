@@ -17,9 +17,10 @@ import {
   type Kind,
 } from './shared';
 
-export function state<
-  K extends 'delivery' | 'note' | 'login' | 'snapshot' | 'config' | 'connection',
->(s: DrizzleStore, kind: K): Kind<StoreRecords[K]> {
+export function state<K extends 'delivery' | 'login' | 'snapshot' | 'config' | 'connection'>(
+  s: DrizzleStore,
+  kind: K,
+): Kind<StoreRecords[K]> {
   const t = chatState;
   const prefix = statePrefix(s.organizationId, kind);
   const key = t.key;

@@ -24,7 +24,14 @@ import type {
   TaskContext,
   TaskSource,
 } from '../../../agent/types';
-import type { AgentRecord, EngineCredential, TaskLogLine, TaskOutcome, TaskState } from '../types';
+import type {
+  AgentRecord,
+  EngineCredential,
+  TaskHistory,
+  TaskLogLine,
+  TaskOutcome,
+  TaskState,
+} from '../types';
 
 /** Everything Coder owns lives in its own Postgres schema, so a database can be shared. */
 export const coder = pgSchema('coder');
@@ -224,6 +231,7 @@ export const task = pgTable(
     status: text().$type<TaskState>().notNull(),
     agent: text().notNull(),
     flow: text().notNull(),
+    reviewKey: text(),
     runner: text().notNull(),
     permissions: text().$type<AgentDefinition['permissions']>(),
     appId: bigint({ mode: 'number' }).references(() => integrationApp.id, { onDelete: 'set null' }),
@@ -273,6 +281,9 @@ export const task = pgTable(
       .on(t.organizationId)
       .where(sql`${t.status} = 'queued'`),
     index().on(t.status, t.createdAt),
+    index()
+      .on(t.organizationId, t.reviewKey)
+      .where(sql`${t.status} in ('running', 'waiting')`),
   ],
 );
 
@@ -310,6 +321,23 @@ export const taskLog = pgTable(
     line: text().notNull(),
   },
   t => [uniqueIndex('task_log_taskId_seq_unique').on(t.taskId, t.seq)],
+);
+
+/** A task's engine conversations, one row each, gzipped and encrypted. */
+export const taskHistory = pgTable(
+  'task_history',
+  {
+    ...owned,
+    taskId: bigint({ mode: 'number' })
+      .notNull()
+      .references(() => task.id, { onDelete: 'cascade' }),
+    engine: text().$type<TaskHistory['engine']>().notNull(),
+    conversation: text().notNull(),
+    data: text().notNull(),
+    state: text(),
+    savedAt: at().notNull(),
+  },
+  t => [uniqueIndex('task_history_taskId_conversation_unique').on(t.taskId, t.conversation)],
 );
 
 /** A deleted task's id for a while, so every server's events streams drop it from their lists. */
@@ -393,6 +421,7 @@ export const tables = {
   task,
   taskInbox,
   taskLog,
+  taskHistory,
   taskTombstone,
   usage,
   chatState,

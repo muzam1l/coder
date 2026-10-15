@@ -34,6 +34,9 @@ export interface ServerConfig {
   taskStallMs?: number;
   taskAttempts?: number;
   maxQueued?: number;
+  /** Conversation and reaction batching windows. */
+  steerBatchMs?: number;
+  reactionBatchMs?: number;
   /** `CLAUDE_SUBSCRIPTIONS` and `CODEX_SUBSCRIPTIONS`: subscription sign-in for personal credentials. */
   subscriptions?: { claude?: boolean; codex?: boolean };
   /** Wular, the identity provider; set for a Postgres server. */
@@ -181,6 +184,7 @@ export interface ServerContext {
   queue: TaskQueue;
   /** Chat SDK state for every app; a context without one keeps it for the request only. */
   chatState?: StateAdapter;
+  syncAgent?(slug: string): Promise<unknown>;
   /** Load the app's server-owned agent version and per-repository usage. */
   loadAgent(
     app: AgentApp,

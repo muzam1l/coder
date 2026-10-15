@@ -14,27 +14,28 @@ import type {
   InstallationSettings,
   TaskSource,
 } from '../../agent/types';
-import type { TaskContext } from '../../agent/types';
 import { issueLinkToken } from '../auth/link';
 import type { ServerContext } from '../context';
 import { updateMetadata } from '../store';
-import type { Store } from '../store/types';
+import type { Store, TaskStatus } from '../store/types';
 import { machineSignedIn, runLocalTask } from './local';
 import { syncLocalAgents } from '../store/local';
 import { credentialFix, resolveCredential } from '../settings/credentials';
 import { dispatchTokens, requesterToken, type EventTokens } from './context';
 import { chooseRunner } from '../runners';
-import { sessionKey, addInbox } from './queue';
-import { buildContext, conversationKey, NOTE_TTL_MS, threadKey } from './thread';
+import { buildContext } from './thread';
 import {
-  appendTaskLog,
-  enqueueSteer,
-  generateTaskId,
-  loadTask,
-  reconcileTask,
-} from '../../core/state';
+  conversationState,
+  everyMessageDelivered,
+  describe,
+  forgetUnseen,
+  recordUnseen,
+  rememberConversation,
+  steerConversation,
+} from './conversation';
+import { eventPrompt } from '../../core/prompts';
+import { appendTaskLog, generateTaskId } from '../../core/state';
 import { generateRunId } from '../../flow/runs';
-import { steerTask } from '../../core/task/actions';
 import { connectionWarnings } from './logs';
 import { DEFAULT_ENGINE } from '../../core/defaults';
 import { dashPath, organizationSlug } from '../auth/account';
@@ -54,14 +55,14 @@ const SETTINGS_HELP = [
   '• `/setup show`. Shows the current settings.',
 ].join('\n');
 
-/** Where dispatch answers an event: its thread in public, the actor in private, and the thread's recent messages. */
+/** Public and private replies to an event. */
 export interface Replies {
-  post(text: string): Promise<unknown>;
+  post(text: string, progress?: boolean): Promise<{ id?: string; ids?: string[] } | null | void>;
+  react?(emoji: string, message?: string): Promise<void>;
   /** A reply that reports a failure; Linear marks the session failed, elsewhere it is a plain reply. */
-  problem(text: string): Promise<unknown>;
+  problem(text: string): ReturnType<Replies['post']>;
   /** Resolves without posting where the platform has no private messages. */
   whisper(text: string): Promise<unknown>;
-  recent?(): Promise<TaskContext['messages']>;
 }
 
 /** `/setup` settings commands: server-side installation settings, no task involved. */
@@ -135,19 +136,22 @@ function outsiderEvent(
   return ctx.auth ? !member : canWrite === false;
 }
 
-/** Whether the actor may write where the event happened, as the platform says; a failed check counts as no, and a platform without one answers nothing. */
+/** Whether the actor may write where the event happened, as the platform says; `null` when the check failed, which counts as no, and a platform without one answers nothing. */
 async function writeCheck(
   ctx: ServerContext,
   integration: Integration,
   event: AgentEvent,
   tokens: EventTokens,
-): Promise<boolean | undefined> {
+): Promise<boolean | null | undefined> {
   if (!integration.auth.canWrite) return undefined;
   const token = await (await tokens(event.integration))!.token();
   return integration.auth.canWrite(event, token!, ctx.fetch).catch((error: unknown) => {
-    console.error(`coder server: ${integration.id} write check failed`, error);
+    console.error(
+      `coder server: ${integration.id} write check failed for ${event.appId} event ${event.deliveryId}`,
+      error,
+    );
 
-    return false;
+    return null;
   });
 }
 
@@ -197,13 +201,6 @@ async function sendLink(
   }
 }
 
-/** Remembers a thread Coder started a task in. */
-async function converse(ctx: ServerContext, event: AgentEvent, now: number): Promise<void> {
-  if (!event.chat) return;
-  const key = conversationKey(event.appId, event.installationId, event.chat.thread.id);
-  await ctx.store.put('delivery', key, { at: now }, { ttlMs: NOTE_TTL_MS });
-}
-
 /** The integrations the agent declares that the event can reach, found without minting. */
 async function reachable(tokens: EventTokens, agent: Agent): Promise<Set<string>> {
   const ids = Object.keys(agent.definition.integrations);
@@ -213,9 +210,9 @@ async function reachable(tokens: EventTokens, agent: Agent): Promise<Set<string>
 }
 
 async function frozenToolScopes(
-  ctx: ServerContext,
   installation: Installation,
   event: AgentEvent,
+  tokens: EventTokens,
 ): Promise<NonNullable<AgentTask['toolScopes']>> {
   const scopes: NonNullable<AgentTask['toolScopes']> = {};
   if (event.repo)
@@ -231,7 +228,7 @@ async function frozenToolScopes(
   for (const [id, connection] of Object.entries(installation.connections ?? {})) {
     if (connection.kind !== 'installation') continue;
 
-    const linked = await ctx.store.get('installation', connection.id);
+    const linked = (await tokens(id))?.record;
     const configRepo = linked?.settings?.configRepo;
     const match = configRepo && /^([^/]+)\/([^/]+)$/.exec(configRepo);
     if (match) scopes[id] = { repo: { owner: match[1]!, name: match[2]! } };
@@ -240,67 +237,49 @@ async function frozenToolScopes(
   return scopes;
 }
 
-async function setupText(ctx: ServerContext, engine: string): Promise<string> {
-  return `No model is configured yet. If you have access to it, [add one here](${await credentialFix(ctx, engine)}).`;
+async function setupText(ctx: ServerContext, engine: string, slug?: string): Promise<string> {
+  return `No model is configured yet. If you have access to it, [add one here](${await credentialFix(ctx, engine, slug)}).`;
 }
 
-/** What the thread gets when a run ends without an answer. */
-async function failureText(ctx: ServerContext, engine: string): Promise<string> {
-  return `There was a problem with your connected model. If you have access to it, [check it here](${await credentialFix(ctx, engine)}).`;
+/** What the thread gets when a run fails without an answer. */
+async function failureText(ctx: ServerContext, engine: string, slug?: string): Promise<string> {
+  return `There was a problem with your connected model. If you have access to it, [check it here](${await credentialFix(ctx, engine, slug)}).`;
 }
 
-/** Someone spoke to the agent: a mention, a direct message, or a message that @-mentions it. */
-const direct = (integration: Integration, event: AgentEvent) =>
-  integration.events[event.type]?.on === 'mention' ||
-  event.chat?.thread.isDM === true ||
-  event.chat?.message?.isMention === true;
+/** The task's dashboard page, linked when the agent returns no reply where one is due. */
+async function taskPage(ctx: ServerContext, id: string, slug: string): Promise<string | undefined> {
+  const base = ctx.config.publicUrl?.replace(/\/$/, '');
 
-/** The session's task still running for this app, agent and requester in the event's thread. */
-async function runningIn(
+  return base ? `${base}${dashPath(slug, `/tasks/${id}`)}` : undefined;
+}
+
+/** Starts an interrupted local handoff before steering its conversation. */
+async function reservedConversation(
   ctx: ServerContext,
   event: AgentEvent,
   agent: string,
-  requester?: string,
-): Promise<string | undefined> {
-  const key = sessionKey({ agent, requester, event });
-  const session =
-    (await localSession(ctx, key)) ??
-    (await ctx.store.get<SessionBinding>('snapshot', `session:${key}`));
-  if (
-    !session ||
-    session.requester !== requester ||
-    !event.actor.id ||
-    session.actor !== event.actor.id
-  )
-    return;
-
-  const queued = await ctx.store.get('task', session.id);
-  if (
-    queued &&
-    ['queued', 'running', 'waiting'].includes(queued.status) &&
-    sessionKey(queued.task) === key
-  )
-    return queued.task.id;
-
-  let found = loadTask(ctx.local!.cwd, session.id);
-  if (!found) {
-    const receipts = await ctx.store.list<{ pending?: PendingHandoff; session?: SessionBinding }>(
-      'delivery',
-      { prefix: 'delivery:' },
+): Promise<TaskStatus | undefined> {
+  const thread = event.chat?.thread.id;
+  if (!ctx.local || event.repo || !thread) return undefined;
+  const receipts = await ctx.store.list<{ pending?: PendingHandoff }>('delivery', {
+    prefix: 'delivery:',
+  });
+  const reserved = receipts.find(({ value }) => {
+    const task = value.pending?.task;
+    return (
+      task?.flow === 'default' &&
+      task.agent === agent &&
+      task.event?.appId === event.appId &&
+      task.event.installationId === event.installationId &&
+      task.event.chat?.thread.id === thread &&
+      value.pending?.taskId
     );
-    const reserved = receipts.find(
-      row => row.value.session?.key === key && row.value.session.id === session.id,
-    )?.value.pending;
-    if (!reserved?.task || reserved.taskId !== session.id || sessionKey(reserved.task) !== key)
-      return;
-    await runLocalTask(ctx, reserved.task, reserved.taskId);
-    found = loadTask(ctx.local!.cwd, session.id);
-  }
-  if (!found || found.agentId !== agent) return;
+  })?.value.pending;
+  if (!reserved?.task) return undefined;
+  const started = await runLocalTask(ctx, reserved.task, reserved.taskId);
+  await rememberConversation(ctx, reserved.task.event!, started.task.id, (ctx.now ?? Date.now)());
 
-  const task = reconcileTask(ctx.local!.cwd, found);
-
-  return task.status === 'running' || task.status === 'queued' ? task.id : undefined;
+  return (await ctx.store.get('task', started.task.id)) ?? started;
 }
 
 /** One parsed event through dedupe, installation, tokens, agent match, and a task. */
@@ -317,7 +296,10 @@ export async function dispatchEvent(
   const installation = await loadInstallation(ctx, app, event);
   if (!installation) return {};
   if (ctx.local)
-    await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations, app.agent).catch(() => {});
+    await (
+      ctx.syncAgent?.(app.agent) ??
+      syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations, app.agent)
+    ).catch(error => console.error('coder server: local agent sync failed', error));
   if ((await ctx.store.get('agent', app.agent))?.settings?.disabled) return {};
   if (
     ctx.local &&
@@ -391,24 +373,6 @@ export async function dispatchEvent(
   }
 }
 
-export interface SessionBinding {
-  key: string;
-  id: string;
-  version: number;
-  requester?: string;
-  actor: string;
-}
-
-async function localSession(ctx: ServerContext, key: string): Promise<SessionBinding | undefined> {
-  const receipts = await ctx.store.list<{ session?: SessionBinding }>('delivery', {
-    prefix: 'delivery:',
-  });
-  const snapshot = await ctx.store.get<SessionBinding>('snapshot', `session:${key}`);
-  return [...receipts.map(row => row.value.session), snapshot && { ...snapshot, key }]
-    .filter((session): session is SessionBinding => session?.key === key)
-    .sort((a, b) => (b.version ?? 0) - (a.version ?? 0))[0];
-}
-
 export interface PendingHandoff {
   event: AgentEvent;
   task?: AgentTask;
@@ -422,39 +386,25 @@ async function handoff(
   now: () => number,
   work: (pending: PendingHandoff) => Promise<void>,
   task?: AgentTask,
-  reserve = false,
+  slug?: () => Promise<string>,
 ): Promise<{ work?: Promise<void> }> {
   const owner = randomUUID();
+  const taskId = task && (task.flow === 'default' ? generateTaskId() : generateRunId());
+  // A local task runs under its own id, so its link names that one.
+  const taskUrl =
+    taskId && task?.taskUrl
+      ? await taskPage(ctx, taskId, await (slug?.() ?? organizationSlug(ctx)))
+      : undefined;
   let pending: PendingHandoff = {
     event,
-    ...(task ? { task, taskId: task.flow === 'default' ? generateTaskId() : generateRunId() } : {}),
+    ...(task ? { task: { ...task, ...(taskUrl ? { taskUrl } : {}) }, taskId } : {}),
   };
-  let session: SessionBinding | undefined;
   if (ctx.local && !event.repo) {
-    const receipt = await ctx.store.get<{ pending?: PendingHandoff; session?: SessionBinding }>(
-      'delivery',
-      delivery,
-    );
+    const receipt = await ctx.store.get<{ pending?: PendingHandoff }>('delivery', delivery);
     if (receipt && !receipt.pending) return {};
     pending = receipt?.pending ?? pending;
     if (pending.task && !pending.taskId) throw new Error('Local delivery has no task binding');
-    session = receipt?.session;
-    if (!session && reserve && pending.task) {
-      const key = sessionKey(pending.task);
-      session = {
-        key,
-        id: pending.taskId!,
-        version: ((await localSession(ctx, key))?.version ?? 0) + 1,
-        requester: pending.task.requester,
-        actor: pending.task.event!.actor.id,
-      };
-    }
-    await ctx.store.put('delivery', delivery, {
-      at: now(),
-      owner,
-      pending,
-      ...(session ? { session } : {}),
-    });
+    await ctx.store.put('delivery', delivery, { at: now(), owner, pending });
   } else if (
     !(await ctx.store.create(
       'delivery',
@@ -485,12 +435,7 @@ async function handoff(
         await work(pending);
         if (timer) clearInterval(timer);
         await renewal;
-        await ctx.store.updateDelivery(
-          delivery,
-          owner,
-          { at: now(), ...(session ? { session } : {}) },
-          { ttlMs: DELIVERY_TTL_MS },
-        );
+        await ctx.store.updateDelivery(delivery, owner, { at: now() }, { ttlMs: DELIVERY_TTL_MS });
       } catch (error) {
         if (timer) clearInterval(timer);
         await renewal;
@@ -513,7 +458,10 @@ async function claimed(
   replies: Replies,
   delivery: string,
 ): Promise<{ taskId?: string; work?: Promise<void> }> {
-  const effect = (work: () => Promise<void>) => handoff(ctx, delivery, event, now, work);
+  let resolvedSlug: Promise<string> | undefined;
+  const slug = () => (resolvedSlug ??= organizationSlug(ctx));
+  const effect = (work: () => Promise<void>) =>
+    handoff(ctx, delivery, event, now, work, undefined, slug);
   if (isSettingsCommand(event)) {
     // Installation-wide settings change only for a linked member of this workspace.
     if (ctx.auth && changesSettings(event) && !(await linkedMember(ctx, integration, event)))
@@ -535,16 +483,31 @@ async function claimed(
   const addressed = Boolean(
     ctx.auth && event.actor.id && integration.events[event.type]?.addressed,
   );
+  // A failed check drops the event and says so, so every prompt gets an answer.
+  const unchecked = () =>
+    effect(async () => {
+      await replies.problem('Coder could not check your access to this conversation.');
+    });
   const trusted =
     addressed && !member ? await writeCheck(ctx, integration, event, tokens) : undefined;
+  if (trusted === null) return unchecked();
   if (addressed && !member && !trusted)
     return effect(() => sendLink(ctx, integration, installation, event, replies, now()));
 
-  const requester = member?.id;
   const match = matchAgent(event, agent);
-  if (!match) return {};
+  if (!match) {
+    // A message the agent's wiring filters out still shows under `since` on its next turn.
+    const message = event.chat?.message;
+    if (message)
+      await recordUnseen(ctx, event, {
+        id: message.id,
+        author: message.author.userName || message.author.userId,
+        text: event.text,
+        sentAt: message.metadata.dateSent,
+      });
+    return {};
+  }
 
-  const steers = event.chat && match.flow === 'default' && integration.events[event.type]?.steers;
   const local = (task: AgentTask, fallbackText?: string, personal?: string) =>
     handoff(
       ctx,
@@ -554,7 +517,10 @@ async function claimed(
       async pending => {
         const saved = pending.task!;
         const started = await runLocalTask(ctx, saved, pending.taskId);
-        await converse(ctx, event, now());
+        await Promise.all([
+          rememberConversation(ctx, saved.event!, started.task.id, now()),
+          forgetUnseen(ctx, saved.event!),
+        ]);
         await taskConnectionSecrets(ctx, started.task.id, [
           ...tokens.minted,
           ...(personal ? [personal] : []),
@@ -562,57 +528,63 @@ async function claimed(
         if (fallbackText) {
           appendTaskLog(ctx.local!.cwd, started.task.id, { kind: 'status', message: fallbackText });
         }
-        if (steers) {
-          const session = await localSession(ctx, sessionKey(saved));
-          if (session && session.id === pending.taskId)
-            await ctx.store.put('snapshot', `session:${session.key}`, {
-              ...session,
-              id: started.task.id,
-            });
-        }
       },
       task,
-      Boolean(steers),
+      slug,
     );
+
+  // A redelivery resumes its own interrupted handoff, never steers the task it made.
   if (ctx.local && !event.repo) {
     const receipt = await ctx.store.get<{ pending?: PendingHandoff }>('delivery', delivery);
     if (receipt?.pending?.task) {
       const saved = receipt.pending.task;
-      if (
-        sessionKey(saved) !== sessionKey({ agent: agent.id, requester, event }) ||
-        saved.flow !== match.flow
-      )
-        return {};
+      if (saved.agent !== agent.id || saved.flow !== match.flow) return {};
       return local(saved);
     }
   }
 
-  const running =
-    ctx.local && !event.repo && steers
-      ? await runningIn(ctx, event, agent.id, requester)
-      : undefined;
-  if (running) {
-    const queued = await ctx.store.get('task', running);
-    const task = loadTask(ctx.local!.cwd, running);
-    if (!task || queued?.status === 'queued')
-      return effect(async () => {
-        if (queued)
-          await addInbox(ctx, running, 'steer', { text: event.text }, queued.generation ?? 0);
-      });
-    if (!task.threadId)
-      return effect(async () => {
-        enqueueSteer(ctx.local!.cwd, running, event.text);
-      });
+  // A conversation has one task: the first message starts it, every later one steers it.
+  const talk = Boolean(event.chat) && match.flow === 'default';
+  const state = talk ? await conversationState(ctx, event) : undefined;
+  const known = state?.record;
+  const described = talk
+    ? await describe(ctx, integration, event, {
+        token: async () => (await tokens(event.integration))?.token(),
+        delivered: everyMessageDelivered(integration, app, agent),
+        unseen: state?.unseen,
+        loaded: true,
+        ...(known ? { existing: known } : {}),
+      })
+    : event;
+  const user = member ? { name: member.name, email: member.email } : undefined;
+  const current = talk
+    ? (state?.status ?? (await reservedConversation(ctx, described, agent.id)))
+    : undefined;
+  if (current) {
+    // The same gate as a new event: a linked member or a platform writer steers; write tools need the write check.
+    const reads = new Set(integration.tools.presets.observe);
+    const writes = (current.task.tools[event.integration] ?? []).some(name => !reads.has(name));
+    const allowed =
+      trusted ||
+      (Boolean(member) && !writes) ||
+      (await writeCheck(ctx, integration, event, tokens));
+    if (allowed === null) return unchecked();
 
-    return effect(() => steerTask(ctx.local!.cwd, task, event.text).then(() => {}));
+    return allowed !== false
+      ? effect(() => steerConversation(ctx, current, described, user, now, state))
+      : {};
   }
 
+  // A 1:1 conversation runs on the requester's own credentials; a shared one, where anyone may steer, on the workspace's only.
+  const personal = !talk || described.chat?.thread.isDM === true;
+  const requester = personal ? member?.id : undefined;
+  const actAs = personal ? match.actAs : undefined;
   const settings = effectiveSettings(agent);
   const declared = await reachable(tokens, agent);
   const [route, credential, toolScopes, context, grants, personalToken] = await Promise.all([
     chooseRunner(ctx, { requester, agent: agent.definition.runner }),
     resolveCredential(ctx.store, settings.engine, requester),
-    frozenToolScopes(ctx, installation, event),
+    frozenToolScopes(installation, event, tokens),
     buildContext(
       ctx,
       integration,
@@ -620,7 +592,6 @@ async function claimed(
       event,
       async id => (declared.has(id) ? tokens(id) : undefined),
       agent,
-      integration.events[event.type]?.addressed ? replies.recent : undefined,
       member ?? null,
     ),
     connectionGrants(
@@ -629,34 +600,13 @@ async function claimed(
       agent.usage?.connections,
       Boolean(ctx.auth && !member && !trusted),
     ),
-    match.actAs === 'requester'
+    actAs === 'requester'
       ? requesterToken(ctx, integration, event, credentials).catch(() => undefined)
       : undefined,
   ]);
   if (!credential && route.runner !== 'http' && !(await machineSignedIn(ctx, settings.engine))) {
-    if ((!ctx.local || event.repo) && steers) {
-      const forwarded = await ctx.queue.deliver(
-        ctx.organizationId,
-        {
-          id: `${event.deliveryId}-${agent.id}`,
-          source: event.integration as TaskSource,
-          agent: agent.id,
-          flow: match.flow,
-          ...route,
-          event,
-          requester,
-          definition: agent.definition,
-          tools: {},
-        },
-        now(),
-        { key: delivery, ttlMs: DELIVERY_TTL_MS },
-        true,
-        undefined,
-        false,
-      );
-      if (forwarded.steered) return {};
-    }
-    if (!direct(integration, event)) return {};
+    const spoken = described.mustReply ?? integration.events[event.type]?.on === 'mention';
+    if (!spoken) return {};
     return effect(async () => {
       // Once per thread, unless every prompt waits for an answer; a retry of the delivery that holds the mark may post again.
       const key = `setup:${app.id}:${event.chat?.thread.id ?? event.deliveryId}`;
@@ -672,7 +622,9 @@ async function claimed(
       if (!first && (await ctx.store.get<{ owner?: string }>('delivery', key))?.owner !== owner)
         return;
       try {
-        await replies.problem(await setupText(ctx, settings.engine ?? DEFAULT_ENGINE));
+        await replies.problem(
+          await setupText(ctx, settings.engine ?? DEFAULT_ENGINE, await slug()),
+        );
       } catch (error) {
         if (!integration.answersEveryPrompt) await ctx.store.updateDelivery(key, owner, undefined);
         throw error;
@@ -682,7 +634,7 @@ async function claimed(
 
   const reads = new Set(integration.tools.presets.observe);
   const own = match.tools[event.integration] ?? [];
-  const fallback = !!ctx.auth && match.actAs === 'requester' && !personalToken;
+  const fallback = !!ctx.auth && actAs === 'requester' && !personalToken;
   const writes = own.some(name => !reads.has(name));
   const check = ctx.auth
     ? member && (writes || fallback)
@@ -691,11 +643,12 @@ async function claimed(
       Object.entries(match.tools).some(
         ([id, names]) => id !== event.integration && declared.has(id) && names.length,
       );
-  const canWrite =
+  const checked =
     trusted ?? (check ? await writeCheck(ctx, integration, event, tokens) : undefined);
+  const canWrite = checked === null ? false : checked;
   const outsider = outsiderEvent(ctx, member || trusted, canWrite);
   const fallbackText = fallback
-    ? `Acting as the app because the requester's account has no usable ${integration.name} token. ${canWrite === true && !outsider ? 'The platform write check passed.' : 'Only reads are allowed.'} [Connect your account](${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${dashPath(await organizationSlug(ctx), '/settings/connections')}).`
+    ? `Acting as the app because the requester's account has no usable ${integration.name} token. ${canWrite === true && !outsider ? 'The platform write check passed.' : 'Only reads are allowed.'} [Connect your account](${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${dashPath(await slug(), '/settings/connections')}).`
     : undefined;
   if (fallbackText)
     context.instructions = [
@@ -730,15 +683,18 @@ async function claimed(
   if (Buffer.byteLength(JSON.stringify(context)) > CONTEXT_LIMIT)
     throw new Error('Task context exceeds 256 KB');
 
+  const id = `${event.deliveryId}-${agent.id}`;
+  const taskUrl = await taskPage(ctx, id, await slug());
   const task: AgentTask = {
-    id: `${event.deliveryId}-${agent.id}`,
+    id,
     source: event.integration as TaskSource,
     agent: agent.id,
     flow: match.flow,
     ...route,
     permissions: match.permissions ?? settings.permissions,
-    event,
-    failureReply: await failureText(ctx, settings.engine ?? DEFAULT_ENGINE),
+    event: described,
+    failureReply: await failureText(ctx, settings.engine ?? DEFAULT_ENGINE, await slug()),
+    ...(taskUrl ? { taskUrl } : {}),
     author: integration.author?.(app.name) ?? app.name,
     definition: agent.definition,
     ...(credential ? { credential: credential.id } : {}),
@@ -753,16 +709,20 @@ async function claimed(
   if (ctx.local && !event.repo && route.runner === 'local' && !route.runnerId)
     return local(task, fallbackText, personalToken);
 
+  // The queue steers an active task of the conversation itself, so two first messages at once make one task.
   const delivered = await ctx.queue.deliver(
     ctx.organizationId,
     task,
     now(),
     { key: delivery, ttlMs: DELIVERY_TTL_MS },
-    Boolean(steers),
+    talk ? eventPrompt([described], user) : undefined,
     ctx.config.maxQueued ?? 1000,
   );
   if (delivered.taskId) {
-    await converse(ctx, event, now());
+    await Promise.all([
+      rememberConversation(ctx, described, delivered.taskId, now()),
+      forgetUnseen(ctx, described),
+    ]);
     await taskConnectionSecrets(ctx, delivered.taskId, [
       ...tokens.minted,
       ...(personalToken ? [personalToken] : []),

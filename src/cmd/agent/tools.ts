@@ -17,10 +17,10 @@ export const commandTools = command({
     const tools = agentTools(id, allowed);
     if (!tools)
       throw new Error(
-        `Unknown tool set "${id}"; known: ${[...Object.keys(INTEGRATIONS).filter(key => INTEGRATIONS[key]!.tools.serve), 'note'].join(', ')}`,
+        `Unknown tool set "${id}"; known: ${[...Object.keys(INTEGRATIONS).filter(key => INTEGRATIONS[key]!.tools.serve), 'history'].join(', ')}`,
       );
     const token = process.env.APP_TOKEN ?? '';
-    if (!token && id !== 'note') throw new Error('APP_TOKEN is not set');
+    if (!token && id !== 'history') throw new Error('APP_TOKEN is not set');
     const scope = process.env.CODER_AGENT_SCOPE
       ? JSON.parse(process.env.CODER_AGENT_SCOPE)
       : undefined;

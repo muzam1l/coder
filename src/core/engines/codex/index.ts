@@ -25,6 +25,7 @@ import { engineEnvironment } from '../../connections';
 import { MACHINE_SANDBOX_ENV } from '../../config';
 import { isCodexSessionArchived, unarchiveCodexSession } from './sessions';
 import type { Availability, AuthStatus, Effort, McpServerSpec, TurnResult } from '../../types';
+import { HISTORY_LOST } from '../../types';
 import {
   type TurnCaptureState,
   type ProgressReporter,
@@ -60,6 +61,8 @@ export interface RunTurnOptions {
   approvalsReviewer?: string | null;
   onApprovalRequest?: ApprovalRequestHandler;
   resumeThreadId?: string | null;
+  /** The thread's developer instructions, sent on start and resume. */
+  developerInstructions?: string;
   onProgress?: ProgressReporter;
   onHeartbeat?: () => void;
   onResult?: (result: TurnResult) => void;
@@ -406,6 +409,10 @@ export async function runTurn(
       ...(!options.nativeMcp ? { 'features.apps': false, 'features.plugins': false } : {}),
     };
 
+    const developer = options.developerInstructions
+      ? { developerInstructions: options.developerInstructions }
+      : {};
+    let resumed: { thread: { id: string } } | undefined;
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, 'starting', {
         kind: 'status',
@@ -415,18 +422,29 @@ export async function runTurn(
       if (isCodexSessionArchived(options.resumeThreadId)) {
         await unarchiveCodexSession(options.resumeThreadId);
       }
-      const response = await client.request('thread/resume', {
-        threadId: options.resumeThreadId,
-        cwd,
-        model: options.model ?? null,
-        modelProvider: options.modelProvider ?? null,
-        config: threadConfig,
-        approvalPolicy: options.approvalPolicy ?? 'never',
-        ...sandbox,
-        // Only sent when set: older codex builds reject unknown enum-bearing fields.
-        ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
-      });
-      threadId = response.thread.id;
+      resumed = await client
+        .request('thread/resume', {
+          threadId: options.resumeThreadId,
+          cwd,
+          model: options.model ?? null,
+          modelProvider: options.modelProvider ?? null,
+          config: threadConfig,
+          approvalPolicy: options.approvalPolicy ?? 'never',
+          ...sandbox,
+          // Only sent when set: older codex builds reject unknown enum-bearing fields.
+          ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
+          ...developer,
+        })
+        .catch(error => {
+          emitProgress(options.onProgress, HISTORY_LOST, 'starting', {
+            kind: 'warning',
+            detail: String(error?.message ?? error),
+          });
+          return undefined;
+        });
+    }
+    if (resumed) {
+      threadId = resumed.thread.id;
     } else {
       emitProgress(options.onProgress, 'Starting Codex task thread.', 'starting', {
         kind: 'status',
@@ -439,6 +457,7 @@ export async function runTurn(
         approvalPolicy: options.approvalPolicy ?? 'never',
         ...sandbox,
         ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
+        ...developer,
         serviceName: SERVICE_NAME,
         // Persist by default so status/steer/stop can target the thread later.
         ephemeral: options.ephemeral ?? false,
@@ -470,7 +489,13 @@ export async function runTurn(
         () =>
           client.request('turn/start', {
             threadId,
-            input: [{ type: 'text', text: prompt, text_elements: [] }],
+            input: [
+              {
+                type: 'text',
+                text: prompt,
+                text_elements: [],
+              },
+            ],
             model: options.model ?? null,
             effort: options.effort ?? null,
             outputSchema: options.outputSchema ?? null,
@@ -512,6 +537,7 @@ export async function runTurn(
       fileChanges: turnState.fileChanges,
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
       tokens: collectTokenUsage(turnState),
+      contextTokens: turnState.contextTokens,
       model: options.model ?? null,
       commandExecutions: turnState.commandExecutions,
     };

@@ -192,7 +192,7 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
   };
   await fsp.mkdir(dir, { recursive: true });
   await fsp.writeFile(path.join(dir, 'agent.json'), `${JSON.stringify(definition, null, 2)}\n`);
-  await fsp.writeFile(path.join(dir, 'system.md'), `You are ${picks.name ?? id}.\n`);
+  await fsp.writeFile(path.join(dir, 'system.md'), '');
 
   // Sample events live outside the repo; they are fixtures for `coder agent run`, not part of the agent.
   const sampleDir = path.join(os.tmpdir(), 'coder-agent-samples', id);

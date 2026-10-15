@@ -105,19 +105,23 @@ async function createSlackApp(
   };
 }
 
+/** The Slack events an agent's definition listens to. */
+function agentEvents(definition: AgentDefinition): string[] {
+  const events = definition.integrations.slack?.events;
+  return Array.isArray(events) ? events : Object.keys(events ?? {});
+}
+
 /** The bot scopes an agent's definition asks for. */
 const agentScopes = (definition: AgentDefinition) =>
-  slackAppScopes(definition.integrations.slack?.tools);
+  slackAppScopes(definition.integrations.slack?.tools, agentEvents(definition));
 
 /** The manifest an agent's definition asks for. */
 function agentManifest(publicUrl: string, name: string, definition: AgentDefinition) {
-  const wiring = definition.integrations.slack ?? {};
-  const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
   return slackManifest(publicUrl, {
     name,
     description: definition.description,
     scopes: agentScopes(definition),
-    events: slackAppEvents(events),
+    events: slackAppEvents(agentEvents(definition)),
     extras: slackManifestExtras(publicUrl, definition),
   });
 }
@@ -348,31 +352,46 @@ const OBSERVE_SCOPES = [
   'groups:history',
   'im:history',
   'channels:read',
+  'groups:read',
+  'im:read',
+  'mpim:read',
   'users:read',
   'reactions:read',
+  'reactions:write',
   'commands',
   'links:read',
   'links:write',
 ];
-/** Bot token scopes for a Slack app manifest; anything beyond observe can post and react. */
-export function slackAppScopes(tools: Preset | string[] = 'observe'): string[] {
+/** Every preset can react; comment/write can post and upload files, and `dm` reads group DMs. */
+export function slackAppScopes(
+  tools: Preset | string[] = 'observe',
+  events: string[] = [],
+): string[] {
   const observe = new Set(Object.keys(SLACK_READ_METHODS));
   const readOnly = Array.isArray(tools)
     ? tools.every(tool => observe.has(tool))
     : tools === 'observe';
-  return readOnly
-    ? [...OBSERVE_SCOPES]
-    : [...OBSERVE_SCOPES, 'chat:write', 'reactions:write', 'im:write', 'assistant:write'];
+  return [
+    ...OBSERVE_SCOPES,
+    ...(events.includes('dm') ? ['mpim:history'] : []),
+    ...(readOnly ? [] : ['chat:write', 'files:write', 'im:write', 'assistant:write']),
+  ];
 }
 const APP_EVENTS: Record<string, string[]> = {
   mention: ['app_mention'],
-  message: ['message.channels', 'message.groups', 'message.im'],
-  reaction: ['reaction_added'],
+  dm: ['message.im', 'message.mpim'],
+  channel: ['message.channels', 'message.groups'],
 };
+/** Events that make conversations; reactions in them steer the task, so each subscribes `reaction_added` too. */
+const CONVERSATION_EVENTS = ['mention', 'dm', 'channel'];
 /** Slack manifest agent events for catalog event names, plus the workspace grants of an org install, the Home tab and shared links. */
 export function slackAppEvents(events: string[]): string[] {
+  const converses = events.some(event => CONVERSATION_EVENTS.includes(event));
   return [
-    ...new Set(events.flatMap(event => APP_EVENTS[event] ?? [])),
+    ...new Set([
+      ...events.flatMap(event => APP_EVENTS[event] ?? []),
+      ...(converses ? ['reaction_added'] : []),
+    ]),
     'team_access_granted',
     'team_access_revoked',
     'app_home_opened',

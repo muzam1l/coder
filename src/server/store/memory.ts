@@ -1,3 +1,8 @@
+import { randomUUID } from 'node:crypto';
+
+import { BATCH_LEASE_MS, type Batch, type Unseen } from '../tasks/conversation';
+import { SINCE_LIMIT } from '../../core/prompts';
+import type { SinceMessage } from '../../integrations/types';
 import type { StoreListOptions } from './types';
 import type { AgentApp, Installation } from '../../agent/types';
 import { completeLogin, parseCredentialId, type StoredCredential } from '../settings/credentials';
@@ -92,6 +97,113 @@ export function checkBinding(
   });
 
   if (bound) throw new InstallationBoundError(`Installation "${id}" is bound through another app.`);
+}
+
+export function batchValue(
+  current: Batch | undefined,
+  owner: string,
+  items: unknown[],
+  at: number,
+): Batch {
+  const count = current?.sending?.count ?? 0;
+  const pending = [...(current?.items.slice(count) ?? []), ...items];
+  const dropped = pending.slice(0, Math.max(0, pending.length - 50));
+
+  return {
+    ...current,
+    owner,
+    at,
+    items: [...(current?.items.slice(0, count) ?? []), ...pending.slice(-50)],
+    more: (current?.more ?? 0) + dropped.length,
+    mustReply:
+      current?.mustReply ||
+      dropped.some(
+        item => (item as { event?: { mustReply?: boolean } })?.event?.mustReply === true,
+      ),
+  };
+}
+
+/** How many reserved items an acknowledgement through `admission` covers; the whole reservation without one. */
+function admittedCount(current: Batch, through?: string): number {
+  const count = current.sending?.count ?? 0;
+  if (through === undefined) return count;
+  const index = current.items.findIndex(
+    (item, n) => n < count && (item as { admission?: string }).admission === through,
+  );
+
+  return index + 1;
+}
+
+/** The batch after its sender finished: the admitted prefix gone, the rest released or still reserved. */
+export function finishedBatch(
+  current: Batch,
+  accepted: boolean,
+  through: string | undefined,
+  now: number,
+): Batch {
+  const { sending, ...rest } = current;
+  const count = accepted ? admittedCount(current, through) : 0;
+  if (accepted && sending && count < sending.count)
+    return {
+      ...current,
+      items: current.items.slice(count),
+      sending: { ...sending, count: sending.count - count, until: now + BATCH_LEASE_MS },
+    };
+  const pending = {
+    ...rest,
+    items: accepted ? current.items.slice(sending?.count ?? 0) : current.items,
+    more: (current.more ?? 0) + (accepted ? 0 : (sending?.more ?? 0)),
+    mustReply: current.mustReply || (!accepted && sending?.mustReply),
+  };
+
+  return accepted ? pending : batchValue(pending, pending.owner, [], pending.at);
+}
+
+export function unseenValue(
+  current: Unseen | undefined,
+  message?: SinceMessage,
+  through = 0,
+  epoch?: string,
+): Unseen {
+  const value = current ?? { messages: [], more: 0, epoch: randomUUID() };
+  const version = value.version ?? value.messages.length + value.more;
+  const messages = value.messages.map((item, index) => ({ sequence: index + 1, ...item }));
+  if (message)
+    return {
+      ...value,
+      version: version + 1,
+      messages:
+        messages.length < SINCE_LIMIT
+          ? [...messages, { ...message, sequence: version + 1 }]
+          : messages,
+      more: value.more + (messages.length < SINCE_LIMIT ? 0 : 1),
+    };
+  if (value.epoch !== epoch) return value;
+  const acknowledged = Math.max(value.acknowledged ?? 0, Math.min(through, version));
+  const remaining = messages.filter(item => item.sequence > acknowledged);
+
+  return {
+    ...value,
+    version,
+    acknowledged,
+    messages: remaining,
+    more: version - acknowledged - remaining.length,
+  };
+}
+
+export function availableBatch(current: Batch): Batch {
+  const { sending, ...rest } = current;
+
+  return batchValue(
+    {
+      ...rest,
+      more: (current.more ?? 0) + (sending?.more ?? 0),
+      mustReply: current.mustReply || sending?.mustReply,
+    },
+    current.owner,
+    [],
+    current.at,
+  );
 }
 
 export class MemoryStore implements Store {
@@ -238,15 +350,20 @@ export class MemoryStore implements Store {
   async putMany<K extends StoreKind>(
     kind: K,
     entries: Array<{ id: string; value: StoreRecords[K] }>,
+    opts: { ttlMs?: number } = {},
   ): Promise<void> {
     if (kind === 'task') {
-      await Promise.all(entries.map(entry => this.put(kind, entry.id, entry.value)));
+      await Promise.all(entries.map(entry => this.put(kind, entry.id, entry.value, opts)));
       return;
     }
 
     const bucket = this.bucket(kind);
 
-    for (const entry of entries) bucket.set(entry.id, { value: entry.value });
+    for (const entry of entries)
+      bucket.set(entry.id, {
+        value: entry.value,
+        ...(opts.ttlMs === undefined ? {} : { expiresAt: this.now() + opts.ttlMs }),
+      });
   }
 
   list<K extends StoreKind>(
@@ -287,6 +404,9 @@ export class MemoryStore implements Store {
 
   async delete(kind: StoreKind, id: string): Promise<void> {
     this.bucket(kind).delete(id);
+    if (kind === 'task')
+      for (const key of this.bucket('history').keys())
+        if (key.startsWith(`${id}:`)) this.bucket('history').delete(key);
   }
 
   async create<K extends StoreKind>(
@@ -352,6 +472,75 @@ export class MemoryStore implements Store {
         value,
         ...(opts.ttlMs === undefined ? {} : { expiresAt: this.now() + opts.ttlMs }),
       });
+    return true;
+  }
+
+  async appendUnseen(key: string, message: SinceMessage, ttlMs: number): Promise<void> {
+    const bucket = this.live('delivery');
+    if (!bucket.has(key)) return;
+    const id = `since:${key}`;
+    const current = bucket.get(id)?.value as Unseen | undefined;
+    bucket.set(id, { value: unseenValue(current, message), expiresAt: this.now() + ttlMs });
+  }
+
+  async acknowledgeUnseen(key: string, through: number, epoch?: string): Promise<void> {
+    const entry = this.live('delivery').get(`since:${key}`);
+    if (!entry) return;
+    entry.value = unseenValue(entry.value as Unseen, undefined, through, epoch);
+  }
+
+  async appendBatch(
+    id: string,
+    owner: string,
+    items: unknown[],
+    at: number,
+    ttlMs: number,
+  ): Promise<void> {
+    const entry = this.live('delivery').get(id);
+    const current = entry?.value as Batch | undefined;
+    const next = batchValue(current, owner, items, at);
+    const expiresAt = this.now() + ttlMs;
+    this.bucket('delivery').set(id, { value: next, expiresAt });
+  }
+
+  async claimBatch(id: string, owner: string): Promise<Batch | null | undefined> {
+    return this.withAppLock(`batch:${id}`, async () => {
+      const entry = this.live('delivery').get(id);
+      let current = entry?.value as Batch | undefined;
+      if (current?.owner !== owner || !current.items.length) return undefined;
+      if (current.sending && (current.sending.until ?? 0) > this.now()) return null;
+      if (current.sending) current = availableBatch(current);
+      const next = {
+        ...current,
+        more: 0,
+        mustReply: false,
+        sending: {
+          owner,
+          until: this.now() + BATCH_LEASE_MS,
+          count: current.items.length,
+          more: current.more,
+          mustReply: current.mustReply,
+        },
+      };
+      const expiresAt = entry!.expiresAt;
+      this.bucket('delivery').set(id, { value: next, expiresAt });
+
+      return current;
+    });
+  }
+
+  async finishBatch(
+    id: string,
+    owner: string,
+    accepted: boolean,
+    through?: string,
+  ): Promise<boolean> {
+    const entry = this.live('delivery').get(id);
+    const current = entry?.value as Batch | undefined;
+    if (current?.sending?.owner !== owner) return false;
+    const next = finishedBatch(current, accepted, through, this.now());
+    this.bucket('delivery').set(id, { value: next, expiresAt: entry!.expiresAt });
+
     return true;
   }
 

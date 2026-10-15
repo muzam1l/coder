@@ -20,7 +20,9 @@ import { mailboxDir, askWorker } from '../core/mailbox';
 import { formatEngineSpec, loadTask } from '../core/state';
 import { steerTask } from '../core/task/actions';
 import type { TokenUsage, TurnResult, McpServerSpec } from '../core/types';
+import { addTokens } from '../core/task/log-view';
 import { loadConfig } from '../core/config';
+import { jsonReplyPrompt, jsonRetryPrompt } from '../core/prompts';
 import { Journal, defined, fingerprint } from './journal';
 import { resolveFlow } from './discover';
 import type {
@@ -154,17 +156,6 @@ export class Semaphore {
 // Token helpers
 // ---------------------------------------------------------------------------
 
-function addTokens(a: TokenUsage | null, b: TokenUsage | null | undefined): TokenUsage | null {
-  if (!b) return a;
-  if (!a) return { ...b };
-  return {
-    input: a.input + b.input,
-    cachedInput: a.cachedInput + b.cachedInput,
-    output: a.output + b.output,
-    total: a.total + b.total,
-  };
-}
-
 function recordLedger(ctx: RunContext, res: FlowTaskResult): void {
   if (!res.tokens) return;
   const key = res.model ?? 'default';
@@ -189,14 +180,6 @@ async function toJSONSchema(schema: unknown): Promise<object | null> {
     // Zod is unavailable or the schema is not convertible. Use generic prose.
   }
   return null;
-}
-
-async function formatInstructions(schema: unknown): Promise<string> {
-  const json = await toJSONSchema(schema);
-  const shape = json
-    ? `matching this JSON Schema:\n${JSON.stringify(json, null, 2)}`
-    : 'matching the requested shape';
-  return `Reply with only a single JSON object ${shape}\nUse no prose or markdown fences. Return only the JSON object.`;
 }
 
 // Strip markdown fences, extract the first balanced JSON object, parse it.
@@ -341,7 +324,9 @@ async function runOneTask(
   const outputSchema = opts.returns ? await toJSONSchema(opts.returns) : null;
   const system =
     opts.returns && !outputSchema
-      ? [opts.system, await formatInstructions(opts.returns)].filter(Boolean).join('\n\n')
+      ? [opts.system, jsonReplyPrompt(await toJSONSchema(opts.returns))]
+          .filter(Boolean)
+          .join('\n\n')
       : opts.system;
   // Chain engine override for mid-turn fallback attempts; mirrors dispatch's
   // own startup fallback (next engine runs on its config defaults).
@@ -452,8 +437,7 @@ async function executeTask(
       parsed = { ok: false, errors: e instanceof Error ? e.message : String(e) };
     }
     if (!parsed.ok) {
-      const retryPrompt = `Your previous reply did not match the required format: ${parsed.errors}\n\nReply again with the required JSON object.`;
-      const retry = await steerOnce(first.taskId, retryPrompt, {}, ctx);
+      const retry = await steerOnce(first.taskId, jsonRetryPrompt(parsed.errors), {}, ctx);
       output = retry.output || output;
       tokens = addTokens(tokens, retry.tokens);
       try {

@@ -5,7 +5,7 @@ import { ConfigError, body } from '../settings/config';
 import { TaskInputError, createTask, repoAccess, type NewTask } from './create';
 import { redactTask, taskError } from './admin';
 import { json } from '../routes/http';
-import { type AgentApp } from '../../agent/types';
+import { type AgentApp, type AgentEvent } from '../../agent/types';
 import { type Integration, type OwnEvent } from '../../integrations/types';
 import { importAgents, pushedFiles, sourceEvent } from '../agents/repo';
 import { storeInstallation } from '../agents/install';
@@ -19,7 +19,9 @@ import {
   type Target,
 } from '../chat';
 import { dropTokens } from './context';
+import { appendLog } from './logs';
 import { recordFailure } from './failures';
+import { reviewKey } from './queue';
 import { updateMetadata } from '../store';
 import { decryptSecret } from '../store/secrets';
 import { InstallationBoundError } from '../store/types';
@@ -151,6 +153,49 @@ export function start(
   return Promise.resolve(json({ tasks }, 202));
 }
 
+/** Cancels queued reviews replaced by this event. */
+async function dropQueuedReviews(
+  ctx: ServerContext,
+  integration: Integration,
+  event: AgentEvent,
+): Promise<void> {
+  const pr = integration.repos?.pullRequest(event);
+  const tenant =
+    pr === undefined
+      ? undefined
+      : await forInstallation(ctx, `${event.appId}:${event.installationId}`);
+  if (!tenant) return;
+
+  const key = reviewKey({ flow: 'review', event });
+  if (!key) return;
+  const queued = await tenant.queue.list(tenant.organizationId, {
+    status: 'queued',
+    reviewKey: key,
+  });
+  const now = (ctx.now ?? Date.now)();
+  const replaced = JSON.stringify({
+    kind: 'status',
+    message: 'Replaced by a newer review of this pull request.',
+  });
+  for (const status of queued.filter(
+    status =>
+      status.task.event?.type === event.type && status.task.event.deliveryId !== event.deliveryId,
+  ))
+    if (
+      await tenant.queue.cancel(tenant.organizationId, status.task.id, now, {
+        statuses: ['queued'],
+      })
+    )
+      await appendLog(
+        tenant.store,
+        status.task.id,
+        [{ level: 'sys', line: replaced }],
+        status.logSeq ?? 0,
+        now,
+        status.logBytes ?? 0,
+      );
+}
+
 async function ownEvent(
   ctx: ServerContext,
   integration: Integration,
@@ -269,7 +314,9 @@ async function ownEvent(
       app,
       event,
       eventReplies(ctx, app, event).then(replies =>
-        deliver(ctx, integration, app, credentials, event, replies),
+        deliver(ctx, integration, app, credentials, event, replies, () =>
+          dropQueuedReviews(ctx, integration, event),
+        ),
       ),
     );
 

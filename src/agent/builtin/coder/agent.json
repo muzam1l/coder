@@ -21,9 +21,9 @@
     "slack": {
       "events": {
         "mention": true,
+        "dm": true,
         "command": true,
-        "reaction": true,
-        "message": {
+        "channel": {
           "match": "[Cc]oder"
         }
       },

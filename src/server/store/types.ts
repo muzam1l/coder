@@ -13,7 +13,9 @@ import type { StoredCredential } from '../settings/credentials';
 import type { StoredConfig } from '../settings/config';
 import type { InboxEntry } from '../tasks/queue';
 import type { LocalCompletion, LocalStart } from '../tasks/local';
-import type { SessionBinding, PendingHandoff } from '../tasks/events';
+import type { PendingHandoff } from '../tasks/events';
+import type { SinceMessage } from '../../integrations/types';
+import type { Batch, Conversation, ConversationState, Unseen } from '../tasks/conversation';
 import { type PairingRecord } from '../settings/runners';
 import type { SnapshotState } from '../runners/vercel-sandbox';
 import type { RepoFile, RepoPush, SyncMarker } from '../agents/repo';
@@ -24,7 +26,6 @@ export interface StoreRecords {
   agentversion: AgentVersionRecord;
   app: AgentApp;
   installation: Installation;
-  note: string;
   credential: StoredCredential;
   login: EngineLogin;
   runner: RunnerRecord;
@@ -35,7 +36,6 @@ export interface StoreRecords {
     | PairingRecord
     | LocalStart
     | LocalCompletion
-    | SessionBinding
     | DeliveryLease
     | AuditRow
     | RepoFile
@@ -43,6 +43,7 @@ export interface StoreRecords {
     | HeldToken
     | TokenDrop;
   task: TaskStatus;
+  history: TaskHistory;
   tasklog: Omit<TaskLogLine, 'seq'>;
   inbox: InboxEntry;
   delivery: DeliveryRecord;
@@ -62,12 +63,16 @@ export type DeliveryRecord =
       owner?: string;
       pid?: number;
       posted?: boolean;
-      session?: SessionBinding;
+      /** Turns of a local task whose replies are handled. */
+      turns?: number;
       pending?:
         | boolean
         | PendingHandoff
         | { task?: AgentTask; inbox?: { taskId: string; id: string; entry: InboxEntry } };
     }
+  | (Conversation & { pending?: never })
+  | (Unseen & { pending?: never })
+  | (Batch & { pending?: never })
   | SyncMarker
   /** How Wular names the organization, under `workspace`, for links made without a session. */
   | { slug: string; name: string; pending?: never }
@@ -177,7 +182,7 @@ export interface Store {
     Awaited<ReturnType<typeof import('../connections/resolve').resolveConnections>>
   >;
   connectionSecrets?: Map<string, string[]>;
-  localFlows?: Map<string, { stop(): Promise<void>; work: Promise<void> }>;
+  localFlows?: Map<string, { stop(): Promise<void>; work: Promise<unknown> }>;
   completionWatches?: Map<string, { stopped: boolean; work: Promise<void> }>;
   handoffs?: Map<string, Promise<unknown>>;
   withAppLock<T>(id: string, work: (store: Store) => Promise<T>): Promise<T>;
@@ -205,6 +210,8 @@ export interface Store {
     requester?: string,
     engine?: string,
   ): Promise<{ record?: AgentRecord; version?: AgentVersionRecord; credential?: string }>;
+  listHistory?(taskId: string): Promise<Array<Omit<TaskHistory, 'data' | 'state'>>>;
+  installationApp?(id: string): Promise<{ installation: Installation; app: AgentApp } | undefined>;
   getApps?(keys: string[]): Promise<Array<{ id: string; value: AgentApp }>>;
   listCredentials?(options: {
     owner?: string;
@@ -239,6 +246,7 @@ export interface Store {
   putMany<K extends StoreKind>(
     kind: K,
     entries: Array<{ id: string; value: StoreRecords[K] }>,
+    opts?: { ttlMs?: number },
   ): Promise<void>;
   list<K extends StoreKind>(
     kind: K,
@@ -292,6 +300,27 @@ export interface Store {
     value: T | undefined,
     opts?: { ttlMs?: number },
   ): Promise<boolean>;
+  conversationState?(key: string): Promise<ConversationState>;
+  markConversation?(
+    key: string,
+    taskId: string,
+    seen: string,
+    at: number,
+    ttlMs: number,
+  ): Promise<void>;
+  batchEvents?: EventTarget;
+  appendUnseen(key: string, message: SinceMessage, ttlMs: number): Promise<void>;
+  acknowledgeUnseen(key: string, through: number, epoch?: string): Promise<void>;
+  appendBatch(
+    id: string,
+    owner: string,
+    items: unknown[],
+    at: number,
+    ttlMs: number,
+  ): Promise<void>;
+  claimBatch(id: string, owner: string): Promise<Batch | null | undefined>;
+  /** Releases the sender's reservation; accepted through an admission drops the items up to it, without one the whole reservation. */
+  finishBatch(id: string, owner: string, accepted: boolean, through?: string): Promise<boolean>;
   /** Every agent, or one, with its current version in one read. */
   listAgentsWithVersions?(
     slug?: string,
@@ -420,6 +449,17 @@ export interface TaskLogLine {
   level: 'out' | 'err' | 'sys';
   line: string;
   entry?: import('../../core/state').TaskLogEntry;
+}
+
+/** One engine conversation of a task, under `<task>:<conversation>`, served only to the task's runner. */
+export interface TaskHistory {
+  engine: 'claude' | 'codex';
+  conversation: string;
+  /** The engine's history file, gzipped and sealed with the server key. */
+  data: string;
+  /** The task's conversation chain while this was its current conversation, sealed. */
+  state?: string;
+  savedAt: number;
 }
 
 export interface EngineCredential {

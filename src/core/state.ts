@@ -300,7 +300,7 @@ export function processStartMs(pid: number): number | null {
 // Our worker is spawned within moments of the task being created, so a live pid
 // whose process started well after the task's createdAt is a recycled pid. The
 // real worker is gone.
-function pidIsOurWorker(pid: number, task: Task, startMs: typeof processStartMs): boolean {
+export function pidIsOurWorker(pid: number, task: Task, startMs = processStartMs): boolean {
   if (!isPidAlive(pid)) {
     return false;
   }
@@ -322,7 +322,8 @@ const STALE_NO_PID_MS = 60_000;
 // (crash, kill, reboot) can never reach a terminal status on its own, so mark it
 // failed. Detect it through a dead pid or through staleness for tasks with no pid.
 export function reconcileTask(cwd: string, task: Task, startMs = processStartMs): Task {
-  if (task.status !== 'running' && task.status !== 'queued') {
+  const active = task.status === 'running' || task.status === 'queued';
+  if (!active && !task.rollingOver) {
     return task;
   }
   let dead: boolean;
@@ -333,8 +334,10 @@ export function reconcileTask(cwd: string, task: Task, startMs = processStartMs)
     dead = Number.isFinite(ts) && Date.now() - ts > STALE_NO_PID_MS;
   }
   if (dead) {
+    if (!active) return writeTask(cwd, task.id, { rollingOver: false }, { touch: false });
     return writeTask(cwd, task.id, {
       status: 'failed',
+      rollingOver: false,
       error: 'worker exited without finishing',
       completedAt: new Date().toISOString(),
     });
@@ -396,7 +399,7 @@ export async function* taskDirectories(
 const byRecency = (left: Task, right: Task) =>
   String(right.updatedAt ?? '').localeCompare(String(left.updatedAt ?? ''));
 
-function processStarts(): typeof processStartMs {
+export function processStarts(): typeof processStartMs {
   const starts = new Map<number, number | null>();
   return pid => {
     if (!starts.has(pid)) starts.set(pid, processStartMs(pid));
@@ -598,6 +601,10 @@ export function enqueueSteer(cwd: string, taskId: string, text: string): void {
   );
 }
 
+export function hasQueuedSteers(cwd: string, taskId: string): boolean {
+  return fs.existsSync(path.join(resolveTaskDir(cwd, taskId), STEER_QUEUE_FILE));
+}
+
 // Atomically claim every queued follow-up, oldest first. Renames the queue file
 // aside before reading so a steer racing this drain starts a fresh file (its
 // entry is never lost. The next drain picks it up and the worker is the sole
@@ -643,17 +650,28 @@ export function appendTaskLog(cwd: string, taskId: string, entry: TaskLogEntry):
   );
 }
 
+/** The log line of a steer the engine took into its running turn, before the steer's text. */
+export const LIVE_STEER = 'Steer accepted live:\n';
+
 export interface TurnResultEntry {
   at?: string;
   prompt?: string | null;
+  /** Steers the engine took into this turn while it ran. */
+  steers?: string[];
+  lastReply?: string;
   finalMessage?: string;
+  error?: TurnResult['error'];
   status?: number;
   tokens?: TurnResult['tokens'];
   model?: TurnResult['model'];
   [key: string]: unknown;
 }
 
-export function readTurnResults(cwd: string, taskId: string): TurnResultEntry[] {
+export function readTurnResults(
+  cwd: string,
+  taskId: string,
+  includeInternal = false,
+): TurnResultEntry[] {
   const file = path.join(resolveTaskDir(cwd, taskId), 'results.jsonl');
   if (!fs.existsSync(file)) {
     return [];
@@ -664,7 +682,8 @@ export function readTurnResults(cwd: string, taskId: string): TurnResultEntry[] 
     .filter(Boolean)
     .flatMap((line): TurnResultEntry[] => {
       try {
-        return [JSON.parse(line) as TurnResultEntry];
+        const entry = JSON.parse(line) as TurnResultEntry;
+        return includeInternal || !entry.internal ? [entry] : [];
       } catch {
         return [];
       }

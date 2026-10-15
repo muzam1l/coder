@@ -15,11 +15,8 @@ export const SLACK_READ_METHODS: Record<string, string[]> = {
 };
 export const SLACK_WRITE_METHODS: Record<string, string[]> = {
   'chat.postMessage': ['chat:write'],
-  'reactions.add': ['reactions:write'],
-};
-const THREAD_FIELDS: Record<string, string> = {
-  'chat.postMessage': 'thread_ts',
-  'reactions.add': 'timestamp',
+  'files.getUploadURLExternal': ['files:write'],
+  'files.completeUploadExternal': ['files:write'],
 };
 const SCOPES = { ...SLACK_READ_METHODS, ...SLACK_WRITE_METHODS };
 
@@ -30,17 +27,24 @@ export async function slackApi(
   args: Record<string, unknown> = {},
 ): Promise<unknown> {
   const allowed = ctx.tools ?? [];
-  if (!allowed.includes(method) || !SCOPES[method])
+  if (!Object.hasOwn(SCOPES, method)) throw new Error(`Unknown Slack method: ${method}`);
+  if (!allowed.includes(method))
     throw new Error(
       `Slack method ${method} is not allowed for this task; allowed: ${allowed.join(', ') || 'none'}`,
     );
   if (method in SLACK_WRITE_METHODS) {
     // The task's Chat SDK thread: `slack:<channel>:<thread ts>`.
     const [, channel, thread] = (ctx.scope?.thread ?? '').split(':');
-    if (!channel || args.channel !== channel)
+    const allocation = method === 'files.getUploadURLExternal';
+    const destination = method === 'files.completeUploadExternal' ? args.channel_id : args.channel;
+    if (!channel || (!allocation && (destination !== channel || Object.hasOwn(args, 'channels'))))
       throw new Error('This task may only write to its connected channel.');
-    const field = Object.hasOwn(THREAD_FIELDS, method) ? THREAD_FIELDS[method] : undefined;
-    if (!thread || !field || args[field] !== thread || args.reply_broadcast)
+    // A 1:1 DM is one conversation with no thread ts (`slack:D…:`), so the whole DM is its thread.
+    const dm = !thread && channel.startsWith('D');
+    if (
+      (!thread && !dm) ||
+      (!allocation && (!(dm || args.thread_ts === thread) || args.reply_broadcast))
+    )
       throw new Error('This task may only write to its triggering thread.');
   }
   // An org-wide token acts only in the workspace the task's event came from.
@@ -62,7 +66,7 @@ export async function slackApi(
 export const SLACK_TOOLS: ToolSet = {
   slack_api: {
     description:
-      'Call a Slack Web API method, such as conversations.replies or chat.postMessage, with its JSON arguments. Only the methods this task allows work; others fail with the allowed list.',
+      'Call a Slack Web API method, such as conversations.history or users.info, with its JSON arguments. Only the methods this task allows work; others fail with the allowed list.',
     inputSchema: {
       type: 'object',
       properties: { method: { type: 'string' }, args: { type: 'object' } },

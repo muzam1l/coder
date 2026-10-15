@@ -1,5 +1,6 @@
 import type { TaskRow } from '@coder/client/types';
 import { byListKey, listRank } from '@coder/core/defaults';
+import { eventJsons, replyRequired as turnReplyRequired } from '@coder/core/event-prompt';
 
 /** Task statuses a list filters by. */
 export const STATUSES: Array<[string, string]> = [
@@ -80,11 +81,44 @@ export function readDelta(
   };
 }
 
-export const taskTitle = (task: TaskRow) =>
-  task.task.name?.trim() ||
-  task.task.prompt?.trim() ||
-  task.task.event?.text?.trim() ||
-  `${task.task.event?.type ?? 'task'} on ${task.task.agent}`;
+export type EventMessage = { author: string; text: string; reaction?: boolean };
+
+/** A platform turn's messages from its `<event>` prompt; undefined for any other prompt. */
+export function eventMessages(prompt?: string): EventMessage[] | undefined {
+  return eventJsons(prompt)?.flatMap(json => {
+    if (json.reactions)
+      return json.reactions.map(({ emoji, by }) => ({
+        author: by.join(', '),
+        text: `reacted ${emoji}`,
+        reaction: true,
+      }));
+
+    return (json.messages ?? (json.message ? [json.message] : [])).map(({ text, author }) => ({
+      author: author.handle ?? author.name ?? author.id,
+      text: text || (json.event ?? ''),
+    }));
+  });
+}
+
+/** Whether a turn had to be answered: any of its events asks for a reply, else the task's event decides. */
+export const replyRequired = (task: TaskRow, prompt: string) =>
+  turnReplyRequired(prompt, task.task.event?.mustReply !== false)!;
+
+/** A platform task is titled by its first message; dashboard and CLI tasks by their prompt. */
+export function taskTitle(task: TaskRow) {
+  const prompt = task.task.prompt?.trim();
+  const first =
+    !prompt || eventMessages(prompt)
+      ? task.task.event?.text?.trim() ||
+        eventMessages(task.turns?.[0]?.prompt ?? prompt)
+          ?.find(message => !message.reaction)
+          ?.text.trim()
+      : prompt;
+
+  return (
+    task.task.name?.trim() || first || `${task.task.event?.type ?? 'task'} on ${task.task.agent}`
+  );
+}
 
 /** A folder path's last segment. */
 export const folderName = (path: string) => path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;

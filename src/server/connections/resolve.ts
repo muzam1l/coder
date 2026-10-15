@@ -433,7 +433,10 @@ export async function taskConnectionSecrets(
   const id = `connection-secrets:${taskId}`;
 
   return ctx.store.withAppLock(`connections:${taskId}`, async store => {
-    const status = await store.get('task', taskId);
+    const [status, known] = await Promise.all([
+      store.get('task', taskId),
+      store instanceof LocalStore ? undefined : store.get('snapshot', id),
+    ]);
     const active = status && !['completed', 'failed', 'cancelled'].includes(status.status);
     if (store instanceof LocalStore) {
       const cache = (store.connectionSecrets ??= new Map());
@@ -444,7 +447,6 @@ export async function taskConnectionSecrets(
 
       return secrets;
     }
-    const known = await store.get('snapshot', id);
     const previous =
       known && 'connectionSecrets' in known
         ? decryptSecret<string[]>(ctx.config, known.connectionSecrets)

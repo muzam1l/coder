@@ -68,7 +68,7 @@ Run `await handler.scheduled()` from an hourly scheduled job to sweep expired st
 
 `DATABASE_POOL_MAX` sets the process pool limit, defaulting to 10 connections on a persistent host and 2 on Vercel. `DATABASE_IDLE_TIMEOUT` sets idle expiry in seconds, defaulting to 240 and 30 respectively. Set these before creating a handler; handlers sharing a database share the first pool's settings.
 
-Completed tasks, their logs and usage remain until a task is explicitly deleted. Sandbox snapshots remain until replaced or deleted. Expiring deliveries, notes, engine sign-ins and chat state are cleaned by the sweep.
+Completed tasks, their logs and usage remain until a task is explicitly deleted. Sandbox snapshots remain until replaced or deleted. Expiring deliveries, engine sign-ins and chat state are cleaned by the sweep.
 
 ### Database setup
 
@@ -108,7 +108,7 @@ From a terminal, `coder credentials` adds, lists, removes and signs in credentia
 
 ## Tasks
 
-A task starts from the dashboard, `coder task run --server`, or a platform event. Its credential is the requester's own, then the workspace's; without one it is refused with a link that connects it. The server holds up to `limits.concurrentTasks` runner slots per workspace, including tasks waiting for a reply or approval. Set `MAX_TASKS` for an additional cap across all instances. `TASK_STALL`, `TASK_TIMEOUT` and `TASK_ATTEMPTS` bound each task.
+A task starts from the dashboard, `coder task run --server`, or a platform event. Its credential is the requester's own, then the workspace's; a shared platform conversation, such as a channel thread or a pull request, uses only the workspace's. Without one it is refused with a link that connects it. The server holds up to `limits.concurrentTasks` runner slots per workspace, including tasks waiting for a reply or approval. Set `MAX_TASKS` for an additional cap across all instances. `TASK_STALL`, `TASK_TIMEOUT` and `TASK_ATTEMPTS` bound each task.
 
 A task is a conversation: steer it or ask it a question while it runs, and continue it once it has finished. Its output streams over Server-Sent Events, and a repo task's result includes the diff of its changes. The CLI's task commands take `--server` to do the same as the dashboard. A repo's own `.coder/config.json` can only narrow the workspace's config.
 

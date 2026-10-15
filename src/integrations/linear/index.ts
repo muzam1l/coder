@@ -21,13 +21,17 @@ export const linear: Integration = {
   use: 'Mention @{handle} or delegate an issue to it.',
   answersEveryPrompt: true,
   sample: 'linear:2f1e6a1c-0000-4000-8000-000000000001:s:5b7d3c2a-0000-4000-8000-000000000002',
-  hint: "You are working in a Linear issue's agent session. Keep replies short and about the issue; link pull requests you open.",
+  prompt: [
+    'A conversation is a Linear agent session on an issue.',
+    'get_issue reads the issue by its id or identifier, such as ENG-123.',
+    'reply posts progress in the agent session; your final message completes it. create_comment posts an issue comment outside the session.',
+    'Replies are Markdown about the issue; link pull requests you open.',
+  ].join('\n'),
   events: {
     mention: {
       description: 'Agent session started or prompted by mentioning or assigning the agent',
       on: 'mention',
       addressed: true,
-      steers: true,
     },
   },
   tools: { presets: LINEAR_PRESETS, serve: LINEAR_TOOLS },

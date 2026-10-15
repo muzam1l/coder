@@ -1,8 +1,9 @@
 /* task head: the facts line under the title */
 .head .lead:has(.fact) {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 16px;
+  gap: 4px 16px;
   font-size: 12px;
 }
 .fact {
@@ -63,7 +64,8 @@
   width: 12px;
   height: 12px;
 }
-.turn.answer {
+.turn.answer,
+.turn.reply {
   border-left-color: var(--line2);
 }
 .agent-link:hover {

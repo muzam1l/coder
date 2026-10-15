@@ -137,6 +137,7 @@ export async function installationToken(
 export interface PlatformAccess {
   /** The installation's store id. */
   installation: string;
+  record?: Installation;
   /** A token that can see `repo` (`owner/name`), by default the access's own repository. */
   token(repo?: string): Promise<string | undefined>;
   fetch: typeof fetch;
@@ -219,15 +220,19 @@ async function connection(
 ): Promise<
   | {
       installation: string;
+      record: Installation;
       repo: { owner: string; name: string };
       mint(repo?: { owner: string; name: string }): Promise<string>;
     }
   | undefined
 > {
-  const linked = await ctx.store.get('installation', link.id);
+  const resolved = ctx.store.installationApp ? await ctx.store.installationApp(link.id) : undefined;
+  const linked = ctx.store.installationApp
+    ? resolved?.installation
+    : await ctx.store.get('installation', link.id);
   if (!linked || linked.deletedAt) return undefined;
 
-  const app = await ctx.store.get('app', linked.app);
+  const app = ctx.store.installationApp ? resolved?.app : await ctx.store.get('app', linked.app);
   const target = ctx.integrations[integration];
   if (!app || !target) return undefined;
 
@@ -236,6 +241,7 @@ async function connection(
 
   return {
     installation: linked.id,
+    record: linked,
     repo,
     mint: async (read = repo) =>
       installationToken(
@@ -291,6 +297,7 @@ export function dispatchTokens(
     if (id === event.integration)
       return {
         installation: installation.id,
+        record: installation,
         fetch: fetcher,
         token: scoped(event.repo, repo =>
           installationToken(
@@ -307,6 +314,7 @@ export function dispatchTokens(
     return (
       linked && {
         installation: linked.installation,
+        record: linked.record,
         fetch: fetcher,
         token: scoped(linked.repo, repo => linked.mint(repo).catch(connectionFailed(id))),
       }
@@ -349,7 +357,7 @@ export async function eventTokens(
       task.toolScopes?.[event.integration]?.repo ?? event.repo,
       task.tools[event.integration] ?? (posts ? integration.tools.presets.comment : []),
     ),
-    eventOptions(task.definition.integrations[event.integration], event.type)?.actAs,
+    taskActAs(task),
   );
   const tokens: Record<string, string> = { [event.integration]: eventToken };
   await Promise.all(
@@ -364,6 +372,14 @@ export async function eventTokens(
   return tokens;
 }
 
+/** A personal token only in a 1:1 conversation; in a shared one anyone may steer, so the task acts as the app. */
+function taskActAs(task: TaskStatus['task']) {
+  const event = task.event!;
+  return event.chat && !event.chat.thread.isDM
+    ? undefined
+    : eventOptions(task.definition.integrations[event.integration], event.type)?.actAs;
+}
+
 export async function taskContext(
   ctx: ServerContext,
   status: TaskStatus,
@@ -371,6 +387,7 @@ export async function taskContext(
   task: TaskStatus['task'];
   tokens: Record<string, string>;
   nativeTokens: Record<string, string>;
+  postToken?: string;
   credential: EngineCredential;
   config: Partial<CoderConfig>;
   connections: Record<string, McpServerSpec>;
@@ -387,6 +404,37 @@ export async function taskContext(
     ctx.local ? {} : taskConfig(ctx.store),
     taskCredential(ctx, task),
   ]);
+
+  let postToken: string | undefined;
+  const event = task.event;
+  if (task.flow === 'default' && event?.chat && task.source === event.integration) {
+    const integration = ctx.integrations[event.integration]!;
+    const comment = integration.tools.presets.comment;
+    const tools = task.tools[event.integration] ?? [];
+    // The app's tool token posts too when its scopes are exactly the comment scopes.
+    const shared =
+      !taskActAs(task) &&
+      tools.length === comment.length &&
+      comment.every(scope => tools.includes(scope));
+    if (shared) postToken = tokens[event.integration];
+    else {
+      const [app, installation] = await Promise.all([
+        ctx.store.get('app', event.appId),
+        ctx.store.get('installation', `${event.appId}:${event.installationId}`),
+      ]);
+      if (!app || !installation || installation.deletedAt)
+        throw new Error('Conversation installation is gone');
+      postToken = await installationToken(
+        ctx,
+        integration,
+        installation,
+        decryptSecret(ctx.config, app.credentials),
+        tokenBound(task.toolScopes?.[event.integration]?.repo ?? event.repo, comment),
+        ctx.config.taskTimeoutMs,
+      );
+    }
+  }
+
   const resolved = await resolvedTaskConnections(ctx, status, tokens);
   const connectionEnv = { ...resolved.env };
   const warnings = [...resolved.warnings];
@@ -402,6 +450,7 @@ export async function taskContext(
     ...currentSecrets,
     ...Object.values(resolved.tokens),
     ...Object.values(tokens),
+    ...(postToken ? [postToken] : []),
     ...credentialSecrets(credential.env),
   ]);
   await connectionWarnings(ctx, task.id, warnings);
@@ -409,6 +458,7 @@ export async function taskContext(
     task: safeTask,
     tokens: { ...resolved.tokens, ...tokens },
     nativeTokens: resolved.nativeTokens,
+    ...(postToken ? { postToken } : {}),
     credential,
     config,
     connections: resolved.mcp,

@@ -324,6 +324,7 @@ export const mcpEntrySchema = z
     ),
   );
 const effectiveConfigSchema = z.strictObject({
+  conversationCompactTokens: z.number().check(z.int(), z.positive()),
   chain: z.array(engineSchema).check(z.minLength(1)),
   engines: z.partial(
     z.strictObject({

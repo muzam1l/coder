@@ -38,8 +38,8 @@ const linkButton = (id: string, url: string, text: string, primary?: boolean) =>
 function ways(name: string, events: string[]): string | undefined {
   const all = [
     events.includes('mention') && `mention @${escaped(name)} in a channel`,
-    events.includes('message') && 'message it here',
-    events.includes('reaction') && 'react to a message',
+    events.includes('dm') && 'message it here',
+    events.includes('channel') && 'write in a channel it is in',
   ].filter((way): way is string => Boolean(way));
   if (!all.length) return undefined;
   const text = all.length > 1 ? `${all.slice(0, -1).join(', ')}, or ${all.at(-1)}` : all[0]!;

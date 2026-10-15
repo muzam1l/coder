@@ -81,7 +81,7 @@ export function taskCwd(ctx: ServerContext, input: { cwd?: string }): string | u
   return checked.folder.path;
 }
 
-const MAX_PROMPT_CHARS = 64 * 1024;
+export const MAX_PROMPT_CHARS = 64 * 1024;
 const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
 const ENGINES = new Set(['claude', 'codex', 'custom']);
 const EFFORTS = new Set(['low', 'medium', 'high']);
@@ -353,7 +353,7 @@ export async function continueTask(
     },
     { user: 'agent', text: status.result?.output ?? status.error ?? '', ts: at },
   ].slice(-20);
-  const { note: previousNote, ...context } = status.task.context ?? {};
+  const context = status.task.context ?? {};
   const turns = taskTurns(status);
   turns.at(-1)!.finishedAt ??= now;
   const next: TaskStatus = {

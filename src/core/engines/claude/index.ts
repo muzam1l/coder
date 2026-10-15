@@ -33,6 +33,8 @@ import type {
   TokenUsage,
   TurnResult,
 } from '../../types';
+import { HISTORY_LOST } from '../../types';
+import { lastClaudeUsage } from './sessions';
 
 // A token snapshot is only worth logging once the count has actually moved;
 // every block of an assistant message reports usage.
@@ -295,6 +297,7 @@ export function getClaudeAuthStatus(): AuthStatus {
 
 export interface ClaudeTurnOptions {
   prompt: string;
+  promptCacheTtl?: '1h';
   outputSchema?: object;
   model?: string | null;
   effort?: Effort | null;
@@ -317,6 +320,10 @@ export interface ClaudeTurnOptions {
   /** Directory for the short-lived 0600 MCP config file. */
   taskRoot?: string;
   resumeSessionId?: string | null;
+  /** Appended to Claude Code's system prompt on every turn. */
+  systemPrompt?: string;
+  /** Moves per-machine sections out of the system prompt so conversations share its cache. */
+  excludeDynamicSections?: boolean;
   onProgress?: (update: Exclude<ProgressUpdate, string>) => void;
   onHeartbeat?: () => void;
   command?: MailboxKey;
@@ -373,6 +380,7 @@ export function buildClaudeTurnArgs(
   sessionId: string,
   mcpConfigPath?: string,
   cliVersion?: string,
+  systemPromptPath?: string,
 ): string[] {
   // stream-json emits newline-delimited events (tool calls, result) as the turn
   // runs, so progress is visible instead of a single blob at the end like the
@@ -393,6 +401,12 @@ export function buildClaudeTurnArgs(
   args.push(options.resumeSessionId ? '--resume' : '--session-id', sessionId);
   if (options.model) args.push('--model', options.model);
   if (options.effort) args.push('--effort', options.effort);
+  if (options.systemPrompt)
+    args.push(
+      '--append-system-prompt-file',
+      systemPromptPath ?? path.join(options.taskRoot ?? cwd, '.claude-system.md'),
+    );
+  if (options.excludeDynamicSections) args.push('--exclude-dynamic-system-prompt-sections');
   if (options.outputSchema) {
     // Claude Code's validator rejects the draft 2020-12 meta-schema reference that zod writes.
     const { $schema: _, ...schema } = options.outputSchema as Record<string, unknown>;
@@ -470,6 +484,9 @@ export function buildClaudeTurnArgs(
   const settings = {
     ...(turnSettings ? JSON.parse(turnSettings) : {}),
     ...(!options.nativeMcp ? { disableClaudeAiConnectors: true } : {}),
+    ...(options.promptCacheTtl && version && compareVersions(version, '2.1.242') >= 0
+      ? { promptCacheTtl: options.promptCacheTtl }
+      : {}),
   };
   if (Object.keys(settings).length) args.push('--settings', JSON.stringify(settings));
 
@@ -755,28 +772,45 @@ export async function runClaudeTurn(
   cwd: string,
   options: ClaudeTurnOptions,
 ): Promise<ClaudeTurnResult> {
+  const result = await claudeTurn(cwd, options);
+  if (
+    !options.resumeSessionId ||
+    !result.error?.message?.includes('No conversation found with session ID')
+  )
+    return result;
+
+  options.onProgress?.({ kind: 'warning', message: HISTORY_LOST });
+  return claudeTurn(cwd, { ...options, resumeSessionId: null });
+}
+
+async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<ClaudeTurnResult> {
   const sessionId = options.resumeSessionId ?? randomUUID();
   const mcpServers = buildClaudeMcpConfig(cwd, options);
   const configFile = Object.keys(mcpServers).length
     ? path.join(options.taskRoot ?? cwd, `.claude-mcp-${randomUUID()}.json`)
     : undefined;
-  if (configFile) {
-    fs.mkdirSync(path.dirname(configFile), { recursive: true });
-    fs.writeFileSync(configFile, `${JSON.stringify({ mcpServers })}\n`, {
-      encoding: 'utf8',
-      flag: 'wx',
-      mode: 0o600,
-    });
+  const systemFile = options.systemPrompt
+    ? path.join(options.taskRoot ?? cwd, `.claude-system-${randomUUID()}.md`)
+    : undefined;
+  for (const [file, content] of [
+    [configFile, `${JSON.stringify({ mcpServers })}\n`],
+    [systemFile, options.systemPrompt],
+  ]) {
+    if (!file) continue;
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, content!, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   }
   const env = engineEnvironment({ ...process.env, ...options.env });
   const version = claudeVersion(options.executable ?? 'claude', env, cwd);
-  const args = buildClaudeTurnArgs(cwd, options, sessionId, configFile, version);
+  const args = buildClaudeTurnArgs(cwd, options, sessionId, configFile, version, systemFile);
   const removeConfig = () => {
-    if (!configFile) return;
-    try {
-      fs.unlinkSync(configFile);
-    } catch {
-      /* best-effort */
+    for (const file of [configFile, systemFile]) {
+      if (!file) continue;
+      try {
+        fs.unlinkSync(file);
+      } catch {
+        /* best-effort */
+      }
     }
   };
 
@@ -787,6 +821,7 @@ export async function runClaudeTurn(
   });
 
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const child = spawn(options.executable ?? 'claude', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -810,6 +845,9 @@ export async function runClaudeTurn(
     // Output accrues across the turn's requests; input/cached describe the
     // latest one (the context the model is holding right now).
     let outputSoFar = 0;
+    let contextTokens = 0;
+    let requestUsage: any = null;
+    let requestId: string | undefined;
     let loggedTokens = 0;
     // Files the turn wrote, mirroring codex's touchedFiles so both engines
     // report what changed.
@@ -826,11 +864,28 @@ export async function runClaudeTurn(
       options.onHeartbeat?.();
       if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
         streamSessionId = event.session_id;
+      } else if (event.type === 'stream_event' && !event.parent_tool_use_id) {
+        const delta = event.event;
+        if (delta?.type === 'message_start') {
+          requestId = delta.message?.id;
+          requestUsage = delta.message?.usage;
+        } else if (delta?.type === 'message_delta')
+          requestUsage = { ...requestUsage, ...delta.usage };
+        const usage = normalizeClaudeUsage(requestUsage);
+        contextTokens = usage ? usage.input + usage.cachedInput : 0;
       } else if (event.type === 'assistant' || event.type === 'user') {
         // Each block is logged with its kind, so the text views can tell a
         // command apart from prose without parsing the message back out.
         const usage =
           event.type === 'assistant' ? normalizeClaudeUsage(event.message?.usage) : null;
+        if (event.type === 'assistant' && !event.parent_tool_use_id) {
+          if (!requestId || requestId !== event.message?.id) requestUsage = null;
+          requestId = event.message?.id;
+          if (!requestUsage || (usage && usage.input + usage.cachedInput > 0))
+            requestUsage = event.message?.usage;
+          const latest = normalizeClaudeUsage(requestUsage);
+          contextTokens = latest ? latest.input + latest.cachedInput : 0;
+        }
         if (usage) {
           outputSoFar += usage.output;
           const total = usage.input + usage.cachedInput + outputSoFar;
@@ -1025,13 +1080,25 @@ export async function runClaudeTurn(
         resultEvent?.is_error === true ||
         resultEvent == null ||
         protocolErrors.length > 0;
+      const tokens = normalizeClaudeUsage(resultEvent?.usage);
+      if (!contextTokens && resultEvent) {
+        // Result usage spans requests; prefer the last request's finalized transcript usage.
+        const last = normalizeClaudeUsage(
+          await lastClaudeUsage(streamSessionId, startedAt, env.CLAUDE_CONFIG_DIR).catch(
+            () => null,
+          ),
+        );
+        const usage = last && last.input + last.cachedInput > 0 ? last : tokens;
+        contextTokens = usage ? usage.input + usage.cachedInput : 0;
+      }
       resolve({
         status: failed ? 1 : 0,
         threadId: resultEvent?.session_id ?? streamSessionId,
         turnId: null,
         finalMessage,
         touchedFiles: [...touched],
-        tokens: normalizeClaudeUsage(resultEvent?.usage),
+        tokens,
+        contextTokens,
         // modelUsage is keyed by the actual model id(s) that served the turn.
         model:
           (resultEvent?.modelUsage && Object.keys(resultEvent.modelUsage).join('+')) ||

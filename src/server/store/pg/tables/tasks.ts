@@ -1,9 +1,10 @@
-/** The task kinds: `task`, `tasklog`, `inbox`, `usage`, and the `delivery` and `note` rows that expire. */
+/** The task kinds: `task`, `history`, `tasklog`, `inbox`, `usage`, and the `delivery` rows that expire. */
 import { and, asc, eq, gt, sql } from 'drizzle-orm';
 
-import type { TaskLogLine, TaskStatus, UsageRecord } from '../../types';
-import { task, taskInbox, taskLog, usage } from '../schema';
+import type { TaskHistory, TaskLogLine, TaskStatus, UsageRecord } from '../../types';
+import { task, taskHistory, taskInbox, taskLog, usage } from '../schema';
 import type { DrizzleStore } from '../store';
+import { reviewKey } from '../../../tasks/queue';
 import {
   appRowId,
   date,
@@ -37,6 +38,7 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
         status: value.status,
         agent: j.agent,
         flow: j.flow,
+        reviewKey: reviewKey(j) ?? null,
         runner: j.runner,
         permissions: j.permissions ?? null,
         appId: j.event ? await appRowId(s, j.event.appId) : null,
@@ -106,6 +108,85 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
     },
     delete: async id => {
       await s.db.delete(t).where(and(s.mine(t.organizationId), eq(t.publicId, id)));
+    },
+  };
+}
+
+export async function historySummaries(
+  s: DrizzleStore,
+  id: string,
+): Promise<Array<Omit<TaskHistory, 'data' | 'state'>>> {
+  const rows = await s.db
+    .select({
+      engine: taskHistory.engine,
+      conversation: taskHistory.conversation,
+      savedAt: taskHistory.savedAt,
+    })
+    .from(taskHistory)
+    .innerJoin(task, eq(task.id, taskHistory.taskId))
+    .where(
+      and(s.mine(taskHistory.organizationId), s.mine(task.organizationId), eq(task.publicId, id)),
+    )
+    .orderBy(asc(taskHistory.savedAt));
+
+  return rows.map(row => ({ ...row, savedAt: ms(row.savedAt) }));
+}
+
+export function histories(s: DrizzleStore): Kind<TaskHistory> {
+  const t = taskHistory;
+  const key = sql<string>`${task.publicId} || ':' || ${t.conversation}`;
+  const parts = (id: string) => [id.slice(0, id.indexOf(':')), id.slice(id.indexOf(':') + 1)];
+  return {
+    key,
+    where: ({ id, prefix }) => {
+      const [publicId, conversation] = parts(id ?? prefix ?? '');
+      return and(
+        s.mine(task.organizationId),
+        eq(task.publicId, publicId!),
+        id === undefined ? undefined : eq(t.conversation, conversation!),
+      )!;
+    },
+    rows: async (where, limit) => {
+      const q = s.db
+        .select({ row: t, key })
+        .from(t)
+        .innerJoin(task, eq(task.id, t.taskId))
+        .where(and(s.mine(t.organizationId), where))
+        .orderBy(asc(t.savedAt));
+      const rows = await (limit === undefined ? q : q.limit(limit));
+      return rows.map(({ row, key: id }) => ({
+        id,
+        value: defined({
+          engine: row.engine,
+          conversation: row.conversation,
+          data: row.data,
+          state: row.state,
+          savedAt: ms(row.savedAt),
+        }),
+      }));
+    },
+    put: async (id, value) => {
+      const row = {
+        engine: value.engine,
+        data: value.data,
+        state: value.state ?? null,
+        savedAt: date(value.savedAt),
+      };
+      await s.db
+        .insert(t)
+        .values({
+          organizationId: s.organizationId,
+          taskId: await taskRowId(s, parts(id)[0]!),
+          conversation: value.conversation,
+          ...row,
+        })
+        .onConflictDoUpdate({ target: [t.taskId, t.conversation], set: row });
+    },
+    delete: async id => {
+      const [publicId, conversation] = parts(id);
+      const taskId = await taskRowId(s, publicId!).catch(() => undefined);
+      if (taskId !== undefined)
+        await s.db.delete(t).where(and(eq(t.taskId, taskId), eq(t.conversation, conversation!)));
     },
   };
 }

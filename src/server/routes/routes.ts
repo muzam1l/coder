@@ -39,6 +39,7 @@ import {
   reportResult,
   reportLogs,
 } from '../tasks/callbacks';
+import { listHistory, readHistory, saveHistory } from '../tasks/history';
 import {
   answerLogin,
   cancelLogin,
@@ -164,6 +165,9 @@ const callbacksRoutes = [
     route('POST', '/:id/logs', reportLogs, completedTaskGuard),
     route('POST', '/:id/result', reportResult, completedTaskGuard),
     route('POST', '/:id/credential', refreshCredential, completedTaskGuard),
+    route('GET', '/:id/history', listHistory, taskGuard),
+    route('GET', '/:id/history/:conversation', readHistory, taskGuard),
+    route('POST', '/:id/history', saveHistory, completedTaskGuard),
     route('GET', '/:id', readContext, taskGuard),
   ]),
   ...group('/logins', [

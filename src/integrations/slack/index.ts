@@ -4,7 +4,7 @@ import * as z from 'zod/mini';
 
 import { safeEqual } from '../../utils/crypto';
 import type { Integration, OwnEvent } from '../types';
-import { canWriteSlack } from './api';
+import { canWriteSlack, slackFetch } from './api';
 import { slackApp, type SlackAppCredentials } from './app';
 import { SLACK_READ_METHODS, SLACK_TOOLS, SLACK_WRITE_METHODS } from './tools';
 
@@ -111,6 +111,10 @@ function verified(req: Request, raw: string, secret: string | undefined): boolea
   return safeEqual(req.headers.get('x-slack-signature') ?? '', expected);
 }
 
+/** The catalog event of a plain Slack message, from its event's `channel_type`. */
+export const messageEvent = (channelType?: string) =>
+  channelType === 'im' || channelType === 'mpim' ? 'dm' : 'channel';
+
 /** The four-colour Slack mark; the dashboard shows it full colour. */
 const SLACK_MARK =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><g><path d="M 84.04 252.77 c 0 23.13 -18.89 42.02 -42.02 42.02 S 0 275.9 0 252.77 s 18.89 -42.02 42.02 -42.02 h 42.02 v 42.02 Z" fill="#e3066a"/><path d="M 105.21 252.77 c 0 -23.13 18.89 -42.02 42.02 -42.02 s 42.02 18.89 42.02 42.02 v 105.21 c 0 23.13 -18.89 42.02 -42.02 42.02 s -42.02 -18.89 -42.02 -42.02 c 0 0 0 -105.21 0 -105.21 Z" fill="#e3066a"/></g><g><path d="M 147.23 84.04 c -23.13 0 -42.02 -18.89 -42.02 -42.02 S 124.1 0 147.23 0 s 42.02 18.89 42.02 42.02 v 42.02 h -42.02 Z" fill="#00b3ff"/><path d="M 147.23 105.21 c 23.13 0 42.02 18.89 42.02 42.02 s -18.89 42.02 -42.02 42.02 H 42.02 c -23.13 0 -42.02 -18.89 -42.02 -42.02 s 18.89 -42.02 42.02 -42.02 c 0 0 105.21 0 105.21 0 Z" fill="#00b3ff"/></g><g><path d="M 315.96 147.23 c 0 -23.13 18.89 -42.02 42.02 -42.02 s 42.02 18.89 42.02 42.02 -18.89 42.02 -42.02 42.02 h -42.02 v -42.02 Z" fill="#41b658"/><path d="M 294.79 147.23 c 0 23.13 -18.89 42.02 -42.02 42.02 s -42.02 -18.89 -42.02 -42.02 V 42.02 c 0 -23.13 18.89 -42.02 42.02 -42.02 s 42.02 18.89 42.02 42.02 v 105.21 Z" fill="#41b658"/></g><g><path d="M 252.77 315.96 c 23.13 0 42.02 18.89 42.02 42.02 s -18.89 42.02 -42.02 42.02 -42.02 -18.89 -42.02 -42.02 v -42.02 h 42.02 Z" fill="#fcc003"/><path d="M 252.77 294.79 c -23.13 0 -42.02 -18.89 -42.02 -42.02 s 18.89 -42.02 42.02 -42.02 h 105.21 c 23.13 0 42.02 18.89 42.02 42.02 s -18.89 42.02 -42.02 42.02 h -105.21 Z" fill="#fcc003"/></g></svg>';
@@ -124,22 +128,41 @@ export const slack: Integration = {
   brand: { color: '#E3066A', icon: SLACK_ICON, svg: SLACK_MARK },
   name: 'Slack',
   featured: true,
-  description: 'Mentions, messages, and reactions in a Slack workspace',
+  description: 'Mentions, direct messages, and channel messages in a Slack workspace',
   installLabel: 'Add to Slack',
-  use: 'Message {handle} or mention it in a channel.',
+  use: 'Mention {handle} in a channel or send it a direct message.',
   covered: 'Slack workspace',
   sample: 'slack:C0000000000:1700000000.000100',
-  hint: 'Do not use Markdown headings. Use short paragraphs and code spans, and reply only in the thread where you were addressed.',
+  prompt: [
+    'A conversation is a Slack thread or a whole 1:1 DM. A group DM works like a channel.',
+    "conversations.replies reads a thread with each message's reactions. conversations.history reads a channel or DM, including DM messages older than your history.",
+    'conversations.info describes a channel, users.info a person, reactions.get the reactions on one message. conversations.list and users.list find channels and people.',
+    "Get a file upload URL with files.getUploadURLExternal, upload the bytes to it, then files.completeUploadExternal shares it in this thread.",
+    "chat.postMessage posts Block Kit blocks; use reply for text. Writes reach only the event's conversation.",
+    'Your final message renders as Markdown with headings, tables, lists, code blocks and quotes.',
+    'Mention a person as <@USER_ID>.',
+  ].join('\n'),
+  // `markdown_text` holds at most 12,000 characters (chat.postMessage).
+  replyLimit: 12_000,
   events: {
-    mention: { description: 'Slack app mention', on: 'mention', addressed: true },
-    command: { description: '/setup and other slash commands', on: 'command' },
-    reaction: { description: 'Reaction added', on: 'reaction' },
-    message: {
-      description: 'Channel, group, or direct message',
+    mention: {
+      description: 'A message that mentions the agent in a channel or group DM.',
+      on: 'mention',
+      addressed: true,
+    },
+    dm: {
+      description: 'Every message in a direct message or group DM with the agent.',
+      on: 'message',
+      addressed: true,
+    },
+    channel: {
+      description:
+        'Every message in channels the agent is in. Slack delivers at most 30,000 events per workspace per app per hour.',
       on: 'message',
       noisy: true,
       addressed: true,
     },
+    command: { description: '/setup and other slash commands', on: 'command' },
   },
   tools: {
     presets: {
@@ -191,7 +214,20 @@ export const slack: Integration = {
       : { invalid: true };
   },
   adapter: async ctx => (await import('./adapter')).slackAdapter(ctx),
-  reactionId: reaction => (reaction.raw as { event_ts?: string }).event_ts,
+  // Chat SDK routes a 1:1 DM as a mention, and DMs and channels share its message route.
+  event(type, thread, message) {
+    const channelType = (message.raw as { channel_type?: string }).channel_type;
+    return {
+      type: thread.isDM ? 'dm' : type === 'mention' ? type : messageEvent(channelType),
+      actor: {
+        id: message.author.userId,
+        ...(message.author.userName ? { login: message.author.userName } : {}),
+      },
+    };
+  },
+  requestFetch: slackFetch,
+  conversation: async (event, access) =>
+    (await import('./conversation')).slackConversation(event, access),
   auth: {
     canWrite: canWriteSlack,
     async token(installation) {

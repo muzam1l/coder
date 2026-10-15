@@ -2,6 +2,7 @@ import type { CoderConfig } from './config';
 
 /** Built-in config every file and flag merges over; import-free so the shipped dashboard can read it. */
 export const DEFAULT_CONFIG: CoderConfig = {
+  conversationCompactTokens: 70_000,
   // Agents are tried in order; the next one is the fallback when the previous
   // fails to start (missing binary, auth, quota, rate limit).
   chain: ['codex', 'claude'],
@@ -26,6 +27,13 @@ export const DEFAULT_CONFIG: CoderConfig = {
 
 /** The engine an agent runs on when its settings name none. */
 export const DEFAULT_ENGINE = DEFAULT_CONFIG.chain[0]!;
+
+/** The final message that posts nothing. */
+export const EMPTY_MESSAGE = '__EMPTY__';
+/** The task log line when the agent declined to reply. */
+export const SKIPPED = 'Skipped: the agent chose not to reply.';
+/** What the platform gets when the agent declined a reply that was due. */
+export const EMPTY_MESSAGE_NOTICE = 'The agent returned no reply.';
 
 /** The default task list's groups: failed first, then active, then other stopped, then completed. */
 export const listRank = (status: string) =>

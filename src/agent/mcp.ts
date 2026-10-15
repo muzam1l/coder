@@ -4,15 +4,20 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { CLI_PATH } from '../core/runtime';
-import type { McpServerSpec } from '../core/types';
+import type { McpServerSpec, Task } from '../core/types';
 import { INTEGRATIONS } from '../integrations';
 import type { AgentEvent, AgentTask } from './types';
 import type { ToolSet } from '../integrations/types';
 import { schema } from '../utils/mcp-server';
+import { history } from '../core/engines/history';
+import { connectionEnvironment } from '../core/connections';
+import { claudeProjectsDir } from '../core/engines/claude/sessions';
+import { codexHome } from '../core/engines/codex/sessions';
+import { askWorker } from '../core/mailbox';
 
-/** Tool sets coder serves over stdio: one per integration plus `note`. */
+/** Tool sets coder serves over stdio: one per integration plus task history. */
 export function agentTools(id: string, allowed?: string[]): ToolSet | undefined {
-  if (id === 'note') return NOTE_TOOLS;
+  if (id === 'history') return HISTORY_TOOLS;
   const integration = INTEGRATIONS[id]?.tools;
   const tools = integration?.serve;
   if (
@@ -96,6 +101,21 @@ export function taskToolServers(
   });
 }
 
+/** Task tool servers with their tokens in the worker env, under names every turn of the task shares. */
+export function nativeToolEnvironment(
+  task: Pick<AgentTask, 'tools' | 'event' | 'toolScopes'>,
+  tokens: Record<string, string | undefined>,
+) {
+  return connectionEnvironment(
+    Object.fromEntries(
+      taskToolServers(task, tokens).map(server => [
+        `native:${server.name}`,
+        { ...server, resolved: true },
+      ]),
+    ),
+  );
+}
+
 export async function gitToolEnvironment(
   servers: McpServerSpec[],
 ): Promise<{ env: Record<string, string>; close(): Promise<void> }> {
@@ -153,34 +173,96 @@ process.stdin.on('end', () => {
   }
 }
 
-export const NOTE_FILE_ENV = 'CODER_NOTE_FILE';
-
-const MAX_NOTE_CHARS = 2000;
-
-export const NOTE_TOOLS: ToolSet = {
-  note: {
+const HISTORY_TOOLS: ToolSet = {
+  reply: {
     description:
-      "Read this thread's note, or replace it by passing text: at most 5 short lines a future turn in this thread must remember. Empty text clears it.",
-    inputSchema: schema({ text: 'string' }, []),
+      'Post a reply now, during your turn, such as before longer work. Your final message is a reply too; never send the same text twice.',
+    inputSchema: {
+      type: 'object',
+      properties: { text: { type: 'string', description: 'Markdown to post.' } },
+      required: ['text'],
+    },
     handler: async a => {
-      const file = process.env[NOTE_FILE_ENV];
-      if (!file) throw new Error(`${NOTE_FILE_ENV} is not set`);
-      if (typeof a.text !== 'string')
-        return { note: await fs.readFile(file, 'utf8').catch(() => '') };
-      if (a.text.length > MAX_NOTE_CHARS)
-        throw new Error(`A note holds at most ${MAX_NOTE_CHARS} characters`);
-      await fs.writeFile(file, a.text.trim());
-      return { saved: true };
+      const file = process.env.CODER_HISTORY_TASK;
+      if (!file) throw new Error('CODER_HISTORY_TASK is not set');
+      const task = JSON.parse(await fs.readFile(file, 'utf8')) as Task;
+      if (!task.conversation) throw new Error('Only conversation tasks can reply');
+
+      return askWorker(
+        'reply',
+        { text: a.text },
+        {
+          dir: path.join(path.dirname(file), 'replies'),
+          timeoutMs: 60_000,
+        },
+      );
+    },
+  },
+  react: {
+    description:
+      'React to a message in this conversation with an emoji, by default the one that started your turn.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        emoji: {
+          type: 'string',
+          description: 'An emoji name such as thumbsup, or the emoji itself.',
+        },
+        message: { type: 'string', description: 'A message id from the conversation.' },
+      },
+      required: ['emoji'],
+    },
+    handler: async a => {
+      const file = process.env.CODER_HISTORY_TASK;
+      if (!file) throw new Error('CODER_HISTORY_TASK is not set');
+      const task = JSON.parse(await fs.readFile(file, 'utf8')) as Task;
+      if (!task.conversation) throw new Error('Only conversation tasks can react');
+
+      return askWorker(
+        'react',
+        { emoji: a.emoji, message: a.message },
+        {
+          dir: path.join(path.dirname(file), 'replies'),
+          timeoutMs: 60_000,
+        },
+      );
+    },
+  },
+  history: {
+    description:
+      "Search or read this task's earlier conversation, including your tool calls and results, oldest first. With query, the messages containing that exact text; without, the messages from `from` on.",
+    inputSchema: schema({ query: 'string', from: 'number', limit: 'number' }, [], {
+      query:
+        'Exact text to find, case-insensitive, 1 to 500 characters: a word or phrase from the message, not a question.',
+      from: 'Message index to start at; default the oldest, or after the last match.',
+      limit: 'Messages to return, 1 to 20; default 10.',
+    }),
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async a => {
+      const file = process.env.CODER_HISTORY_TASK;
+      if (!file) throw new Error('CODER_HISTORY_TASK is not set');
+      const task = JSON.parse(await fs.readFile(file, 'utf8')) as Task;
+
+      return history(task, a);
     },
   },
 };
 
-export function noteToolServer(file: string): McpServerSpec {
+export function historyToolServer(file: string): McpServerSpec {
   return {
-    name: 'note',
+    name: 'history',
     command: process.execPath,
-    args: [CLI_PATH, 'agent', 'tools', 'note'],
-    env: { [NOTE_FILE_ENV]: file },
-    tools: Object.keys(NOTE_TOOLS),
+    args: [CLI_PATH, 'agent', 'tools', 'history'],
+    env: {
+      CODER_HISTORY_TASK: file,
+      CODEX_HOME: codexHome(),
+      CLAUDE_CONFIG_DIR: path.dirname(claudeProjectsDir()),
+    },
+    tools: Object.keys(HISTORY_TOOLS),
   };
 }

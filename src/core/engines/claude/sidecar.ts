@@ -14,6 +14,7 @@ import { spawn } from 'node:child_process';
 
 import { CLAUDE_SIDECAR_FLAGS } from '../../config';
 import { readJsonFile, writeJsonFileAtomic } from '../../../utils/fsx';
+import { approvalActionPrompt, approvalReviewerPrompt } from '../../prompts';
 
 export interface SidecarAsk {
   /** The task's goal, included in the seed turn. */
@@ -34,19 +35,6 @@ interface SidecarState {
 }
 
 const MODEL = 'sonnet';
-
-const SEED_RULES = `You are the approval reviewer for a "coder" background coding task. The task runs inside an OS sandbox; you review only actions that escape it.
-
-Rules:
-- git stays read-only: decline any git write (commit/push/checkout/reset/...).
-- Decline anything destructive or system-level (sudo, rm -rf outside workspace, killing processes, changing system config, piping downloads to shells).
-- Temp locations (/tmp, $TMPDIR, os temp dirs) and paths this task created are workspace scratch. They can be deleted after checking the progress log.
-- Accept actions clearly needed for the task goal (package installs in the workspace, running tests/builds/linters, reading system info, network to well-known package registries).
-- Escalate when genuinely uncertain, when the action is irreversible beyond the workspace, or when it touches credentials/secrets.
-
-You may Read/Grep workspace files and the task progress log to inform a decision. Do this only when the action line alone is not enough. Most decisions should not need it.
-
-Reply with ONLY one line of JSON: {"decision":"accept"|"decline"|"escalate","reason":"<short>"}. Acknowledge now with {"decision":"escalate","reason":"ready"}.`;
 
 // Claude CLI cold start alone can take ~45s; the API call itself is seconds.
 const CALL_TIMEOUT_MS = 120_000;
@@ -211,11 +199,13 @@ export async function decideSidecar(
 
     if (!state.sessionId) {
       const sessionId = randomUUID();
-      const goal = ask.taskGoal
-        ? `\n\nTask goal: ${ask.taskGoal.replace(/\s+/g, ' ').slice(0, 500)}`
-        : '';
-      const log = `\nTask progress log: ${path.join(taskDir, 'log.jsonl')}`;
-      await callClaude(cwd, taskDir, sessionId, false, `${SEED_RULES}${goal}${log}`);
+      await callClaude(
+        cwd,
+        taskDir,
+        sessionId,
+        false,
+        approvalReviewerPrompt(ask.taskGoal, path.join(taskDir, 'log.jsonl')),
+      );
       state.sessionId = sessionId;
       writeJsonFileAtomic(statePath(taskDir), state);
     }
@@ -225,7 +215,7 @@ export async function decideSidecar(
       taskDir,
       state.sessionId,
       true,
-      `action: ${ask.summary.slice(0, 500)}`,
+      approvalActionPrompt(ask.summary),
     );
     const verdict = parseVerdict(text);
 

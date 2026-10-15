@@ -8,12 +8,12 @@ import { storeLogs } from './logs';
 import { stopTaskMachine } from './kick';
 import { taskRunner } from '../runners';
 import { type InboxAck } from './queue';
-import { noteKey, NOTE_TTL_MS } from './thread';
 import { taskClaims, taskTokenHash } from './token';
 import { bearerToken } from '../routes/guards';
 import { json } from '../routes/http';
 import { type EngineLogin } from '../settings/logins';
 import { decryptSecret } from '../store/secrets';
+import { rememberPost } from './conversation';
 
 export async function authorizeTask(
   req: Request,
@@ -56,8 +56,8 @@ type TaskCallback = {
   tokens?: unknown;
   approval?: unknown;
   answer?: unknown;
-  note?: string;
   diff?: string;
+  postedMessages?: string[];
 };
 
 export type CallbackContext = ServerContext & {
@@ -191,7 +191,10 @@ export async function reportResult(
   const body = (await req.json().catch(() => undefined)) as TaskCallback | undefined;
   if (
     !body?.status ||
-    !['running', 'waiting', 'completed', 'failed', 'cancelled'].includes(body.status)
+    !['running', 'waiting', 'completed', 'failed', 'cancelled'].includes(body.status) ||
+    (body.postedMessages !== undefined &&
+      (!Array.isArray(body.postedMessages) ||
+        body.postedMessages.some(id => typeof id !== 'string')))
   )
     return json({ error: 'Invalid task result' }, 400);
 
@@ -210,6 +213,9 @@ export async function reportResult(
   );
 
   let now = (ctx.now ?? Date.now)();
+  if (authorized.task.event)
+    await rememberPost(ctx, authorized.task.event, body.postedMessages ?? [], now);
+
   if (body.status === 'running' || body.status === 'waiting') {
     await ctx.queue.patchTask(
       ctx.organizationId,
@@ -254,9 +260,6 @@ export async function reportResult(
         ...(body.error ? { error: body.error } : {}),
         ...(body.tokens !== undefined ? { tokens: body.tokens } : {}),
       },
-      ...(typeof body.note === 'string'
-        ? { note: { key: noteKey(authorized.task), value: body.note, ttlMs: NOTE_TTL_MS } }
-        : {}),
       usage: {
         ...(authorized.task.event
           ? {

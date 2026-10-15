@@ -21,12 +21,17 @@ import {
   type SQLWrapper,
 } from 'drizzle-orm';
 
+import { BATCH_LEASE_MS } from '../../tasks/conversation';
 import { createTaskToken } from '../../tasks/token';
 import type { AgentTask } from '../../../agent/types';
 import type { TaskLogLine, TaskStatus } from '../types';
 import {
   ACTIVE_STATES,
+  BatchClaimLost,
+  batchAdmissions,
+  type BatchAdmission,
   sessionKey,
+  reviewKey,
   type Delivery,
   type ClaimedTask,
   type TaskCounts,
@@ -182,7 +187,7 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     delivery?: Delivery,
     maxQueued?: number,
-    session?: { target: SQL; create: boolean },
+    session?: { target: SQL; create: boolean; steer: string },
   ) {
     const event = agentTask.event;
     const stamp = new Date(now).toISOString();
@@ -209,14 +214,14 @@ export class DrizzleQueue implements TaskQueue {
         returning id, inbox_seq, generation
       ), forwarded as (
         insert into ${taskInbox} (organization_id, task_id, seq, generation, at, kind, value)
-        select ${organizationId}, id, inbox_seq, generation, ${stamp}::timestamptz, 'steer', ${json({ text: event?.text })} from advanced returning seq
+        select ${organizationId}, id, inbox_seq, generation, ${stamp}::timestamptz, 'steer', ${json({ text: session!.steer })} from advanced returning seq
       ),`
           : sql``
       } inserted as (
-        insert into ${task} (organization_id, public_id, source, status, agent, flow, runner, permissions,
+        insert into ${task} (organization_id, public_id, source, status, agent, flow, review_key, runner, permissions,
           app_id, installation_id, event, prompt, args, mcp, author, definition, credential, requester,
           runner_id, usage, tools, tool_scopes, context, files, attempts, created_at, updated_at)
-        select ${organizationId}, ${agentTask.id}, ${agentTask.source}, 'queued', ${agentTask.agent}, ${agentTask.flow}, ${agentTask.runner}, ${agentTask.permissions ?? null},
+        select ${organizationId}, ${agentTask.id}, ${agentTask.source}, 'queued', ${agentTask.agent}, ${agentTask.flow}, ${reviewKey(agentTask) ?? null}, ${agentTask.runner}, ${agentTask.permissions ?? null},
           ${event ? sql`coalesce((select id from ${app} where key = ${event.appId} and organization_id in (${organizationId}, '')), 0)` : sql`null`},
           ${event ? sql`coalesce((select id from ${install} where key = ${`${event.appId}:${event.installationId}`} and organization_id = ${organizationId}), 0)` : sql`null`},
           ${json(event)}, ${agentTask.prompt ?? null}, ${json(agentTask.args)}, ${json(agentTask.mcp)}, ${agentTask.author ?? null}, ${json(agentTask.definition)},
@@ -232,26 +237,25 @@ export class DrizzleQueue implements TaskQueue {
     agentTask: AgentTask,
     now: number,
     delivery: Delivery,
-    steers: boolean,
+    steer: string | undefined,
     maxQueued?: number,
     create = true,
   ): Promise<{ taskId?: string; steered?: boolean }> {
-    if (!steers)
+    if (steer === undefined)
       return create && (await this.enqueue(organizationId, agentTask, now, delivery, maxQueued))
         ? { taskId: agentTask.id }
         : {};
     const event = agentTask.event;
     const target = sql`select id from ${task} where organization_id = ${organizationId} and status in ('queued', 'running', 'waiting')
       and agent = ${agentTask.agent} and source = ${agentTask.source} and flow = 'default'
-      and requester is not distinct from ${agentTask.requester ?? null}
       and event->>'appId' is not distinct from ${event?.appId ?? null}
       and event->>'installationId' is not distinct from ${event?.installationId ?? null}
-      and event->'chat'->'thread'->>'id' is not distinct from ${event?.chat?.thread.id ?? null}
-      and event->'actor'->>'id' = ${event?.actor.id || null}
+      and event->'chat'->'thread'->>'id' = ${event?.chat?.thread.id || null}
       order by created_at desc, public_id desc limit 1 for update`;
     const statement = this.insertion(organizationId, agentTask, now, delivery, maxQueued, {
       target,
       create,
+      steer,
     });
     const locks = [
       sql`select pg_advisory_xact_lock(3, hashtext(${JSON.stringify([organizationId, sessionKey(agentTask)])}))`,
@@ -268,6 +272,9 @@ export class DrizzleQueue implements TaskQueue {
   }
 
   async claim(_now: number, maxTasks?: number, knownWork = false, concurrentTasks?: number) {
+    const unblocked = sql`not exists (select 1 from ${task} reviewing
+      where reviewing.organization_id = ${task.organizationId} and reviewing.status in ('running', 'waiting')
+        and reviewing.review_key = ${task.reviewKey})`;
     const available =
       concurrentTasks === undefined
         ? sql`true`
@@ -276,7 +283,7 @@ export class DrizzleQueue implements TaskQueue {
       const [ready] = await readQuery(this.db, () =>
         rows<{ ready: boolean }>(
           this.db,
-          sql`select exists (select 1 from ${task} where status = 'queued' and ${available})
+          sql`select exists (select 1 from ${task} where status = 'queued' and ${available} and ${unblocked})
         and ${maxTasks === undefined ? sql`true` : sql`(select count(*) from ${task} where status in ('running', 'waiting')) < ${maxTasks}`} as ready`,
         ),
       );
@@ -287,7 +294,7 @@ export class DrizzleQueue implements TaskQueue {
       to_json(public_id), to_json(organization_id), attempts + 1), 'UTF8'), 'base64'), E'\\n', ''), '='), '+/', '-_') || '.' || ${nonce}`;
     const statement = sql`with stamp as materialized (select date_trunc('milliseconds', clock_timestamp()) as at), picked as materialized (
       select id, ${bearer} as bearer from ${task} where status = 'queued'
-        and ${available}
+        and ${available} and ${unblocked}
         ${maxTasks === undefined ? sql`` : sql`and (select count(*) from ${task} where status in ('running', 'waiting')) < ${maxTasks}`}
         order by created_at, id limit 1 for update
       ), claimed as (
@@ -296,13 +303,12 @@ export class DrizzleQueue implements TaskQueue {
           token_hash = translate(rtrim(encode(sha256(convert_to(picked.bearer, 'UTF8')), 'base64'), '='), '+/', '-_')
         from picked where ${task.id} = picked.id returning ${task}.*
       ) select to_jsonb(claimed) as record, exists (select 1 from ${task} where status = 'queued' and id <> claimed.id
+        and ${unblocked} and (${task.organizationId} <> claimed.organization_id or ${task.reviewKey} is null or ${task.reviewKey} is distinct from claimed.review_key)
         and ${concurrentTasks === undefined ? sql`true` : sql`(select count(*) from ${task} active where active.organization_id = ${task.organizationId} and active.status in ('running', 'waiting')) + case when ${task.organizationId} = claimed.organization_id then 1 else 0 end < ${concurrentTasks}`})
         and ${maxTasks === undefined ? sql`true` : sql`(select count(*) from ${task} where status in ('running', 'waiting')) + 1 < ${maxTasks}`} as more from claimed`;
     const [claimed] = await pipeline<{ record: Record<string, unknown>; more: boolean }>(
       this.db,
-      maxTasks === undefined && concurrentTasks === undefined
-        ? []
-        : [sql`select pg_advisory_xact_lock(2, 0)`],
+      [sql`select pg_advisory_xact_lock(2, 0)`],
       statement,
     );
     if (!claimed) return undefined;
@@ -486,12 +492,7 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     fence: TaskFence,
   ): Promise<boolean> {
-    const note = sql`(select value from ${chatState} where key = ${statePrefix(organizationId, 'note')} ||
-      case when ${task.source} = ${task.event}->>'integration' then
-        (${task.event}->>'appId') || ':' || (${task.event}->>'installationId') || ':' || coalesce(${task.event}->'chat'->'thread'->>'id', ${task.event}->>'deliveryId')
-        else 'task:' || ${task.publicId} end
-      and (${chatState.expiresAt} is null or ${chatState.expiresAt} > ${new Date(now).toISOString()}::timestamptz))`;
-    const context = sql`(${JSON.stringify(next.context ?? {})}::jsonb - 'note' - 'connections') || jsonb_strip_nulls(jsonb_build_object('connections', ${task.context}->'connections', 'note', nullif(${note}, '""'::jsonb)))`;
+    const context = sql`(${JSON.stringify(next.context ?? {})}::jsonb - 'connections') || jsonb_strip_nulls(jsonb_build_object('connections', ${task.context}->'connections'))`;
     const [row] = await this.db
       .update(task)
       .set({
@@ -535,18 +536,8 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
   ): Promise<boolean> {
     return this.withConnections(organizationId, id, async db => {
-      const { outcome, usage: record, note } = completion;
+      const { outcome, usage: record } = completion;
       const at = new Date(now).toISOString();
-      const noteKey = note && stateKey(organizationId, 'note', note.key);
-      const noteMutation = !note
-        ? sql``
-        : note.value
-          ? sql`, note as (
-      insert into ${chatState} (key, value, expires_at)
-      select ${noteKey}, ${JSON.stringify(note.value)}::jsonb, ${new Date(now + note.ttlMs).toISOString()}::timestamptz from finished
-      on conflict (key) do update set value = excluded.value, expires_at = excluded.expires_at
-    )`
-          : sql`, note as (delete from ${chatState} where key = ${noteKey} and exists (select 1 from finished))`;
       const [row] = await rows<{ completed: boolean }>(
         db,
         sql`
@@ -563,7 +554,7 @@ export class DrizzleQueue implements TaskQueue {
         on conflict (task_id) do update set installation_id = excluded.installation_id, agent = excluded.agent, target = excluded.target,
           engine = excluded.engine, model = excluded.model, credential = excluded.credential, runner_ms = ${usage.runnerMs} + excluded.runner_ms,
           tokens = ${addTokens(sql`${usage.tokens}`, record.tokens)}, at = excluded.at, updated_at = excluded.updated_at
-      ) ${noteMutation}
+      )
       select exists (select 1 from finished) as completed`,
       );
       return Boolean(row?.completed);
@@ -615,6 +606,7 @@ export class DrizzleQueue implements TaskQueue {
       states ? inArray(task.status, states) : undefined,
       opts.agent ? eq(task.agent, opts.agent) : undefined,
       opts.source ? eq(task.source, opts.source) : undefined,
+      opts.reviewKey ? eq(task.reviewKey, opts.reviewKey) : undefined,
       opts.archived === undefined
         ? undefined
         : opts.archived
@@ -947,16 +939,47 @@ export class DrizzleQueue implements TaskQueue {
     value: unknown,
     now: number,
     generation: number,
+    batch?: BatchAdmission,
   ): Promise<InboxEntry | undefined> {
-    const [row] = await rows<{ seq: number }>(
+    const held = batch
+      ? sql`select key, value from ${chatState}
+          where key = ${stateKey(organizationId, 'delivery', batch.key)}
+            and value->'sending'->>'owner' = ${batch.owner}
+            and (expires_at is null or expires_at > ${new Date(now).toISOString()}::timestamptz) for update`
+      : sql`select null`;
+    const admissions = batch && batchAdmissions(batch);
+    const context = admissions
+      ? sql`, context = coalesce(${task.context}, '{}'::jsonb) || jsonb_build_object('admissions',
+          coalesce(${task.context}->'admissions', '{}'::jsonb) || ${JSON.stringify(admissions)}::jsonb)`
+      : sql``;
+    const reserved = sql`(${chatState.value}->'sending'->>'count')::int`;
+    const admitted = sql`coalesce((select n from jsonb_array_elements(${chatState.value}->'items') with ordinality e(item,n)
+          where n <= ${reserved} and item->>'admission' = ${batch?.through ?? null}::text limit 1), 0)`;
+    const [row] = await rows<{ seq: number | null; held: boolean }>(
       this.db,
       sql`
-      with next as (
-        update ${task} set inbox_seq = inbox_seq + 1, updated_at = ${new Date(now).toISOString()}::timestamptz where ${this.fence(organizationId, id, { generation, statuses: ACTIVE_STATES })} returning id, inbox_seq, generation
-      ) insert into ${taskInbox} (organization_id, task_id, seq, generation, kind, value, at)
-        select ${organizationId}, id, inbox_seq, generation, ${kind}, ${JSON.stringify(value ?? null)}::jsonb, ${new Date(now).toISOString()}::timestamptz from next returning seq`,
+      with held as materialized (${held}), next as (
+        update ${task} set inbox_seq = inbox_seq + 1, updated_at = ${new Date(now).toISOString()}::timestamptz${context}
+        where ${this.fence(organizationId, id, { generation, statuses: ACTIVE_STATES })}
+          and exists(select 1 from held) returning id, inbox_seq, generation
+      ), admitted as (
+        insert into ${taskInbox} (organization_id, task_id, seq, generation, kind, value, at)
+        select ${organizationId}, id, inbox_seq, generation, ${kind}, ${JSON.stringify(admissions ? { ...(value as object), admissions } : (value ?? null))}::jsonb, ${new Date(now).toISOString()}::timestamptz from next returning seq
+      ) ${
+        batch
+          ? sql`, acknowledged as (
+        update ${chatState} set value = (${chatState.value} - 'sending') || jsonb_build_object(
+          'items', coalesce((select jsonb_agg(item order by n) from jsonb_array_elements(${chatState.value}->'items') with ordinality e(item,n) where n > ${admitted}), '[]'::jsonb)) ||
+          case when ${reserved} > ${admitted} then jsonb_build_object('sending',
+            (${chatState.value}->'sending') || jsonb_build_object('count', ${reserved} - ${admitted}, 'until', ${now + BATCH_LEASE_MS}::bigint)) else '{}'::jsonb end
+        where key in (select key from held) and exists(select 1 from admitted)
+      )`
+          : sql``
+      }
+      select (select seq from admitted) as seq, exists(select 1 from held) as held`,
     );
-    return row && { seq: row.seq, generation, at: now, kind, value };
+    if (batch && !row?.held) throw new BatchClaimLost();
+    return row?.seq != null ? { seq: row.seq, generation, at: now, kind, value } : undefined;
   }
 
   async fetchInbox(

@@ -23,6 +23,7 @@ import { MenuItem } from '@/comps/ui/menu-items';
 import { Link } from '@wular/pnext/link';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { usePaged } from '@/utils/paged';
+import { useZone } from '@/app/zone';
 import type {
   IntegrationInfo,
   TaskCounts,
@@ -227,7 +228,7 @@ export function TasksList({
   agent,
   head,
   missing,
-  tz,
+  tz: serverZone,
   now,
 }: {
   first: TasksPage;
@@ -246,6 +247,7 @@ export function TasksList({
   tz: string;
   now: number;
 }) {
+  const tz = useZone(serverZone);
   const org = useOrg();
   const { values, set, query } = useFilters<Keys>(filters);
   const initial = queryOf(filters);

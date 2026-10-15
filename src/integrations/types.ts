@@ -1,5 +1,5 @@
 /** The contract every integration implements: a Chat SDK adapter, apps, tools, tokens and repository reads. */
-import type { Adapter, Message, ReactionEvent, SerializedThread, StateAdapter, Thread } from 'chat';
+import type { Adapter, Message, SerializedThread, StateAdapter, Thread } from 'chat';
 
 import type { McpServerSpec } from '../core/types';
 import type { McpTool } from '../utils/mcp-server';
@@ -253,10 +253,12 @@ export interface AdapterContext {
   saveSelf?(installationId: string, self: string): Promise<void>;
   /** A fresh in-memory Chat SDK state for caches the adapter must not share. */
   privateState?(): StateAdapter;
-  /** Whether Coder acts on a plain message that neither mentions the app nor is direct, by its raw text; the adapter reads nothing more of one it does not. */
-  hears?(text: string): Promise<boolean>;
+  /** Whether the app takes this plain message. */
+  hears?(type: string, text: string): Promise<boolean>;
   /** Whether Coder answered in this Chat SDK thread lately; only mentions, direct messages and such threads look up users. */
   active?(thread: string): Promise<boolean>;
+  /** Whether the message belongs to a conversation Coder knows. */
+  knows?(channel: string, message: string): Promise<boolean>;
   /** Coder's public address. */
   publicUrl?: string;
   /** The dashboard of the installation's workspace, for links to its pages. */
@@ -289,7 +291,7 @@ export interface TaskSummary {
 }
 
 /** Chat SDK handlers that raise Coder events. */
-export type ChatRoute = 'mention' | 'message' | 'reaction' | 'command';
+export type ChatRoute = 'mention' | 'message' | 'command';
 
 /** One catalog event: what it is, the Chat SDK handler that raises it, and how it is gated. */
 export interface EventSpec {
@@ -300,8 +302,34 @@ export interface EventSpec {
   noisy?: true;
   /** A person asks the agent directly; only linked workspace members run it. */
   addressed?: true;
-  /** A follow-up in a thread whose task still runs steers that task instead of starting another. */
-  steers?: true;
+}
+
+/** A message the agent did not get as a turn, as `since` lists it. */
+export interface SinceMessage {
+  /** The platform's message id, so a message counts once; not shown to the agent. */
+  id?: string;
+  author: string;
+  text: string;
+  sentAt: string;
+}
+
+/** What Coder lends an integration's conversation hook. */
+export interface ConversationAccess {
+  /** The installation's read token. */
+  token(): Promise<string | undefined>;
+  fetch: typeof fetch;
+  /** Whether every message of the conversation reaches Coder as an event, so none needs fetching. */
+  delivered: boolean;
+  /** The id of the last message the agent saw in this conversation; absent on a task's first turn. */
+  after?: string;
+}
+
+/** Conversation facts for the event the agent reads; each part is best-effort and absent where it has no meaning. */
+export interface ConversationFacts {
+  /** The message's position in its conversation, 0 = first. */
+  index?: number;
+  /** Messages posted after `after` that the agent has not seen, oldest first, with bots and the app's own posts left out. */
+  since?: SinceMessage[];
 }
 
 /** A signed webhook the adapter does not cover, verified by the integration itself. */
@@ -344,6 +372,8 @@ export interface WebhookTarget {
   repo?: NonNullable<AgentEvent['repo']>;
   /** The app's own platform user, so mentions of it are recognized. */
   self?: string;
+  /** The message's position in its conversation when the webhook states it (GitHub's comment count), 0 = first. */
+  index?: number;
 }
 
 /** What Coder lends a token mint. */
@@ -424,8 +454,10 @@ export interface Integration {
   readonly publicApps?: boolean;
   /** Listed first among an agent's handles. */
   readonly featured?: true;
-  /** How an agent should write for this platform, added to its prompt for events from it. */
-  readonly hint?: string;
+  /** The platform section of an agent's prompt for events from it. */
+  readonly prompt?: string;
+  /** The most characters one posted reply may hold; a longer reply goes out as several, split between paragraphs. */
+  readonly replyLimit?: number;
   readonly events: Record<string, EventSpec>;
   /** Where the sample events `agent init` writes happen: a Chat SDK thread id. */
   readonly sample?: string;
@@ -441,8 +473,7 @@ export interface Integration {
   target(req: Request, raw: string): WebhookTarget | Response | undefined;
   /** The app's Chat SDK adapter, built per request; every secret is passed explicitly, never read from the environment. */
   adapter(ctx: AdapterContext): Promise<Adapter>;
-  /** The platform delivery or activity that raised a reaction. */
-  reactionId?(reaction: ReactionEvent): string | undefined;
+  requestFetch?(request: typeof fetch, installation?: string): typeof fetch;
   /** The platform page of the thread or issue an event came from. */
   link?(event: AgentEvent): string | undefined;
   /** Greets the person who installed the app, right after the install: `open` is the agent in Coder, `setup` the missing model. */
@@ -451,6 +482,8 @@ export interface Integration {
     installer: string,
     links: { open: string; setup?: string },
   ): Promise<void>;
+  /** The event's position and messages since its last turn. */
+  conversation?(event: AgentEvent, access: ConversationAccess): Promise<ConversationFacts>;
   /** Signed webhooks the adapter does not handle (GitHub pull requests, issues, installs and pushes); `undefined` leaves it to the adapter. */
   ownEvents?(req: Request, raw: string, app: AgentApp, credentials: unknown): OwnEvent | undefined;
   /** What core cannot read from a Chat SDK message, such as the actor's role; `undefined` drops it. */

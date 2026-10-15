@@ -1,15 +1,16 @@
 /** The task queue: claim, retry, finish, cancel. Logs and lookups go through the `Store` (`task`, `tasklog`). */
 import { deleteTaskConnections } from '../connections/resolve';
 import { randomUUID } from 'node:crypto';
-import { noteKey } from './thread';
 import { createTaskToken } from './token';
-import type { AgentTask, TaskSource } from '../../agent/types';
+import type { AgentTask, TaskContext, TaskSource } from '../../agent/types';
 import type { TaskLogLine, TaskStatus, Store, UsageRecord } from '../store/types';
 import { scoped, type ServerContext } from '../context';
 import { taskRunner } from '../runners';
 import { pushLocalInbox } from './local';
 import { byId, byListKey, listRank, type ListKey } from '../../core/defaults';
 import { archiveDue } from '../../core/state';
+import { INTEGRATIONS } from '../../integrations';
+import type { Batch } from './conversation';
 
 export interface ClaimedTask {
   organizationId: string;
@@ -24,6 +25,20 @@ export interface InboxEntry {
   value: unknown;
 }
 
+/** The batch an inbox entry delivers: fenced by the sender's reservation, admitted through the last item's id. */
+export interface BatchAdmission {
+  key: string;
+  owner: string;
+  through: string;
+}
+
+/** What a delivery records on the task and its inbox entry: the admitted id under the batch's kind. */
+export const batchAdmissions = (batch: BatchAdmission): NonNullable<TaskContext['admissions']> => ({
+  [batch.key.slice(0, batch.key.indexOf(':'))]: batch.through,
+});
+
+export class BatchClaimLost extends Error {}
+
 export type Outcome = Pick<TaskStatus, 'result' | 'error' | 'tokens'> & {
   status: 'completed' | 'failed' | 'cancelled';
 };
@@ -34,6 +49,7 @@ export interface TaskFilter {
   statuses?: TaskStatus['status'][];
   agent?: string;
   source?: TaskSource;
+  reviewKey?: string;
   archived?: boolean;
   /** Case-insensitive match on the request text, agent, or task id. */
   q?: string;
@@ -73,6 +89,7 @@ export function matchesTask(status: TaskStatus, filter: TaskFilter): boolean {
   if (states && !states.includes(status.status)) return false;
   if (filter.agent && status.task.agent !== filter.agent) return false;
   if (filter.source && status.task.source !== filter.source) return false;
+  if (filter.reviewKey && reviewKey(status.task) !== filter.reviewKey) return false;
   if (filter.archived !== undefined && filter.archived !== (status.archivedAt !== undefined))
     return false;
   const q = filter.q?.trim().toLowerCase();
@@ -145,7 +162,6 @@ export type TaskPatch = Partial<
 export interface Completion {
   outcome: Outcome;
   usage: UsageRecord;
-  note?: { key: string; value: string; ttlMs: number };
   attempts: number;
   tokenHash: string;
 }
@@ -158,36 +174,46 @@ interface PendingDelivery {
   pending?: { task?: AgentTask; inbox?: { taskId: string; id: string; entry: InboxEntry } };
 }
 
-export function sessionKey(task: Pick<AgentTask, 'agent' | 'requester' | 'event'>): string {
+/** The conversation a task belongs to: app, installation, Chat SDK thread and agent; who wrote or asked is no part of it. */
+export function sessionKey(task: Pick<AgentTask, 'agent' | 'event'>): string {
   const event = task.event;
-  return JSON.stringify([
-    event?.appId,
-    event?.installationId,
-    event?.chat?.thread.id,
-    task.agent,
-    task.requester,
-    event?.actor.id,
-  ]);
+  return JSON.stringify([event?.appId, event?.installationId, event?.chat?.thread.id, task.agent]);
 }
 
 export function sameSession(task: AgentTask, incoming: AgentTask): boolean {
   return (
     task.flow === 'default' &&
-    Boolean(task.event?.actor.id) &&
+    Boolean(task.event?.chat) &&
     sessionKey(task) === sessionKey(incoming)
   );
+}
+
+export function reviewKey(task: Pick<AgentTask, 'flow' | 'event'>): string | undefined {
+  const event = task.event;
+  if (task.flow !== 'review' || !event) return undefined;
+  const pr = INTEGRATIONS[event.integration]?.repos?.pullRequest(event);
+  if (pr === undefined) return undefined;
+
+  return JSON.stringify([
+    event.appId,
+    event.installationId,
+    event.repo?.owner,
+    event.repo?.name,
+    pr,
+  ]);
 }
 
 export interface TaskQueue {
   metrics?(organizationId: string, since: number): Promise<TaskMetrics>;
   scheduler?: { running?: Promise<void>; waiting?: Promise<void> };
   inboxDelivery?: Map<string, { work?: Promise<void>; again?: boolean }>;
+  /** Inserts the task, or with `steer` appends that text to the conversation's active task instead. */
   deliver(
     organizationId: string,
     task: AgentTask,
     now: number,
     delivery: Delivery,
-    steers: boolean,
+    steer: string | undefined,
     maxQueued?: number,
     create?: boolean,
   ): Promise<{ taskId?: string; steered?: boolean }>;
@@ -295,6 +321,7 @@ export interface TaskQueue {
     value: unknown,
     now: number,
     generation: number,
+    batch?: BatchAdmission,
   ): Promise<InboxEntry | undefined>;
 }
 
@@ -350,12 +377,23 @@ export async function deleteTask(ctx: ServerContext, status: TaskStatus): Promis
   return Boolean(row?.deleted);
 }
 
+/** The task with these admissions recorded in its context, a steer's or a consumed entry's. */
+const withAdmissions = (
+  task: AgentTask,
+  admissions: NonNullable<TaskContext['admissions']>,
+): AgentTask => ({
+  ...task,
+  context: { ...task.context, admissions: { ...task.context?.admissions, ...admissions } },
+});
+
 export async function addInbox(
   ctx: ServerContext,
   id: string,
   kind: InboxEntry['kind'],
   value: unknown,
   generation: number,
+  task?: AgentTask,
+  batch?: BatchAdmission,
 ): Promise<InboxEntry | undefined> {
   const entry = await ctx.queue.appendInbox(
     ctx.organizationId,
@@ -364,8 +402,11 @@ export async function addInbox(
     value,
     (ctx.now ?? Date.now)(),
     generation,
+    batch,
   );
-  if (entry) await pushInbox(ctx, id);
+  if (entry && batch)
+    ctx.store.batchEvents?.dispatchEvent(new Event(`${ctx.organizationId}:${batch.key}`));
+  if (entry) await pushInbox(ctx, id, task);
   return entry;
 }
 
@@ -465,7 +506,7 @@ export class StoreQueue implements TaskQueue {
     task: AgentTask,
     now: number,
     delivery: Delivery,
-    steers: boolean,
+    steer: string | undefined,
     maxQueued?: number,
     create = true,
   ): Promise<{ taskId?: string; steered?: boolean }> {
@@ -494,7 +535,7 @@ export class StoreQueue implements TaskQueue {
         receipt = undefined;
       }
       const active =
-        steers && !receipt?.pending?.task
+        steer !== undefined && !receipt?.pending?.task
           ? (
               await this.list(organizationId, {
                 statuses: ACTIVE_STATES,
@@ -513,7 +554,7 @@ export class StoreQueue implements TaskQueue {
         generation: active.generation ?? 0,
         at: now,
         kind: 'steer',
-        value: { text: task.event!.text },
+        value: { text: steer },
       };
       const id = `${active.task.id}:${String(seq).padStart(8, '0')}`;
       await this.store.put('delivery', delivery.key, {
@@ -540,8 +581,18 @@ export class StoreQueue implements TaskQueue {
       )
         return undefined;
 
+      const runningReviews = new Set(
+        rows
+          .filter(row => ['running', 'waiting'].includes(row.status))
+          .map(row => reviewKey(row.task))
+          .filter(key => key !== undefined),
+      );
       const queued = rows
-        .filter(status => status.status === 'queued')
+        .filter(status => {
+          const key = reviewKey(status.task);
+
+          return status.status === 'queued' && (key === undefined || !runningReviews.has(key));
+        })
         .sort((a, b) => a.createdAt - b.createdAt);
       const next = queued[0];
       if (!next) return undefined;
@@ -558,13 +609,16 @@ export class StoreQueue implements TaskQueue {
       };
 
       await this.store.put('task', status.task.id, status);
+      const reviewing = reviewKey(next.task);
 
       return {
         organizationId: 'default',
         status,
         token: token.token,
         more:
-          queued.length > 1 &&
+          queued.some(
+            row => row !== next && (reviewing === undefined || reviewKey(row.task) !== reviewing),
+          ) &&
           (maxTasks === undefined ||
             rows.filter(row => ['running', 'waiting'].includes(row.status)).length + 1 < maxTasks),
       };
@@ -680,10 +734,6 @@ export class StoreQueue implements TaskQueue {
       const current = await this.read(id);
       if (!current || !DONE.has(current.status) || !this.allowed(current, fence)) return false;
 
-      const { note: previous, ...context } = task.context ?? {};
-      const note = await this.store.get('note', noteKey(current.task));
-
-      task.context = { ...context, ...(note ? { note } : {}) };
       await this.store.put(
         'task',
         id,
@@ -724,11 +774,6 @@ export class StoreQueue implements TaskQueue {
         return false;
 
       await this.store.put('usage', `${id}:${current.generation ?? 0}`, completion.usage);
-      if (completion.note) {
-        const { key, value, ttlMs } = completion.note;
-        if (value) await this.store.put('note', key, value, { ttlMs });
-        else await this.store.delete('note', key);
-      }
 
       for (const row of await this.store.list('inbox', { prefix: `${id}:` }))
         if (row.value.generation === (current.generation ?? 0))
@@ -1000,8 +1045,16 @@ export class StoreQueue implements TaskQueue {
             (row.value.value as { approvalId?: string })?.approvalId === approvalId,
         );
 
+      const admissions = Object.assign(
+        {},
+        ...applied.map(row => (row.value.value as { admissions?: object } | null)?.admissions),
+      ) as NonNullable<TaskContext['admissions']>;
+
       await this.store.put('task', id, {
         ...current,
+        ...(Object.keys(admissions).length
+          ? { task: withAdmissions(current.task, admissions) }
+          : {}),
         inboxAck: { generation: ack.generation, seq: Math.max(after, ack.seq) },
         ...(answers.length ? { answer: [...(current.answer ?? []), ...answers] } : {}),
         ...(approved ? { status: 'running', approval: undefined } : {}),
@@ -1034,8 +1087,13 @@ export class StoreQueue implements TaskQueue {
     value: unknown,
     now: number,
     generation: number,
+    batch?: BatchAdmission,
   ): Promise<InboxEntry | undefined> {
-    return this.serial(async () => {
+    const work = async () => {
+      if (batch) {
+        const pending = await this.store.get<Batch>('delivery', batch.key);
+        if (pending?.sending?.owner !== batch.owner) throw new BatchClaimLost();
+      }
       const current = await this.read(id);
       if (
         !current ||
@@ -1044,17 +1102,34 @@ export class StoreQueue implements TaskQueue {
       )
         return undefined;
       const seq = await this.nextSeq(id);
-      const entry = { seq, generation, at: now, kind, value };
+      const admissions = batch && batchAdmissions(batch);
+      const entry = {
+        seq,
+        generation,
+        at: now,
+        kind,
+        value: admissions ? { ...(value as object), admissions } : value,
+      };
+      // The entry carries the admission first, so a crash before the task write still reconciles.
       await this.store.put('inbox', `${id}:${String(seq).padStart(8, '0')}`, entry);
-      await this.store.put('task', id, { ...current, inboxSeq: seq, updatedAt: now });
+      await this.store.put('task', id, {
+        ...current,
+        ...(admissions ? { task: withAdmissions(current.task, admissions) } : {}),
+        inboxSeq: seq,
+        updatedAt: now,
+      });
+      if (batch) await this.store.finishBatch(batch.key, batch.owner, true, batch.through);
       return entry;
-    });
+    };
+    return this.serial(() => (batch ? this.store.withAppLock(`batch:${batch.key}`, work) : work()));
   }
 }
 
 const INBOX_LEASE_MS = 30_000;
 
-export function pushInbox(ctx: ServerContext, id: string): Promise<void> {
+export function pushInbox(ctx: ServerContext, id: string, task?: AgentTask): Promise<void> {
+  if (task && !ctx.local && !task.runnerId && !ctx.runners[task.runner]?.push)
+    return Promise.resolve();
   const queue = (ctx.queue.inboxDelivery ??= new Map());
   const key = JSON.stringify([ctx.organizationId, id]);
   let state = queue.get(key);

@@ -2,7 +2,14 @@
 import { createHmac } from 'node:crypto';
 
 import { LinearAdapter } from '@chat-adapter/linear';
-import { type Adapter, type AdapterPostableMessage, type ChatInstance, ConsoleLogger } from 'chat';
+import {
+  type Adapter,
+  type AdapterPostableMessage,
+  type ChatInstance,
+  ConsoleLogger,
+  defaultEmojiResolver,
+  type EmojiValue,
+} from 'chat';
 
 import { safeEqual } from '../../utils/crypto';
 import type { AdapterContext } from '../types';
@@ -61,8 +68,31 @@ class BoundLinearAdapter extends LinearAdapter {
     return this.bound(() => super.postMessage(threadId, message));
   }
 
+  override addReaction(threadId: string, messageId: string, emoji: EmojiValue | string) {
+    return this.bound(() =>
+      super.addReaction(threadId, messageId, defaultEmojiResolver.toGChat(emoji)),
+    );
+  }
+
   override startTyping(threadId: string, status?: string) {
     return this.bound(() => super.startTyping(threadId, status));
+  }
+
+  postProgress(threadId: string, text: string) {
+    const { agentSessionId } = this.decodeThreadId(threadId);
+    if (!agentSessionId) return this.postMessage(threadId, { markdown: text });
+
+    return this.bound(async () => {
+      await this.ensureValidToken();
+      const result = await this.getClient().createAgentActivity({
+        agentSessionId,
+        content: { type: 'thought' as never, body: text },
+      });
+      const activity = await result.agentActivity;
+      if (!result.success || !activity) throw new Error('Linear progress activity failed');
+
+      return { id: activity.id };
+    });
   }
 
   /** An error activity, so Linear shows the session as failed; outside a session, a comment. */

@@ -7,12 +7,13 @@ import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 
 import { serverEvents } from '@coder/client';
 import { LogView, type TaskDisplayRow } from '@coder/core/task/log-view';
+import { EMPTY_MESSAGE, EMPTY_MESSAGE_NOTICE, SKIPPED } from '@coder/core/defaults';
 import { client } from '@/utils/client';
 import { formatDate, formatDuration, reasonText } from '@/utils/format';
 import { Link } from '@wular/pnext/link';
 import { useSearchParams } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
-import type { TaskLog, TaskRow } from '@coder/client/types';
+import type { TaskLog, TaskRow, TaskTurn } from '@coder/client/types';
 import { iAgent, iClock, iDown, iFolder, iPlug, iRight, iTerminal } from '@/comps/ui/icons';
 import { Badge } from '@/comps/ui/badge';
 import { Button } from '@/comps/ui/button';
@@ -25,8 +26,17 @@ import { Back, PageHead } from '@/comps/frame/page-head';
 import { backFrom } from '@/comps/frame/heads';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
 import { Status } from '@/app/dash/[org]/tasks/list/status';
-import { folderName, sourceLabel, taskActive, taskTitle } from '@/app/dash/[org]/tasks/list/task';
+import {
+  eventMessages,
+  folderName,
+  replyRequired,
+  sourceLabel,
+  taskActive,
+  taskTitle,
+  type EventMessage,
+} from '@/app/dash/[org]/tasks/list/task';
 import { useAction } from '@/utils/action';
+import { useZone } from '@/app/zone';
 import { Approval, TaskActions } from './task-actions';
 import { Activity, RunPreview, runSummary } from './activity';
 import { toastError, useTaskEvents, watchTask } from '@/comps/frame/task-toasts';
@@ -42,6 +52,42 @@ function messageOf(value: unknown, fallback: string): string {
   for (const key of ['output', 'answer', 'message'])
     if (typeof record[key] === 'string') return record[key];
   return fallback;
+}
+
+/** Who made a turn and what they said: a platform turn's messages, else its prompt. */
+function turnMessages(task: TaskRow, prompt: string, first: boolean): EventMessage[] {
+  const { event } = task.task;
+
+  return (
+    eventMessages(prompt) ??
+    (first && event?.actor && prompt === event.text
+      ? [{ author: event.actor.login ?? event.actor.id, text: prompt }]
+      : [{ author: 'Prompt', text: prompt }])
+  );
+}
+
+/** Whether a log line came before the end of a turn: a hosted turn's log sequence, else its finish time. */
+const within = (turn: TaskTurn, line: TaskLog) =>
+  turn.logSeq !== undefined
+    ? line.seq < turn.logSeq
+    : turn.finishedAt === undefined || line.at <= turn.finishedAt;
+
+/** Each turn's posts from the reply tool, in order, from the lines loaded so far; a line past every turn goes to the last. */
+function turnReplies(turns: TaskTurn[], lines: TaskLog[]): string[][] {
+  const replies = turns.map((): string[] => []);
+  for (const line of lines) {
+    const message = line.entry?.kind === 'reply' ? line.entry.message : undefined;
+    if (!message) continue;
+    const index = turns.findIndex(turn => within(turn, line));
+    replies.at(index)!.push(message);
+  }
+
+  return replies;
+}
+
+function isEmpty(text: string) {
+  const bare = text.trim().replace(/^`+|`+$/g, '');
+  return bare.trim() === EMPTY_MESSAGE;
 }
 
 /** A result's message as pretty JSON when it is JSON, else as markdown. */
@@ -84,8 +130,10 @@ function Findings({ findings }: { findings: Finding[] }) {
   );
 }
 
-function ResultBody({ value }: { value: unknown }) {
+/** A result as the platform got it: an empty answer is the notice when a reply was due, else the skip. */
+function ResultBody({ value, required }: { value: unknown; required: boolean }) {
   const text = messageOf(value, 'Result received.');
+  if (isEmpty(text)) return <p class="body muted">{required ? EMPTY_MESSAGE_NOTICE : SKIPPED}</p>;
   let json: unknown;
   if (/^\s*[[{]/.test(text))
     try {
@@ -121,10 +169,12 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
   const source = task.task.event?.integration ?? task.task.source;
   const kind = task.task.event?.type ?? (task.task.flow !== 'default' ? task.task.flow : undefined);
 
+  const title = useMemo(() => taskTitle(task).split('\n')[0], [task.task, task.turns]);
+
   return (
     <PageHead
       back={<TaskBack />}
-      title={taskTitle(task).split('\n')[0]}
+      title={title}
       meta={
         <>
           <Status status={task.status} />
@@ -189,7 +239,8 @@ function useDisplayRows(lines: TaskLog[]) {
 }
 
 /** A task as a conversation with its activity; the box at the bottom steers, asks, or continues. */
-export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
+export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: string }) {
+  const tz = useZone(serverZone);
   const [task, setTask] = useState(initial);
   const [lines, setLines] = useState(initial.logs ?? []);
   const [complete, setComplete] = useState((initial.logs?.length ?? 0) < LOG_CHUNK);
@@ -367,6 +418,20 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       finishedAt: task.finishedAt,
     },
   ];
+  const parsed = useMemo(
+    () =>
+      turns.map((turn, index) => ({
+        messages: turnMessages(task, turn.prompt, index === 0),
+        required: replyRequired(task, turn.prompt),
+      })),
+    [turns, task.task],
+  );
+  const replied = useMemo(() => turnReplies(turns, lines), [turns, lines]);
+  // Turns show once their log lines are in, so a reply never pushes what is already shown.
+  const loaded = turns.findIndex(
+    turn => !complete && (!lines.length || within(turn, lines.at(-1)!)),
+  );
+  const shown = loaded < 0 ? turns : turns.slice(0, loaded);
 
   const send = async () => {
     const text = input.current?.value.trim();
@@ -470,14 +535,22 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
         <Activity rows={rows} live={live} tz={tz} at={at} />
       ) : (
         <div class="convo">
-          {turns.map((turn, index) => {
+          {shown.map((turn, index) => {
             const last = index === turns.length - 1;
+            const posts = replied[index]!;
+            // A turn that posted with the reply tool and ended empty posted nothing more.
+            const body =
+              posts.length > 0 && isEmpty(messageOf(turn.result, '')) ? null : (
+                <ResultBody value={turn.result} required={parsed[index]!.required} />
+              );
             return (
               <Fragment key={index}>
-                <div class="turn prompt">
-                  <p class="who">Prompt</p>
-                  <Collapse class="prose">{turn.prompt}</Collapse>
-                </div>
+                {parsed[index]!.messages.map((message, index) => (
+                  <div key={`p${index}`} class="turn prompt">
+                    <p class="who">{message.author}</p>
+                    <Collapse class="prose">{message.text}</Collapse>
+                  </div>
+                ))}
                 {last
                   ? (task.answer ?? []).slice(0, knownAnswers.current).map((answer, index) => (
                       <div key={`a${index}`} class="turn answer">
@@ -486,6 +559,12 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
                       </div>
                     ))
                   : null}
+                {posts.map((text, index) => (
+                  <div key={`r${index}`} class="turn reply">
+                    <p class="who">{task.task.agent}</p>
+                    <div class="prose md">{markdown(text)}</div>
+                  </div>
+                ))}
                 {sent
                   .filter(message => message.turn === index)
                   .map((message, index) => {
@@ -516,9 +595,9 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
                       </div>
                     );
                   })}
-                {turn.result ? (
+                {turn.result && (body || (last && foot)) ? (
                   <Card title="Result">
-                    <ResultBody value={turn.result} />
+                    {body}
                     {last ? foot : null}
                   </Card>
                 ) : last && live ? (
@@ -535,6 +614,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
               </Fragment>
             );
           })}
+          {shown.length < turns.length ? <Loading label="Loading the conversation." /> : null}
         </div>
       )}
       {replies ? (

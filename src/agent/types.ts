@@ -2,6 +2,7 @@ import type { SerializedMessage, SerializedThread } from 'chat';
 
 import type { Effort, McpConfigEntry, Permission } from '../core/config';
 import type { TaskTurn, RunnerKind } from '../client/types';
+import type { SinceMessage } from '../integrations/types';
 
 export type Preset = 'observe' | 'comment' | 'write';
 export const PRESETS: Preset[] = ['observe', 'comment', 'write'];
@@ -92,6 +93,16 @@ export interface AgentEvent {
   within?: string;
   /** The Chat SDK thread and message it happened in, without raw platform payloads; replies go to this thread. */
   chat?: { thread: SerializedThread; message?: SerializedMessage };
+  /** Whether the agent must answer: a mention, a 1:1 direct message, or a handle that answers every prompt. */
+  mustReply?: boolean;
+  /** The event's place in its conversation, gathered at dispatch; `more` counts messages past `since`'s cap. */
+  conversation?: {
+    index?: number;
+    since?: SinceMessage[];
+    more?: number;
+    /** Internal acknowledgement watermark of the recorded unseen snapshot. */
+    unseen?: { version: number; epoch?: string };
+  };
   repo?: {
     owner: string;
     name: string;
@@ -239,22 +250,28 @@ export interface AgentTask {
       within?: string;
     }
   >;
-  /** Conversation context gathered by the receiver: recent thread messages and the stored note. */
+  /** Context gathered by the receiver: repository instructions and who asked. */
   context?: TaskContext;
-  /** What the platform thread gets when the run ends without an answer. */
+  /** What the platform thread gets when the run fails without an answer. */
   failureReply?: string;
+  /** The task's dashboard page, linked when the agent returns no reply where one is due. */
+  taskUrl?: string;
 }
 
 export interface TaskContext {
   outputSchema?: object;
-  /** Most recent thread messages, oldest first. */
+  /** Earlier turns a dashboard continuation pastes in, oldest first. */
   messages?: Array<{ user: string; text: string; ts: string }>;
   /** Completed turns of this task, kept across dashboard continuations. */
   turns?: TaskTurn[];
-  /** Rolling note the agent wrote at the end of its previous turn in this thread. */
-  note?: string;
   /** Extra instructions from the config repo (`.coder/<agent>.md`). */
   instructions?: string;
+  /** The config repo `instructions` came from. */
+  repository?: string;
+  /** Whether this turn requires a reply. */
+  mustReply?: boolean;
+  /** The last conversation batch each kind admitted, by steer or resume. */
+  admissions?: Partial<Record<'batch' | 'reactions', string>>;
   /** The Coder account behind the event's actor, when they connected it. */
   user?: { name: string; email: string };
 }
