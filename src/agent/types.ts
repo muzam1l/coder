@@ -200,6 +200,7 @@ export interface Installation {
   settings?: InstallationSettings;
   createdAt: number;
   deletedAt?: number;
+  uninstalled?: boolean;
 }
 
 /** Where a task came from: a Coder surface, or the id of the integration whose event started it. */

@@ -208,6 +208,7 @@ export interface StoreListOptions {
   agent?: string;
   visibleTo?: string;
   active?: boolean;
+  includeUninstalled?: boolean;
   apps?: string[];
   installation?: string;
   runner?: string;
@@ -387,6 +388,7 @@ export interface AgentRecord {
   id: string;
   name: string;
   description?: string;
+  problems?: string[];
   source: 'repo' | 'home' | 'upload' | 'builtin';
   repo?: string;
   path?: string;

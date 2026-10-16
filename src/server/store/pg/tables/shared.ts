@@ -95,6 +95,7 @@ export const agentValue = (r: typeof agent.$inferSelect): AgentRecord =>
     id: r.slug,
     name: r.name,
     description: r.description,
+    problems: r.problems,
     source: r.source,
     repo: r.repo,
     path: r.path,

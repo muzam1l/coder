@@ -414,7 +414,7 @@ export class DrizzleStore implements Store {
       kind === 'app'
         ? ['name', 'agentsRepo', 'branch']
         : kind === 'installation'
-          ? ['account', 'self', 'covers', 'repos', 'connections', 'settings', 'deletedAt']
+          ? ['account', 'self', 'covers', 'repos', 'connections', 'settings', 'deletedAt', 'uninstalled']
           : ['name', 'config', 'lastSeen', 'updatedAt'];
     if (Object.keys(fields).some(key => !allowed.includes(key)))
       throw new Error('Invalid metadata fields');
@@ -790,7 +790,9 @@ export class DrizzleStore implements Store {
             ? eq(agent.slug, opts.agent)
             : sql`false`,
       );
-    if (opts.active) filters.push(kind === 'installation' ? isNull(install.deletedAt) : undefined);
+    if (opts.active) filters.push(kind === 'installation'
+      ? or(isNull(install.deletedAt), ...(opts.includeUninstalled ? [eq(install.uninstalled, true)] : []))
+      : undefined);
     if (opts.apps)
       filters.push(
         kind === 'installation' && opts.apps.length ? inArray(app.key, opts.apps) : sql`false`,

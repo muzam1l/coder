@@ -5,7 +5,7 @@ export const DEFAULT_CONFIG: CoderConfig = {
   conversationCompactTokens: 70_000,
   // Agents are tried in order; the next one is the fallback when the previous
   // fails to start (missing binary, auth, quota, rate limit).
-  chain: ['codex', 'claude'],
+  chain: ['codex', 'claude', 'custom'],
   engines: {
     codex: {
       model: 'gpt-6.1-sol',

@@ -517,6 +517,8 @@ export class VercelSandboxRunner implements Runner {
           toolInstalls()
             .map(install => `sudo sh -c '${install}'`)
             .join(' && '),
+          '',
+          'setpriv --inh-caps=-all --ambient-caps=-all bun',
         ),
         'coder-task',
         task.id,

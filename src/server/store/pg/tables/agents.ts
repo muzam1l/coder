@@ -69,7 +69,7 @@ export function publishAgent(
       returning version
     )`;
     await tx.execute(sql`${insert} update ${agent} set
-      name = ${record.name}, description = ${record.description ?? null}, source = ${record.source},
+      name = ${record.name}, description = ${record.description ?? null}, problems = null, source = ${record.source},
       repo = ${record.repo ?? null}, path = ${record.path ?? null},
       current_version = ${unchanged ? sql`${version.version}` : sql`(select version from published)`}, updated_at = ${date(record.updatedAt).toISOString()}::timestamptz
       where id = ${locked!.id}`);
@@ -94,6 +94,7 @@ export function agents(s: DrizzleStore): Kind<AgentRecord> {
       const row = {
         name: value.name,
         description: value.description ?? null,
+        problems: value.problems ?? null,
         source: value.source,
         repo: value.repo ?? null,
         path: value.path ?? null,

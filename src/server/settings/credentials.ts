@@ -146,7 +146,9 @@ function credentialNames(
   let model: string | null = null;
   try {
     model = resolveTaskOptions({ ...settings, engine }, config).model;
-  } catch {}
+  } catch {
+    return [];
+  }
   const entry = model ? config.models?.[model] : undefined;
 
   return [(entry && isEndpointModel(entry) && entry.envKey) || ENGINE_KEYS.codex];
@@ -213,10 +215,16 @@ export async function resolveEngine(
   for (const engine of chain) {
     const credential = credentials[engine];
     if (credential) return { engine, credential, usable: true, chain, credentials };
-    if (await machineSignedIn(ctx, engine)) return { engine, usable: true, chain, credentials };
+    if (await machineSignedIn(ctx, engine, engine === pinned ? settings.model : undefined))
+      return { engine, usable: true, chain, credentials };
   }
 
-  return { engine: chain[0] ?? DEFAULT_ENGINE, usable: false, chain, credentials };
+  const custom = Object.values(config.models ?? {}).some(isEndpointModel) || rows.some(
+    row => ![...Object.keys(ENGINE_KEYS), ...Object.values(ENGINE_KEYS), ...Object.values(SUBSCRIPTION_KEYS)]
+      .includes(parseCredentialId(row.id).name),
+  );
+
+  return { engine: custom ? 'custom' : chain[0] ?? DEFAULT_ENGINE, usable: false, chain, credentials };
 }
 
 /** Workspace credentials plus the caller's own; nobody sees another member's. */
@@ -480,9 +488,10 @@ export async function credentialFix(
   engine: string,
   slug?: string,
 ): Promise<string> {
-  const page = dashPath(slug ?? (await organizationSlug(ctx)), '/settings/credentials');
+  const page = dashPath(slug ?? (await organizationSlug(ctx)),
+    engine === 'custom' ? '/settings/models' : '/settings/credentials');
 
-  return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${page}?engine=${encodeURIComponent(engine)}`;
+  return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${page}${engine === 'custom' ? '' : `?engine=${encodeURIComponent(engine)}`}`;
 }
 
 const credentialSchema = z.object({
@@ -576,10 +585,11 @@ export async function createCredential(
 
     return json({ ok: true, name: parseCredentialId(id).name, replaced });
   } catch (error) {
-    return json(
-      { error: error instanceof Error ? error.message : String(error) },
-      error instanceof CredentialCheckError ? error.status : 400,
-    );
+    if (error instanceof CredentialCheckError)
+      return json({ error: error.message }, error.status);
+    console.error('coder server: could not save credential', error);
+
+    return json({ error: 'Could not save credential. Please try again.' }, 500);
   }
 }
 

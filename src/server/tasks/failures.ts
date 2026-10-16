@@ -1,5 +1,6 @@
 /** Platform events Coder failed to handle: kept a day for the agent's Usage page, and told to their thread once. */
 import { randomUUID } from 'node:crypto';
+import { AgentLoadError } from '../../agent/load';
 
 import type { AgentApp, AgentEvent } from '../../agent/types';
 import { forInstallation, type ServerContext } from '../context';
@@ -48,7 +49,9 @@ export async function recordFailure(
     await (
       await replies()
     ).problem(
-      `Coder could not handle this message. If you run this server, check its logs. Otherwise report it at ${ctx.config.issuesUrl}.`,
+      error instanceof AgentLoadError
+        ? error.message
+        : `Coder could not handle this message. If you run this server, check its logs. Otherwise report it at ${ctx.config.issuesUrl}.`,
     );
   } catch (cause) {
     console.error(`coder server: could not tell ${app.id}'s thread about a failed delivery`, cause);

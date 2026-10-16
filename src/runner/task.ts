@@ -652,6 +652,8 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       await reportResult({
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
+        ...(remote.task.event && INTEGRATIONS[remote.task.event.integration]?.isUninstalled?.(error)
+          ? { installationRevoked: true } : {}),
       }).catch(failure => console.error('coder runner: result delivery failed', failure));
     throw error;
   } finally {

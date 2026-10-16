@@ -61,6 +61,7 @@
   -webkit-line-clamp: 2;
   flex: 1;
   overflow: hidden;
+  overflow-wrap: anywhere;
   color: var(--muted);
 }
 .pfs {

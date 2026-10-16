@@ -43,8 +43,6 @@ export interface McpServerSpec {
   tools?: string[];
   /** Schemas load before the first prompt instead of behind tool search. */
   alwaysLoad?: boolean;
-  /** Calls run without the engine's approval prompt in every permission mode. */
-  autoApprove?: boolean;
 }
 
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';

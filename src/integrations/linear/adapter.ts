@@ -1,6 +1,4 @@
 /** Linear agent sessions through Chat SDK: Coder verifies the webhook signature, then mints the workspace's app token. */
-import { createHmac } from 'node:crypto';
-
 import { LinearAdapter } from '@chat-adapter/linear';
 import {
   type Adapter,
@@ -11,23 +9,9 @@ import {
   type EmojiValue,
 } from 'chat';
 
-import { safeEqual } from '../../utils/crypto';
+import { verifyLinearWebhook } from './api';
 import type { AdapterContext } from '../types';
 import type { LinearAppCredentials } from './app';
-
-/** Linear's webhook check: an HMAC of the body under the app's secret, sent within the last minute. */
-export function verifyLinearWebhook(
-  raw: string,
-  signature: string | null,
-  secret: string | undefined,
-  now = Date.now(),
-): boolean {
-  if (!secret || !signature) return false;
-  const expected = createHmac('sha256', secret).update(raw).digest();
-  if (!safeEqual(Buffer.from(signature, 'hex'), expected)) return false;
-  const sent = (JSON.parse(raw) as { webhookTimestamp?: unknown }).webhookTimestamp;
-  return typeof sent === 'number' && Math.abs(now - sent) <= 60_000;
-}
 
 /** Mints nothing before a webhook is verified, and posts outside one (a task's reply) for the bound workspace. */
 class BoundLinearAdapter extends LinearAdapter {

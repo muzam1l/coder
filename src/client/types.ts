@@ -106,7 +106,6 @@ export interface AgentRow {
   files?: Record<string, string>;
   settings?: AgentSettings;
   versions?: VersionRow[];
-  /** The names its platform apps answer to where it wakes on a mention. */
   /** The names it answers to, one per app that wakes on mentions, with the platform's display name. */
   handles?: Array<{ name: string; integration: string; platform: string }>;
   /** Platform events it failed to handle in the last day, with the newest; absent when none. */
@@ -115,6 +114,8 @@ export interface AgentRow {
   needsModel?: true;
   /** The engine selected from the agent's settings and the workspace's usable credentials. */
   resolvedEngine?: string;
+  /** Why its definition is invalid; it answers no events until fixed. */
+  problems?: string[];
 }
 
 /** A platform event Coder failed to handle. */
@@ -325,6 +326,8 @@ export interface InstallationRow {
   covers?: string[];
   repos?: string[];
   deletedAt?: number;
+  /** The app was removed or uninstalled on the platform. */
+  uninstalled?: boolean;
   settings?: {
     configRepo?: string;
     model?: string;

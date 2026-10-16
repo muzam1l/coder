@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { useRouter } from '@wular/pnext/navigation/client';
 
 import type { AppCheck, CreateStart } from '@coder/client/types';
-import type { CreateStep, PlatformPost } from '@coder/integrations/types';
+import type { CreateField, CreateStep, PlatformPost } from '@coder/integrations/types';
 import { client } from '@/utils/client';
 import { useAction } from '@/utils/action';
 import { iDots, iDown, iOut, iPlus, iSpark, iSteer, iUpload, iX } from '@/comps/ui/icons';
@@ -19,6 +19,7 @@ import { Icon } from '@/comps/ui/icon';
 import { Menu } from '@/comps/ui/menu';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { Segmented } from '@/comps/ui/segmented';
+import { Select } from '@/comps/ui/select';
 import { showToast, toastError } from '@/comps/frame/task-toasts';
 import { OutcomeDialog } from '@/app/dash/[org]/setup/outcome-dialog';
 
@@ -58,6 +59,9 @@ const uiNames = (text: string) =>
       part
     ),
   );
+
+/** Focuses a field the form just revealed. */
+const focusShown = (input: HTMLInputElement | null) => input?.focus();
 
 /** Posts the platform's own create form, such as GitHub's app manifest. */
 export function postTo({ url, fields }: PlatformPost) {
@@ -194,6 +198,26 @@ export function CreateDialog({
 }) {
   const action = useAction({ leaves: true });
   const busy = Boolean(action.pending);
+  const intro = useRef<HTMLParagraphElement>(null);
+  const [values, setValues] = useState(() =>
+    Object.fromEntries(step.fields.map(field => [field.name, field.options?.[0]?.value ?? ''])),
+  );
+  const shown = ({ when }: Pick<CreateField, 'when'>) =>
+    !when || values[when.field] === when.equals;
+  const steps = step.steps.filter(shown);
+  const fields = step.fields.filter(shown);
+  const choose = (name: string, value: string) => {
+    // The dialog keeps its top while the form below grows or shrinks.
+    const dialog = intro.current!.closest('dialog')!;
+    if (!dialog.style.marginTop) {
+      const { top } = dialog.getBoundingClientRect();
+      Object.assign(dialog.style, {
+        marginTop: `${top}px`,
+        maxHeight: `calc(100dvh - ${top + 24}px)`,
+      });
+    }
+    setValues({ ...values, [name]: value });
+  };
   const submit = (event: SubmitEvent) => {
     event.preventDefault();
     const form = event.currentTarget as HTMLFormElement;
@@ -220,31 +244,51 @@ export function CreateDialog({
       }
     >
       {unreachable ? <Unreachable /> : null}
-      <p class="muted">{step.intro}</p>
-      <div class="create-link">
-        <Button variant="secondary" class="create-open" href={step.link} external>
-          Open {new URL(step.link).host}
-        </Button>
-        <CopyButton value={step.link} label="Copy link" />
-      </div>
-      <ol class="create-steps">
-        {step.steps.map(({ text, link, copy = [] }) => (
-          <li key={text}>
-            <p>{uiNames(text)}</p>
-            {link && link !== step.link ? (
-              <div class="create-link">
-                <a href={link} target="_blank" rel="noreferrer">
-                  {link.replace(/^https:\/\//, '')}
-                </a>
-                <CopyButton value={link} label="Copy link" />
-              </div>
-            ) : null}
-            {copy.map(value => (
-              <CopyLine key={value} value={value} label="Copy" />
-            ))}
-          </li>
+      <p ref={intro} class="muted">
+        {step.intro}
+      </p>
+      {fields
+        .filter(field => field.options)
+        .map(field => (
+          <Field key={field.name} label={field.label} hint={field.hint} group>
+            <Select
+              label={field.label}
+              name={field.name}
+              options={field.options!.map(({ value, label }) => [value, label])}
+              value={values[field.name]}
+              onChange={value => choose(field.name, value)}
+              disabled={busy}
+            />
+          </Field>
         ))}
-      </ol>
+      {steps.length ? (
+        <>
+          <div class="create-link">
+            <Button variant="secondary" class="create-open" href={step.link} external>
+              Open {new URL(step.link).host}
+            </Button>
+            <CopyButton value={step.link} label="Copy link" />
+          </div>
+          <ol class="create-steps">
+            {steps.map(({ text, link, copy = [] }) => (
+              <li key={text}>
+                <p>{uiNames(text)}</p>
+                {link && link !== step.link ? (
+                  <div class="create-link">
+                    <a href={link} target="_blank" rel="noreferrer">
+                      {link.replace(/^https:\/\//, '')}
+                    </a>
+                    <CopyButton value={link} label="Copy link" />
+                  </div>
+                ) : null}
+                {copy.map(value => (
+                  <CopyLine key={value} value={value} label="Copy" />
+                ))}
+              </li>
+            ))}
+          </ol>
+        </>
+      ) : null}
       {step.notes?.length ? (
         <details class="create-more">
           <summary>Advanced</summary>
@@ -255,21 +299,24 @@ export function CreateDialog({
           </ul>
         </details>
       ) : null}
-      {step.fields.map(field => (
-        <Field
-          key={field.name}
-          label={field.label}
-          hint={field.hint ?? (field.required ? undefined : 'optional')}
-        >
-          <input
-            name={field.name}
-            placeholder={field.placeholder}
-            required={field.required}
-            autocomplete="off"
-            spellcheck={false}
-          />
-        </Field>
-      ))}
+      {fields
+        .filter(field => !field.options)
+        .map(field => (
+          <Field
+            key={field.name}
+            label={field.label}
+            hint={field.hint ?? (field.required ? undefined : 'optional')}
+          >
+            <input
+              ref={field.when ? focusShown : undefined}
+              name={field.name}
+              placeholder={field.placeholder}
+              required={field.required}
+              autocomplete="off"
+              spellcheck={false}
+            />
+          </Field>
+        ))}
     </Modal>
   );
 }
@@ -519,6 +566,7 @@ export function PlatformActions({
   name,
   apps,
   installed,
+  reinstall,
   createUrl,
   create,
   unreachable,
@@ -533,6 +581,8 @@ export function PlatformActions({
   name: string;
   apps: AppChoice[];
   installed: boolean;
+  /** The app whose every install was removed on the platform. */
+  reinstall?: string;
   createUrl: string;
   /** The form that creates the app here; without one, creation happens on the platform. */
   create?: CreateStep;
@@ -556,6 +606,7 @@ export function PlatformActions({
   const [removing, setRemoving] = useState<AppChoice>();
   const [updating, setUpdating] = useState<{ app: AppChoice; check: AppCheck }>();
   const asks = publicApps || organizationApps;
+  const main = apps.find(app => app.id === reinstall) ?? apps[0];
   // Creation on the platform: the browser posts the platform's own form, such as GitHub's manifest.
   const createThere = (state: Record<string, string>) => {
     setLeaving(true);
@@ -658,8 +709,8 @@ export function PlatformActions({
     <>
       <span class="split">
         {installed ? null : (
-          <Button size="sm" loading={busy} onClick={() => install(apps[0]!.id)}>
-            Install
+          <Button size="sm" loading={busy} onClick={() => install(main!.id)}>
+            {reinstall ? 'Reinstall' : 'Install'}
           </Button>
         )}
         <Menu
@@ -669,8 +720,8 @@ export function PlatformActions({
           summary={<Icon d={installed ? iDots : iDown} />}
         >
           {apps.map(app => {
-            // The main button already installs the first app.
-            if (!installed && app === apps[0]) return null;
+            // The main button already installs this app.
+            if (!installed && app === main) return null;
             const named = apps.length > 1 ? ` ${app.name}` : '';
 
             return (

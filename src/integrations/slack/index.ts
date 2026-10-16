@@ -37,6 +37,11 @@ const access = z.object({
   }),
 });
 
+const revoked = z.object({
+  type: z.enum(['app_uninstalled', 'tokens_revoked']),
+  tokens: z.optional(z.object({ bot: z.optional(z.array(z.string())) })),
+});
+
 /** The Home tab opened, and links shared under Coder's domain. */
 const home = z.object({
   type: z.literal('app_home_opened'),
@@ -62,7 +67,7 @@ const clicks = z.object({
 /** The Events API envelope, a slash command's form, or an interaction's `payload` field, read unverified. */
 function fields(
   raw: string,
-): z.infer<typeof envelope> & { team?: { id?: string }; enterprise?: { id?: string } } {
+): z.infer<typeof envelope> & { event?: unknown; team?: { id?: string }; enterprise?: { id?: string } } {
   try {
     return JSON.parse(raw);
   } catch {
@@ -78,7 +83,16 @@ function fields(
 }
 
 /** What Coder handles itself, before verification: the Home tab, shared links, interactions, and an org install's workspace grants. */
-function ownEvent(value: { type?: string; event?: unknown }, app: string): OwnEvent | undefined {
+function ownEvent(
+  value: ReturnType<typeof fields>,
+  app: string,
+  installation?: string,
+): OwnEvent | undefined {
+  const gone = revoked.safeParse(value.event).data;
+  if (gone) {
+    const removed = gone.type === 'app_uninstalled' || gone.tokens?.bot?.length;
+    return installation && removed ? { uninstalled: `${app}:${installation}` } : { ack: true };
+  }
   const opened = home.safeParse(value.event).data;
   if (opened) return { work: async ctx => (await import('./views')).publishHome(ctx, opened.user) };
   const links = shared.safeParse(value.event).data;
@@ -123,6 +137,23 @@ const SLACK_MARK =
 const SLACK_ICON =
   'M5.042 15.165a2.528 2.528 0 0 1-2.52 2.523A2.528 2.528 0 0 1 0 15.165a2.527 2.527 0 0 1 2.522-2.52h2.52v2.52zM6.313 15.165a2.527 2.527 0 0 1 2.521-2.52 2.527 2.527 0 0 1 2.521 2.52v6.313A2.528 2.528 0 0 1 8.834 24a2.528 2.528 0 0 1-2.521-2.522v-6.313zM8.834 5.042a2.528 2.528 0 0 1-2.521-2.52A2.528 2.528 0 0 1 8.834 0a2.528 2.528 0 0 1 2.521 2.522v2.52H8.834zM8.834 6.313a2.528 2.528 0 0 1 2.521 2.521 2.528 2.528 0 0 1-2.521 2.521H2.522A2.528 2.528 0 0 1 0 8.834a2.528 2.528 0 0 1 2.522-2.521h6.312zM18.956 8.834a2.528 2.528 0 0 1 2.522-2.521A2.528 2.528 0 0 1 24 8.834a2.528 2.528 0 0 1-2.522 2.521h-2.522V8.834zM17.688 8.834a2.528 2.528 0 0 1-2.523 2.521 2.527 2.527 0 0 1-2.52-2.521V2.522A2.527 2.527 0 0 1 15.165 0a2.528 2.528 0 0 1 2.523 2.522v6.312zM15.165 18.956a2.528 2.528 0 0 1 2.523 2.522A2.528 2.528 0 0 1 15.165 24a2.527 2.527 0 0 1-2.52-2.522v-2.522h2.52zM15.165 17.688a2.527 2.527 0 0 1-2.52-2.523 2.526 2.526 0 0 1 2.52-2.52h6.313A2.527 2.527 0 0 1 24 15.165a2.528 2.528 0 0 1-2.522 2.523h-6.313z';
 
+/** How people reach the agent in Slack, from the Slack events it listens to; none when nothing wakes it. */
+export function slackWays(
+  name: string,
+  events: string[],
+  direct = 'send it a direct message',
+): string | undefined {
+  const all = [
+    events.includes('mention') && `mention @${name} in a channel`,
+    events.includes('dm') && direct,
+    events.includes('channel') && 'write in a channel it is in',
+  ].filter((way): way is string => Boolean(way));
+  if (!all.length) return undefined;
+  const text = all.length > 1 ? `${all.slice(0, -1).join(', ')}, or ${all.at(-1)}` : all[0]!;
+
+  return `${text[0]!.toUpperCase()}${text.slice(1)}.`;
+}
+
 export const slack: Integration = {
   id: 'slack',
   brand: { color: '#E3066A', icon: SLACK_ICON, svg: SLACK_MARK },
@@ -130,7 +161,7 @@ export const slack: Integration = {
   featured: true,
   description: 'Mentions, direct messages, and channel messages in a Slack workspace',
   installLabel: 'Add to Slack',
-  use: 'Mention {handle} in a channel or send it a direct message.',
+  use: events => slackWays('{handle}', events),
   covered: 'Slack workspace',
   sample: 'slack:C0000000000:1700000000.000100',
   prompt: [
@@ -206,7 +237,8 @@ export const slack: Integration = {
     return thread ? `https://slack.com/archives/${thread[1]}/p${thread[2]}${thread[3]}` : undefined;
   },
   ownEvents(req, raw, app, credentials) {
-    const own = ownEvent(fields(raw), app.id);
+    const target = slack.target(req, raw);
+    const own = ownEvent(fields(raw), app.id, target && !(target instanceof Response) ? target.installation : undefined);
     if (!own) return undefined;
 
     return verified(req, raw, (credentials as SlackAppCredentials | undefined)?.signingSecret)
@@ -226,6 +258,10 @@ export const slack: Integration = {
     };
   },
   requestFetch: slackFetch,
+  isUninstalled(error) {
+    const code = (error as { data?: { error?: string } } | null)?.data?.error;
+    return ['invalid_auth', 'account_inactive', 'token_revoked'].includes(code ?? '');
+  },
   conversation: async (event, access) =>
     (await import('./conversation')).slackConversation(event, access),
   auth: {

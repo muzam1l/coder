@@ -64,6 +64,7 @@ export class TaskInputError extends Error {
 
 /** Refuses tasks for an agent disabled in this workspace. */
 export function assertEnabled(ctx: ServerContext, slug: string, record?: AgentRecord): void {
+  if (record?.problems?.length) throw new TaskInputError(record.problems.join('\n'), 409);
   if (!record?.settings?.disabled) return;
   throw new TaskInputError(
     `Agent "${slug}" is disabled in this workspace. Enable it in its settings to start tasks.`,

@@ -1,3 +1,4 @@
+import { appTokens } from './tokens';
 import { type Params } from '../routes/match';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import { InstallationBoundError, type Store } from '../store/types';
@@ -8,9 +9,7 @@ import { consumeNonce, inspectNonce, issueNonce, nonceOrganization } from '../au
 import { memberOf } from '../auth/connect';
 import { encodeJson } from '../../utils/base64url';
 import { agentWithVersion } from './records';
-import { credentialFix, resolveCredential } from '../settings/credentials';
-import { machineSignedIn } from '../tasks/local';
-import { DEFAULT_ENGINE } from '../../core/defaults';
+import { credentialFix, resolveEngine } from '../settings/credentials';
 import { decodeParam, redirect } from '../routes/http';
 import {
   type AppsContext,
@@ -229,6 +228,7 @@ async function bindInstall(
       credentials,
       publicUrl,
       fetch: request,
+      tokens: appTokens(ctx, integration.id),
       ...(verifying ? { installation: verifying } : {}),
     })
     .catch((error: unknown) => {
@@ -267,6 +267,7 @@ async function bindInstall(
     createdAt: existing?.createdAt ?? now,
   };
   delete installation.deletedAt;
+  delete installation.uninstalled;
   if (integration.repos) {
     const token = await integration.auth.token(
       result.token ? { ...installation, token: result.token } : installation,
@@ -326,10 +327,10 @@ async function greet(
       import('../chat'),
       agentWithVersion(ctx.store, app.agent),
     ]);
-    const engine = record?.settings?.engine ?? version?.definition.engine ?? DEFAULT_ENGINE;
-    const ready =
-      Boolean(await resolveCredential(ctx, engine, ctx.session?.user.id)) ||
-      (await machineSignedIn(ctx, record?.settings?.engine ?? version?.definition.engine));
+    const { engine, usable } = await resolveEngine(ctx, {
+      engine: record?.settings?.engine ?? version?.definition.engine,
+      model: record?.settings?.model ?? version?.definition.model,
+    }, ctx.session?.user.id);
     const adapter = adapterContext(
       ctx,
       integration,
@@ -341,7 +342,7 @@ async function greet(
     const open = `${ctx.config.publicUrl!.replace(/\/$/, '')}${platformsPath(ctx, app.agent)}`;
     await integration.welcome!(adapter, installer, {
       open,
-      ...(ready ? {} : { setup: await credentialFix(ctx, engine) }),
+      ...(usable ? {} : { setup: await credentialFix(ctx, engine) }),
     });
   } catch (error) {
     console.error(`coder server: could not greet the installer of ${app.id}`, error);

@@ -8,6 +8,7 @@ import { encodeJson } from '../../utils/base64url';
 import { sha256 } from '../../utils/crypto';
 import { decodeParam, json, redirect } from '../routes/http';
 import { notBuilt, serveDash } from '../dash/serve';
+import { appTokens, savedAppTokens } from './tokens';
 import { sharedApps } from './apps';
 import { syncKey } from './repo';
 import { dashPath, sessionSlug } from '../auth/account';
@@ -123,6 +124,7 @@ async function startedCreate(ctx: AppsContext, id: string, source: URLSearchPara
   const create =
     app.createStep && (ctx.operatorApp || started.state.public)
       ? app.createStep(ctx.config.publicUrl!, {
+          saved: await savedAppTokens(ctx, id),
           name: started.definition.name,
           public: started.state.public,
         })
@@ -214,6 +216,7 @@ async function finishCreate(
       publicUrl,
       ...parsed,
       fetch: ctx.fetch ?? fetch,
+      tokens: appTokens(ctx, id),
       ...(shared ? { shared: decryptSecret(ctx.config, shared.credentials) } : {}),
     })
     .catch((error: unknown) => {

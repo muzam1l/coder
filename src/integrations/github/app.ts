@@ -395,8 +395,6 @@ async function githubDrift(
   const permissions = live.permissions ?? {};
   const lines: AppDrift['lines'] = [];
 
-  if (wanted.name !== live.name)
-    lines.push({ text: `Rename the app to **${wanted.name}**`, copy: wanted.name });
   const description = wanted.description ?? '';
   if (description !== (live.description ?? ''))
     lines.push(

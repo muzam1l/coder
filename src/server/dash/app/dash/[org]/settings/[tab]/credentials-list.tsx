@@ -58,7 +58,7 @@ function KeyForm({
   const [name, setName] = useState(ENGINES.find(engine => engine.id === focus)?.key ?? 'OPENAI_API_KEY');
   const [scope, setScope] = useState(admin ? 'workspace' : 'personal');
   const input = useRef<HTMLInputElement>(null);
-  const action = useAction({ refresh: true });
+  const action = useAction({ toast: 'Not saved', refresh: true });
   useEffect(() => {
     if (focus) input.current?.focus();
   }, []);
@@ -552,7 +552,7 @@ export function CredentialsList({
         <div class="cred-engine">
           <p class="muted cred-note">
             Tasks read each key as its variable. Claude uses ANTHROPIC_API_KEY, Codex uses
-            OPENAI_API_KEY, and a <a href={`/dash/${org}/settings/models`}>custom model</a> uses the
+            OPENAI_API_KEY, and a <a class="link" href={`/dash/${org}/settings/models`}>custom model</a> uses the
             one it names.
           </p>
           {keys.length ? (

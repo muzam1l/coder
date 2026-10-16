@@ -324,6 +324,7 @@ export function githubInstallation(
       : {}),
     installation: {
       integration: 'github',
+      ...(name === 'installation' && action === 'deleted' ? { uninstalled: true } : {}),
       id: `${app.id}:${id}`,
       app: app.id,
       account: {

@@ -7,6 +7,7 @@ import { Link } from '@wular/pnext/link';
 import { usePaged } from '@/utils/paged';
 import type { AgentCardRow, IntegrationInfo, Paged } from '@coder/client/types';
 import { Empty } from '@/comps/ui/card';
+import { editableAgent } from '@/api/types';
 import { initial } from '@/utils/format';
 import { AgentPills, BrandIcon, PlatformLine } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { Filter } from '@/comps/ui/filter';
@@ -19,6 +20,13 @@ type Keys = 'q' | 'platform' | 'type';
 
 function AgentCard({ agent, catalog }: { agent: AgentCardRow; catalog: IntegrationInfo[] }) {
   const org = useOrg();
+  const page = `/dash/${org}/agents/${encodeURIComponent(agent.id)}`;
+  // Where a broken definition is fixed: the editor, its repository, or its workspace settings.
+  const fix = editableAgent(agent)
+    ? { href: `${page}/edit?section=platforms` }
+    : agent.source === 'repo' && agent.sourceUrl
+      ? { href: agent.sourceUrl, external: true }
+      : { href: `${page}/settings` };
 
   return (
     <li class="agent-card">
@@ -31,12 +39,16 @@ function AgentCard({ agent, catalog }: { agent: AgentCardRow; catalog: Integrati
             </Link>
           </h3>
           <span class="pills">
-            <AgentPills agent={agent} />
+            <AgentPills agent={agent} fix={fix} />
           </span>
         </div>
       </div>
       <div class="lead-clamp">
-        <span>{agent.description ?? 'No description yet.'}</span>
+        <span>
+          {agent.problems?.length
+            ? agent.problems.join(' ')
+            : (agent.description ?? 'No description yet.')}
+        </span>
       </div>
       {agent.platforms.length ? (
         <PlatformLine platforms={agent.platforms} catalog={catalog} agent={agent.id} />

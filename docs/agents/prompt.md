@@ -41,7 +41,7 @@ A platform event's task: a Slack thread or DM, a GitHub pull request or issue, a
 <replies>
  Be concise.
  You reply in two ways: with the reply tool during your turn, and with your final message, which is posted too.
- You may reply before longer work.
+ Reply early only before long work, such as several tool calls; a quick answer is your final message alone.
  Never send the same reply twice.
  When mustReply is true, reply at least once, either way.
  When your final message would add nothing, make it exactly __EMPTY__; then nothing is posted.

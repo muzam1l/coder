@@ -19,6 +19,7 @@ import {
   CoderError,
   dispatchTask,
   readResultJson,
+  resolveTaskOptions,
   spawnWorker,
   selectMcpServers,
 } from '../../core/dispatch';
@@ -1432,12 +1433,24 @@ export async function engineStatus(ctx?: ServerContext): Promise<EngineStatus> {
 }
 
 /** This machine's own logins; an agent without an engine falls back along the chain. */
-export async function machineSignedIn(ctx: ServerContext, engine?: string): Promise<boolean> {
+export async function machineSignedIn(
+  ctx: ServerContext,
+  engine?: string,
+  model?: string,
+): Promise<boolean> {
   if (!ctx.local) return false;
   const engines = engine ? [engine] : loadConfig(ctx.local.cwd).chain;
   const status = await engineStatus(ctx);
 
-  return engines.some(
-    name => name === 'custom' || status[name as 'claude' | 'codex']?.signedIn === true,
-  );
+  return engines.some(name => {
+    if (name !== 'custom') return status[name as 'claude' | 'codex']?.signedIn === true;
+    const config = loadConfig(ctx.local!.cwd);
+    try {
+      const selected = resolveTaskOptions({ engine: 'custom', model }, config).model;
+      const entry = selected && config.models?.[selected];
+      return Boolean(entry && 'baseUrl' in entry && process.env[entry.envKey ?? 'OPENAI_API_KEY']);
+    } catch {
+      return false;
+    }
+  });
 }

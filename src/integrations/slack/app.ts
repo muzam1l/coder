@@ -1,7 +1,7 @@
 /** Slack app creation from a manifest plus the OAuth install dance for that app. */
 import { isIP } from 'node:net';
 
-import { IntegrationError, type AgentDefinition, type IntegrationApp, type Preset } from '../types';
+import { IntegrationError, type AgentDefinition, type AppTokens, type IntegrationApp, type Preset } from '../types';
 import { SLACK_READ_METHODS } from './tools';
 
 type Fetcher = typeof fetch;
@@ -11,11 +11,7 @@ export interface SlackAppCredentials {
   clientId: string;
   clientSecret: string;
   signingSecret: string;
-  /** App configuration tokens, rotated via `tooling.tokens.rotate`. */
-  configToken?: string;
-  configRefreshToken?: string;
-  /** When `configToken` expires, in epoch milliseconds. */
-  configTokenExpires?: number;
+  configTokenId?: string;
   /** The manifest's bot scopes, asked for again on every install. */
   scopes?: string[];
 }
@@ -92,7 +88,7 @@ async function createSlackApp(
   configToken: string,
   manifest: Record<string, unknown>,
   request: Fetcher = fetch,
-): Promise<Omit<SlackAppCredentials, 'configToken' | 'configRefreshToken' | 'configTokenExpires'>> {
+): Promise<SlackAppCredentials> {
   const value = await slackApi<{
     app_id: string;
     credentials: { client_id: string; client_secret: string; signing_secret: string };
@@ -126,13 +122,19 @@ function agentManifest(publicUrl: string, name: string, definition: AgentDefinit
   });
 }
 
+export interface SlackConfigToken {
+  configToken: string;
+  configRefreshToken: string;
+  configTokenExpires: number;
+  workspace: string;
+  user: string;
+}
+
 /** `tooling.tokens.rotate`: config tokens expire after 12 hours. */
-async function rotateConfigToken(
+export async function rotateConfigToken(
   refreshToken: string,
   request: Fetcher = fetch,
-): Promise<
-  Required<Pick<SlackAppCredentials, 'configToken' | 'configRefreshToken' | 'configTokenExpires'>>
-> {
+): Promise<SlackConfigToken> {
   const response = await request('https://slack.com/api/tooling.tokens.rotate', {
     method: 'POST',
     headers: { 'content-type': 'application/x-www-form-urlencoded' },
@@ -144,14 +146,46 @@ async function rotateConfigToken(
     token?: string;
     refresh_token?: string;
     exp?: number;
+    team_id?: string;
+    user_id?: string;
   };
-  if (!response.ok || !value.ok || !value.token || !value.refresh_token)
+  if (!response.ok || !value.ok || !value.token || !value.refresh_token || !value.team_id || !value.user_id)
     throw new IntegrationError('platform-error', value.error ?? String(response.status));
   return {
+    workspace: value.team_id,
+    user: value.user_id,
     configToken: value.token,
     configRefreshToken: value.refresh_token,
     configTokenExpires: (value.exp ?? 0) * 1000,
   };
+}
+
+async function withConfigToken<T>(
+  tokens: AppTokens,
+  id: string,
+  request: Fetcher,
+  run: (token: string) => Promise<T>,
+): Promise<T> {
+  return tokens.use(id, async (credentials, save, invalidate) => {
+    let current = credentials as SlackConfigToken;
+    if (current.configTokenExpires <= Date.now() + 60_000) {
+      try {
+        const rotated = await rotateConfigToken(current.configRefreshToken, request);
+        if (rotated.workspace !== current.workspace || rotated.user !== current.user)
+          throw new Error('Configuration token owner changed');
+        current = rotated;
+      } catch {
+        await invalidate();
+        throw new IntegrationError(
+          'invalid-field',
+          'token',
+          'This configuration token could not be refreshed. Paste a new token.',
+        );
+      }
+      await save(current);
+    }
+    return run(current.configToken);
+  });
 }
 
 export function oauthInstallUrl(
@@ -233,76 +267,117 @@ async function grantedTeams(token: string, request: Fetcher): Promise<string[]> 
 
 export const slackApp: IntegrationApp = {
   builtin: 'own',
-  createStep: () => ({
-    intro:
-      "Coder creates the Slack app with a configuration token and installs its bot in the token's whole workspace.",
-    link: 'https://api.slack.com/apps',
-    steps: [
-      {
-        text: 'Under **Your App Configuration Tokens**, click **Generate Token** and pick the workspace the agent should join.',
-      },
-      { text: 'Paste the refresh token below, then approve the install when Slack asks.' },
-    ],
-    notes: [
-      'A workspace that requires app approval sends the install to its admins first. In Enterprise Grid, only an org admin can install org-wide.',
-      "To install the app in other Slack workspaces, click **Activate Public Distribution** under the app's **Manage Distribution**.",
-    ],
-    fields: [
-      {
-        name: 'refreshToken',
-        label: 'Refresh token',
-        hint: 'Starts with xoxe-1-.',
-        placeholder: 'xoxe-1-…',
-        required: true,
-      },
-    ],
-    submit: 'Create Slack app',
-  }),
-  async createCallback(req, { publicUrl, state, definition, fetch: request }) {
-    const refreshToken = new URLSearchParams(await req.text()).get('refreshToken');
-    if (!refreshToken) throw new Error('Missing refresh token');
-    if (refreshToken.startsWith('xoxe.xoxp-'))
-      throw new IntegrationError(
-        'invalid-field',
-        'access-token',
-        'That is the access token, xoxe.xoxp-…. Paste the refresh token next to it, which starts with xoxe-1-.',
-      );
-    if (!refreshToken.startsWith('xoxe-1-'))
-      throw new IntegrationError(
-        'invalid-field',
-        'refresh-token',
-        'That is not a refresh token; they start with xoxe-1-. Copy it from Your App Configuration Tokens.',
-      );
-    const rotated = await rotateConfigToken(refreshToken, request);
+  createStep: (_publicUrl, input) => {
+    const saved = input?.saved ?? [];
+    const when = saved.length ? { field: 'token', equals: 'new' } : undefined;
+    return {
+      intro:
+        "Coder creates the Slack app with a configuration token and installs its bot in the token's whole workspace.",
+      link: 'https://api.slack.com/apps',
+      steps: [
+        {
+          ...(when ? { when } : {}),
+          text: 'Under **Your App Configuration Tokens**, click **Generate Token** and pick the workspace the agent should join.',
+        },
+        {
+          text: 'Paste the refresh token below, then approve the install when Slack asks.',
+          ...(when ? { when } : {}),
+        },
+      ],
+      notes: [
+        'A workspace that requires app approval sends the install to its admins first. In Enterprise Grid, only an org admin can install org-wide.',
+        "To install the app in other Slack workspaces, click **Activate Public Distribution** under the app's **Manage Distribution**.",
+      ],
+      fields: [
+        ...(saved.length
+          ? [
+              {
+                name: 'token',
+                label: 'Configuration token',
+                options: [
+                  ...saved.map(({ id, label }) => ({ value: id, label })),
+                  { value: 'new', label: 'Paste a new token' },
+                ],
+              },
+            ]
+          : []),
+        {
+          ...(when ? { when } : {}),
+          name: 'refreshToken',
+          label: 'Refresh token',
+          hint: 'Starts with xoxe-1-.',
+          placeholder: 'xoxe-1-…',
+          required: true,
+        },
+      ],
+      submit: 'Create Slack app',
+    };
+  },
+  async createCallback(req, { publicUrl, state, definition, fetch: request, tokens }) {
+    if (!tokens) throw new Error('Configuration token storage is unavailable');
+    const form = new URLSearchParams(await req.text());
+    let id = form.get('token');
+    if (!id || id === 'new') {
+      const refreshToken = form.get('refreshToken');
+      if (!refreshToken) throw new Error('Missing refresh token');
+      if (refreshToken.startsWith('xoxe.xoxp-'))
+        throw new IntegrationError(
+          'invalid-field',
+          'access-token',
+          'That is the access token, xoxe.xoxp-…. Paste the refresh token next to it, which starts with xoxe-1-.',
+        );
+      if (!refreshToken.startsWith('xoxe-1-'))
+        throw new IntegrationError(
+          'invalid-field',
+          'refresh-token',
+          'That is not a refresh token; they start with xoxe-1-. Copy it from Your App Configuration Tokens.',
+        );
+      const rotated = await rotateConfigToken(refreshToken, request);
+      const value = {
+        workspace: rotated.workspace,
+        user: rotated.user,
+        workspaceName: rotated.workspace,
+        credentials: rotated,
+      };
+      const identity = await slackApi<{ team?: string }>(
+        'auth.test',
+        {},
+        rotated.configToken,
+        request,
+      ).catch(() => undefined);
+      id = await tokens.put({
+        ...value,
+        workspaceName: identity?.team || value.workspaceName,
+      });
+    }
     const name = definition.name ?? state.agent;
-    const created = await createSlackApp(
-      rotated.configToken,
-      agentManifest(publicUrl, name, definition),
-      request,
+    const created = await withConfigToken(tokens, id, request, token =>
+      createSlackApp(token, agentManifest(publicUrl, name, definition), request),
     );
     return {
       platformAppId: created.appId,
       name,
-      credentials: { ...created, ...rotated, scopes: agentScopes(definition) },
+      credentials: { ...created, configTokenId: id, scopes: agentScopes(definition) },
     };
   },
   manifest: (app, { publicUrl, definition }) => agentManifest(publicUrl, app.name, definition),
-  // Configuration tokens last 12 hours; an expired one is rotated and the new pair saved first.
-  async update(app, credentials, { publicUrl, definition, fetch: request, saveCredentials }) {
-    let current = credentials as SlackAppCredentials;
-    if (!current.configRefreshToken) return undefined;
-    if (!current.configToken || (current.configTokenExpires ?? 0) <= Date.now() + 60_000) {
-      current = { ...current, ...(await rotateConfigToken(current.configRefreshToken, request)) };
-      await saveCredentials(current);
-    }
-    await slackApi(
-      'apps.manifest.update',
-      {
-        app_id: current.appId,
-        manifest: JSON.stringify(agentManifest(publicUrl, app.name, definition)),
-      },
-      current.configToken!,
-      request,
+  async update(
+    app,
+    credentials,
+    { publicUrl, definition, fetch: request, saveCredentials, tokens },
+  ) {
+    const current = credentials as SlackAppCredentials;
+    if (!current.configTokenId || !tokens) throw new IntegrationError('no-refresh-token');
+    await withConfigToken(tokens, current.configTokenId, request, token =>
+      slackApi(
+        'apps.manifest.update',
+        {
+          app_id: current.appId,
+          manifest: JSON.stringify(agentManifest(publicUrl, app.name, definition)),
+        },
+        token,
+        request,
+      ),
     );
     const scopes = agentScopes(definition);
     if (scopes.join() !== current.scopes?.join()) await saveCredentials({ ...current, scopes });
@@ -314,7 +389,7 @@ export const slackApp: IntegrationApp = {
     const current = credentials as SlackAppCredentials;
     return oauthInstallUrl(current, publicUrl, state, current.scopes ?? slackAppScopes('write'));
   },
-  async installCallback(req, { app, credentials, publicUrl, fetch: request }) {
+  async installCallback(req, { app, credentials, publicUrl, fetch: request, tokens }) {
     const code = new URL(req.url).searchParams.get('code');
     if (!code) throw new IntegrationError('missing-code');
     const result = await oauthCallback(
@@ -323,6 +398,9 @@ export const slackApp: IntegrationApp = {
       publicUrl,
       request,
     );
+    const tokenId = (credentials as SlackAppCredentials).configTokenId;
+    if (tokens && tokenId && !result.org)
+      await tokens.use(tokenId, (pair, save) => save(pair, result.name));
     // The workspace address, for the dashboard's link; `auth.test` needs no scope.
     const url = await slackApi<{ url?: string }>('auth.test', {}, result.accessToken, request)
       .then(value => value.url?.replace(/\/$/, ''))
@@ -394,6 +472,8 @@ export function slackAppEvents(events: string[]): string[] {
     ]),
     'team_access_granted',
     'team_access_revoked',
+    'app_uninstalled',
+    'tokens_revoked',
     'app_home_opened',
     'link_shared',
   ];

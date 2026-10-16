@@ -81,6 +81,17 @@ export function taskFromEvent(agent: Agent, flow: string, event: AgentEvent): Ag
   };
 }
 
+function normalizedReply(text: string): string {
+  return text
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[“”„‟«»‘’‚‛"'`]/g, '')
+    .replace(/[‐‑‒–—―−]/g, '-')
+    .replace(/[.!?,;:…]+(?=\s|$)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 /** The turn's reply, including skipped answers, missing answers and failures. */
 export function threadReply(
   task: Pick<AgentTask, 'event' | 'context' | 'failureReply' | 'taskUrl'>,
@@ -89,17 +100,21 @@ export function threadReply(
   turn?: Pick<TurnResultEntry, 'prompt' | 'steers' | 'lastReply'>,
 ): { text: string; problem: boolean; skipped?: true; duplicate?: boolean } {
   const answer = result?.finalMessage?.trim();
+  const progress = task.event && INTEGRATIONS[task.event.integration]?.progressReplies;
+  const lastReply = turn?.lastReply?.trim();
   // Claude Code reports its own errors as the final message; a failed run gets the failure text instead.
   if (answer && answer.replace(/^`+|`+$/g, '').trim() !== EMPTY_MESSAGE && !result?.error)
     return {
       text: answer,
       problem: false,
-      ...(answer === turn?.lastReply?.trim() ? { duplicate: true } : {}),
+      ...(!progress && lastReply && normalizedReply(answer) === normalizedReply(lastReply)
+        ? { duplicate: true } : {}),
     };
   const error = result?.error?.message?.trim() ?? '';
-  if (result?.error && turn?.lastReply?.trim()) return { text: '', problem: true, duplicate: true };
+  if (result?.error && lastReply && !progress) return { text: '', problem: true, duplicate: true };
   if (cancelled) return { text: error, problem: false };
   if (result && !result.error) {
+    if (progress && lastReply) return { text: lastReply, problem: false };
     if (
       turn?.lastReply?.trim() ||
       replyRequired(

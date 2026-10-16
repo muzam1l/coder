@@ -72,7 +72,7 @@ fetch(url, {
 }).then(response => { if (!response.ok) process.exitCode = 1; }).catch(() => { process.exitCode = 1; });
 `;
 
-export function startCommand(tools = '', preflight = ''): string {
+export function startCommand(tools = '', preflight = '', runtime = 'bun'): string {
   const extract =
     'rm -rf .coder-runner/package && tar -xzf .coder-runner/package.tgz -C .coder-runner';
   const verified = `node -e 'const fs=require("fs"),crypto=require("crypto");process.exit(/^[a-f0-9]{64}$/.test(process.env.CODER_RUNNER_HASH||"")&&crypto.createHash("sha256").update(fs.readFileSync(".coder-runner/package.tgz")).digest("hex")===process.env.CODER_RUNNER_HASH?0:1)'`;
@@ -88,7 +88,7 @@ export function startCommand(tools = '', preflight = ''): string {
   const run = [
     ...(preflight ? [preflight] : []),
     `if ${prepared}; then ${extract}; else ${install}; fi`,
-    'CODER_NO_UPDATE_CHECK=1 bun .coder-runner/package/bin/coder.mjs agent run --task "$1"',
+    `CODER_NO_UPDATE_CHECK=1 ${runtime} .coder-runner/package/bin/coder.mjs agent run --task "$1"`,
   ].join(' && ');
 
   return [

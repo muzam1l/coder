@@ -13,7 +13,7 @@ import { forInstallation, type ServerContext } from './context';
 import { appChatState, LocalChatState } from './store/chat';
 import { decryptSecret } from './store/secrets';
 import { updateMetadata } from './store';
-import { installationToken } from './tasks/context';
+import { installationToken, uninstall } from './tasks/context';
 import { DELIVERY_TTL_MS, dispatchEvent, type Replies } from './tasks/events';
 import { conversationKey } from './tasks/thread';
 import { knownKey, reactToConversation, recordUnseen } from './tasks/conversation';
@@ -197,10 +197,14 @@ export function threadReplies(
   user?: Message['author'] | string,
   message?: Message | string,
   limit?: number,
+  failed?: (error: unknown) => Promise<void>,
 ): Replies {
   // Where the platform answers one message, the reply goes to the one that raised the event, not the thread's newest.
   const post = async (text: string, progress = false) => {
-    const sent = await postReplyParts(thread, text, limit, message, progress);
+    const sent = await postReplyParts(thread, text, limit, message, progress).catch(async error => {
+      await failed?.(error);
+      throw error;
+    });
 
     return { id: sent.at(-1)?.id, ids: sent.map(message => message.id) };
   };
@@ -242,7 +246,15 @@ export async function eventReplies(
     event.actor.id || undefined,
     event.chat.message?.id || undefined,
     ctx.integrations[app.integration]?.replyLimit,
+    error => failedPost(ctx, app, event.installationId, error),
   );
+}
+
+async function failedPost(ctx: ServerContext, app: AgentApp, installation: string, error: unknown) {
+  if (!ctx.integrations[app.integration]?.isUninstalled?.(error)) return;
+  const id = `${app.id}:${installation}`;
+  const tenant = await forInstallation(ctx, id);
+  if (tenant) await uninstall(tenant.store, id, (ctx.now ?? Date.now)());
 }
 
 /** A Chat SDK message as the integration's event, or nothing when no event of the app's integration fits it; `delivery` names it within its thread. */
@@ -472,7 +484,8 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
       if (message.author.isBot !== true) await unseen(ctx, app, target, thread, message);
       return;
     }
-    const replies = threadReplies(thread, message.author, message, integration.replyLimit);
+    const replies = threadReplies(thread, message.author, message, integration.replyLimit,
+      error => failedPost(ctx, app, target.id, error));
     later(ctx, app, event, deliver(ctx, integration, app, credentials, event, replies), replies);
   };
   chat.onNewMention((thread, message) => receive('mention', thread, message));

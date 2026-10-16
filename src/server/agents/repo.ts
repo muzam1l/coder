@@ -1,8 +1,9 @@
+import { appTokens } from './tokens';
 /** Agents that live in a repository: reading it through an installed app, importing its versions, and loading one app's agent. */
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
-import { agentsFromSources, assertNotReserved, loadAgents } from '../../agent/load';
+import { AgentLoadError, agentsFromSources, assertNotReserved, loadAgents } from '../../agent/load';
 import { INTEGRATIONS, repositoryReader } from '../../integrations';
 import type { AppDrift, Integration, IntegrationApp, Pushed } from '../../integrations/types';
 import type { AppCheck } from '../../client/types';
@@ -289,6 +290,7 @@ export function remoteAgentLoader(
     }
     const { record, version } = loaded;
     if (!record) return undefined;
+    if (record.problems?.length) throw new AgentLoadError(record.problems.join('\n'));
     if (!version) throw new Error(`No version ${record.currentVersion} for agent "${record.id}".`);
     const usage = await usageFor(files, installation, event, tokens);
     const entry =
@@ -384,10 +386,30 @@ export async function importRepoAgents(
       );
       const raw = files['agent.json'];
       if (raw === undefined) return;
-      const [validated] = agentsFromSources(
-        { definitions: { [id]: { json: JSON.parse(raw), builtin: false } }, usage: undefined },
-        { ...INTEGRATIONS, [contents.id]: contents },
-      );
+      let validated: Agent | undefined;
+      try {
+        [validated] = agentsFromSources(
+          { definitions: { [id]: { json: JSON.parse(raw), builtin: false } }, usage: undefined },
+          { ...INTEGRATIONS, [contents.id]: contents },
+        );
+      } catch (error) {
+        if (!(error instanceof AgentLoadError || error instanceof SyntaxError)) throw error;
+        console.error(`coder server: could not load agent ${id}`, error);
+        const existing = await store.get('agent', id);
+        await store.put('agent', id, {
+          id,
+          name: id,
+          source: 'repo',
+          repo,
+          path: root,
+          currentVersion: 0,
+          createdAt: now,
+          ...existing,
+          problems: [error.message],
+          updatedAt: now,
+        });
+        return;
+      }
       if (!validated) return;
       const { 'agent.json': _definition, 'system.md': systemPrompt, ...extra } = files;
 
@@ -546,6 +568,7 @@ export async function syncApps(
               publicUrl,
               definition: version.definition,
               fetch: ctx.fetch ?? fetch,
+              tokens: appTokens({ ...ctx, store }, app.integration),
               saveCredentials: async credentials => {
                 await store.put('app', app.id, {
                   ...app,

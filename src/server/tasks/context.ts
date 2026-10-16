@@ -22,6 +22,7 @@ import { connectionWarnings } from './logs';
 import { LocalStore } from '../store/local';
 import { mcpSecretValue } from '../../core/mcp';
 import { findConnection, nativeCredential, nativeApp } from '../connections/records';
+import { updateMetadata } from '../store';
 
 /** Installation tokens are encrypted at rest; integrations see plaintext only in memory. */
 export function unsealed(ctx: ServerContext, installation: Installation): Installation {
@@ -52,6 +53,15 @@ export async function dropTokens(store: Store, id: string): Promise<void> {
   await store.put('snapshot', dropKey(id), { drop: randomUUID() }, { ttlMs: DROP_FENCE_TTL_MS });
   for (const row of await store.list<HeldToken>('snapshot', { prefix: heldKey(id) }))
     await store.delete('snapshot', row.id);
+}
+
+export async function uninstall(store: Store, id: string, now: number): Promise<void> {
+  await store.withAppLock(`installation:${id}`, async locked => {
+    const current = await locked.get('installation', id);
+    if (!current || current.deletedAt) return;
+    await updateMetadata(locked, 'installation', id, { deletedAt: now, uninstalled: true });
+    await dropTokens(locked, id);
+  });
 }
 
 /** The installation's token through its integration, reused from the store per exact scope where it can be; a refreshed one is stored again, sealed. A task's token must outlive `taskMs`. */

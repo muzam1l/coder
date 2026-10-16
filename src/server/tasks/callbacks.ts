@@ -2,7 +2,7 @@ import { type Params } from '../routes/match';
 import { type AgentTask } from '../../agent/types';
 import { type TaskStatus, type TaskLogLine, type UsageRecord } from '../store/types';
 import { type ServerContext } from '../context';
-import { taskContext } from './context';
+import { taskContext, uninstall } from './context';
 import { writeBackCodexAuth } from '../settings/credentials';
 import { storeLogs, taskRedactor } from './logs';
 import { stopTaskMachine } from './kick';
@@ -61,6 +61,7 @@ type TaskCallback = {
   answer?: unknown;
   diff?: string;
   postedMessages?: string[];
+  installationRevoked?: true;
 };
 
 export type CallbackContext = ServerContext & {
@@ -195,6 +196,7 @@ export async function reportResult(
   if (
     !body?.status ||
     !['running', 'waiting', 'completed', 'failed', 'cancelled'].includes(body.status) ||
+    (body.installationRevoked !== undefined && body.installationRevoked !== true) ||
     (body.postedMessages !== undefined &&
       (!Array.isArray(body.postedMessages) ||
         body.postedMessages.some(id => typeof id !== 'string')))
@@ -289,6 +291,11 @@ export async function reportResult(
     },
     now,
   );
+
+  const event = authorized.task.event;
+  if (completed && body.status === 'failed' && body.installationRevoked && event &&
+    ctx.integrations[event.integration]?.isUninstalled)
+    await uninstall(ctx.store, `${event.appId}:${event.installationId}`, now);
 
   if (completed)
     await stopTaskMachine(

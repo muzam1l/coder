@@ -127,19 +127,23 @@ export function TaskSecrets({
                 const env = String(values.get('env') ?? '').trim();
                 const key = String(values.get('key') ?? '').trim();
                 if (!env || !key) return;
-                void action.run('add', async () => {
-                  put(
-                    await client.connections.add({
-                      name: env,
-                      provider: 'env',
-                      key,
-                      keyIn: { env },
-                      ...(scope ? { owner: 'me' as const } : {}),
-                    }),
-                  );
-                  box.reset();
-                  setAdding(false);
-                });
+                void action.run(
+                  'add',
+                  async () => {
+                    put(
+                      await client.connections.add({
+                        name: env,
+                        provider: 'env',
+                        key,
+                        keyIn: { env },
+                        ...(scope ? { owner: 'me' as const } : {}),
+                      }),
+                    );
+                    box.reset();
+                    setAdding(false);
+                  },
+                  { toast: 'Not saved' },
+                );
               }}
             >
               <input

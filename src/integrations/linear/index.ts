@@ -1,5 +1,5 @@
 import type { Integration } from '../types';
-import { canWriteLinear } from './api';
+import { canWriteLinear, verifyLinearWebhook } from './api';
 import { linearApp, linearToken, linearUserAuth } from './app';
 import { LINEAR_PRESETS, LINEAR_TOOLS } from './tools';
 
@@ -20,6 +20,7 @@ export const linear: Integration = {
   installLabel: 'Connect Linear',
   use: 'Mention @{handle} or delegate an issue to it.',
   answersEveryPrompt: true,
+  progressReplies: true,
   sample: 'linear:2f1e6a1c-0000-4000-8000-000000000001:s:5b7d3c2a-0000-4000-8000-000000000002',
   prompt: [
     'A conversation is a Linear agent session on an issue.',
@@ -60,6 +61,14 @@ export const linear: Integration = {
       : undefined;
   },
   adapter: async ctx => (await import('./adapter')).linearAdapter(ctx),
+  ownEvents(req, raw, app, credentials) {
+    const body = JSON.parse(raw) as { type?: string; action?: string; organizationId?: string; oauthClientId?: string };
+    if (body.type !== 'OAuthApp' || body.action !== 'revoked') return undefined;
+    const secret = (credentials as { webhookSecret?: string }).webhookSecret;
+    if (!verifyLinearWebhook(raw, req.headers.get('linear-signature'), secret)) return { invalid: true };
+    return body.organizationId && body.oauthClientId === app.id.slice('linear:'.length)
+      ? { uninstalled: `${app.id}:${body.organizationId}` } : { invalid: true };
+  },
   // Linear marks a session unresponsive without an activity within 10 seconds, so the agent thinks aloud before dispatch.
   event(type, thread, message) {
     void thread.startTyping('Reading the issue').catch(() => {});

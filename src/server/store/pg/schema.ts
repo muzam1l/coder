@@ -72,6 +72,7 @@ export const agent = pgTable(
     slug: text().notNull(),
     name: text().notNull(),
     description: text(),
+    problems: jsonb().$type<string[]>(),
     source: text().$type<AgentRecord['source']>().notNull(),
     repo: text(),
     path: text(),
@@ -162,6 +163,7 @@ export const integrationAppInstallation = pgTable(
     settings: jsonb().$type<InstallationSettings>(),
     ...timestamps,
     deletedAt: at(),
+    uninstalled: boolean(),
   },
   t => [unique().on(t.key), index().on(t.organizationId, t.appId)],
 );

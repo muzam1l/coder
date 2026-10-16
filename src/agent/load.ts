@@ -18,6 +18,8 @@ export interface AgentSource {
   dir?: string;
 }
 
+export class AgentLoadError extends Error {}
+
 const BUILTIN_DIR = fileURLToPath(new URL('./builtin/coder/', import.meta.url));
 const BUILTINS = {
   coder: {
@@ -111,7 +113,7 @@ export function agentsFromSources(
     } catch (error) {
       // A disabled agent that does not parse is left out, not blocking the runnable ones.
       if (disabled) continue;
-      throw error;
+      throw new AgentLoadError(error instanceof Error ? error.message : String(error));
     }
     const definition = source.builtin ? enabledOnly(parsed, integrations) : parsed;
     agents.push({
@@ -127,7 +129,7 @@ export function agentsFromSources(
     agents.filter(agent => !agent.usage?.disabled),
     integrations,
   );
-  if (errors.length) throw new Error(`Invalid agents:\n  ${errors.join('\n  ')}`);
+  if (errors.length) throw new AgentLoadError(`Invalid agents:\n  ${errors.join('\n  ')}`);
   return agents;
 }
 

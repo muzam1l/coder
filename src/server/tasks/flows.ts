@@ -18,7 +18,7 @@ import {
   later,
   type Target,
 } from '../chat';
-import { dropTokens } from './context';
+import { dropTokens, uninstall } from './context';
 import { appendLog } from './logs';
 import { recordFailure } from './failures';
 import { reviewKey } from './queue';
@@ -171,6 +171,11 @@ async function ownEvent(
   target?: Target,
 ): Promise<Response> {
   if ('ack' in own) return new Response(null, { status: 200 });
+  if ('uninstalled' in own) {
+    const tenant = await forInstallation(ctx, own.uninstalled);
+    if (tenant) await uninstall(tenant.store, own.uninstalled, now);
+    return json({ ok: true });
+  }
   if ('unhandled' in own) {
     console.warn(`coder server: ${app.id} sent ${own.unhandled}, which Coder does not handle yet`);
     return new Response(null, { status: 200 });
@@ -207,9 +212,10 @@ async function ownEvent(
             )
         : own.installation.installation.repos;
       await updateMetadata(store, 'installation', existing.id, {
-        account: own.installation.installation.account,
+        account: own.installation.op === 'delete' ? current.account : own.installation.installation.account,
         ...(change || repos ? { repos } : {}),
         deletedAt: own.installation.op === 'delete' ? now : undefined,
+        uninstalled: own.installation.installation.uninstalled,
       });
     });
     // Its repositories or permissions may have changed.

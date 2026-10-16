@@ -40,6 +40,7 @@ export function matchesStoreRow(
     agent?: string;
     owner?: string;
     deletedAt?: number;
+    uninstalled?: boolean;
     app?: string;
     installationId?: string;
     name?: string;
@@ -51,7 +52,7 @@ export function matchesStoreRow(
     (!options.ids || options.ids.includes(id)) &&
     (!options.agent || (agent ?? row.agent) === options.agent) &&
     (!Object.hasOwn(options, 'visibleTo') || !row.owner || row.owner === options.visibleTo) &&
-    (!options.active || row.deletedAt === undefined) &&
+    (!options.active || row.deletedAt === undefined || Boolean(options.includeUninstalled && row.uninstalled)) &&
     (!options.installation || row.installationId === options.installation) &&
     (!options.apps || (!!row.app && options.apps.includes(row.app)))
   );

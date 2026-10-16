@@ -123,6 +123,7 @@ export function installationValue(
     settings: r.settings,
     createdAt: ms(r.createdAt),
     deletedAt: r.deletedAt ? ms(r.deletedAt) : undefined,
+    uninstalled: r.uninstalled || undefined,
   });
 }
 
@@ -233,6 +234,7 @@ export function installations(s: DrizzleStore): Kind<Installation> {
           createdAt: date(value.createdAt),
           updatedAt: s.at(),
           deletedAt: value.deletedAt === undefined ? null : date(value.deletedAt),
+          uninstalled: value.uninstalled ?? null,
         };
         const [bound] = await s.db
           .insert(t)

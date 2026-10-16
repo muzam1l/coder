@@ -340,6 +340,5 @@ export function historyToolServer(file: string, env: Record<string, string> = {}
     },
     tools: Object.keys(HISTORY_TOOLS),
     alwaysLoad: true,
-    autoApprove: true,
   };
 }

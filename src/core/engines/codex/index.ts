@@ -100,22 +100,15 @@ export function codexReadOnlyProfile(
   };
 }
 
-/**
- * Per-thread config overrides attaching MCP servers, as dotted `mcp_servers.<name>`
- * keys (the same overlay shape custom model providers use). `enabled_tools` is
- * codex's per-server tool allowlist.
- */
+/** Thread-scoped MCP servers, with Codex's per-server tool allowlists. */
 export function buildCodexMcpOverrides(
   servers: McpServerSpec[] = [],
   nativeServers: string[] = [],
   nativeMcp = false,
-): Record<string, unknown> {
-  const overrides: Record<string, unknown> = {};
-  if (!nativeMcp && nativeServers.length) {
-    overrides.mcp_servers = Object.fromEntries(
-      nativeServers.map(name => [name, { enabled: false }]),
-    );
-  }
+): { mcp_servers?: Record<string, unknown> } {
+  const configured: Record<string, unknown> = Object.fromEntries(
+    (nativeMcp ? [] : nativeServers).map(name => [name, { enabled: false }]),
+  );
   const names = new Set([...nativeServers, ...servers.map(server => server.name)]);
   for (const server of servers) {
     let name = server.name;
@@ -123,7 +116,7 @@ export function buildCodexMcpOverrides(
       for (let suffix = 1; names.has(name); suffix++) name = `${server.name}_coder_${suffix}`;
       names.add(name);
     }
-    overrides[`mcp_servers.${name}`] = {
+    configured[name] = {
       ...(server.url
         ? { url: server.url, ...(server.headers ? { http_headers: server.headers } : {}) }
         : {
@@ -132,10 +125,10 @@ export function buildCodexMcpOverrides(
             ...(server.env ? { env: server.env } : {}),
           }),
       ...(server.tools?.length ? { enabled_tools: server.tools } : {}),
-      ...(server.autoApprove ? { default_tools_approval_mode: 'approve' } : {}),
+      default_tools_approval_mode: 'approve',
     };
   }
-  return overrides;
+  return Object.keys(configured).length ? { mcp_servers: configured } : {};
 }
 
 function cleanCodexStderr(stderr: string) {

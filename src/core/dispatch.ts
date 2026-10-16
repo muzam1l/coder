@@ -857,7 +857,7 @@ export async function dispatchTask(
       if (!(error instanceof FallbackSignal)) {
         throw error;
       }
-      const next = config.chain[config.chain.indexOf(error.engine) + 1];
+      const next = nextFallbackEngine(error.engine, config);
       if (!next) {
         const payload = buildFallbackPayload(
           error.engine,
@@ -893,6 +893,12 @@ export interface TaskResult {
   task: Task;
 }
 
+function nextFallbackEngine(engine: Engine, config: CoderConfig): Engine | undefined {
+  return config.chain.slice(config.chain.indexOf(engine) + 1).find(next =>
+    next !== 'custom' || Object.values(config.models ?? {}).some(isEndpointModel),
+  );
+}
+
 function turnHasSideEffects(result: TurnResult | null, toolUsed = false): boolean {
   return Boolean(
     toolUsed ||
@@ -921,8 +927,7 @@ export function turnFallbackEngine(
   );
   if (turnHasSideEffects(r, toolUsed)) return undefined;
   if (waited.turns.at(-1)?.lastReply) return undefined;
-  const chain = (config ?? loadConfig(cwd)).chain;
-  return chain[chain.indexOf(waited.task.engine as Engine) + 1] ?? null;
+  return nextFallbackEngine(waited.task.engine as Engine, config ?? loadConfig(cwd)) ?? null;
 }
 
 export function readResultJson(cwd: string, taskId: string): TurnResult | null {

@@ -115,9 +115,10 @@ export function DisabledBadge() {
   );
 }
 
-/** Built-in, dashboard, or the repository it comes from, plus the version and whether it is disabled. */
+/** Built-in, dashboard, or the repository it comes from, plus the version and whether it is disabled or not running, linked to `fix`. */
 export function AgentPills({
   agent,
+  fix,
 }: {
   agent: {
     source: string;
@@ -127,7 +128,9 @@ export function AgentPills({
     local?: true;
     commit?: string;
     settings?: { disabled?: boolean };
+    problems?: string[];
   };
+  fix?: { href: string; external?: boolean };
 }) {
   return (
     <>
@@ -176,6 +179,11 @@ export function AgentPills({
         <Badge>v{agent.currentVersion}</Badge>
       )}
       {agent.settings?.disabled ? <DisabledBadge /> : null}
+      {agent.problems?.length ? (
+        <Badge tone="warn" title={agent.problems.join('\n')} {...fix}>
+          not running
+        </Badge>
+      ) : null}
     </>
   );
 }

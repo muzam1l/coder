@@ -59,6 +59,10 @@ export interface CreateField {
   hint?: string;
   placeholder?: string;
   required?: true;
+  /** Rendered as a select; the first option is the default. */
+  options?: Array<{ value: string; label: string }>;
+  /** Shown, and posted, only while that field holds that value. */
+  when?: { field: string; equals: string };
 }
 
 /** A create form as data: the dashboard renders it and posts the fields with `tx` to `/create/<id>/callback`. */
@@ -68,7 +72,12 @@ export interface CreateStep {
   /** Where the user gets the values. */
   link: string;
   /** Numbered steps; `link` is the platform page the step happens on, `copy` holds values to paste there. `text` marks the platform's own UI names **like this**. */
-  steps: Array<{ text: string; link?: string; copy?: string[] }>;
+  steps: Array<{
+    text: string;
+    link?: string;
+    copy?: string[];
+    when?: { field: string; equals: string };
+  }>;
   /** Advanced notes, shown collapsed under the steps; UI names marked **like this**. */
   notes?: string[];
   fields: CreateField[];
@@ -111,6 +120,23 @@ export interface AppDrift {
   lines: Array<{ text: string; copy?: string }>;
 }
 
+export interface AppTokens {
+  put(value: {
+    workspace: string;
+    user: string;
+    workspaceName: string;
+    credentials: unknown;
+  }): Promise<string>;
+  use<T>(
+    id: string,
+    run: (
+      credentials: unknown,
+      save: (credentials: unknown, workspaceName?: string) => Promise<void>,
+      invalidate: () => Promise<void>,
+    ) => Promise<T>,
+  ): Promise<T>;
+}
+
 /** Creating one app per agent on the user's account, then installing it; all browser-driven. */
 export interface IntegrationApp {
   /** Built-in agents install the server's one shared app (`shared`), or create their own in each workspace like any agent (`own`). */
@@ -127,7 +153,13 @@ export interface IntegrationApp {
   /** The form that creates the app from values the user copies from the platform; used when there is no `createPost`. */
   createStep?(
     publicUrl: string,
-    input?: { name?: string; shared?: boolean; public?: boolean },
+    input?: {
+      name?: string;
+      shared?: boolean;
+      public?: boolean;
+      /** Saved configuration tokens, most recently used first. */
+      saved?: Array<{ id: string; label: string }>;
+    },
   ): CreateStep;
   /** `/create/<id>/callback`: finish creation; credentials are stored encrypted by the caller, or `shared` keeps the shared app's. */
   createCallback(
@@ -139,6 +171,7 @@ export interface IntegrationApp {
       fetch: typeof fetch;
       /** Credentials of this server's shared app on the platform, when one exists. */
       shared?: unknown;
+      tokens?: AppTokens;
     },
   ): Promise<
     { platformAppId: string; name: string } & ({ credentials: unknown } | { shared: true })
@@ -154,6 +187,7 @@ export interface IntegrationApp {
       definition: AgentDefinition;
       fetch: typeof fetch;
       saveCredentials(credentials: unknown): Promise<void>;
+      tokens?: AppTokens;
     },
   ): Promise<unknown | undefined>;
   /** Changes the app on the platform needs for a definition, read from the platform; none when it is up to date. */
@@ -187,6 +221,7 @@ export interface IntegrationApp {
       credentials: unknown;
       publicUrl: string;
       fetch: typeof fetch;
+      tokens?: AppTokens;
       /** A platform-started install to verify, from Coder's own state. */
       installation?: string;
     },
@@ -335,6 +370,7 @@ export interface ConversationFacts {
 /** A signed webhook the adapter does not cover, verified by the integration itself. */
 export type OwnEvent =
   | { invalid: true }
+  | { uninstalled: string }
   | { events: AgentEvent[] }
   | {
       installation: {
@@ -445,9 +481,13 @@ export interface Integration {
   /** The button that installs an app, in the platform's own words. */
   readonly installLabel?: string;
   /** How people reach an installed agent there, `{handle}` standing for its handle. */
-  readonly use?: string;
+  readonly use?: string | ((events: string[]) => string | undefined);
   /** Every prompt waits for its own answer, as a Linear agent session does, so notices repeat instead of going out once per thread. */
   readonly answersEveryPrompt?: true;
+  /** Replies during a turn are progress; a final response must close it. */
+  readonly progressReplies?: true;
+  /** An outbound call proved the installation's token revoked. */
+  isUninstalled?(error: unknown): boolean;
   /** What one account an installation covers is called, such as a Slack workspace of an org install. */
   readonly covered?: string;
   /** Apps may live under an organization instead of the creator's own account. */

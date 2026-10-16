@@ -409,11 +409,15 @@ export function ModelsList({
   const [models, setModels] = useState(first);
   const action = useAction();
   const settings = useConfig(config.config);
-  const send = (act: () => Promise<Config>) =>
-    action.run('send', async () => {
-      const answer = await act();
-      setModels(now => ({ ...now, models: answer.models ?? {} }));
-    });
+  const send = (act: () => Promise<Config>, toast?: string) =>
+    action.run(
+      'send',
+      async () => {
+        const answer = await act();
+        setModels(now => ({ ...now, models: answer.models ?? {} }));
+      },
+      { toast },
+    );
   const defaultOf = (engine: string) =>
     settings.value.engines?.[engine]?.model ?? config.effective.engines?.[engine]?.model;
   const off = (name: string) => models.models[name]?.disabled === true;
@@ -468,7 +472,7 @@ export function ModelsList({
             settings.value.engines?.[engine]?.effort ?? config.effective.engines?.[engine]?.effort,
           ]),
         )}
-        onAdd={send}
+        onAdd={act => send(act, 'Not saved')}
       />
       {groups.map(([engine, list]) => (
         <List key={engine} title={ENGINE_NAMES[engine] ?? engine} count={list.length}>

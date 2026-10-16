@@ -8,7 +8,7 @@ import {
   type AgentVersionSummary,
 } from '../store/types';
 import { type ServerContext } from '../context';
-import { getAgent, agentWithVersion, getVersion, ensureBuiltinAgents, versionKey } from './records';
+import { getAgent, agentWithVersion, getVersion, ensureBuiltinAgents, versionKey, agentProblems } from './records';
 import { syncLocalAgents } from '../store/local';
 import { agentApps } from './connections';
 import { failedDeliveries } from '../tasks/failures';
@@ -128,6 +128,7 @@ export async function listAgents(
 
         return {
           ...record,
+          problems: agentProblems(record, version, ctx.integrations),
           ...(record.id === preferred ? { default: true } : {}),
           definition: version?.definition,
           ...(source ? { sourceUrl: source } : {}),
@@ -253,6 +254,7 @@ export async function readAgent(
 
   return json({
     ...record,
+    problems: agentProblems(record, current, ctx.integrations),
     ...(current
       ? {
           definition: current.definition,
@@ -335,7 +337,7 @@ export async function agentsPage(
         }),
   ]);
   const live = new Set(
-    installations.filter(({ value }) => !value.deletedAt).map(({ value }) => value.app),
+    installations.filter(({ value }) => !value.deletedAt && !value.uninstalled).map(({ value }) => value.app),
   );
   const reach = (agent: string, integration: string): Reach => {
     const own = appRows.filter(
@@ -378,6 +380,7 @@ export async function agentsPage(
         const source = await sourceUrl(ctx, record, version, apps);
         return {
           ...record,
+          problems: agentProblems(record, version, ctx.integrations),
           ...(record.id === preferred ? { default: true } : {}),
           definition: version?.definition,
           ...(source ? { sourceUrl: source } : {}),
