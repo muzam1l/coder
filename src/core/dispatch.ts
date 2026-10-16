@@ -701,15 +701,21 @@ async function attemptOnce(
   const signal = watchTask(cwd, taskId, worker);
   const startupLines = createJsonlTail(logFile, logStart);
   let worked = false;
-  const working = () =>
-    startupLines().some(line => {
+  let toolUsed = false;
+  const working = () => {
+    const entries = startupLines().map(line => {
       try {
-        const entry = JSON.parse(line);
-        return entry.phase !== 'starting' && !['status', 'usage'].includes(entry.kind ?? '');
+        return JSON.parse(line) as TaskLogEntry;
       } catch {
-        return true;
+        return { kind: 'unknown' };
       }
     });
+    toolUsed ||= entries.some(entry => entry.kind === 'tool' || entry.kind === 'reply');
+
+    return entries.some(
+      entry => entry.phase !== 'starting' && !['status', 'usage'].includes(entry.kind ?? ''),
+    );
+  };
   const deadline = Date.now() + 15_000;
   let readyAt: number | undefined;
   let current = task;
@@ -735,6 +741,7 @@ async function attemptOnce(
   }
 
   if (current.status === 'failed') {
+    working();
     // Turn errors (sandbox init, usage/auth) land in result.json, not the
     // progress log, so prefer it and fall back to the log tail.
     const resultFile = path.join(resolveTaskDir(cwd, taskId), 'result.json');
@@ -747,7 +754,7 @@ async function attemptOnce(
     if (isSandboxFailure(resolved.permissions, detail)) {
       throw new CoderError('read-only-unavailable', detail);
     }
-    if (isStartupError(detail) && !turnHasSideEffects(result)) {
+    if (isStartupError(detail) && !turnHasSideEffects(result, toolUsed)) {
       throw new FallbackSignal(resolved.engine, detail);
     }
     throw new CoderError('startup-failed', detail, { taskId: taskId });
@@ -886,8 +893,9 @@ export interface TaskResult {
   task: Task;
 }
 
-function turnHasSideEffects(result: TurnResult | null): boolean {
+function turnHasSideEffects(result: TurnResult | null, toolUsed = false): boolean {
   return Boolean(
+    toolUsed ||
     result?.touchedFiles?.length ||
     (result?.fileChanges as unknown[] | undefined)?.length ||
     (result?.commandExecutions as unknown[] | undefined)?.length,
@@ -903,7 +911,16 @@ export function turnFallbackEngine(
   if (waited.status !== 'failed') return undefined;
   const r = waited.result;
   if (!r || !isStartupError(r.error?.message ?? '')) return undefined;
-  if (turnHasSideEffects(r)) return undefined;
+  const since = Date.parse(
+    waited.turns.at(-2)?.at ?? waited.task.resumedAt ?? waited.task.createdAt,
+  );
+  const toolUsed = readTaskLog(cwd, waited.taskId, Number.MAX_SAFE_INTEGER).some(
+    entry =>
+      (entry.kind === 'tool' || entry.kind === 'reply') &&
+      (!entry.at || Date.parse(entry.at) >= since),
+  );
+  if (turnHasSideEffects(r, toolUsed)) return undefined;
+  if (waited.turns.at(-1)?.lastReply) return undefined;
   const chain = (config ?? loadConfig(cwd)).chain;
   return chain[chain.indexOf(waited.task.engine as Engine) + 1] ?? null;
 }

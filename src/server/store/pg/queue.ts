@@ -678,7 +678,7 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     fence: TaskFence,
   ): Promise<boolean> {
-    const context = sql`(${JSON.stringify(next.context ?? {})}::jsonb - 'connections') || jsonb_strip_nulls(jsonb_build_object('connections', ${task.context}->'connections'))`;
+    const context = sql`(${JSON.stringify(next.context ?? {})}::jsonb - 'connections' - 'engineChain' - 'engineCredentials') || jsonb_strip_nulls(jsonb_build_object('connections', ${task.context}->'connections', 'engineChain', ${task.context}->'engineChain', 'engineCredentials', ${task.context}->'engineCredentials'))`;
     const [row] = await this.db
       .update(task)
       .set({

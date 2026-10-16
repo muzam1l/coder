@@ -376,6 +376,7 @@ export async function taskContext(
   nativeTokens: Record<string, string>;
   postToken?: string;
   credential: EngineCredential;
+  engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
   config: Partial<CoderConfig>;
   connections: Record<string, McpServerSpec>;
   connectionEnv: Record<string, string>;
@@ -423,10 +424,17 @@ export async function taskContext(
   }
 
   const resolved = await resolvedTaskConnections(ctx, status, tokens);
+  const engineCredentials = task.engineChain?.length
+    ? await taskEngineCredentials(ctx, task)
+    : undefined;
   const connectionEnv = { ...resolved.env };
   const warnings = [...resolved.warnings];
   for (const name of Object.keys(connectionEnv)) {
-    if (credential.env[name] === undefined) continue;
+    if (
+      credential.env[name] === undefined &&
+      !engineCredentials?.some(row => row.credential.env[name] !== undefined)
+    )
+      continue;
     delete connectionEnv[name];
     warnings.push(`${name} is temporarily unavailable; skipped for this task.`);
   }
@@ -439,6 +447,7 @@ export async function taskContext(
     ...Object.values(tokens),
     ...(postToken ? [postToken] : []),
     ...credentialSecrets(credential.env),
+    ...(engineCredentials?.flatMap(row => credentialSecrets(row.credential.env)) ?? []),
   ]);
   await connectionWarnings(ctx, task.id, warnings);
   const common = {
@@ -447,19 +456,34 @@ export async function taskContext(
     nativeTokens: resolved.nativeTokens,
     ...(postToken ? { postToken } : {}),
     credential,
+    ...(engineCredentials ? { engineCredentials } : {}),
     config,
     connections: resolved.mcp,
     connectionEnv,
     connectionSecrets,
   };
   if (task.runner !== 'vercel-sandbox') return common;
-  const env = Object.fromEntries(
-    Object.entries(credential.env).map(([name, value]) => [
-      name,
-      name in BROKERED ? BROKERED_PLACEHOLDER : value,
-    ]),
-  );
-  return { ...common, credential: { ...credential, env } };
+  const brokered = (credential: EngineCredential) => ({
+    ...credential,
+    env: Object.fromEntries(
+      Object.entries(credential.env).map(([name, value]) => [
+        name,
+        name in BROKERED ? BROKERED_PLACEHOLDER : value,
+      ]),
+    ),
+  });
+  return {
+    ...common,
+    credential: brokered(credential),
+    ...(engineCredentials
+      ? {
+          engineCredentials: engineCredentials.map(row => ({
+            ...row,
+            credential: brokered(row.credential),
+          })),
+        }
+      : {}),
+  };
 }
 
 /** The task's engine credential; a member's own runner falls back to the machine's logins. */
@@ -485,6 +509,28 @@ export async function taskCredential(
       'claude') as EngineCredential['engine'],
     env: {},
   };
+}
+
+export async function taskEngineCredentials(ctx: ServerContext, task: TaskStatus['task']) {
+  const engine = task.usage?.engine ?? task.definition.engine;
+  const chain = task.engineChain ?? [];
+  const remaining = chain.slice(Math.max(0, chain.indexOf(engine ?? '')) + 1);
+  const rows = await Promise.all(
+    remaining.map(async engine => {
+      const id = task.engineCredentials?.[engine];
+      const value = id ? await ctx.store.get('credential', id) : undefined;
+      return value && value.engine === engine && (!value.owner || value.owner === task.requester)
+        ? { id: id!, credential: credentialValue(ctx.config, value) }
+        : undefined;
+    }),
+  );
+
+  return [
+    ...(task.credential
+      ? [{ id: task.credential, credential: await taskCredential(ctx, task) }]
+      : []),
+    ...rows.flatMap(row => (row ? [row] : [])),
+  ];
 }
 
 const hostOf = (url: string | undefined) =>

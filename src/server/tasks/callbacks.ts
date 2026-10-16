@@ -386,17 +386,21 @@ export async function refreshCredential(
   const authorized = ctx.callbackTask!;
   const body = (await req.json().catch(() => ({}))) as {
     authJson?: unknown;
+    credentialId?: unknown;
   };
   if (typeof body.authJson !== 'string' || !authorized.task.credential)
     return json({ error: 'Invalid credential update' }, 400);
 
+  const credentialId =
+    typeof body.credentialId === 'string' ? body.credentialId : authorized.task.credential;
+  if (
+    credentialId !== authorized.task.credential &&
+    credentialId !== authorized.task.engineCredentials?.codex
+  )
+    return json({ error: 'Invalid credential update' }, 400);
+
   return json({
-    kept: await writeBackCodexAuth(
-      ctx.store,
-      ctx.config,
-      authorized.task.credential,
-      body.authJson,
-    ),
+    kept: await writeBackCodexAuth(ctx.store, ctx.config, credentialId, body.authJson),
   });
 }
 

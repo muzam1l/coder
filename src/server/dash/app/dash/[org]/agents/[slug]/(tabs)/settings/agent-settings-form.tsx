@@ -98,7 +98,7 @@ export function AgentSettingsForm({
   const declared = agent.definition?.integrations ?? {};
   const platforms = Object.keys(declared).sort();
   const own = agent.definition;
-  const engine = own?.engine ?? defaults.engine;
+  const engine = own?.engine ?? agent.resolvedEngine ?? defaults.engine;
   const deletable = agent.source !== 'builtin';
 
   // Filters every panel's fields by label, current value and platform, and moves to a panel that has a match.

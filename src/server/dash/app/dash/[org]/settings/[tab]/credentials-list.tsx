@@ -117,7 +117,7 @@ function Row({
   );
 }
 
-/** One key field for an engine; Enter saves it. A custom key also names its variable. */
+/** One key field for an engine; Add or Enter saves it. A custom key also names its variable. */
 function KeyField({
   engine,
   token,
@@ -135,7 +135,7 @@ function KeyField({
   const [value, setValue] = useState('');
   const input = useRef<HTMLInputElement>(null);
   const [name, setName] = useState(engine.key);
-  const [scope, setScope] = useState('personal');
+  const [scope, setScope] = useState(admin ? 'workspace' : 'personal');
   const action = useAction({ leaves: true });
   const busy = Boolean(action.pending);
   useEffect(() => {
@@ -179,13 +179,12 @@ function KeyField({
         autocomplete="off"
         name={`${engine.id}-${token ? 'token' : 'key'}`}
         aria-label={token ? 'Your claude setup-token' : engine.hint}
-        placeholder={
-          token ? 'Paste a claude setup-token, then Enter' : `${engine.hint}, then Enter`
-        }
+        placeholder={token ? 'Paste a claude setup-token' : engine.hint}
         ref={input}
         aria-busy={busy}
         value={value}
         onInput={event => setValue(event.currentTarget.value)}
+        required
       />
       {admin ? (
         <Select
@@ -196,7 +195,9 @@ function KeyField({
           disabled={token}
         />
       ) : null}
-      <button hidden />
+      <Button type="submit" loading={busy}>
+        Add
+      </Button>
     </form>
   );
 }
@@ -531,10 +532,10 @@ export function CredentialsList({
       {ENGINES.map(engine => {
         const own = rows.filter(row => row.engine === engine.id);
         const canSignIn = engine.id !== 'custom' && !token && Boolean(subscriptions?.[engine.id]);
+        // A setup-token is a subscription too, so it comes and goes with subscription sign-in.
         const methods = [
-          ...(canSignIn ? ['signin'] : []),
+          ...(canSignIn ? ['signin', ...(engine.id === 'claude' ? ['token'] : [])] : []),
           'key',
-          ...(engine.id === 'claude' && !canSignIn ? ['token'] : []),
         ];
         const how = chosen[engine.id] ?? methods[0]!;
         const open = !own.length || adding === engine.id;

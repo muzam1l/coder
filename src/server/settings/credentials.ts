@@ -17,6 +17,10 @@ import {
   type EncryptedCredential,
 } from '../store/secrets';
 import { dashPath, organizationSlug } from '../auth/account';
+import { resolveTaskOptions } from '../../core/dispatch';
+import { effectiveConfig, shownConfig } from './config';
+import { machineSignedIn } from '../tasks/local';
+import { DEFAULT_ENGINE } from '../../core/defaults';
 
 /** Engine credentials stored for a workspace or a member; every row change goes through `store.withCredential`. */
 
@@ -120,12 +124,11 @@ export async function checkCredential(
 }
 
 /** The requester's own default for the engine, then the workspace's; tasks without a requester use the workspace's only. */
-export async function resolveCredential(
-  store: Store,
+function pickCredential(
+  rows: CredentialRow[],
   engine: string | undefined,
   requester?: string,
-): Promise<{ id: string; value: StoredCredential } | undefined> {
-  const rows = await store.listCredentials({ owner: requester, engine });
+): CredentialRow | undefined {
   const pick = (owner: string | undefined) => {
     const scoped = rows.filter(
       row => row.value.owner === owner && (!engine || row.value.engine === engine),
@@ -133,6 +136,53 @@ export async function resolveCredential(
     return scoped.find(row => row.value.isDefault) ?? scoped[0];
   };
   return (requester ? pick(requester) : undefined) ?? pick(undefined);
+}
+
+export async function resolveCredential(
+  store: Store,
+  engine: string | undefined,
+  requester?: string,
+): Promise<CredentialRow | undefined> {
+  return pickCredential(
+    await store.listCredentials({ owner: requester, engine }),
+    engine,
+    requester,
+  );
+}
+
+/** Pinned settings use one engine; Default uses the first usable engine in the workspace chain. */
+export async function resolveEngine(
+  ctx: ServerContext,
+  settings: { engine?: string; model?: string },
+  requester?: string,
+): Promise<{
+  engine: string;
+  credential?: string;
+  usable: boolean;
+  chain: string[];
+  credentials: Record<string, string>;
+}> {
+  const [shown, rows] = await Promise.all([
+    shownConfig(ctx),
+    ctx.store.listCredentials({ owner: requester }),
+  ]);
+  const config = effectiveConfig(ctx, shown);
+  const pinned =
+    settings.engine ?? (settings.model ? resolveTaskOptions(settings, config).engine : undefined);
+  const chain = pinned ? [pinned] : config.chain;
+  const credentials = Object.fromEntries(
+    chain.flatMap(engine => {
+      const row = pickCredential(rows, engine, requester);
+      return row ? [[engine, row.id]] : [];
+    }),
+  );
+  for (const engine of chain) {
+    const credential = credentials[engine];
+    if (credential) return { engine, credential, usable: true, chain, credentials };
+    if (await machineSignedIn(ctx, engine)) return { engine, usable: true, chain, credentials };
+  }
+
+  return { engine: chain[0] ?? DEFAULT_ENGINE, usable: false, chain, credentials };
 }
 
 /** Workspace credentials plus the caller's own; nobody sees another member's. */
@@ -587,9 +637,11 @@ export async function createCredential(
   if (workspace && !workspaceAdmin(ctx)) return json({ error: ADMINS_ONLY }, 403);
   if (env.CODEX_AUTH_JSON)
     return json({ error: 'Sign in with Codex on the Credentials page instead.' }, 400);
-  // A pasted setup-token is your own, and only where subscription sign-in is off.
-  if (env.CLAUDE_CODE_OAUTH_TOKEN && ((workspace && ctx.auth) || ctx.config.subscriptions?.claude))
-    return json({ error: 'Sign in with Claude on the Credentials page instead.' }, 400);
+  // A pasted setup-token is a subscription: your own, and only where subscription sign-in is on.
+  if (env.CLAUDE_CODE_OAUTH_TOKEN && !ctx.config.subscriptions?.claude)
+    return json({ error: 'Claude subscriptions are off on this server; add an API key.' }, 400);
+  if (env.CLAUDE_CODE_OAUTH_TOKEN && workspace && ctx.auth)
+    return json({ error: 'A Claude subscription is personal; add it without --workspace.' }, 400);
 
   const owner = workspace ? undefined : user;
 

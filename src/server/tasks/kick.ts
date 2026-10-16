@@ -2,7 +2,7 @@ import type { TaskStatus } from '../store/types';
 import { SERVER_LIMITS } from '../limits';
 import { scoped, type ServerContext } from '../context';
 import { loadedStore } from '../store/primed';
-import { taskCredential, taskHosts } from './context';
+import { taskCredential, taskEngineCredentials, taskHosts } from './context';
 import type { ClaimedTask, TaskFence } from './queue';
 import { taskRunner, type Runner } from '../runners';
 import { startQueuedLocalTask, inspectLocalTask, localTasks, sweepLocalQueue } from './local';
@@ -257,6 +257,15 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
     try {
       const credential =
         runner.kind === 'vercel-sandbox' ? await taskCredential(taskCtx, status.task) : undefined;
+      const credentials = credential
+        ? [
+            credential,
+            ...(await taskEngineCredentials(taskCtx, status.task)).map(row => row.credential),
+          ]
+        : [];
+      const hosts = await Promise.all(
+        credentials.map(value => taskHosts(taskCtx, status.task, value)),
+      );
       const start = runner.start(
         status.task,
         {
@@ -267,11 +276,19 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
           CODER_TASK_TOKEN: claimed.token,
           CODER_INBOX_MODE: runner.push ? 'push' : 'poll',
         },
-        credential?.env,
+        credential
+          ? Object.assign({}, ...credentials.map(value => value.env).reverse())
+          : undefined,
         {
           timeoutMs: taskCtx.config.taskTimeoutMs + 60_000,
           waitUntil: taskCtx.waitUntil,
-          ...(credential ? { hosts: await taskHosts(taskCtx, status.task, credential) } : {}),
+          ...(credential
+            ? {
+                hosts: hosts.some(value => value === undefined)
+                  ? undefined
+                  : [...new Set(hosts.flatMap(value => value ?? []))],
+              }
+            : {}),
         },
       );
       handle = await deadline(start, taskCtx.runnerTimeoutMs ?? 30_000, 'runner start').catch(error => {

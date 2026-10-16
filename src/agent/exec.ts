@@ -18,6 +18,7 @@ import {
   resolveMcpServers,
   turnFallbackEngine,
   type DispatchOptions,
+  type TaskResult,
 } from '../core/dispatch';
 import { EMPTY_MESSAGE, EMPTY_MESSAGE_NOTICE, SKIPPED } from '../core/defaults';
 import {
@@ -26,6 +27,8 @@ import {
   loadTask as loadTaskRecord,
   readTurnResults,
   resolveTaskDir,
+  generateTaskId,
+  writeTask,
   type TurnResultEntry,
 } from '../core/state';
 import { heldConnections, steerTask } from '../core/task/actions';
@@ -94,6 +97,7 @@ export function threadReply(
       ...(answer === turn?.lastReply?.trim() ? { duplicate: true } : {}),
     };
   const error = result?.error?.message?.trim() ?? '';
+  if (result?.error && turn?.lastReply?.trim()) return { text: '', problem: true, duplicate: true };
   if (cancelled) return { text: error, problem: false };
   if (result && !result.error) {
     if (
@@ -283,6 +287,7 @@ export interface ExecResult {
   posted?: boolean;
   postedMessages?: string[];
   taskId?: string;
+  turn?: number;
   runId?: string;
   result?: unknown;
   tokens?: unknown;
@@ -302,9 +307,10 @@ export async function execAgent(options: {
   resumeTurn?: number;
   /** An engine conversation saved by an earlier turn, continued instead of starting a new one. */
   resume?: DispatchOptions['resume'];
-  onTask?: (taskId: string) => void | Promise<void>;
+  onTask?: (taskId: string, turn?: number) => void | Promise<void>;
   onWorker?: DispatchOptions['onWorker'];
   availability?: DispatchOptions['availability'];
+  onEngine?: (engine: string) => Promise<boolean | void>;
   onStart?: import('../flow/runtime').FlowHooks['onStart'];
   /** Secrets passed only to task-core MCP children, never inherited by the engine. */
   toolEnvironment?: { tokens: Record<string, string> };
@@ -327,7 +333,7 @@ export async function execAgent(options: {
       flow,
     };
   let agent = agents.find(candidate => candidate.id === options.agent);
-  if (!agent && task) {
+  if (task) {
     agent = {
       id: task.agent,
       name: task.definition.name ?? task.agent,
@@ -358,7 +364,13 @@ export async function execAgent(options: {
       : undefined;
     void prepared?.catch(() => {});
     const defaults = defaultTask(agent, task);
-    const resolved = resolveTaskOptions(effectiveSettings(agent), config);
+    const resumedEngine = options.resumeTaskId && loadTaskRecord(cwd, options.resumeTaskId)?.engine;
+    let resolved = resolveTaskOptions(
+      resumedEngine && resumedEngine !== effectiveSettings(agent).engine
+        ? { engine: resumedEngine }
+        : effectiveSettings(agent),
+      config,
+    );
     const selectedMcp = selectMcpServers(
       task.mcp?.join(','),
       config.mcp,
@@ -366,51 +378,137 @@ export async function execAgent(options: {
       connected.mcp,
     );
     const mcp = [...Object.values(native.mcp), ...selectedMcp.mcp];
-    const first =
+    let first =
       options.resumeTurn ??
       (options.resumeTaskId ? readTurnResults(cwd, options.resumeTaskId).length : 0);
     let worker: ChildProcess | undefined;
-    const dispatched = options.resumeTaskId
-      ? { taskId: options.resumeTaskId }
-      : await dispatchTask({
-          onWorker: (id, child) => {
-            worker = child;
-            options.onWorker?.(id, child);
-          },
-          availability: options.availability,
-          taskId: options.taskId,
-          ...(options.resume ? { resume: options.resume } : {}),
-          mcp,
-          mcpBindings: selectedMcp.mcpBindings,
-          mcpWarnings: selectedMcp.warnings,
-          nativeMcp: selectedMcp.nativeMcp,
-          connectionEnv: { ...connected.env, ...native.env },
-          connections: task.connections,
-          cwd,
-          agentId: task.agent,
-          // Platform conversations roll over; dashboard and CLI tasks keep the engine's own compaction.
-          ...(isConversation(task) ? { conversation: true } : {}),
-          ...(task.author ? { author: task.author } : {}),
-          ...(event?.repo ? { repo: `${event.repo.owner}/${event.repo.name}` } : {}),
-          ...(options.source
-            ? { source: options.source }
-            : { name: `${AGENT_TASK_PREFIX}${task.id}`, source: task.source }),
+    const engineTaskId = options.resumeTaskId ?? options.taskId ?? generateTaskId();
+    const chain = task.engineChain ?? [resolved.engine];
+    let index = Math.max(0, chain.indexOf(resolved.engine));
+    let retry = false;
+    for (const engine of chain.slice(0, index))
+      appendTaskLog(cwd, engineTaskId, {
+        kind: 'warning',
+        message: `${engine} skipped because no applicable credential is connected`,
+      });
+    let dispatched!: { taskId: string };
+    let completed!: TaskResult;
+    for (;;) {
+      const engine = chain[index]!;
+      resolved = resolveTaskOptions(
+        retry ? { engine } : { ...effectiveSettings(agent), engine },
+        config,
+      );
+      let startupFailure = false;
+      try {
+        if ((await options.onEngine?.(engine)) === false)
+          throw new CoderError(
+            'chain-exhausted',
+            `No applicable credential is connected for ${engine}`,
+          );
+        if (retry)
+          writeTask(cwd, engineTaskId, {
+            status: 'queued',
+            pid: null,
+            threadId: null,
+            resumeThreadId: null,
+            resumedAt: new Date().toISOString(),
+            error: undefined,
+            completedAt: undefined,
+          });
+        dispatched = options.resumeTaskId
+          ? { taskId: options.resumeTaskId }
+          : await dispatchTask(
+              {
+                onWorker: (id, child) => {
+                  worker = child;
+                  options.onWorker?.(id, child);
+                },
+                availability: options.availability,
+                taskId: engineTaskId,
+                ...(options.resume ? { resume: options.resume } : {}),
+                mcp,
+                mcpBindings: selectedMcp.mcpBindings,
+                mcpWarnings: selectedMcp.warnings,
+                nativeMcp: selectedMcp.nativeMcp,
+                connectionEnv: { ...connected.env, ...native.env },
+                connections: task.connections,
+                cwd,
+                agentId: task.agent,
+                // Platform conversations roll over; dashboard and CLI tasks keep the engine's own compaction.
+                ...(isConversation(task) ? { conversation: true } : {}),
+                ...(task.author ? { author: task.author } : {}),
+                ...(event?.repo ? { repo: `${event.repo.owner}/${event.repo.name}` } : {}),
+                ...(options.source
+                  ? { source: options.source }
+                  : { name: `${AGENT_TASK_PREFIX}${task.id}`, source: task.source }),
+                engine: resolved.engine,
+                model: resolved.model ?? undefined,
+                effort: resolved.effort ?? undefined,
+                permissions: task.permissions ?? resolved.permissions,
+                agentPrompt: defaults.agentPrompt,
+                prompt: defaults.prompt,
+                outputSchema: task.context?.outputSchema,
+                wait: true,
+              },
+              task.engineChain
+                ? { config: { ...config, chain: [resolved.engine] }, waitForStartup: false }
+                : {},
+            );
+        await options.onTask?.(dispatched.taskId, first);
+        completed = await waitForAgentTask(cwd, dispatched.taskId, options.onApproval, (cwd, id) =>
+          waitTask(cwd, id, { turn: first, worker }),
+        );
+      } catch (error) {
+        if (!task.engineChain || !(error instanceof CoderError) || error.code !== 'chain-exhausted')
+          throw error;
+        startupFailure = true;
+        const detail = error.payload?.error ?? error.message;
+        const record = writeTask(cwd, engineTaskId, {
+          status: 'failed',
           engine: resolved.engine,
-          model: resolved.model ?? undefined,
-          effort: resolved.effort ?? undefined,
-          permissions: task.permissions ?? resolved.permissions,
-          agentPrompt: defaults.agentPrompt,
           prompt: defaults.prompt,
-          outputSchema: task.context?.outputSchema,
-          wait: true,
+          error: detail,
+          pid: null,
         });
-    await options.onTask?.(dispatched.taskId);
-    const completed = await waitForAgentTask(
-      cwd,
-      dispatched.taskId,
-      options.onApproval,
-      (cwd, id) => waitTask(cwd, id, { turn: first, worker }),
-    );
+        const result = { status: 1, threadId: null, error: { message: detail } };
+        writeJsonFileAtomic(path.join(resolveTaskDir(cwd, record.id), 'result.json'), result);
+        await fs.appendFile(
+          path.join(resolveTaskDir(cwd, record.id), 'results.jsonl'),
+          JSON.stringify({ ...result, prompt: defaults.prompt }) + '\n',
+        );
+        dispatched = { taskId: record.id };
+        await options.onTask?.(record.id, first);
+        completed = {
+          taskId: record.id,
+          task: record,
+          status: 'failed',
+          result,
+          turns: readTurnResults(cwd, record.id),
+          steps: [],
+        };
+      }
+      const next = startupFailure
+        ? (chain[index + 1] ?? null)
+        : task.engineChain
+          ? turnFallbackEngine(cwd, completed, { ...config, chain: chain as typeof config.chain })
+          : undefined;
+      if (next !== undefined)
+        appendTaskLog(cwd, engineTaskId, {
+          kind: 'warning',
+          message: `${resolved.engine} skipped because ${completed.result?.error?.message ?? 'the engine could not start'}`,
+        });
+      if (next === undefined || next === null) break;
+      first = readTurnResults(cwd, dispatched.taskId).length;
+      if (worker)
+        await new Promise<void>(resolve => {
+          if (worker!.exitCode !== null || worker!.signalCode) return resolve();
+          worker!.once('exit', () => resolve());
+        });
+      index++;
+      retry = true;
+      options = { ...options, resumeTaskId: undefined, resume: undefined };
+    }
     // This turn's own answer: later turns are posted by whoever waits for them.
     const turn = readTurnResults(cwd, dispatched.taskId)[first];
     const {
@@ -446,6 +544,7 @@ export async function execAgent(options: {
       posted,
       ...(postedMessages.length ? { postedMessages } : {}),
       taskId: dispatched.taskId,
+      turn: first,
       tokens: completed.result?.tokens ?? undefined,
     };
   }

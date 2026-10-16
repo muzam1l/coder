@@ -192,7 +192,7 @@ function CustomFields({
   const [baseUrl, setBaseUrl] = useState(preset.baseUrl);
   const [envKey, setEnvKey] = useState(preset.envKey);
   const [key, setKey] = useState('');
-  const [scope, setScope] = useState('personal');
+  const [scope, setScope] = useState(admin ? 'workspace' : 'personal');
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const latest = useRef(0);
   const [model, setModel] = useState('');
@@ -274,7 +274,7 @@ function CustomFields({
             label="API key"
             hint={
               <>
-                {saved(envKey) ? `optional, your saved ${envKey}` : `saved as ${envKey}`}
+                {saved(envKey) ? `uses your saved ${envKey}; enter one to replace it` : `a new key, stored as ${envKey}`}
                 {preset.keyUrl ? (
                   <>
                     {', '}
@@ -290,7 +290,7 @@ function CustomFields({
               name="key"
               type="password"
               autocomplete="off"
-              placeholder={saved(envKey) ? 'Optional' : `${preset.name} API key`}
+              placeholder={saved(envKey) ? 'Leave empty to use the saved key' : `${preset.name} API key`}
               value={key}
               onInput={event => {
                 setKey(event.currentTarget.value);

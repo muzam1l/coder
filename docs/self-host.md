@@ -102,7 +102,7 @@ An engine credential names an engine (`claude`, `codex`, or `custom`) and holds 
 
 `CLAUDE_SUBSCRIPTIONS=1` and `CODEX_SUBSCRIPTIONS=1` turn on "Sign in with Claude" and "Sign in with Codex", for personal credentials only; both are off by default. Sign-in runs the official, unmodified `claude setup-token` or `codex login --device-auth` on the server's runner, and the dashboard stores the result. The page shows each credential masked, with the account email and plan where the CLI reports them.
 
-API keys are personal for any member and workspace-wide for owners and admins. Built-in engines are checked with one models request unless `--no-check` is set. Without subscription sign-in, a member may paste their own `claude setup-token` output as a personal credential.
+API keys are personal for any member and workspace-wide for owners and admins. Built-in engines are checked with one models request unless `--no-check` is set. With Claude sign-in on, a member may also paste their own `claude setup-token` output as a personal credential.
 
 From a terminal, `coder credentials` adds, lists, removes and signs in credentials; it reads secrets from the environment or stdin and never prints them.
 

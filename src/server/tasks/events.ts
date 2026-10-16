@@ -20,9 +20,9 @@ import type { ServerContext } from '../context';
 import { updateMetadata } from '../store';
 import type { DispatchLoaded, Store, TaskStatus } from '../store/types';
 import { dispatchStore } from '../store/primed';
-import { machineSignedIn, runLocalTask } from './local';
+import { runLocalTask } from './local';
 import { syncLocalAgents } from '../store/local';
-import { credentialFix, resolveCredential } from '../settings/credentials';
+import { credentialFix, resolveEngine } from '../settings/credentials';
 import { dispatchTokens, requesterToken, type EventTokens } from './context';
 import { chooseRunner } from '../runners';
 import { buildContext, conversationKey } from './thread';
@@ -42,7 +42,6 @@ import { appendTaskLog, generateTaskId } from '../../core/state';
 import { generateRunId } from '../../flow/runs';
 import { connectionWarnings } from './logs';
 import type { PendingDelivery } from './queue';
-import { DEFAULT_ENGINE } from '../../core/defaults';
 import { dashPath, organizationSlug } from '../auth/account';
 
 const PENDING_TTL_MS = 60_000;
@@ -601,9 +600,9 @@ async function claimed(
   const actAs = personal ? match.actAs : undefined;
   const settings = effectiveSettings(agent);
   const declared = await reachable(tokens, agent);
-  const [route, credential, toolScopes, context, grants, personalToken] = await Promise.all([
+  const [route, resolved, toolScopes, context, grants, personalToken] = await Promise.all([
     chooseRunner(ctx, { requester, agent: agent.definition.runner }),
-    resolveCredential(ctx.store, settings.engine, requester),
+    resolveEngine(ctx, settings, requester),
     frozenToolScopes(installation, event, tokens),
     buildContext(
       ctx,
@@ -624,7 +623,8 @@ async function claimed(
       ? requesterToken(ctx, integration, event, credentials).catch(() => undefined)
       : undefined,
   ]);
-  if (!credential && route.runner !== 'http' && !(await machineSignedIn(ctx, settings.engine))) {
+  const { engine, credential, usable, chain, credentials: engineCredentials } = resolved;
+  if (!usable && route.runner !== 'http') {
     const spoken = described.mustReply ?? integration.events[event.type]?.on === 'mention';
     if (!spoken) return {};
     return effect(async () => {
@@ -642,9 +642,7 @@ async function claimed(
       if (!first && (await ctx.store.get<{ owner?: string }>('delivery', key))?.owner !== owner)
         return;
       try {
-        await replies.problem(
-          await setupText(ctx, settings.engine ?? DEFAULT_ENGINE, await slug()),
-        );
+        await replies.problem(await setupText(ctx, engine, await slug()));
       } catch (error) {
         if (!integration.answersEveryPrompt) await ctx.store.updateDelivery(key, owner, undefined);
         throw error;
@@ -713,14 +711,16 @@ async function claimed(
     ...route,
     permissions: match.permissions ?? settings.permissions,
     event: described,
-    failureReply: await failureText(ctx, settings.engine ?? DEFAULT_ENGINE, await slug()),
+    failureReply: await failureText(ctx, engine, await slug()),
     ...(taskUrl ? { taskUrl } : {}),
     author: integration.author?.(app.name) ?? app.name,
     definition: agent.definition,
-    ...(credential ? { credential: credential.id } : {}),
+    engineChain: chain,
+    engineCredentials,
+    ...(credential ? { credential } : {}),
     ...(requester ? { requester } : {}),
     ...(agent.files ? { files: agent.files } : {}),
-    ...(agent.usage ? { usage: agent.usage } : {}),
+    usage: { ...agent.usage, engine },
     tools,
     connections: outsider ? [] : grants,
     ...(Object.keys(toolScopes).length ? { toolScopes } : {}),

@@ -13,7 +13,7 @@ export const commandCredentialsAdd = command({
     usage:
       'coder credentials add [label] --engine <claude|codex|custom> --env <NAME> [--env <NAME> ...] [--value <secret|->] [--workspace] [--no-check] [--default] [--server [url]]',
     summary:
-      'Store an API key, encrypted on the server, as your personal credential or with --workspace for every member. The value comes from the named environment variable unless --value says otherwise, and is never printed. Without subscription sign-in on the server, CLAUDE_CODE_OAUTH_TOKEN takes your own claude setup-token output.',
+      'Store an API key, encrypted on the server, as your personal credential or with --workspace for every member. The value comes from the named environment variable unless --value says otherwise, and is never printed. Where the server has subscription sign-in on, CLAUDE_CODE_OAUTH_TOKEN takes your own claude setup-token output.',
     examples: [
       [
         'ANTHROPIC_API_KEY=sk-... coder credentials add --engine claude --env ANTHROPIC_API_KEY',

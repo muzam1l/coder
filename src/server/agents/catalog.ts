@@ -13,8 +13,7 @@ import { syncLocalAgents } from '../store/local';
 import { agentApps } from './connections';
 import { failedDeliveries } from '../tasks/failures';
 import { decodeCursor, json, notFound, page, pageLimit, paged } from '../routes/http';
-import { DEFAULT_ENGINE } from '../../core/defaults';
-import { machineSignedIn } from '../tasks/local';
+import { resolveEngine } from '../settings/credentials';
 
 export async function sourceUrl(
   ctx: ServerContext,
@@ -191,7 +190,7 @@ export async function readAgent(
   const withContent = url.searchParams.get('content') !== '0';
   const withHandles = url.searchParams.get('handles') === '1';
   const requester = ctx.session?.user.id;
-  const [{ record, version: current }, rows, apps, deliveries, credentials] = await Promise.all([
+  const [{ record, version: current }, rows, apps, deliveries] = await Promise.all([
     !withContent && !local
       ? ctx.store
           .listAgentSummaries({ slug })
@@ -204,18 +203,19 @@ export async function readAgent(
       : [],
     withHandles ? agentApps(ctx, slug) : [],
     withHandles ? failedDeliveries(ctx.store, slug) : undefined,
-    withHandles ? ctx.store.listCredentials({ owner: requester }) : undefined,
   ]);
   if (!record) return json({ error: `No agent named "${slug}"` }, 404);
 
-  // No credential of the caller's or the workspace's runs its engine, and this machine is not signed in to it.
-  const engine = record.settings?.engine ?? current?.definition.engine ?? DEFAULT_ENGINE;
-  const needsModel =
-    credentials !== undefined &&
-    !credentials.some(
-      ({ value }) => value.engine === engine && (!value.owner || value.owner === requester),
-    ) &&
-    !(await machineSignedIn(ctx, record.settings?.engine ?? current?.definition.engine));
+  const resolved = withHandles
+    ? await resolveEngine(
+        ctx,
+        {
+          engine: record.settings?.engine ?? current?.definition.engine,
+          model: record.settings?.model ?? current?.definition.model,
+        },
+        requester,
+      )
+    : undefined;
 
   // The names its apps answer to, once each, where the agent wakes on a mention.
   const wired = current?.definition.integrations ?? {};
@@ -283,7 +283,9 @@ export async function readAgent(
           },
         }
       : {}),
-    ...(needsModel ? { needsModel: true } : {}),
+    ...(resolved
+      ? { resolvedEngine: resolved.engine, ...(!resolved.usable ? { needsModel: true } : {}) }
+      : {}),
   });
 }
 

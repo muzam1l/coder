@@ -21,15 +21,14 @@ import type {
 import type { TaskTurn } from '../../client/types';
 import type { AgentRecord, TaskStatus } from '../store/types';
 import { PERMISSION_MODES, type Permission } from '../../core/config';
-import { ensureBuiltinAgents, toAgent } from '../agents/records';
+import { agentWithVersion, ensureBuiltinAgents, toAgent } from '../agents/records';
 import type { ServerContext } from '../context';
 import { syncLocalAgents } from '../store/local';
-import { machineSignedIn, runLocalTask } from './local';
-import { credentialFix } from '../settings/credentials';
+import { runLocalTask } from './local';
+import { credentialFix, resolveEngine } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { installationToken } from './context';
 import { chooseRunner } from '../runners';
-import { DEFAULT_ENGINE } from '../../core/defaults';
 
 export interface NewTask {
   cwd?: string;
@@ -210,8 +209,7 @@ export async function createTask(
   if (!slug) throw new TaskInputError('Name an agent: this server has no default agent.');
   if (slug === defaultAgent()) await ensureBuiltinAgents(ctx, now);
   if (ctx.local) await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
-  const loaded = await ctx.store.taskInputs(slug, requester, input.engine);
-  const { record, version } = loaded;
+  const { record, version } = await agentWithVersion(ctx.store, slug);
   const chosen = await chooseRunner(ctx, {
     requester,
     runner: input.runner,
@@ -230,9 +228,12 @@ export async function createTask(
   const agent = toAgent(record, version, usage, ctx.integrations);
   const settings = effectiveSettings(agent);
 
-  const credential = loaded.credential;
-  const engine = settings.engine ?? DEFAULT_ENGINE;
-  if (!credential && chosen.runner !== 'http' && !(await machineSignedIn(ctx, settings.engine)))
+  const { engine, credential, usable, chain, credentials } = await resolveEngine(
+    ctx,
+    settings,
+    requester,
+  );
+  if (!usable && chosen.runner !== 'http')
     throw new TaskInputError(
       `No ${engine} credential is connected`,
       409,
@@ -254,10 +255,12 @@ export async function createTask(
     ...(input.args ? { args: input.args } : {}),
     ...(input.mcp?.length ? { mcp: input.mcp } : {}),
     definition: agent.definition,
+    engineChain: chain,
+    engineCredentials: credentials,
     ...(credential ? { credential } : {}),
     ...(requester ? { requester } : {}),
     ...(agent.files ? { files: agent.files } : {}),
-    ...(agent.usage ? { usage: agent.usage } : {}),
+    usage: { ...agent.usage, engine },
     tools: {},
     connections: await connectionGrants(
       ctx,

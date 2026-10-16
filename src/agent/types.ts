@@ -233,6 +233,10 @@ export interface AgentTask {
   definition: AgentDefinition;
   /** Frozen id of the credential selected for this task. */
   credential?: string;
+  /** The engine order for this task; a pinned engine has one entry. */
+  engineChain?: string[];
+  /** Applicable credentials frozen with the engine order, without their values. */
+  engineCredentials?: Record<string, string>;
   /** Wular user who asked, when known; their personal credential comes first. */
   requester?: string;
   /** Stored agent body for runners whose checkout does not contain the agent. */

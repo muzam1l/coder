@@ -432,6 +432,13 @@ export async function inspectLocalTask(
   now: number,
 ): Promise<boolean> {
   if (status.status !== 'running' && status.status !== 'waiting') return false;
+  if (
+    status.task.flow === 'default' &&
+    ctx.store.localFlows?.has(status.task.id) &&
+    status.cancelRequestedAt === undefined &&
+    (status.startedAt === undefined || now - status.startedAt < ctx.config.taskTimeoutMs)
+  )
+    return false;
   const start = await ctx.store.get<LocalStart>('snapshot', `local-start:${status.task.id}`);
   if (!start) return false;
   const fence: TaskFence = {
@@ -864,6 +871,7 @@ export async function runLocalTask(
       ctx.local?.engineChecks && ctx.local.engineChecks.expiresAt > Date.now()
         ? ctx.local.engineChecks.availability
         : undefined,
+    ...(task.engineChain ? { onEngine: (engine: string) => machineSignedIn(ctx, engine) } : {}),
     post: task.flow === 'default' ? false : task.source === task.event?.integration,
     ...(token ? { postToken: token } : {}),
     source: task.source,
@@ -882,24 +890,40 @@ export async function runLocalTask(
       worker = child;
     },
     onTask: id => {
-      if (task.flow === 'default') watchCompletion(ctx, id, completion, worker);
       started(id);
     },
-  }).finally(async () => {
-    ctx.store.localFlows?.delete(task.id);
-    if (task.flow !== 'default') {
-      const current = await ctx.store.get('task', task.id);
-      if (
-        current &&
-        current.attempts === completion.fence?.attempts &&
-        current.tokenHash === completion.fence?.tokenHash &&
-        (current.generation ?? 0) === completion.fence?.generation
-      )
-        await inspectLocalTask(ctx, current, (ctx.now ?? Date.now)());
+  })
+    .then(async result => {
+      if (task.flow === 'default' && result.taskId) {
+        completion.turns = result.turn ?? completion.turns;
+        await ctx.store.put('snapshot', `completion:${result.taskId}`, completion);
+        watchCompletion(ctx, result.taskId, completion, worker);
+      }
+      return result;
+    })
+    .finally(async () => {
+      ctx.store.localFlows?.delete(task.id);
+      if (task.flow !== 'default') {
+        const current = await ctx.store.get('task', task.id);
+        if (
+          current &&
+          current.attempts === completion.fence?.attempts &&
+          current.tokenHash === completion.fence?.tokenHash &&
+          (current.generation ?? 0) === completion.fence?.generation
+        )
+          await inspectLocalTask(ctx, current, (ctx.now ?? Date.now)());
 
-      scheduleKick(ctx, true);
-    }
-  });
+        scheduleKick(ctx, true);
+      }
+    });
+  if (task.flow === 'default')
+    (ctx.store.localFlows ??= new Map()).set(task.id, {
+      stop: async () => {
+        const current = loadTask(cwd, taskId ?? task.id);
+        if (current) await stopTask(cwd, current);
+      },
+      work: run,
+    });
   run.catch(() => {
     if (ctx.local) ctx.local.engineChecks = undefined;
   });

@@ -76,6 +76,7 @@ type RemoteTask = {
   nativeTokens?: Record<string, string>;
   postToken?: string;
   credential: EngineCredential;
+  engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
   config?: Partial<CoderConfig>;
   connections?: Record<string, McpServerSpec>;
   connectionEnv?: Record<string, string>;
@@ -267,6 +268,8 @@ async function applyEnvironment(remote: RemoteTask, root: string): Promise<strin
   delete process.env.CODER_TASK_TOKEN;
   delete process.env.APP_TOKEN;
   for (const id of Object.keys(remote.tokens)) delete process.env[tokenEnvName(id)];
+  for (const row of remote.engineCredentials ?? [])
+    for (const name of Object.keys(row.credential.env)) delete process.env[name];
   const { CODEX_AUTH_JSON: authJson, [MACHINE_SANDBOX_ENV]: _, ...env } = remote.credential.env;
   Object.assign(process.env, env);
   process.env[WORKSPACE_CONFIG_ENV] = JSON.stringify(remote.config ?? {});
@@ -324,6 +327,10 @@ async function historySecrets(
       .filter(([name]) => /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH/i.test(name))
       .map(([, value]) => value),
     ...tokens(remote.credential.env.CODEX_AUTH_JSON),
+    ...(remote.engineCredentials?.flatMap(row => [
+      ...Object.values(row.credential.env),
+      ...tokens(row.credential.env.CODEX_AUTH_JSON),
+    ]) ?? []),
     ...tokens(rotated),
   ];
 }
@@ -340,7 +347,7 @@ async function writeBack(
   if (authJson && authJson !== remote.credential.env.CODEX_AUTH_JSON)
     await taskRequest(auth.server, auth.token, id, '/credential', {
       method: 'POST',
-      body: JSON.stringify({ authJson }),
+      body: JSON.stringify({ authJson, credentialId: remote.task.credential }),
     }).catch(() => {});
   await fs.rm(home, { recursive: true, force: true });
 }
@@ -527,6 +534,10 @@ export async function runTask(id: string, root: string): Promise<unknown> {
   delete process.env.CODER_CHECKOUT_CACHE;
   let codexHome: string | undefined;
   let claudeHome: string | undefined;
+  const machineHomes = {
+    CODEX_HOME: process.env.CODEX_HOME,
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  };
   let history: ReturnType<typeof taskHistory> | undefined;
   const timeout = new AbortController();
   const timer = setTimeout(
@@ -610,6 +621,31 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       beforeResult,
       reportResult,
       restored.value,
+      remote.engineCredentials
+        ? async engine => {
+            if (engine === remote.credential.engine) return true;
+            const selected = remote.engineCredentials!.find(
+              row => row.credential.engine === engine,
+            );
+            if (!selected) return false;
+            await beforeResult();
+            for (const [name, value] of Object.entries(machineHomes)) {
+              if (value === undefined) delete process.env[name];
+              else process.env[name] = value;
+            }
+            remote.credential = selected.credential;
+            remote.task = {
+              ...remote.task,
+              credential: selected.id,
+              usage: { ...remote.task.usage, engine, model: undefined, effort: undefined },
+            };
+            [codexHome, claudeHome] = await Promise.all([
+              applyEnvironment(remote, root),
+              applyClaudeHome(remote, root),
+            ]);
+            return true;
+          }
+        : undefined,
     );
   } catch (error) {
     if (!reportingResult)
@@ -643,6 +679,7 @@ async function runCheckedOutTask(
   beforeResult: () => Promise<void>,
   reportResult: (body: unknown) => Promise<void>,
   resumed?: Awaited<ReturnType<ReturnType<typeof taskHistory>['restore']>>,
+  onEngine?: (engine: string) => Promise<boolean>,
 ): Promise<unknown> {
   const event = remote.task.event;
   const postToken = remote.task.flow === 'default' ? remote.postToken : eventToken;
@@ -824,7 +861,7 @@ async function runCheckedOutTask(
           worker = undefined;
         });
       },
-      async onTask(started) {
+      async onTask(started, turn) {
         taskId = started;
         if (timeout.aborted) {
           const task = loadTask(cwd, started);
@@ -847,7 +884,7 @@ async function runCheckedOutTask(
         writeJsonFileAtomic(path.join(root, '.runner-task.json'), {
           generation: remote.generation,
           id: started,
-          turn: firstTurn,
+          turn: turn ?? firstTurn,
           usageStart: previousTurns,
         });
         await ack().catch(() => {});
@@ -864,6 +901,7 @@ async function runCheckedOutTask(
           }, 4000);
       },
       onApproval,
+      onEngine,
     });
     const aborted = new Promise<never>((_, reject) => {
       const abort = () => reject(timeout.reason);
@@ -871,6 +909,7 @@ async function runCheckedOutTask(
       if (timeout.aborted) abort();
     });
     const result = await Promise.race([running, aborted]);
+    deliveredTurns = (result.turn ?? firstTurn) + 1;
     if (taskId && remote.task.flow === 'default') {
       const postedMessages = [...(result.postedMessages ?? [])];
       const resultSignal = watchTask(cwd, taskId, worker);

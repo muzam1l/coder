@@ -18,16 +18,22 @@ import { secretKeyVersion } from '../../secrets';
 import type { DrizzleStore } from '../store';
 
 export function storedTaskContext(value: TaskStatus['task']) {
-  return value.connections === undefined
+  return value.connections === undefined && !value.engineChain && !value.engineCredentials
     ? value.context
-    : { ...value.context, connections: value.connections };
+    : {
+        ...value.context,
+        connections: value.connections,
+        engineChain: value.engineChain,
+        engineCredentials: value.engineCredentials,
+      };
 }
 
 export function readTaskContext(value: TaskStatus['task']['context'] | null) {
-  const { connections, runnerLogs, ...context } = (value ?? {}) as NonNullable<
-    TaskStatus['task']['context']
-  > & {
+  const { connections, runnerLogs, engineChain, engineCredentials, ...context } = (value ??
+    {}) as NonNullable<TaskStatus['task']['context']> & {
     connections?: string[];
+    engineChain?: string[];
+    engineCredentials?: Record<string, string>;
     runnerLogs?: {
       at?: number;
       complete?: boolean;
@@ -37,7 +43,13 @@ export function readTaskContext(value: TaskStatus['task']['context'] | null) {
     };
   };
 
-  return { connections, runnerLogs, context: Object.keys(context).length ? context : undefined };
+  return {
+    connections,
+    runnerLogs,
+    engineChain,
+    engineCredentials,
+    context: Object.keys(context).length ? context : undefined,
+  };
 }
 
 /** Postgres requests acquire their organization from a session, app, or task. */
@@ -162,6 +174,8 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
       author: r.author,
       definition: r.definition,
       credential: r.credential,
+      engineChain: context.engineChain,
+      engineCredentials: context.engineCredentials,
       requester: r.requester,
       runnerId: r.runnerId,
       usage: r.usage,

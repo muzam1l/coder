@@ -84,12 +84,14 @@ export function TaskSecrets({
                           name="key"
                           type="password"
                           aria-label={`New value for ${row.env ?? row.name}`}
-                          placeholder="New value, then Enter"
+                          placeholder="New value"
                           autocomplete="off"
                           aria-busy={busy}
                           ref={input => input?.focus()}
                         />
-                        <button hidden />
+                        <Button type="submit" loading={busy}>
+                          Save
+                        </Button>
                       </form>
                     ) : (
                       <Button variant="ghost" size="sm" onClick={() => setRenewing(row.id)}>
@@ -154,7 +156,7 @@ export function TaskSecrets({
                 name="key"
                 type="password"
                 aria-label="Secret value"
-                placeholder="Value, then Enter"
+                placeholder="Value"
                 autocomplete="off"
                 aria-busy={busy}
                 required
@@ -167,7 +169,9 @@ export function TaskSecrets({
                   onChange={setScope}
                 />
               ) : null}
-              <button hidden />
+              <Button type="submit" loading={busy}>
+                Add
+              </Button>
             </form>
           </div>
         ) : null}
