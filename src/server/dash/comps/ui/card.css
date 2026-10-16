@@ -8,7 +8,7 @@
 }
 .card.accent {
   border-color: var(--warn);
-  background: var(--warnbg);
+  background: linear-gradient(var(--warnbg), var(--warnbg)), var(--panel);
 }
 .card.danger {
   border-color: var(--bad);
