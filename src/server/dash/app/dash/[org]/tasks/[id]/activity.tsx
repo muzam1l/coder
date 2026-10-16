@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useLayoutEffect, useReducer, useRef, useState } from 'preact/hooks';
+import { useFollowEnd } from '@/utils/follow';
 import {
   Virtualizer,
   observeWindowOffset,
@@ -45,8 +46,6 @@ const ICONS: Record<TaskDisplayRow['kind'], string> = {
 const foldable = (row: TaskDisplayRow) =>
   Boolean(row.detail || row.result?.detail) || row.title.length > 120 || row.title.includes('\n');
 
-const atEnd = () => innerHeight + scrollY >= document.documentElement.scrollHeight - 48;
-
 /** The list scrolls with the page; only rows near the viewport are in the DOM. */
 function useWindowVirtualizer(count: number, list: { current: HTMLElement | null }) {
   const [, rerender] = useReducer((n: number) => n + 1, 0);
@@ -80,7 +79,6 @@ function runningIn(rows: TaskDisplayRow[], live: boolean) {
   return (row: TaskDisplayRow, index: number) =>
     live && !row.result && (row.state !== undefined || (row.kind === 'tool' && index > settled));
 }
-
 
 /** A call's or approval's outcome on the right: a spinner and the time so far, then ✓ or ✗ and how long it took. */
 function CallState({ row, running }: { row: TaskDisplayRow; running: boolean }) {
@@ -136,14 +134,23 @@ function Row({
       : row.kind === 'reasoning' && row.durationMs
         ? formatDuration(row.durationMs)
         : '';
-  const Tag = fold ? 'button' : 'div';
-
   return (
-    <Tag
-      type={fold ? 'button' : undefined}
-      class={`act ${row.kind}${row.tone ? ` ${row.tone}` : ''}${timed ? ' timed' : ''}${open ? ' open' : ''}`}
-      aria-expanded={fold ? open : undefined}
-      onClick={fold ? onToggle : undefined}
+    <div
+      class={`act ${row.kind}${row.tone ? ` ${row.tone}` : ''}${timed ? ' timed' : ''}${open ? ' open' : ''}${fold ? ' fold' : ''}`}
+      {...(fold
+        ? {
+            role: 'button',
+            tabIndex: 0,
+            'aria-expanded': open,
+            // Selecting text in a row does not fold it.
+            onClick: () => getSelection()?.isCollapsed !== false && onToggle(),
+            onKeyDown: (event: KeyboardEvent) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              onToggle();
+            },
+          }
+        : {})}
     >
       <time>{formatTime(row.at, tz)}</time>
       <Icon d={row.kind === 'tool-result' && failed ? iX : ICONS[row.kind]} />
@@ -157,7 +164,7 @@ function Row({
       </span>
       {timed ? <CallState row={row} running={running} /> : null}
       {fold ? <Icon d={iDown} class="act-chev" /> : null}
-    </Tag>
+    </div>
   );
 }
 
@@ -175,7 +182,7 @@ export function Activity({
 }) {
   const list = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(() => new Set(typeof at === 'number' ? [at] : []));
-  const [follow, setFollow] = useState(at === undefined ? live : at === 'end');
+  const { following, follow } = useFollowEnd(at === undefined ? live : at === 'end');
   const virtual = useWindowVirtualizer(rows.length, list);
   const running = runningIn(rows, live);
 
@@ -200,7 +207,8 @@ export function Activity({
       const slot = list.current?.querySelector<HTMLElement>('.act-slot.at');
       if (slot) {
         const top = parseFloat(getComputedStyle(slot).scrollMarginTop);
-        const bottom = document.querySelector('form.reply')?.getBoundingClientRect().top ?? innerHeight;
+        const bottom =
+          document.querySelector('form.reply')?.getBoundingClientRect().top ?? innerHeight;
         const box = slot.getBoundingClientRect();
         const delta = box.top - (box.height > bottom - top ? top : (top + bottom - box.height) / 2);
         if (Math.abs(delta) < 1) still++;
@@ -209,21 +217,11 @@ export function Activity({
       if (still < 3 && --frames) frame = requestAnimationFrame(align);
       else stop();
     };
-    for (const type of ['wheel', 'touchstart', 'keydown']) addEventListener(type, stop, { passive: true });
+    for (const type of ['wheel', 'touchstart', 'keydown'])
+      addEventListener(type, stop, { passive: true });
     frame = requestAnimationFrame(align);
     return stop;
   }, []);
-
-  useEffect(() => {
-    const onScroll = () => setFollow(atEnd());
-    addEventListener('scroll', onScroll, { passive: true });
-    onScroll();
-    return () => removeEventListener('scroll', onScroll);
-  }, []);
-
-  useLayoutEffect(() => {
-    if (follow) scrollTo({ top: document.documentElement.scrollHeight });
-  }, [rows.length]);
 
   if (!rows.length)
     return (
@@ -268,15 +266,8 @@ export function Activity({
           );
         })}
       </div>
-      {follow ? null : (
-        <button
-          type="button"
-          class="jump"
-          onClick={() => {
-            setFollow(true);
-            scrollTo({ top: document.documentElement.scrollHeight });
-          }}
-        >
+      {following ? null : (
+        <button type="button" class="jump" onClick={follow}>
           Jump to latest
         </button>
       )}

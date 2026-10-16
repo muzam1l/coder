@@ -4,6 +4,7 @@ import './task-view.css';
 
 import { Fragment } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useFollowEnd } from '@/utils/follow';
 
 import { serverEvents } from '@coder/client';
 import { LogView, type TaskDisplayRow } from '@coder/core/task/log-view';
@@ -255,6 +256,8 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
     observer.observe(form);
     return () => observer.disconnect();
   }, [task.task.flow]);
+  // A sent message takes the page to its end, which then follows the conversation while you stay there.
+  const { follow } = useFollowEnd();
   const sender = useAction({ toast: 'Not sent' });
   const asker = useAction({ toast: 'Not sent' });
   const sending = Boolean(sender.pending);
@@ -427,6 +430,7 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
     const text = input.current?.value.trim();
     if (!text || sending) return;
     const kind = live ? (ask ? 'ask' : 'steer') : 'continue';
+    follow();
     if (kind === 'ask') {
       // A question never blocks the box: it shows at once and its answer lands under it.
       input.current!.value = '';
@@ -521,6 +525,7 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
           );
         })}
       </nav>
+      {task.approval ? <Approval task={task} /> : null}
       {tab === 'activity' ? (
         <Activity rows={rows} live={live} tz={tz} at={at} />
       ) : (
@@ -672,7 +677,6 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
       ) : (
         <p class="muted no-reply">This flow takes no follow-ups.</p>
       )}
-      <div class="approval-dock">{task.approval ? <Approval task={task} /> : null}</div>
     </>
   );
 }

@@ -137,21 +137,21 @@ pre.json {
   font: 12.5px/1.7 var(--mono);
   text-align: left;
 }
-button.act {
+:is(.act.fold, button.act) {
   grid-template-columns: 76px 16px minmax(0, 1fr) 14px;
   cursor: pointer;
 }
 .act .act-chev {
   visibility: hidden;
 }
-button.act:hover .act-chev,
+:is(.act.fold, button.act):hover .act-chev,
 .act.open .act-chev {
   visibility: visible;
 }
 .act.open .act-chev {
   rotate: 180deg;
 }
-button.act:hover {
+:is(.act.fold, button.act):hover {
   background: var(--wash);
 }
 .act time {
@@ -216,6 +216,9 @@ button.act:hover {
 }
 .act.error :is(.act-title, .ic) {
   color: var(--bad);
+}
+.act.steer :is(.act-title, .ic) {
+  color: var(--acc);
 }
 .act.timed {
   grid-template-columns: 76px 16px minmax(0, 1fr) auto 14px;
@@ -320,18 +323,11 @@ button.act:hover {
   font-size: 12px;
 }
 
-/* the approval card floats above the reply box, so its coming and going moves nothing */
-.approval-dock {
+/* a pending approval leads the conversation and stays in view under the tabs */
+.tabs + .card.accent {
   position: sticky;
-  bottom: calc(var(--reply, 0px) + 8px);
-  z-index: 12;
-  height: 0;
-  margin-top: -20px;
-}
-.approval-dock .card {
-  position: absolute;
-  inset: auto 0 0;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18);
+  top: var(--stuck);
+  z-index: 8;
 }
 
 /* the reply box stays at the bottom of the window */

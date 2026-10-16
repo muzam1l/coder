@@ -188,6 +188,7 @@ export function claudeTurnSettings(
         enabled: true,
         failIfUnavailable: true,
         autoAllowBashIfSandboxed: true,
+        network: { strictAllowlist: true },
         filesystem: {
           denyWrite: [cwd, ...additionalDirectories],
           ...(writableDirectories.length ? { allowWrite: writableDirectories } : {}),
@@ -205,17 +206,19 @@ export function claudeTurnSettings(
     sandbox: {
       enabled: true,
       autoAllowBashIfSandboxed: true,
-      ...(permissions === 'auto' && allowedNetworkHosts.length
-        ? {
-            network: {
+      // Headless, nobody answers the proxy's host prompt; refuse at once so the retry reaches the permission prompt tool.
+      network: {
+        strictAllowlist: true,
+        ...(permissions === 'auto' && allowedNetworkHosts.length
+          ? {
               allowedDomains: claudeAllowedDomains(allowedNetworkHosts),
               // An allowlisted loopback host also lets commands serve on it (macOS only), so a local dev server runs sandboxed.
               ...(allowedNetworkHosts.some(host => LOOPBACK_HOSTS.has(host))
                 ? { allowLocalBinding: true }
                 : {}),
-            },
-          }
-        : {}),
+            }
+          : {}),
+      },
     },
   });
 }
