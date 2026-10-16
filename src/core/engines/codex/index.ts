@@ -131,6 +131,41 @@ export function buildCodexMcpOverrides(
   return Object.keys(configured).length ? { mcp_servers: configured } : {};
 }
 
+/** Codex starts MCP servers in the background; waits for the thread's own so their tools reach the first request, and logs each failure. */
+async function awaitMcpStartup(
+  client: AppServerClient,
+  threadId: string,
+  servers: Record<string, unknown>,
+  onProgress?: ProgressReporter | null,
+) {
+  const names = Object.entries(servers)
+    .filter(([, entry]) => (entry as { enabled?: boolean }).enabled !== false)
+    .map(([name]) => name);
+
+  await Promise.all(
+    names.map(async serverName => {
+      const status = await client
+        .request('mcpServerStatus/list', { threadId, serverName, detail: 'toolsAndAuthOnly' })
+        .catch(error => {
+          emitProgress(
+            onProgress,
+            `MCP server ${serverName} status unavailable. ${errorText(error)}`,
+            null,
+            { kind: 'warning' },
+          );
+        });
+      for (const server of status?.data ?? [])
+        if (server.name === serverName && server.runtimeStatus === 'failed')
+          emitProgress(
+            onProgress,
+            `MCP server ${server.name} failed to start. ${server.toolsError ?? ''}`.trim(),
+            null,
+            { kind: 'error' },
+          );
+    }),
+  );
+}
+
 function cleanCodexStderr(stderr: string) {
   return stderr
     .split(/\r?\n/)
@@ -480,6 +515,7 @@ export async function runTurn(
       kind: 'status',
       threadId,
     });
+    await awaitMcpStartup(client, threadId, threadConfig.mcp_servers ?? {}, options.onProgress);
 
     let turnState: TurnCaptureState;
     try {

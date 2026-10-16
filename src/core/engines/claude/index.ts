@@ -46,6 +46,8 @@ const USAGE_LOG_STEP = 1000;
 // Tools whose file_path names a file the turn changed.
 const WRITING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 
+const MCP_STATUS_REQUEST = 'coder-mcp-status';
+
 const claudeVersions = new Map<string, string>();
 const CLAUDE_VERSION_ENV = 'CODER_CLAUDE_VERSION';
 
@@ -695,6 +697,21 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
       options.onHeartbeat?.();
       if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
         streamSessionId = event.session_id;
+        // Init carries only the status; the control request returns each server's error.
+        if (event.mcp_servers?.some((server: any) => server.status === 'failed'))
+          child.stdin.write(
+            `${JSON.stringify({ type: 'control_request', request_id: MCP_STATUS_REQUEST, request: { subtype: 'mcp_status' } })}\n`,
+          );
+      } else if (
+        event.type === 'control_response' &&
+        event.response?.request_id === MCP_STATUS_REQUEST
+      ) {
+        for (const server of event.response.response?.mcpServers ?? [])
+          if (server.status === 'failed')
+            options.onProgress?.({
+              kind: 'error',
+              message: `MCP server ${server.name} failed to start. ${server.error ?? ''}`.trim(),
+            });
       } else if (event.type === 'stream_event' && !event.parent_tool_use_id) {
         const delta = event.event;
         if (delta?.type === 'message_start') {

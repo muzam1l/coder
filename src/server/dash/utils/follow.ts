@@ -10,8 +10,12 @@ export function useFollowEnd(start = false) {
   current.current = following;
 
   useEffect(() => {
+    // Only this page follows; the next page of a navigation must not scroll.
+    const page = location.pathname;
     const onScroll = () => setFollowing((current.current = atEnd()));
-    const observer = new ResizeObserver(() => current.current && toEnd());
+    const observer = new ResizeObserver(
+      () => current.current && location.pathname === page && toEnd(),
+    );
     observer.observe(document.body);
     addEventListener('scroll', onScroll, { passive: true });
     if (current.current) toEnd();

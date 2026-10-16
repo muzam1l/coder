@@ -201,7 +201,7 @@ export const slack: Integration = {
     install: SLACK_MCP_SERVER_INSTALL,
     installHosts: ['github.com', 'release-assets.githubusercontent.com'],
   },
-  hosts: ['slack.com', 'files.slack.com'],
+  hosts: ['slack.com', '*.slack.com'],
   get app() {
     return slackApp;
   },

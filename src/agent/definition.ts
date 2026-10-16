@@ -76,12 +76,29 @@ function issues(error: {
     .join('; ');
 }
 
+/** A stored definition carries the repository marker from its last parse; it is derived again, never read. */
+function withoutMarkers(json: unknown): unknown {
+  const mcp = (json as { mcp?: unknown } | null)?.mcp;
+  if (!mcp || typeof mcp !== 'object') return json;
+
+  return {
+    ...(json as object),
+    mcp: Object.fromEntries(
+      Object.entries(mcp).map(([name, entry]) => {
+        if (!entry || typeof entry !== 'object') return [name, entry];
+        const { repository: _marker, ...rest } = entry as Record<string, unknown>;
+        return [name, rest];
+      }),
+    ),
+  };
+}
+
 export function parseAgentDefinition(
   id: string,
   json: unknown,
   repository = true,
 ): AgentDefinition {
-  const parsed = agentDefinitionSchema.safeParse(json);
+  const parsed = agentDefinitionSchema.safeParse(withoutMarkers(json));
   if (!parsed.success) throw new Error(`Invalid agent definition "${id}": ${issues(parsed.error)}`);
   const { $schema: _ignored, ...definition } = parsed.data;
   markRepositoryMcp(definition.mcp, repository);
@@ -160,11 +177,7 @@ export function validateAgents(
   return errors;
 }
 
-function toolErrors(
-  prefix: string,
-  tools: Preset | undefined,
-  integration: Integration,
-): string[] {
+function toolErrors(prefix: string, tools: Preset | undefined, integration: Integration): string[] {
   if (tools === undefined) return [];
   return PRESETS.includes(tools)
     ? []
@@ -181,10 +194,7 @@ export function resolveTools(
   integrationId: string,
   integration: Integration,
 ): string[] {
-  const used = expand(
-    agent.definition.integrations[integrationId]?.tools ?? 'write',
-    integration,
-  );
+  const used = expand(agent.definition.integrations[integrationId]?.tools ?? 'write', integration);
   const allow = agent.usage?.integrations?.[integrationId]?.allowedTools;
   if (allow === undefined) return used;
   const capped = new Set(expand(allow, integration));
