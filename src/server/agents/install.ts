@@ -328,7 +328,7 @@ async function greet(
     ]);
     const engine = record?.settings?.engine ?? version?.definition.engine ?? DEFAULT_ENGINE;
     const ready =
-      Boolean(await resolveCredential(ctx.store, engine, ctx.session?.user.id)) ||
+      Boolean(await resolveCredential(ctx, engine, ctx.session?.user.id)) ||
       (await machineSignedIn(ctx, record?.settings?.engine ?? version?.definition.engine));
     const adapter = adapterContext(
       ctx,

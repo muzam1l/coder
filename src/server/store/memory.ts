@@ -361,25 +361,9 @@ export class MemoryStore implements Store {
     });
   }
 
-  async taskInputs(slug: string, requester?: string, engine?: string) {
-    const loaded: { record?: AgentRecord; version?: AgentVersionRecord } =
-      (await this.listAgentsWithVersions(slug))[0] ?? {};
-    const { resolveCredential } = await import('../settings/credentials');
-    const credential = await resolveCredential(
-      this,
-      engine ?? loaded.record?.settings?.engine ?? loaded.version?.definition.engine,
-      requester,
-    );
-    return { ...loaded, ...(credential ? { credential: credential.id } : {}) };
-  }
-
-  async listCredentials(options: { owner?: string; engine?: string; limit?: number }) {
+  async listCredentials(options: { owner?: string; limit?: number }) {
     return (await this.list('credential'))
-      .filter(
-        ({ value }) =>
-          (!value.owner || value.owner === options.owner) &&
-          (!options.engine || value.engine === options.engine),
-      )
+      .filter(({ value }) => !value.owner || value.owner === options.owner)
       .slice(0, options.limit);
   }
 
@@ -567,11 +551,10 @@ export class MemoryStore implements Store {
   async completeLogin(
     id: string,
     tokenHash: string,
-    label: string,
     credential: StoredCredential,
   ): Promise<boolean> {
     const { completeLogin } = await import('../settings/credentials');
-    return completeLogin(this, id, tokenHash, label, credential);
+    return completeLogin(this, id, tokenHash, credential);
   }
 
   async put<K extends StoreKind>(

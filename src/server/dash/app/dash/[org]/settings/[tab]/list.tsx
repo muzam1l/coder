@@ -115,6 +115,30 @@ export function useRemove(removal?: Removal) {
   };
 }
 
+export const replaceTitle = (name: string, scope: string) =>
+  scope === 'workspace' ? `Replace ${name} for the workspace?` : `Replace your ${name}?`;
+
+/** The dialog that asks before a save replaces the key saved for a variable in that scope. */
+export function useReplace() {
+  const [asking, setAsking] = useState<{ title: string; run: () => void }>();
+  return {
+    ask: (title: string, run: () => void) => setAsking({ title, run }),
+    dialog: asking ? (
+      <ConfirmDialog
+        open
+        title={asking.title}
+        body="Tasks use the new one from now on."
+        confirmLabel="Replace"
+        onClose={() => setAsking(undefined)}
+        onConfirm={() => {
+          setAsking(undefined);
+          asking.run();
+        }}
+      />
+    ) : null,
+  };
+}
+
 /** A settings row: its primary action as a button, the rest and Remove in the ⋯ menu. */
 export function Row({
   title,
@@ -122,6 +146,7 @@ export function Row({
   sub,
   actions,
   menu,
+  alignMenu,
   remove,
 }: {
   title: string;
@@ -129,6 +154,8 @@ export function Row({
   sub?: ComponentChildren;
   actions?: ComponentChildren;
   menu?: ComponentChildren;
+  /** Show the ⋯ menu even when empty, so rows in one list line up. */
+  alignMenu?: boolean;
   remove?: Removal;
 }) {
   const removing = useRemove(remove);
@@ -143,10 +170,11 @@ export function Row({
       </td>
       <td class="acts">
         {actions}
-        {menu || removing.item ? (
+        {menu || removing.item || alignMenu ? (
           <Menu button="icon" label="Actions" summary={<Icon d={iDots} />}>
             {menu}
             {removing.item}
+            {menu || removing.item ? null : <p class="menu-none">No options</p>}
           </Menu>
         ) : null}
         {removing.dialog}

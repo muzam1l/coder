@@ -80,7 +80,6 @@ import { composerOptions } from '../tasks/composer';
 import { engineStatus } from '../tasks/local';
 import {
   createCredential,
-  defaultCredential,
   deleteCredential,
   listCredentials,
   signInEngine,
@@ -299,8 +298,7 @@ const agentsRoutes = [
 const credentialsRoutes = [
   route('GET', '/credentials', listCredentials),
   route('POST', '/credentials', createCredential, credentialAllowed),
-  route('POST', '/credentials/:label/default', defaultCredential),
-  route('DELETE', '/credentials/:label', deleteCredential),
+  route('DELETE', '/credentials/:name', deleteCredential),
   route('POST', '/logins', createLogin, loginAllowed),
   route('GET', '/logins/:id', readLogin, loginAllowed),
   route('POST', '/logins/:id', answerLogin, loginAllowed),

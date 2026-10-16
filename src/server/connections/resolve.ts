@@ -8,7 +8,7 @@ import {
   connectionEnvConflicts,
 } from '../../core/connections';
 import type { McpServerSpec } from '../../core/types';
-import { encryptSecret, decryptSecret } from '../store/secrets';
+import { decryptCredential, encryptSecret, decryptSecret } from '../store/secrets';
 import {
   findConnection,
   nativeApp,
@@ -20,7 +20,6 @@ import { sharedApps } from '../agents/apps';
 import { IntegrationError } from '../../integrations/types';
 import { OAuthRevoked } from './oauth';
 import { oauthAccessToken, type OAuthSecret } from './oauth';
-import { credentialValue } from '../settings/credentials';
 import { createHash } from 'node:crypto';
 import type { Store, TaskStatus } from '../store/types';
 
@@ -43,7 +42,7 @@ async function envKey(ctx: ConnectionContext, connection: Connection): Promise<s
     : undefined;
   if (!stored || (stored.owner && stored.owner !== connection.owner))
     throw new Error('Missing credential');
-  const key = credentialValue(ctx.config, stored).env[(connection.keyIn as { env: string }).env];
+  const key = decryptCredential(ctx.config, stored).env[(connection.keyIn as { env: string }).env];
   if (!key) throw new Error('Missing key');
 
   return key;

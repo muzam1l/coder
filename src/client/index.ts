@@ -99,9 +99,6 @@ export function validateUrl(raw: string): string {
   return url.toString().replace(/\/+$/, '');
 }
 
-const credentialPath = (label: string, suffix: string, workspace?: boolean) =>
-  `/admin/credentials/${encodeURIComponent(label)}${suffix}${workspace ? '?workspace' : ''}`;
-
 const queryPath = (path: string, options: object) => {
   const query = new URLSearchParams();
   if ('cursor' in options && typeof options.cursor === 'string')
@@ -428,19 +425,17 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
           : D['credential'][]
     > => this.request(queryPath('/admin/credentials', options ?? {})),
     add: (input: {
-      label?: string;
+      /** One variable and its key. */
       env: Record<string, string>;
-      engine: 'claude' | 'codex' | 'custom';
       workspace?: boolean;
       noCheck?: boolean;
-      default?: boolean;
-    }): Promise<{ ok: true; label: string }> => this.post('/admin/credentials', input),
-    remove: (label: string, { workspace }: { workspace?: boolean } = {}): Promise<{ ok: true }> =>
-      this.request(credentialPath(label, '', workspace), { method: 'DELETE' }),
-    setDefault: (
-      label: string,
-      { workspace }: { workspace?: boolean } = {},
-    ): Promise<{ ok: true }> => this.post(credentialPath(label, '/default', workspace)),
+    }): Promise<{ ok: true; name: string; replaced: boolean }> =>
+      this.post('/admin/credentials', input),
+    remove: (name: string, { workspace }: { workspace?: boolean } = {}): Promise<{ ok: true }> =>
+      this.request(
+        `/admin/credentials/${encodeURIComponent(name)}${workspace ? '?workspace' : ''}`,
+        { method: 'DELETE' },
+      ),
     login: (engine: 'claude' | 'codex'): Promise<D['login']> =>
       this.post('/admin/logins', { engine }),
     loginStatus: (id: string, state?: string): Promise<D['login']> =>

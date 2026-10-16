@@ -467,8 +467,7 @@ export class DrizzleQueue implements TaskQueue {
         case when ${secrets} then ${credentialOf(sql`touched`)} end as credential,
         case when ${secrets} and touched.credential is null then (select coalesce(jsonb_agg(${sealedRow(sql`c`, sql`s`)}), '[]'::jsonb)
           from ${engineCredential} c join ${secret} s on s.id = c.secret_id where c.organization_id = touched.organization_id
-          and (c.owner is null or c.owner = touched.requester)
-          and c.engine = coalesce(touched.usage->>'engine', touched.definition->>'engine', c.engine)) end as credentials,
+          and (c.owner is null or c.owner = touched.requester)) end as credentials,
         case when ${context} then ${configOf(org)} end as config,
         case when ${context} then ${runnerOf(sql`touched`)} end as runner,
         case when ${secrets} then jsonb_build_object('rows', coalesce((select jsonb_agg(${t.value}->>'secret') from ${t}

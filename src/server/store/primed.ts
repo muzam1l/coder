@@ -86,11 +86,8 @@ export function loadedStore(store: Store, status: TaskStatus, loaded: Loaded): S
             value: { secret },
           }))
         : MISS,
-    listCredentials: (opts: { owner?: string; engine?: string; limit?: number }) =>
-      has('credentials') &&
-      opts.owner === task.requester &&
-      opts.engine === (task.usage?.engine ?? task.definition.engine) &&
-      opts.limit === undefined
+    listCredentials: (opts: { owner?: string; limit?: number }) =>
+      has('credentials') && opts.owner === task.requester && opts.limit === undefined
         ? (loaded.credentials ?? [])
         : MISS,
     heldTokens: (installations: string[], apps: string[]) =>
@@ -124,12 +121,9 @@ export function dispatchStore(store: Store, loaded: DispatchLoaded, input: Dispa
     installationApp: (id: string) =>
       links.includes(id) ? loaded.linked.find(entry => entry.installation.id === id) : MISS,
     conversationState: (key: string) => (key === input.conversation ? loaded.conversation : MISS),
-    listCredentials: (opts: { owner?: string; engine?: string; limit?: number }) =>
+    listCredentials: (opts: { owner?: string; limit?: number }) =>
       own(opts.owner) && opts.limit === undefined
-        ? loaded.credentials.filter(
-            row =>
-              visible(row.value, opts.owner) && (!opts.engine || row.value.engine === opts.engine),
-          )
+        ? loaded.credentials.filter(row => visible(row.value, opts.owner))
         : MISS,
     list: (kind: StoreKind, opts?: StoreListOptions) =>
       kind === 'runner' && opts?.defaults && !opts.runner && own(opts.visibleTo)

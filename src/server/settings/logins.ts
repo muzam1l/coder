@@ -175,8 +175,6 @@ export interface EngineLogin {
   /** The code the user pasted for Claude, sealed until the runner takes it. */
   input?: string;
   error?: string;
-  /** The stored credential's label once signed in. */
-  label?: string;
   tokenHash: string;
   runner: RunnerKind;
   handle?: string;
@@ -204,7 +202,6 @@ export interface LoginView {
   url?: string;
   code?: string;
   error?: string;
-  label?: string;
 }
 
 function view(id: string, login: EngineLogin): LoginView {
@@ -216,7 +213,6 @@ function view(id: string, login: EngineLogin): LoginView {
     ...(login.url ? { url: login.url } : {}),
     ...(login.code ? { code: login.code } : {}),
     ...(login.error ? { error: login.error } : {}),
-    ...(login.label ? { label: login.label } : {}),
   };
 }
 
@@ -321,11 +317,9 @@ export async function reportLogin(
     if (Object.keys(env).join() !== allowed || typeof env[allowed] !== 'string')
       return json({ error: 'Invalid sign-in result' }, 400);
 
-    const label = `${login.engine}-subscription`;
     const account = body.result?.account;
-    const completed = await ctx.store.completeLogin(id, login.tokenHash, label, {
+    const completed = await ctx.store.completeLogin(id, login.tokenHash, {
       ...encryptCredential(ctx.config, { env }),
-      engine: login.engine,
       createdAt: (ctx.now ?? Date.now)(),
       ...(account?.email || account?.plan
         ? {

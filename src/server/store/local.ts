@@ -236,7 +236,7 @@ export class LocalStore extends MemoryStore {
       return;
     }
     // Only API key connections keep credentials here; engines use this machine's own sign-in.
-    if (kind === 'credential' && (value as StoreRecords['credential']).engine === 'custom') {
+    if (kind === 'credential' && id !== 'claude' && id !== 'codex') {
       this.connections().putCredential(id, value as StoreRecords['credential']);
       return;
     }

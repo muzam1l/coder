@@ -220,12 +220,11 @@ export interface SetupOutcome {
 }
 
 export interface CredentialRow {
-  label: string;
-  engine: 'claude' | 'codex' | 'custom';
+  /** The variable of an API key, the engine of a subscription. */
+  name: string;
   scope: 'personal' | 'workspace';
-  isDefault?: boolean;
+  subscription: boolean;
   createdAt?: number;
-  env: string[];
   masked: string;
   account?: { email?: string; plan?: string };
 }

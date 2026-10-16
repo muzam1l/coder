@@ -144,9 +144,7 @@ export async function pushAgents(
   return results;
 }
 
-const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
-
-const ENGINES = ['claude', 'codex', 'custom'] as const;
+const ENV_NAME = /^[A-Z_][A-Z0-9_]*$/;
 
 const invalid = (message: string, hint?: string) =>
   new CoderError('invalid-option', message, hint ? { hint } : {});
@@ -158,51 +156,28 @@ async function stdinValue(): Promise<string> {
 }
 
 export interface CredentialAddOptions extends ServerOptions {
-  engine?: string;
-  /** The values by name, or names whose values come from `value` (`-` reads stdin), else this environment. */
-  env: Record<string, string> | string[];
+  /** The variable whose key this is; `value` (`-` reads stdin) gives the key, else this environment. */
+  env?: string;
   value?: string;
   workspace?: boolean;
   noCheck?: boolean;
-  default?: boolean;
 }
 
-/** Add an API key or other engine environment values as a personal or workspace credential. */
+/** Save the key of one variable as a personal or workspace credential, replacing the one saved there. */
 export async function addCredential(
-  label: string | undefined,
   options: CredentialAddOptions,
-): Promise<{ ok: true; label: string }> {
-  const names = Array.isArray(options.env) ? options.env : Object.keys(options.env);
-  for (const name of names)
-    if (!ENV_NAME.test(name))
-      throw invalid(`Invalid environment variable name ${JSON.stringify(name)}.`);
-  if (!options.engine) throw invalid('Missing required --engine.', 'Use claude, codex, or custom');
-  const engine = ENGINES.find(value => value === options.engine);
-  if (!engine) throw invalid('Invalid --engine value.', 'Use claude, codex, or custom');
-  if (!names.length) throw invalid('At least one --env NAME is required.');
-  if (options.value !== undefined && names.length !== 1)
-    throw invalid('--value requires exactly one --env NAME.');
-
-  const env = Array.isArray(options.env)
-    ? Object.fromEntries(
-        await Promise.all(
-          names.map(async name => {
-            const value =
-              options.value === '-' ? await stdinValue() : (options.value ?? process.env[name]);
-            if (!value) throw invalid(`Environment variable ${name} is not set.`);
-            return [name, value] as const;
-          }),
-        ),
-      )
-    : options.env;
+): Promise<{ ok: true; name: string; replaced: boolean }> {
+  const name = options.env;
+  if (!name) throw invalid('Missing required --env NAME.', 'Like --env ANTHROPIC_API_KEY');
+  if (!ENV_NAME.test(name))
+    throw invalid(`Invalid environment variable name ${JSON.stringify(name)}.`);
+  const value = options.value === '-' ? await stdinValue() : (options.value ?? process.env[name]);
+  if (!value) throw invalid(`Environment variable ${name} is not set.`);
 
   return connect(options).credentials.add({
-    ...(label ? { label } : {}),
-    env,
-    engine,
+    env: { [name]: value },
     workspace: options.workspace,
     noCheck: options.noCheck,
-    default: options.default,
   });
 }
 
@@ -246,9 +221,7 @@ export async function loginCredential(
 export const credentials = {
   list: (options: ServerOptions = {}) => connect(options).credentials.list(),
   add: addCredential,
-  remove: (label: string, options: ServerOptions & { workspace?: boolean } = {}) =>
-    connect(options).credentials.remove(label, options),
-  default: (label: string, options: ServerOptions & { workspace?: boolean } = {}) =>
-    connect(options).credentials.setDefault(label, options),
+  remove: (name: string, options: ServerOptions & { workspace?: boolean } = {}) =>
+    connect(options).credentials.remove(name, options),
   login: loginCredential,
 };

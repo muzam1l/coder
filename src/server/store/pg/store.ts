@@ -6,7 +6,6 @@ import type postgres from 'postgres';
 import {
   and,
   asc,
-  desc,
   eq,
   gt,
   gte,
@@ -362,7 +361,7 @@ export class DrizzleStore implements Store {
     return rows.map(row => ({ id: row.row.key, value: appValue(row.row, row.sealed) }));
   }
 
-  async listCredentials(opts: { owner?: string; engine?: string; limit?: number }) {
+  async listCredentials(opts: { owner?: string; limit?: number }) {
     const t = engineCredential;
     const query = this.db
       .select({ row: t, sealed: secret })
@@ -372,11 +371,9 @@ export class DrizzleStore implements Store {
         and(
           this.mine(t.organizationId),
           opts.owner ? or(isNull(t.owner), eq(t.owner, opts.owner)) : isNull(t.owner),
-          opts.engine ? eq(t.engine, opts.engine as StoredCredential['engine']) : undefined,
         ),
       )
       .orderBy(
-        asc(t.engine),
         asc(sql`case when ${t.owner} is null then 'workspace' else 'personal' end`),
         asc(t.label),
       );
@@ -583,61 +580,8 @@ export class DrizzleStore implements Store {
     return row?.value;
   }
 
-  completeLogin(
-    id: string,
-    tokenHash: string,
-    label: string,
-    credential: StoredCredential,
-  ): Promise<boolean> {
-    return completeLogin(this, id, tokenHash, label, credential);
-  }
-
-  async taskInputs(slug: string, requester?: string, engine?: string) {
-    const effectiveEngine = sql`coalesce(${engine ?? null}, ${agent.settings}->>'engine', ${agentVersion.definition}->>'engine')`;
-    const credential = this.db
-      .select({ owner: engineCredential.owner, label: engineCredential.label })
-      .from(engineCredential)
-      .where(
-        and(
-          this.mine(engineCredential.organizationId),
-          requester
-            ? or(isNull(engineCredential.owner), eq(engineCredential.owner, requester))
-            : isNull(engineCredential.owner),
-          sql`(${effectiveEngine} is null or ${engineCredential.engine} = ${effectiveEngine})`,
-        ),
-      )
-      .orderBy(
-        sql`${engineCredential.owner} is not null desc`,
-        desc(engineCredential.isDefault),
-        asc(engineCredential.label),
-      )
-      .limit(1)
-      .as('selected_credential');
-    const [row] = await readQuery(this.db, () =>
-      this.db
-        .select({
-          record: agent,
-          version: agentVersion,
-          credentialLabel: credential.label,
-          credentialOwner: credential.owner,
-        })
-        .from(agent)
-        .leftJoin(
-          agentVersion,
-          and(eq(agentVersion.agentId, agent.id), eq(agentVersion.version, agent.currentVersion)),
-        )
-        .leftJoinLateral(credential, sql`true`)
-        .where(and(this.mine(agent.organizationId), eq(agent.slug, slug))),
-    );
-    return row
-      ? {
-          record: agentValue(row.record),
-          ...(row.version ? { version: versionValue(row.version, row.record.slug) } : {}),
-          ...(row.credentialLabel
-            ? { credential: credentialId(row.credentialOwner ?? undefined, row.credentialLabel) }
-            : {}),
-        }
-      : {};
+  completeLogin(id: string, tokenHash: string, credential: StoredCredential): Promise<boolean> {
+    return completeLogin(this, id, tokenHash, credential);
   }
 
   async listAgentsWithVersions(slug?: string | string[]) {

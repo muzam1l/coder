@@ -16,15 +16,10 @@ import type { ServerContext } from '../context';
 import type { Params } from '../routes/match';
 import { json } from '../routes/http';
 import { requireWorkspaceAdmin } from '../routes/guards';
-import { encryptSecret, decryptSecret, encryptCredential } from '../store/secrets';
+import { encryptSecret, decryptSecret, decryptCredential } from '../store/secrets';
 import { authorizeUrl, oauthResource } from './oauth';
 import { sharedApps } from '../agents/apps';
-import {
-  addCredential,
-  credentialValue,
-  removeCredential,
-  visibleCredentials,
-} from '../settings/credentials';
+import { addCredential, removeCredential, visibleCredentials } from '../settings/credentials';
 
 export type ConnectionContext = Pick<
   ServerContext,
@@ -384,36 +379,27 @@ export async function connectionRows(
   });
 }
 
-const holds = (
-  ctx: ServerContext,
-  row: { value: Parameters<typeof credentialValue>[1] },
-  name: string,
-) => credentialValue(ctx.config, row.value).env[name] !== undefined;
-
-/** The credential an `env` connection reads: a new one holding `key`, the named one, else a visible one holding `name`. */
+/** The credential an `env` connection reads: `key` saved as `name` in its scope, the named one, else a visible one holding `name`. */
 async function envCredential(
   ctx: ServerContext,
   name: string,
   input: { key?: string; credential?: string },
-  base: string,
   owner?: string,
 ): Promise<{ id: string; created?: true }> {
   if (input.key && input.credential) throw refuse(400, 'Give a key or a credential, not both');
   if (input.key) {
-    const label = await addCredential(
+    const { id, replaced } = await addCredential(
       ctx.store,
       ctx.config,
-      {
-        base,
-        ...(owner ? { owner } : {}),
-        credential: { engine: 'custom', env: { [name]: input.key } },
-      },
+      { ...(owner ? { owner } : {}), env: { [name]: input.key } },
       ctx.now ?? Date.now,
     );
 
-    return { id: owner ? `${owner}/${label}` : label, created: true };
+    return replaced ? { id } : { id, created: true };
   }
-  const rows = (await visibleCredentials(ctx.store, owner)).filter(row => holds(ctx, row, name));
+  const rows = (await visibleCredentials(ctx.store, owner)).filter(
+    row => decryptCredential(ctx.config, row.value).env[name] !== undefined,
+  );
   const found = input.credential
     ? rows.find(row => row.id === input.credential)
     : (rows.find(row => owner && row.value.owner === owner) ?? rows.find(row => !row.value.owner));
@@ -428,39 +414,15 @@ async function envCredential(
   return { id: found.id };
 }
 
-/** Write `key` into an `env` connection's credential; a member's connection on a workspace credential gets its own. */
+/** Save `key` as an `env` connection's variable in the connection's scope. */
 async function rotateEnvCredential(
   ctx: ServerContext,
   connection: Connection,
   key: string,
 ): Promise<string> {
   const name = (connection.keyIn as { env: string }).env;
-  if (connection.credential) {
-    const changed = await ctx.store.withCredential(
-      'credential',
-      connection.credential,
-      async stored => {
-        if (!stored || stored.owner !== connection.owner) return;
 
-        return [
-          {
-            id: connection.credential!,
-            value: {
-              ...stored,
-              ...encryptCredential(ctx.config, {
-                env: { ...credentialValue(ctx.config, stored).env, [name]: key },
-              }),
-            },
-          },
-        ];
-      },
-    );
-    if (changed) return connection.credential;
-  }
-
-  return (
-    await envCredential(ctx, name, { key }, connection.id.split(':').pop()!, connection.owner)
-  ).id;
+  return (await envCredential(ctx, name, { key }, connection.owner)).id;
 }
 
 /** Create a connection from `body`; an OAuth one also returns where the browser goes next. */
@@ -543,7 +505,7 @@ export async function addConnection(
   }
   const credential =
     provider === 'env'
-      ? await envCredential(ctx, (input.keyIn as { env: string }).env, input, id, owner)
+      ? await envCredential(ctx, (input.keyIn as { env: string }).env, input, owner)
       : undefined;
   if (credential) connection.credential = credential.id;
   const created = await ctx.store.withAppLock(`connection:${connection.id}`, store =>

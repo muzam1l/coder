@@ -63,6 +63,7 @@
 .add-foot > .btn {
   margin-left: auto;
 }
+.add-form .select:has([aria-label="Kind"]),
 .add-form .select:has([aria-label="Engine"]) {
   min-width: 190px;
 }
@@ -71,6 +72,27 @@
 }
 .add-form .select:has([aria-label="Scope"]) {
   min-width: 150px;
+}
+/* the model id is the row's wide field, and its status hint never resizes or wraps it */
+.add-grid > .field:has(> input[name='model']) {
+  flex: 3 1 260px;
+  min-width: 0;
+}
+.add-grid > .field:has(> input[name='model']) > span:first-child {
+  flex-wrap: nowrap;
+  height: 1lh;
+}
+.add-grid > .field:has(> input[name='model']) small {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.add-grid:has([aria-label='Provider']) > .field:has(> input[name='name']) {
+  flex: 0 1 300px;
+}
+.add-grid > .field:has(> input[name='key']) {
+  flex: 0 1 360px;
 }
 .add-more > summary {
   width: max-content;
@@ -88,4 +110,11 @@
 }
 .settings .sub {
   overflow-wrap: anywhere;
+}
+.menu-none {
+  margin: 0;
+  padding: 6px 12px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--dim);
 }

@@ -114,7 +114,7 @@ Connections live in `~/.coder`, or on your Coder server with `--server`; `--acce
 | --------------------------------------- | ---------------------------------------------------------------------------------------------- |
 | `coder auth login`                      | Sign in to Coder Cloud. `--server <url>` for a self-hosted one.                                |
 | `coder auth status`                     | Where you're signed in. `logout` forgets the session.                                          |
-| `coder credentials list`                | Engine credentials on your server. `add`, `login`, `default` and `remove` manage them.         |
+| `coder credentials list`                | Engine credentials on your server. `add`, `login` and `remove` manage them.                   |
 | `coder runner serve --url <public url>` | Run your server's tasks on this machine.                                                       |
 | `coder runner list`                     | Your runners and the workspace's. `add`, `test`, `default`, `rename` and `remove` manage them. |
 | `coder server serve`                    | Run a Coder server. See [Self-hosting](self-host.md).                                          |

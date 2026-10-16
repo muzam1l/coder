@@ -1,4 +1,4 @@
-/** `coder credentials remove <label>`. */
+/** `coder credentials remove <NAME>`. */
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
@@ -11,16 +11,16 @@ export const commandCredentialsRemove = command({
   name: 'credentials remove',
   globalFlags: { cwd: false },
   help: {
-    usage: 'coder credentials remove <label> [--workspace] [--server [url]] [--json]',
-    flags: [['--workspace', 'the workspace credential of that label'], CREDENTIAL_SERVER_FLAG],
+    usage: 'coder credentials remove <NAME> [--workspace] [--server [url]] [--json]',
+    flags: [['--workspace', 'the workspace key of that variable'], CREDENTIAL_SERVER_FLAG],
   },
   options: credentialOptions,
   args: 1,
-  required: ['<label>'],
-  async run({ options, args: [label] }) {
+  required: ['<NAME>'],
+  async run({ options, args: [name] }) {
     const { credentials } = await import('../../core/remote');
 
-    return credentials.remove(label, options);
+    return credentials.remove(name, options);
   },
-  print: (_, { args: [label] }) => process.stdout.write(`Removed ${outStyle.bold(label!)}.\n`),
+  print: (_, { args: [name] }) => process.stdout.write(`Removed ${outStyle.bold(name!)}.\n`),
 });

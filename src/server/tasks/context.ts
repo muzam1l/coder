@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { eventOptions } from '../../agent/definition';
-import { decryptSecret, encryptSecret } from '../store/secrets';
+import { decryptCredential, decryptSecret, encryptSecret } from '../store/secrets';
 import { BROKERED, BROKERED_PLACEHOLDER, engineHosts } from '../runners/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
 import type { AgentEvent, InstallationLink, Installation } from '../../agent/types';
@@ -10,7 +10,7 @@ import { dropKey, heldKey, type HeldToken } from '../store/tokens';
 import type { ServerContext } from '../context';
 import type { CoderConfig } from '../../core/config';
 import { taskConfig } from '../settings/config';
-import { credentialValue, resolveCredential } from '../settings/credentials';
+import { resolveCredential } from '../settings/credentials';
 import {
   resolvedTaskConnections,
   connectionSecretValues,
@@ -491,24 +491,16 @@ export async function taskCredential(
   ctx: ServerContext,
   task: TaskStatus['task'],
 ): Promise<EngineCredential> {
+  const engine = (task.usage?.engine ??
+    task.definition.engine ??
+    'claude') as EngineCredential['engine'];
   const selected = task.credential
     ? await ctx.store.get('credential', task.credential)
-    : (
-        await resolveCredential(
-          ctx.store,
-          task.usage?.engine ?? task.definition.engine,
-          task.requester,
-        )
-      )?.value;
-  if (selected) return credentialValue(ctx.config, selected);
+    : (await resolveCredential(ctx, engine, task.requester, { model: task.usage?.model }))?.value;
+  if (selected) return { engine, ...decryptCredential(ctx.config, selected) };
   if (!task.runnerId && !ctx.local) throw new Error('no-credential');
 
-  return {
-    engine: (task.usage?.engine ??
-      task.definition.engine ??
-      'claude') as EngineCredential['engine'],
-    env: {},
-  };
+  return { engine, env: {} };
 }
 
 export async function taskEngineCredentials(ctx: ServerContext, task: TaskStatus['task']) {
@@ -519,8 +511,14 @@ export async function taskEngineCredentials(ctx: ServerContext, task: TaskStatus
     remaining.map(async engine => {
       const id = task.engineCredentials?.[engine];
       const value = id ? await ctx.store.get('credential', id) : undefined;
-      return value && value.engine === engine && (!value.owner || value.owner === task.requester)
-        ? { id: id!, credential: credentialValue(ctx.config, value) }
+      return value && (!value.owner || value.owner === task.requester)
+        ? {
+            id: id!,
+            credential: {
+              engine: engine as EngineCredential['engine'],
+              ...decryptCredential(ctx.config, value),
+            },
+          }
         : undefined;
     }),
   );

@@ -24,14 +24,7 @@ import type {
   TaskContext,
   TaskSource,
 } from '../../../agent/types';
-import type {
-  AgentRecord,
-  EngineCredential,
-  TaskHistory,
-  TaskLogLine,
-  TaskOutcome,
-  TaskState,
-} from '../types';
+import type { AgentRecord, TaskHistory, TaskLogLine, TaskOutcome, TaskState } from '../types';
 
 /** Everything Coder owns lives in its own Postgres schema, so a database can be shared. */
 export const coder = pgSchema('coder');
@@ -173,7 +166,7 @@ export const integrationAppInstallation = pgTable(
   t => [unique().on(t.key), index().on(t.organizationId, t.appId)],
 );
 
-/** One named engine credential: a member's own when `owner` is set, else the workspace's. */
+/** One engine credential, labelled by its variable or subscription engine: a member's own when `owner` is set, else the workspace's. */
 export const engineCredential = pgTable(
   'engine_credential',
   {
@@ -184,9 +177,7 @@ export const engineCredential = pgTable(
       .unique(),
     /** Wular user id of a personal credential; null for a workspace one. */
     owner: text(),
-    engine: text().$type<EngineCredential['engine']>().notNull(),
     label: text().notNull(),
-    isDefault: boolean().notNull().default(false),
     /** What the engine's CLI reported at sign-in. */
     account: jsonb().$type<{ email?: string; plan?: string }>(),
     ...timestamps,

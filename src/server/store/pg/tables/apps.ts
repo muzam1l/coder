@@ -283,10 +283,8 @@ export const credentialValue = (
     iv: sealed.iv,
     tag: sealed.tag,
     ciphertext: sealed.ciphertext,
-    engine: r.engine,
     owner: r.owner,
     account: r.account,
-    isDefault: r.isDefault,
     createdAt: ms(r.createdAt),
   });
 
@@ -338,8 +336,6 @@ export async function writeCredential(
   }
   const sealed = opaque(value);
   const fields = {
-    engine: value.engine,
-    isDefault: value.isDefault ?? false,
     account: value.account ?? null,
     createdAt:
       value.createdAt === undefined ? (locked?.row.createdAt ?? s.at()) : date(value.createdAt),
@@ -350,11 +346,11 @@ export async function writeCredential(
     await s.db.update(t).set(fields).where(eq(t.id, locked.row.id));
     return;
   }
-  const { owner, label } = parseCredentialId(id);
+  const { owner, name } = parseCredentialId(id);
   await s.db.insert(t).values({
     organizationId: s.organizationId,
     owner: owner ?? null,
-    label,
+    label: name,
     secretId: await addSecret(s, 'engine', sealed),
     ...fields,
   });

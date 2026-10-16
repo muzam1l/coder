@@ -92,7 +92,7 @@ export function redactTask(
     ...(status.status === 'queued' ? { statusReason: 'Waiting for a task slot' } : {}),
     turns: taskTurns(status),
     ...(status.task.credential
-      ? { credential: parseCredentialId(status.task.credential).label }
+      ? { credential: parseCredentialId(status.task.credential).name }
       : {}),
   };
 }

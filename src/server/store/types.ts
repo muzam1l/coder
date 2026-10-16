@@ -134,7 +134,7 @@ export class InstallationBoundError extends Error {}
 
 export type AgentVersionSummary = Omit<AgentVersionRecord, 'systemPrompt' | 'files'>;
 export type LoginPatch = Partial<
-  Pick<EngineLogin, 'state' | 'handle' | 'url' | 'code' | 'error' | 'label'>
+  Pick<EngineLogin, 'state' | 'handle' | 'url' | 'code' | 'error'>
 > & { input?: string | null };
 export type LoginFence = Partial<Pick<EngineLogin, 'input' | 'tokenHash' | 'owner'>> & {
   state?: EngineLogin['state'] | EngineLogin['state'][];
@@ -235,7 +235,6 @@ export interface Store {
   completeLogin(
     id: string,
     tokenHash: string,
-    label: string,
     credential: import('../settings/credentials').StoredCredential,
   ): Promise<boolean>;
   patchLogin(
@@ -243,17 +242,11 @@ export interface Store {
     fields: LoginPatch,
     expected?: LoginFence,
   ): Promise<EngineLogin | undefined>;
-  taskInputs(
-    slug: string,
-    requester?: string,
-    engine?: string,
-  ): Promise<{ record?: AgentRecord; version?: AgentVersionRecord; credential?: string }>;
   listHistory(taskId: string): Promise<Array<Omit<TaskHistory, 'data' | 'state'>>>;
   installationApp(id: string): Promise<{ installation: Installation; app: AgentApp } | undefined>;
   getApps(keys: string[]): Promise<Array<{ id: string; value: AgentApp }>>;
   listCredentials(options: {
     owner?: string;
-    engine?: string;
     limit?: number;
   }): Promise<Array<{ id: string; value: import('../settings/credentials').StoredCredential }>>;
   listAgentSummaries(

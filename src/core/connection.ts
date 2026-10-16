@@ -107,14 +107,12 @@ async function rows(opts: ConnectionOptions): Promise<ConnectionRow[]> {
 async function credentialHolds(opts: ConnectionAddOptions, name: string): Promise<boolean> {
   if (remote(opts))
     return (await api(opts).credentials.list()).some(
-      row => row.env.includes(name) && (opts.me || row.scope === 'workspace'),
+      row => row.name === name && (opts.me || row.scope === 'workspace'),
     );
-  const { credentialSummary } = await import('../server/settings/credentials');
+  const { parseCredentialId } = await import('../server/settings/credentials');
   const { ctx } = await local(cwdOf(opts));
 
-  return (await ctx.store.list('credential')).some(row =>
-    credentialSummary(ctx.config, row.id, row.value).env.includes(name),
-  );
+  return (await ctx.store.list('credential')).some(row => parseCredentialId(row.id).name === name);
 }
 
 async function keyOf(opts: ConnectionAddOptions, what: string): Promise<string> {

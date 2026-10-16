@@ -98,11 +98,9 @@ Each task gets the narrowest platform token: on GitHub an installation token for
 
 ## Credentials
 
-An engine credential names an engine (`claude`, `codex`, or `custom`) and holds one or more encrypted environment variables. A personal credential belongs to one member, who alone sees and uses it. A workspace credential serves every member; only owners and admins add, remove, or change it. Each scope has one default per engine. A task runs on its requester's personal default for the engine, then on the workspace default. Tasks with no known requester, such as events from unlinked platform users, use the workspace default only. Without either, the agent replies with a link to the Credentials page, open at that engine.
+Credentials are subscriptions and API keys. A subscription is a member's own Claude or Codex sign-in, one per engine, offered when `CLAUDE_SUBSCRIPTIONS=1` or `CODEX_SUBSCRIPTIONS=1` is set; it runs the official `claude setup-token` or `codex login --device-auth` on the server's runner, or takes pasted `claude setup-token` output. An API key is saved as its environment variable, one per variable in each scope: personal for any member, workspace-wide for owners and admins.
 
-`CLAUDE_SUBSCRIPTIONS=1` and `CODEX_SUBSCRIPTIONS=1` turn on "Sign in with Claude" and "Sign in with Codex", for personal credentials only; both are off by default. Sign-in runs the official, unmodified `claude setup-token` or `codex login --device-auth` on the server's runner, and the dashboard stores the result. The page shows each credential masked, with the account email and plan where the CLI reports them.
-
-API keys are personal for any member and workspace-wide for owners and admins. Built-in engines are checked with one models request unless `--no-check` is set. With Claude sign-in on, a member may also paste their own `claude setup-token` output as a personal credential.
+Each engine uses its subscription, else its key (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex), the requester's own before the workspace's; a custom model uses the variable it names. Tasks with no known requester use the workspace's only, and without a credential the agent replies with a link to the Credentials page.
 
 From a terminal, `coder credentials` adds, lists, removes and signs in credentials; it reads secrets from the environment or stdin and never prints them.
 
