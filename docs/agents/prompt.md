@@ -69,7 +69,7 @@ A platform event's task: a Slack thread or DM, a GitHub pull request or issue, a
   {events}
  </events>
  <current-access-mode>
-  {read-only or read-write}
+  read-write
  </current-access-mode>
  <tools>
   reply; react; history
@@ -165,7 +165,7 @@ Every other task: `coder task run` with or without `--agent`, flow steps, dashbo
 </access-modes>
 <settings>
  <current-access-mode>
-  {read-only or read-write}
+  read-write
  </current-access-mode>
 </settings>
 <!-- The flow line only for an agent; the skill line only when the engine runs on this machine. -->
