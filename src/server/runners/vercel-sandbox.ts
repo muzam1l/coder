@@ -526,7 +526,7 @@ export class VercelSandboxRunner implements Runner {
         '-c',
         startCommand(
           toolInstalls()
-            .map(install => `sudo sh -c '${install}'`)
+            .map(install => `sudo sh -c '${install.replaceAll("'", "'\\''")}'`)
             .join(' && '),
           '',
           'setpriv --inh-caps=-all --ambient-caps=-all bun',
