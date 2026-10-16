@@ -112,8 +112,6 @@ export interface AgentRow {
   deliveries?: { failed: number; recent: FailedDeliveryRow[] };
   /** Nothing can run its engine for the caller: no credential of theirs or the workspace's, no sign-in on this machine. */
   needsModel?: true;
-  /** The engine selected from the agent's settings and the workspace's usable credentials. */
-  resolvedEngine?: string;
   /** Why its definition is invalid; it answers no events until fixed. */
   problems?: string[];
 }

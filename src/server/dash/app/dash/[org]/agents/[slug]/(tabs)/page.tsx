@@ -11,7 +11,7 @@ import { Settle } from '@/comps/frame/stream';
 import { loadAgent } from '@/api/load';
 import { editableAgent } from '@/api/types';
 import { LIST_PAGE } from '@/utils/paged';
-import { ENGINE_NAMES, defaultLabel } from '@/app/dash/[org]/settings/model-options';
+import { defaultLabel } from '@/app/dash/[org]/settings/model-options';
 import type { Defaults } from '@/app/dash/[org]/tasks/composer';
 import { DEFAULT_ENGINE } from '@coder/core/defaults';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
@@ -94,7 +94,7 @@ function OverviewBody({
   const current = history.items.find(version => version.version === agent.currentVersion);
   const definition = agent.definition;
   const engine = agent.settings?.engine ?? definition?.engine;
-  const base = defaults.engines[engine ?? defaults.engine];
+  const base = engine ? defaults.engines[engine] : undefined;
 
   return (
     <>
@@ -112,7 +112,7 @@ function OverviewBody({
           </div>
           <div>
             <dt>Engine</dt>
-            <dd>{engine ?? defaultLabel(ENGINE_NAMES[defaults.engine] ?? defaults.engine)}</dd>
+            <dd>{engine ?? defaultLabel('first available engine')}</dd>
           </div>
           <div>
             <dt>Model</dt>

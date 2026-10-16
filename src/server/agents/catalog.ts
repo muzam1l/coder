@@ -286,7 +286,7 @@ export async function readAgent(
         }
       : {}),
     ...(resolved
-      ? { resolvedEngine: resolved.engine, ...(!resolved.usable ? { needsModel: true } : {}) }
+      ? { ...(!resolved.usable ? { needsModel: true } : {}) }
       : {}),
   });
 }

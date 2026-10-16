@@ -98,7 +98,7 @@ export function AgentSettingsForm({
   const declared = agent.definition?.integrations ?? {};
   const platforms = Object.keys(declared).sort();
   const own = agent.definition;
-  const engine = own?.engine ?? agent.resolvedEngine ?? defaults.engine;
+  const engine = own?.engine;
   const deletable = agent.source !== 'builtin';
 
   // Filters every panel's fields by label, current value and platform, and moves to a panel that has a match.
@@ -196,12 +196,11 @@ export function AgentSettingsForm({
                   ...modelOptions(
                     models,
                     defaultLabel(
-                      [
-                        ENGINE_NAMES[engine] ?? engine,
-                        own?.model ?? defaults.engines[engine]?.model,
-                      ]
-                        .filter(Boolean)
-                        .join(' · '),
+                      engine
+                        ? [ENGINE_NAMES[engine] ?? engine, own?.model ?? defaults.engines[engine]?.model]
+                            .filter(Boolean)
+                            .join(' · ')
+                        : 'first available engine',
                     ),
                   ),
                   ...(!settings.engine && settings.model
@@ -218,7 +217,7 @@ export function AgentSettingsForm({
               value={settings.effort}
               options={EFFORTS}
               blank={defaultLabel(
-                own?.effort ?? defaults.engines[splitModel(model).engine ?? engine]?.effort,
+                own?.effort ?? defaults.engines[(splitModel(model).engine ?? engine)!]?.effort,
               )}
             />
             <Choice
