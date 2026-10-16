@@ -62,6 +62,8 @@ type TaskCallback = {
   diff?: string;
   postedMessages?: string[];
   installationRevoked?: true;
+  /** Sent by the machine when the task never reported its own outcome. */
+  machine?: true;
 };
 
 export type CallbackContext = ServerContext & {
@@ -197,6 +199,7 @@ export async function reportResult(
     !body?.status ||
     !['running', 'waiting', 'completed', 'failed', 'cancelled'].includes(body.status) ||
     (body.installationRevoked !== undefined && body.installationRevoked !== true) ||
+    (body.machine !== undefined && body.machine !== true) ||
     (body.postedMessages !== undefined &&
       (!Array.isArray(body.postedMessages) ||
         body.postedMessages.some(id => typeof id !== 'string')))
@@ -293,9 +296,28 @@ export async function reportResult(
   );
 
   const event = authorized.task.event;
-  if (completed && body.status === 'failed' && body.installationRevoked && event &&
-    ctx.integrations[event.integration]?.isUninstalled)
+  if (
+    completed &&
+    body.status === 'failed' &&
+    body.installationRevoked &&
+    event &&
+    ctx.integrations[event.integration]?.isUninstalled
+  )
     await uninstall(ctx.store, `${event.appId}:${event.installationId}`, now);
+
+  if (completed && body.machine && event && authorized.task.source === event.integration) {
+    const app = await ctx.store.get('app', event.appId);
+    const { recordFailure } = await import('./failures');
+    if (app)
+      await recordFailure(
+        ctx,
+        app,
+        body.error ?? 'The machine failed',
+        event.installationId,
+        event,
+        async () => (await conversationReplies(ctx, authorized)).replies,
+      );
+  }
 
   if (completed)
     await stopTaskMachine(

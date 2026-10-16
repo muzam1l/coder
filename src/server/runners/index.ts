@@ -69,7 +69,7 @@ const url = process.env.CODER_SERVER.replace(/\\/+$/, '') + (login ? '/logins/' 
 fetch(url, {
   method: 'POST', signal: AbortSignal.timeout(10000),
   headers: { authorization: 'Bearer ' + process.env.CODER_TASK_TOKEN, 'content-type': 'application/json' },
-  body: JSON.stringify(login ? { error } : { status: 'failed', error }),
+  body: JSON.stringify(login ? { error } : { status: 'failed', error, machine: true }),
 }).then(response => { if (!response.ok) process.exitCode = 1; }).catch(() => { process.exitCode = 1; });
 `;
 
