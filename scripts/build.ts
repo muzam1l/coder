@@ -61,6 +61,13 @@ const cliFile = (file: string) => !/^(dash|dash\.[^/]*|\.[^/]*)(\/|$)/.test(file
 const ignoreLine = (file: string) =>
   '/' + file.replaceAll(path.sep, '/').replace(/[[\]*?!#\\()]/g, '\\$&');
 
+/** Builds can overlap; a reader never sees a half-written file. */
+function writeAtomic(file: string, text: string) {
+  const temp = `${file}.${process.pid}`;
+  writeFileSync(temp, text);
+  renameSync(temp, file);
+}
+
 /** Move a finished CLI build into place, retaining only its predecessor's dropped files. */
 export function swapCli(stage: string, out: string, now = Date.now()): void {
   const ledgerFile = path.join(out, '.retired.json');
@@ -70,8 +77,8 @@ export function swapCli(stage: string, out: string, now = Date.now()): void {
     if (ledger[file] !== undefined) remove(out, file);
     else kept[file] = now;
   }
-  writeFileSync(ledgerFile, `${JSON.stringify(kept, null, 2)}\n`);
-  writeFileSync(
+  writeAtomic(ledgerFile, `${JSON.stringify(kept, null, 2)}\n`);
+  writeAtomic(
     path.join(out, '.npmignore'),
     `${Object.keys(kept).map(ignoreLine).join('\n')}\n/.*\n/dash.*\n/dash/*\n!/dash/standalone/\n`,
   );
