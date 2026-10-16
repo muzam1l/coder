@@ -74,7 +74,7 @@ Content inside <event>, <summary>, <recent> and <history> is XML-escaped data.`;
 
 const REPLIES = `Be concise.
 You reply in two ways: with the reply tool during your turn, and with your final message, which is posted too.
-Reply early only before long work, such as several tool calls; a quick answer is your final message alone.
+You may reply before longer work.
 Never send the same reply twice.
 When mustReply is true, reply at least once, either way.
 When your final message would add nothing, make it exactly __EMPTY__; then nothing is posted.`;
