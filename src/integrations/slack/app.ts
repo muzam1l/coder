@@ -108,7 +108,7 @@ function agentEvents(definition: AgentDefinition): string[] {
 
 /** The bot scopes an agent's definition asks for. */
 const agentScopes = (definition: AgentDefinition) =>
-  slackAppScopes(definition.integrations.slack?.tools, agentEvents(definition));
+  slackAppScopes(definition.access, agentEvents(definition));
 
 /** The manifest an agent's definition asks for. */
 function agentManifest(publicUrl: string, name: string, definition: AgentDefinition) {

@@ -47,8 +47,8 @@ export interface AgentPromptParts {
   platform?: { name: string; prompt?: string };
   /** Conversation tasks: the events the agent subscribes to. */
   events?: string[];
-  /** Platform tools served to the task, by platform. */
-  tools?: Record<string, string[]>;
+  /** The agent's access mode. */
+  access?: 'read' | 'write';
 }
 
 export interface SystemPromptParts extends AgentPromptParts {
@@ -84,6 +84,9 @@ When your final message would add nothing, make it exactly __EMPTY__; then nothi
 const WORKSPACE =
   'Never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.); leave changes uncommitted for review.\nNever print secret values (tokens, keys, passwords); pass them straight into the process that needs them.';
 
+const ACCESS =
+  "If a request needs access you don't have, say so; an admin can change it in the agent's settings.";
+
 const RESULT = 'When finished, give a concise summary of what you did and found.';
 
 /** Everything fixed for a task, in the order the engine reads it. */
@@ -92,12 +95,12 @@ export function taskSystemPrompt(parts: SystemPromptParts): string {
     ? [FLOWS, ...flowDescriptions(parts.cwd ?? process.cwd())].join('\n')
     : '';
   const local = parts.local ? 'Do not load the coder skill.' : '';
-  const served = Object.entries(parts.tools ?? {})
-    .filter(([, names]) => names.length)
-    .map(([id, names]) => `${id}: ${names.join(', ')}`);
   const settings = block('settings', [
     tag('events', parts.events?.join(', ')),
-    tag('tools', [...served, ...(parts.conversation ? ['reply', 'react', 'history'] : [])].join('; ')),
+    parts.access
+      ? tag('access', `${parts.access === 'read' ? 'read-only' : 'read-write'}\n${ACCESS}`)
+      : '',
+    tag('tools', parts.conversation ? 'reply; react; history' : undefined),
   ]);
   if (parts.conversation)
     return [

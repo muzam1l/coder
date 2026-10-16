@@ -1,4 +1,4 @@
-import { eventOptions, narrowPermission, resolveEvents, resolveTools } from './definition';
+import { agentAccess, eventOptions, narrowPermission, resolveEvents } from './definition';
 import { INTEGRATIONS } from '../integrations';
 import type { Agent, AgentEvent } from './types';
 
@@ -7,7 +7,7 @@ function declaredTools(agent: Agent): Record<string, string[]> {
   const result: Record<string, string[]> = {};
   for (const id of Object.keys(agent.definition.integrations)) {
     const integration = INTEGRATIONS[id];
-    if (integration) result[id] = resolveTools(agent, id, integration);
+    if (integration) result[id] = integration.tools.presets[agentAccess(agent)];
   }
   return result;
 }

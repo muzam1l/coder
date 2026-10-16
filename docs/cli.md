@@ -101,7 +101,7 @@ Connections live in `~/.coder`, or on your Coder server with `--server`; `--acce
 | Command                                | What it does                                                   |
 | -------------------------------------- | -------------------------------------------------------------- |
 | `coder agent list`                     | Agents in this workspace, or on your server.                   |
-| `coder agent show <id>`                | One agent in full: settings, integrations, events, tools.      |
+| `coder agent show <id>`                | One agent in full: settings, access, integrations, events.     |
 | `coder agent init [id]`                | Scaffold an agent in `.coder/agents/`.                         |
 | `coder agent run <agent> <event.json>` | Run a recorded event through an agent, offline or on a server. |
 | `coder agent push [id]`                | Upload workspace agents to your server.                        |

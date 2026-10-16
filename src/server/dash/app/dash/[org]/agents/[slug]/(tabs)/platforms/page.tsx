@@ -74,6 +74,7 @@ function Platforms({
   issues?: string;
 }) {
   const declared = agent.definition?.integrations ?? {};
+  const readOnly = agent.definition?.access === 'read' || agent.settings?.access === 'read';
   const ids = Object.keys(declared).sort();
   if (!ids.length)
     return (
@@ -137,7 +138,6 @@ function Platforms({
               const gone = live.length ? undefined : installs[0];
               const narrowed = agent.settings?.integrations?.[id];
               const events = narrowed?.allowedEvents ?? eventNames(declared[id]?.events);
-              const tools = narrowed?.allowedTools ?? declared[id]?.tools;
               const place = (entry: InstallationRow) => (
                 <span key={entry.id} class="inst">
                   {entry.account.url ? (
@@ -170,13 +170,7 @@ function Platforms({
                   <td>
                     <Chips values={events} />
                   </td>
-                  <td class="muted">
-                    {tools === 'read'
-                      ? 'Read-only'
-                      : Array.isArray(tools)
-                        ? `${tools.length} tools`
-                        : 'Read-write'}
-                  </td>
+                  <td class="muted">{readOnly ? 'Read-only' : 'Read-write'}</td>
                   <td>
                     {own.length
                       ? own.map(app => (

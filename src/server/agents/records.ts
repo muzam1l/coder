@@ -214,17 +214,7 @@ function mergedUsage(
         left?.allowedEvents && right?.allowedEvents
           ? left.allowedEvents.filter(value => right.allowedEvents!.includes(value))
           : (right?.allowedEvents ?? left?.allowedEvents);
-      const allowedTools =
-        left?.allowedTools && right?.allowedTools
-          ? (left.allowedTools === 'read' || right.allowedTools === 'read' ? 'read' : 'write')
-          : (right?.allowedTools ?? left?.allowedTools);
-      return [
-        id,
-        {
-          ...(allowedEvents ? { allowedEvents } : {}),
-          ...(allowedTools ? { allowedTools } : {}),
-        },
-      ];
+      return [id, allowedEvents ? { allowedEvents } : {}];
     }),
   );
   const maximum = first.permissions ?? definition.permissions ?? 'read-only';
@@ -233,10 +223,13 @@ function mergedUsage(
     requested && PERMISSIONS.indexOf(requested) <= PERMISSIONS.indexOf(maximum)
       ? requested
       : maximum;
+  const access =
+    first.access === 'read' || second.access === 'read' ? 'read' : (second.access ?? first.access);
   return {
     ...first,
     ...second,
     permissions,
+    ...(access ? { access } : {}),
     ...(ids.size ? { integrations: integrationUsage } : {}),
     ...(first.connections !== undefined || second.connections !== undefined
       ? {

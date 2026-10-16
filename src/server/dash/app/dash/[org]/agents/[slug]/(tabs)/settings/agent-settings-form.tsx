@@ -16,7 +16,6 @@ import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { AgentToggle } from '@/app/dash/[org]/agents/agent/agent-toggle';
 import { Field } from '@/comps/ui/field';
 import { Button } from '@/comps/ui/button';
-import { Chips } from '@/comps/ui/badge';
 import { Select, type Option } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
 import {
@@ -31,11 +30,10 @@ import {
 } from '@/app/dash/[org]/settings/model-options';
 import type { Defaults } from '@/app/dash/[org]/tasks/composer';
 
-const PRESETS: Option[] = [
+const ACCESS: Option[] = [
   ['read', 'Read-only'],
   ['write', 'Read-write'],
 ];
-const ACCESS = Object.fromEntries(PRESETS);
 
 function Choice({
   name,
@@ -68,7 +66,7 @@ function Choice({
 
 type Panel = 'run' | 'platforms' | 'manage';
 
-/** How this agent runs here: engine settings, every platform's access and events on one panel, and deleting it. One Save. */
+/** How this agent runs here: engine settings and access, every platform's events on one panel, and deleting it. One Save. */
 export function AgentSettingsForm({
   agent,
   catalog,
@@ -152,17 +150,14 @@ export function AgentSettingsForm({
     const values = new FormData(event.currentTarget as HTMLFormElement);
     const text = (key: string) => String(values.get(key) ?? '').trim();
     const next: AgentSettings = {};
-    for (const key of ['effort', 'permissions', 'runner'] as const)
+    for (const key of ['effort', 'permissions', 'access', 'runner'] as const)
       if (text(key)) next[key] = text(key);
     const picked = splitModel(model);
     if (picked.engine) next.engine = picked.engine;
     if (picked.model) next.model = picked.model;
     if (narrowed) next.connections = values.getAll('connection').map(String);
     for (const id of platforms) {
-      const current = settings.integrations?.[id] ?? {};
       const entry: NonNullable<AgentSettings['integrations']>[string] = {};
-      if (Array.isArray(current.allowedTools)) entry.allowedTools = current.allowedTools;
-      else if (text(`tools:${id}`)) entry.allowedTools = text(`tools:${id}`);
       const names = eventNames(declared[id]?.events);
       const picked = values.getAll(`event:${id}`).map(String);
       if (names.length && picked.length < names.length) entry.allowedEvents = picked;
@@ -235,6 +230,14 @@ export function AgentSettingsForm({
               options={PERMISSIONS}
               blank={defaultLabel(own?.permissions ?? 'read-only')}
             />
+            <Choice
+              name="access"
+              label="Access"
+              hint="what it may do on its platforms and connections"
+              value={settings.access}
+              options={own?.access === 'read' ? ACCESS.slice(0, 1) : ACCESS}
+              blank={defaultLabel(own?.access === 'read' ? 'Read-only' : 'Read-write')}
+            />
             {runners.length > 1 ? (
               <Field label="Runs on" group>
                 <Select
@@ -295,7 +298,7 @@ export function AgentSettingsForm({
           <section class="vpanel" data-panel="platforms" hidden={panel !== 'platforms'}>
             <h2>Platforms</h2>
             <p class="muted">
-              Overrides for this workspace: turn events off or lower access.{' '}
+              Turn events off for this workspace.{' '}
               {editableAgent(agent) ? (
                 <>
                   To add an event or a platform,{' '}
@@ -336,7 +339,6 @@ export function AgentSettingsForm({
               const current = settings.integrations?.[id] ?? {};
               const names = eventNames(declared[id]?.events);
               const allowed = current.allowedEvents;
-              const tools = declared[id]?.tools;
               const info = catalog.find(entry => entry.id === id);
               return (
                 <div key={id} class="vplatform">
@@ -344,29 +346,6 @@ export function AgentSettingsForm({
                     {info ? <BrandIcon brand={info.brand} /> : null}
                     {info?.name ?? id}
                   </h3>
-                  {Array.isArray(current.allowedTools) ? (
-                    <div class="field">
-                      <span>Platform access</span>
-                      <Chips values={current.allowedTools} />
-                    </div>
-                  ) : (
-                    <Choice
-                      name={`tools:${id}`}
-                      label="Platform access"
-                      hint={`Read-only reads and replies; Read-write also pushes and merges. At most ${typeof tools === 'string' ? ACCESS[tools] : tools ? 'its tools' : 'Read-write'}, as the definition grants`}
-                      value={
-                        typeof current.allowedTools === 'string' ? current.allowedTools : undefined
-                      }
-                      options={
-                        typeof tools === 'string'
-                          ? PRESETS.slice(0, PRESETS.findIndex(([key]) => key === tools) + 1)
-                          : PRESETS
-                      }
-                      blank={defaultLabel(
-                        typeof tools === 'string' ? ACCESS[tools] : tools ? 'custom' : 'Read-write',
-                      )}
-                    />
-                  )}
                   {names.length ? (
                     <div class="field">
                       <span>

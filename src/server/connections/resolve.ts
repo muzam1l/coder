@@ -1,4 +1,5 @@
 import type { AgentApp, AgentTask, Connection } from '../../agent/types';
+import { agentAccess } from '../../agent/definition';
 import {
   ConnectionRefused,
   connectionMcp,
@@ -57,6 +58,7 @@ export async function resolveConnections(
   const env: Record<string, string> = {};
   const tokens = { ...handles };
   const tools = { ...task.tools };
+  const mode = agentAccess(task);
   const nativeTokens: Record<string, string> = {};
   const warnings: string[] = [];
   const secrets: string[] = [];
@@ -313,14 +315,15 @@ export async function resolveConnections(
       if (connection.provider === 'env') {
         env[(connection.keyIn as { env: string }).env] = token!;
       } else if (connection.provider === 'mcp') {
+        const access = connection.access ?? mode;
         let spec: McpServerSpec | undefined;
         try {
-          spec = await connectionMcp(connection, token, ctx.fetch ?? fetch);
+          spec = await connectionMcp({ ...connection, access }, token, ctx.fetch ?? fetch);
         } catch (error) {
           if (!(error instanceof ConnectionRefused) || !credential) throw error;
           token = await credential(true, token);
           secrets.push(token);
-          spec = await connectionMcp(connection, token, ctx.fetch ?? fetch);
+          spec = await connectionMcp({ ...connection, access }, token, ctx.fetch ?? fetch);
         }
         if (spec) mcp[id] = spec;
       } else if (!nativeTokens[connection.provider] && token) {
@@ -329,7 +332,7 @@ export async function resolveConnections(
         nativeTokens[connection.provider] = token;
         tokens[connection.provider] = token;
         if (connection.access || !tools[connection.provider])
-          tools[connection.provider] = [...integration.tools.presets[connection.access ?? 'write']];
+          tools[connection.provider] = [...integration.tools.presets[connection.access ?? mode]];
       }
     } catch (error) {
       if (connection && connectionRevoked(error)) {

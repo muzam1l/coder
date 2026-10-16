@@ -147,30 +147,22 @@ function Who({
   );
 }
 
-/** Read-only or Read-write, as a dropdown like the scope beside it; a platform account adds Default, the agent's mode. */
+/** Default (the agent's mode), Read-only or Read-write, as a dropdown like the scope beside it. */
 function Access({
   value,
   onChange,
   write,
-  platform,
 }: {
   value: string;
   onChange: (value: string) => void;
-  /** Only Read-write is possible. */
+  /** Read-only is not possible. */
   write?: boolean;
-  platform?: boolean;
 }) {
   return (
     <Field label="Access" group>
       <Select
         label="Access"
-        options={
-          write
-            ? [READ_WRITE]
-            : platform
-              ? [DEFAULT, READ_ONLY, READ_WRITE]
-              : [READ_ONLY, READ_WRITE]
-        }
+        options={write ? [DEFAULT, READ_WRITE] : [DEFAULT, READ_ONLY, READ_WRITE]}
         value={value}
         onChange={onChange}
       />
@@ -244,7 +236,7 @@ function AddPlatform({
             onChange={setId}
           />
         </Field>
-        <Access value={access} onChange={setAccess} platform />
+        <Access value={access} onChange={setAccess} />
         {who}
       </div>
       {info && !info.connectable ? (
@@ -287,14 +279,14 @@ function AddMcp(props: AddProps) {
   const [target, setTarget] = useState('');
   // A remote server's sign-in is found on Add; a key is asked for only when it needs one.
   const [keyed, setKeyed] = useState(false);
-  const [access, setAccess] = useState('read');
+  const [access, setAccess] = useState('default');
   const { busy, add, who } = useAdd(props);
   const timer = useRef<ReturnType<typeof setTimeout>>();
   const form = useRef<HTMLFormElement>(null);
   const url = !target.trim() || isUrl(target);
   const asksKey = !url || keyed || secretsOf(picked).length > 0;
   // A stdio server refuses Read-only without a tool list.
-  const level = url ? access : 'write';
+  const level = url || access !== 'read' ? access : 'default';
   const secrets = secretsOf(picked);
   const secret = secrets.find(input => input.required) ?? secrets[0];
   const rest = secrets.filter(input => input !== secret);
@@ -390,7 +382,7 @@ function AddMcp(props: AddProps) {
       {
         name: name.trim(),
         provider: 'mcp',
-        access: level as ConnectionInput['access'],
+        ...(level === 'default' ? {} : { access: level as ConnectionInput['access'] }),
         endpoint,
         ...(key
           ? { auth: 'key', key, keyIn: url ? { header: get('header') } : { env: get('env') } }

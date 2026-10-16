@@ -71,7 +71,8 @@ export interface AgentDefinition {
   model?: string;
   effort?: string;
   permissions?: string;
-  integrations?: Record<string, { events?: string[] | Record<string, unknown>; tools?: unknown }>;
+  access?: string;
+  integrations?: Record<string, { events?: string[] | Record<string, unknown> }>;
 }
 
 /** Organization overrides for one agent (`AgentUsage` on the server). */
@@ -82,7 +83,8 @@ export interface AgentSettings {
   permissions?: string;
   /** A registered runner id; unset follows the requester's default. */
   runner?: string;
-  integrations?: Record<string, { allowedTools?: string | string[]; allowedEvents?: string[] }>;
+  access?: string;
+  integrations?: Record<string, { allowedEvents?: string[] }>;
   /** Connections its tasks may use, by id; absent allows every granted one. */
   connections?: string[];
   /** Off in this workspace: no platform events, no new tasks. */
@@ -153,7 +155,6 @@ export interface IntegrationInfo {
   /** Apps may be public: installable by any account, not only the one that owns them. */
   publicApps: boolean;
   events: Record<string, { description: string; noisy?: true; addressed?: true }>;
-  presets: Record<string, string[]>;
   repositories?: boolean;
   /** The form that creates an app; absent where creation happens on the platform itself. */
   create?: CreateStep;
@@ -535,7 +536,7 @@ export interface ConnectionRow {
   /** Set on a member's own connection; `mine` when that member is the viewer. */
   owner?: string;
   mine?: true;
-  /** Absent on a platform account: the agent's mode for that platform. */
+  /** Absent follows the mode of the agent whose task uses it. */
   access?: 'read' | 'write';
   auth: 'none' | 'key' | 'oauth';
   /** The remote server, or the stdio command, it is bound to. */

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Connection } from '../agent/types';
+import type { Connection, Preset } from '../agent/types';
 import type { McpServerSpec } from './types';
 import { coderHome } from './state';
 import { oauthAccessToken, OAuthRevoked, type OAuthSecret } from './oauth';
@@ -619,6 +619,7 @@ export async function localConnections(
   allowed?: string[],
   granted?: string[],
   local = new LocalConnections(),
+  mode: Preset = 'write',
 ) {
   const ids =
     granted ??
@@ -716,11 +717,11 @@ export async function localConnections(
         if (connection.auth !== 'none' && !token) throw new Error('Missing credential');
         let spec: McpServerSpec | undefined;
         try {
-          spec = await connectionMcp(connection, token);
+          spec = await connectionMcp({ ...connection, access: connection.access ?? mode }, token);
         } catch (error) {
           if (!(error instanceof ConnectionRefused) || connection.auth !== 'oauth') throw error;
           token = await credential(true, token);
-          spec = await connectionMcp(connection, token);
+          spec = await connectionMcp({ ...connection, access: connection.access ?? mode }, token);
         }
         if (spec) mcp[id] = spec;
       } catch (error) {

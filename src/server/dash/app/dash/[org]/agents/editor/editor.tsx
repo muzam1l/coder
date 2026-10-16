@@ -52,10 +52,13 @@ const PERMISSION_HINTS: Record<string, string> = {
   'workspace-write': 'edits files inside the repository',
   auto: 'edits files, reaches the network, and asks when it needs more',
 };
-const PRESETS = ['read', 'write'];
-const ACCESS: Record<string, [string, string]> = {
-  read: ['Read-only', 'reads the platform; replies and reacts in the conversation'],
-  write: ['Read-write', 'also changes things there, like opening pull requests'],
+const ACCESS: Array<[string, string]> = [
+  ['read', 'Read-only'],
+  ['write', 'Read-write'],
+];
+const ACCESS_HINTS: Record<string, string> = {
+  read: 'reads its platforms and connections; replies and reacts in the conversation',
+  write: 'also changes things there, like opening pull requests',
 };
 const TEMPLATES: Array<[Template, string, string]> = [
   ['blank', 'Blank', 'start from nothing'],
@@ -85,7 +88,7 @@ interface Draft {
   platforms: string[];
   events: Record<string, string[]>;
   match: Record<string, Record<string, string>>;
-  tools: Record<string, string | string[] | undefined>;
+  access: string;
   permissions: string;
   systemPrompt: string;
   engine: string;
@@ -106,7 +109,7 @@ function draftOf(
     platforms: [],
     events: {},
     match: {},
-    tools: {},
+    access: definition?.access ?? 'write',
     permissions: definition?.permissions ?? 'read-only',
     systemPrompt: agent?.systemPrompt ?? '',
     engine: definition?.engine ?? '',
@@ -123,7 +126,6 @@ function draftOf(
       for (const [name, options] of Object.entries(entry.events))
         if (options && typeof options === 'object' && 'match' in options)
           draft.match[id]![name] = String((options as { match: unknown }).match);
-    draft.tools[id] = entry.tools as Draft['tools'][string];
   }
   return draft;
 }
@@ -144,7 +146,6 @@ function fromTemplate(template: Template, catalog: IntegrationInfo[]): Partial<D
       events: Object.fromEntries(
         platforms.map(id => [id, defaultEvents(catalog.find(info => info.id === id))]),
       ),
-      tools: Object.fromEntries(platforms.map(id => [id, 'write'])),
       match: {},
     };
   };
@@ -160,7 +161,7 @@ function fromTemplate(template: Template, catalog: IntegrationInfo[]): Partial<D
       description: "Answers the team's questions in chat.",
       systemPrompt: HELPER,
     };
-  return { platforms: [], events: {}, tools: {}, match: {}, description: '', systemPrompt: '' };
+  return { platforms: [], events: {}, match: {}, description: '', systemPrompt: '' };
 }
 
 /** One platform's events: a plain list unless an event carries options, which are kept. */
@@ -184,22 +185,6 @@ function eventsFor(
   );
   return Object.values(built).every(value => value === true) ? names : built;
 }
-
-const sameTools = (a: string[] = [], b: string[] = []) =>
-  a.length === b.length && a.every(tool => b.includes(tool));
-
-/** A platform's access presets that each grant more than the one before; a single one means it has no levels. */
-function levelsOf(info?: IntegrationInfo) {
-  if (!info) return [];
-  const kept = PRESETS.filter(
-    (preset, at) => !at || !sameTools(info.presets[preset], info.presets[PRESETS[at - 1]!]),
-  );
-  return kept.length > 1 ? kept : [];
-}
-
-/** The level a preset grants among `levels`: the highest one at or below it. */
-const levelOf = (levels: string[], preset: string) =>
-  levels.filter(level => PRESETS.indexOf(level) <= PRESETS.indexOf(preset)).at(-1) ?? '';
 
 /** The workspace's run settings for whatever the agent leaves unset. */
 export interface RunDefaults {
@@ -255,17 +240,6 @@ export function AgentEditor({
   const busy = Boolean(action.pending);
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft(current => ({ ...current, [key]: value }));
-  const access = (id: string, tools = draft.tools[id]) =>
-    Array.isArray(tools) ? 'custom' : (tools ?? 'write');
-  const shared = draft.platforms.length ? access(draft.platforms[0]!) : 'write';
-  const uniform = draft.platforms.every(id => access(id) === shared);
-
-  const leveled = draft.platforms
-    .map(id => [id, levelsOf(catalog.find(entry => entry.id === id))] as const)
-    .filter(([, kept]) => kept.length);
-  const levels = PRESETS.filter(preset => leveled.some(([, kept]) => kept.includes(preset)));
-  const picked = new Set(leveled.map(([id]) => access(id)));
-  const level = picked.size === 1 ? levelOf(levels, [...picked][0]!) : '';
 
   const aliasOf = (engine: string, model?: string) =>
     Object.entries(defaults.builtin[engine] ?? {}).find(([, target]) => target === model)?.[0] ??
@@ -325,10 +299,6 @@ export function AgentEditor({
           on && !current.events[id]?.length
             ? { ...current.events, [id]: defaultEvents(catalog.find(entry => entry.id === id)) }
             : current.events,
-        tools:
-          on && !current.tools[id]
-            ? { ...current.tools, [id]: uniform && shared !== 'custom' ? shared : 'write' }
-            : current.tools,
       };
     });
   const toggleEvent = (id: string, event: string, on: boolean) =>
@@ -368,12 +338,12 @@ export function AgentEditor({
           draft.events[id] ?? [],
           draft.match[id] ?? {},
         ),
-        tools: draft.tools[id],
       };
     const definition: AgentDefinition = {
       ...agent?.definition,
       integrations,
       permissions: draft.permissions,
+      access: draft.access,
     };
     for (const key of ['name', 'description', 'engine', 'model', 'effort'] as const) {
       const value = draft[key].trim();
@@ -696,22 +666,14 @@ export function AgentEditor({
               })}
               {shown.length ? null : <li class="listen-none muted">No platform matches.</li>}
             </ul>
-            {levels.length ? (
-              <Field
-                label="Platform access"
-                hint={ACCESS[level]?.[1] ?? 'differs between platforms'}
-                group
-              >
-                <Segmented
-                  label="Platform access"
-                  options={levels.map(preset => [preset, ACCESS[preset]![0]])}
-                  value={level}
-                  onChange={preset =>
-                    set('tools', Object.fromEntries(draft.platforms.map(id => [id, preset])))
-                  }
-                />
-              </Field>
-            ) : null}
+            <Field label="Access" hint={ACCESS_HINTS[draft.access]} group>
+              <Segmented
+                label="Access"
+                options={ACCESS}
+                value={draft.access}
+                onChange={value => set('access', value)}
+              />
+            </Field>
           </section>
 
           <details id="agent-run" class="form-part run" open={section === 'run'}>

@@ -8,7 +8,7 @@ On each platform an agent is its own app, a GitHub App or a Slack app for exampl
 
 ## Connections
 
-A connection gives tasks access to an MCP service, your own account on an integration, or an API key passed as one environment variable, such as `GROQ_API_KEY`. Add one under Settings → Connections or with `coder connection add`; an API key is kept as a credential, so rotating the credential rotates the connection. Tasks started by members receive workspace connections and that member’s own connections, narrowed by the agent’s Connections setting and `coder task run --connections`; outsider events receive none.
+A connection gives tasks access to an MCP service, your own account on an integration, or an API key passed as one environment variable, such as `GROQ_API_KEY`. Add one under Settings → Connections or with `coder connection add`; an API key is kept as a credential, so rotating the credential rotates the connection. Tasks started by members receive workspace connections and that member’s own connections, narrowed by the agent’s Connections setting and `coder task run --connections`; outsider events receive none. A connection's access is Default, which follows the agent's, Read-only or Read-write.
 
 ## Built-in agent
 
@@ -19,7 +19,7 @@ A connection gives tasks access to an MCP service, your own account on an integr
 An agent comes from one of two sources:
 
 - **Dashboard**: made in the agent editor on the [dashboard](../dash.md).
-- **Repository**: `coder agent init` scaffolds one, asking its id, platforms, events and tools. It is a folder `.coder/agents/<id>/` with an `agent.json` and a `system.md`. A folder in `$CODER_HOME/agents/<id>/` (default `~/.coder/agents`) is yours in every repo, and a repo's folder of the same id wins.
+- **Repository**: `coder agent init` scaffolds one, asking its id, platforms, events and access. It is a folder `.coder/agents/<id>/` with an `agent.json` and a `system.md`. A folder in `$CODER_HOME/agents/<id>/` (default `~/.coder/agents`) is yours in every repo, and a repo's folder of the same id wins.
 
 Here is a helper that answers in Slack and on GitHub issues:
 
@@ -30,12 +30,10 @@ Here is a helper that answers in Slack and on GitHub issues:
   "name": "Helper",
   "description": "Answers engineering questions about acme/app.",
   "permissions": "read-only",
+  "access": "read",
   "integrations": {
-    "slack": {
-      "events": { "mention": true, "channel": { "match": "^help\\b" } },
-      "tools": "read"
-    },
-    "github": { "events": ["mention"], "tools": "read" }
+    "slack": { "events": { "mention": true, "channel": { "match": "^help\\b" } } },
+    "github": { "events": ["mention"] }
   }
 }
 ```
@@ -65,10 +63,10 @@ Only pushes to the agents repo's configured branch are imported. An app created 
 | `engine`, `model`, `effort` | As in `coder task run`                                                                                                                                                                                  | Engine defaults                                                                                                                                                                                                            |
 | `permissions`               | `read-only` (default), `workspace-write`, `auto`                                                                                                                                                        | Agent sandbox mode inside the checkout                                                                                                                                                                                     |
 | `integrations.<id>.events`  | Event names from the [integration](#integrations): a list, or a map of event → `true`, a flow name (repo `.coder/flows` or built-in such as `review`), or `{ "flow", "match", "permissions", "actAs" }` | A list or `true` runs the agent, a flow name runs that flow, `match` is a regex the event text must pass, `permissions` overrides the agent's for this event, `"actAs": "requester"` uses the requester's own GitHub token |
-| `integrations.<id>.tools`   | `read` (Read-only) or `write` (Read-write, default)                                                                                                            | Platform actions the agent uses; also the app's permissions                                                                                                                                                                |
+| `access`                    | `read` (Read-only) or `write` (Read-write, default)                                                                                                            | What it may do on its platforms and connections; also its apps' permissions                                                                                                                                                |
 | `mcp`                       | A map of MCP servers in the `.mcp.json` entry shape, as in [MCP](../mcp.md)                                                                                                                             | Servers every task of the agent attaches                                                                                                                                                                                   |
 
-`permissions` is about the checkout, `tools` is about the platform. An agent can run any [flow](../flows.md#flows-run-by-an-agent), and the tasks it starts never exceed the agent's `permissions`. The server versions imported definitions and activates a new version when their content changes; recreate the app only when `events` or `tools` change.
+`permissions` is about the checkout, `access` is about platforms and connections. An agent can run any [flow](../flows.md#flows-run-by-an-agent), and the tasks it starts never exceed the agent's `permissions`. The server versions imported definitions and activates a new version when their content changes; recreate the app only when `events` or `access` change.
 
 ## Usage
 
@@ -87,11 +85,11 @@ How a repo runs an agent goes under `agents` in its `.coder/config.json` ([Confi
 | ------------------------------------------ | ------------------- | ---------------------------------------------------------- |
 | `engine`, `model`, `effort`, `permissions` | As above            | Override the definition                                    |
 | `connections` | Connection id list | Narrow `agents.<id>.connections`; omit for all granted connections |
-| `integrations.<id>.allowedTools`           | Read-only or Read-write | Cap the definition's tools; omit to allow all it asks for  |
+| `access`                                   | `read`              | Lower the definition's access to Read-only                 |
 | `integrations.<id>.allowedEvents`          | Event names         | Cap the definition's events; omit to allow all it asks for |
 | `disabled`                                 | `true`              | Disable the agent and keep its other settings              |
 
-Unknown ids, integrations, events, tools, and keys fail validation. Usage is read from the repo the event came from.
+Unknown ids, integrations, events, and keys fail validation. Usage is read from the repo the event came from.
 
 Disable or Enable any agent, built-in ones included, in its Settings › Manage in the dashboard. A disabled agent answers no platform events and starts no tasks in that workspace; its apps, versions, settings and past tasks stay, and other workspaces are unaffected.
 
@@ -100,7 +98,7 @@ Disable or Enable any agent, built-in ones included, in its Settings › Manage 
 | Command                                                             | Purpose                                                                |
 | ------------------------------------------------------------------- | ---------------------------------------------------------------------- |
 | `coder agent list [--server [url]]`                                 | List agents, with active versions on a server                          |
-| `coder agent show <id> [--server [url]]`                            | One agent in full: settings, integrations, events, tools               |
+| `coder agent show <id> [--server [url]]`                            | One agent in full: settings, access, integrations, events              |
 | `coder agent init [id]`                                             | Scaffold an agent folder; interactive without flags                    |
 | `coder agent push [id] [--server [url]]`                            | Upload one agent, or all of them, without a source repo                |
 | `coder agent run <agent> <event.json> [--server [url] [--wait]]`    | Run a recorded event through an agent, on a server or offline          |

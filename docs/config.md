@@ -40,9 +40,7 @@ coder config set engines.codex.model sol
     "review": false,
     "helper": {
       "permissions": "read-only",
-      "integrations": {
-        "github": { "allowedTools": "read" }
-      }
+      "access": "read"
     }
   },
   "mcp": {

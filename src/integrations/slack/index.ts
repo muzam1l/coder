@@ -166,10 +166,7 @@ export const slack: Integration = {
   sample: 'slack:C0000000000:1700000000.000100',
   prompt: [
     'A conversation is a Slack thread or a whole 1:1 DM. A group DM works like a channel.',
-    "conversations.replies reads a thread with each message's reactions. conversations.history reads a channel or DM, including DM messages older than your history.",
-    'conversations.info describes a channel, users.info a person, reactions.get the reactions on one message. conversations.list and users.list find channels and people.',
-    "Get a file upload URL with files.getUploadURLExternal, upload the bytes to it, then files.completeUploadExternal shares it in this thread.",
-    "chat.postMessage posts Block Kit blocks; use reply for text. Writes reach only the event's conversation.",
+    'conversations_replies reads a thread. conversations_history reads a channel or DM, including DM messages older than your history.',
     'Your final message renders as Markdown with headings, tables, lists, code blocks and quotes.',
     'Mention a person as <@USER_ID>.',
   ].join('\n'),

@@ -1,4 +1,4 @@
-/** `coder agent show <id>`: one agent's settings, events and tools. */
+/** `coder agent show <id>`: one agent's settings and events. */
 import path from 'node:path';
 import process from 'node:process';
 
@@ -39,6 +39,7 @@ function printAgentDetail(detail: ReturnType<typeof agentDetail>): void {
     ['source', dir ? `${detail.source} (${dir})` : detail.source],
     ['description', def.description],
     ['permissions', usage?.permissions ?? def.permissions],
+    ['access', usage?.access === 'read' || def.access === 'read' ? 'Read-only' : 'Read-write'],
     ['engine', usage?.engine ?? def.engine],
     ['model', usage?.model ?? def.model],
     ['effort', usage?.effort ?? def.effort],
@@ -48,19 +49,14 @@ function printAgentDetail(detail: ReturnType<typeof agentDetail>): void {
   for (const [key, value] of facts)
     if (value) process.stdout.write(`${s.dim(key.padEnd(width))}${value}\n`);
 
-  type Row = { id: string; events: string; tools: string };
+  type Row = { id: string; events: string };
   const rows: Row[] = Object.entries(def.integrations).map(([integrationId, wiring]) => {
     const cap = usage?.integrations?.[integrationId];
     const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
     const allowed = cap?.allowedEvents
       ? events.filter(e => cap.allowedEvents!.includes(e))
       : events;
-    const readOnly = cap?.allowedTools === 'read' || wiring.tools === 'read';
-    return {
-      id: integrationId,
-      events: allowed.join(', ') || '-',
-      tools: readOnly ? 'Read-only' : 'Read-write',
-    };
+    return { id: integrationId, events: allowed.join(', ') || '-' };
   });
 
   process.stdout.write(
@@ -68,7 +64,6 @@ function printAgentDetail(detail: ReturnType<typeof agentDetail>): void {
       [
         { header: 'integration', value: r => r.id, paint: c => s.cyan(c) },
         { header: 'events', value: r => r.events },
-        { header: 'tools', value: r => r.tools },
       ],
       rows,
       { style: s, border: true },
@@ -81,7 +76,7 @@ export const commandAgentShow = command({
   help: {
     usage: 'coder agent show <id> [--server [url]] [--json] [--cwd <dir>]',
     summary:
-      'Describe one agent as it will run here, or its active version on a server: its settings and per-integration events and tools.',
+      'Describe one agent as it will run here, or its active version on a server: its settings, access and per-integration events.',
     flags: [SERVER_FLAG],
     examples: [['coder agent show coder', 'what the built-in agent listens to and may do']],
   },

@@ -257,7 +257,14 @@ async function resumeInPlace(
         fs.rmSync(path.join(resolveTaskDir(cwd, task.id), name), { recursive: true, force: true });
     const connected = opts.resolveConnections
       ? await opts.resolveConnections(task.connections ?? [])
-      : await localConnections(undefined, task.connections ?? []);
+      : await localConnections(
+          undefined,
+          task.connections ?? [],
+          undefined,
+          task.agentId
+            ? await (await import('../../agent/exec')).localAgentAccess(cwd, task.agentId)
+            : undefined,
+        );
     const servers =
       task.mcp?.map(server => {
         const connection =

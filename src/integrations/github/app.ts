@@ -343,7 +343,7 @@ function agentManifest(
     name: definition.name ?? name,
     description: definition.description,
     permissions: {
-      ...githubAppPermissions(wiring.tools),
+      ...githubAppPermissions(definition.access),
       ...(events.some(event => Object.hasOwn(APP_EVENTS, event))
         ? { issues: 'write', pull_requests: 'write' }
         : {}),

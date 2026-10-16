@@ -51,13 +51,17 @@ A platform event's task: a Slack thread or DM, a GitHub pull request or issue, a
 <platform name="{platform}">
  {catalog prompt}
 </platform>
-<!-- The events the agent subscribes to and the tools it was given. -->
+<!-- The events the agent subscribes to, its access and its conversation tools. -->
 <settings>
  <events>
   {events}
  </events>
+ <access>
+  {read-only or read-write}
+  If a request needs access you don't have, say so; an admin can change it in the agent's settings.
+ </access>
  <tools>
-  {platform}: {tools}; reply; react; history
+  reply; react; history
  </tools>
 </settings>
 ```
@@ -136,11 +140,12 @@ Every other task: `coder task run` with or without `--agent`, flow steps, dashbo
   {.coder/{agent}.md from the config repo}
  </repository-instructions>
 </developer-instructions>
-<!-- Only with an agent that was given platform tools. -->
+<!-- Only with an agent. -->
 <settings>
- <tools>
-  {platform}: {tools}
- </tools>
+ <access>
+  {read-only or read-write}
+  If a request needs access you don't have, say so; an admin can change it in the agent's settings.
+ </access>
 </settings>
 <!-- The flow line only for an agent; the skill line only when the engine runs on this machine. -->
 <runtime>

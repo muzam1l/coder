@@ -49,7 +49,7 @@ const addCommand = (serverCommand: string[]) =>
         ],
         [
           '--access <read|write>',
-          "read keeps only read-only tools (default: the agent's mode for an account, read for MCP, write for API keys)",
+          "read keeps only read-only tools (default: the agent's mode, write for API keys)",
         ],
         ['--tools <a,b>', 'tool allowlist; a read-only stdio server needs one'],
         ['--credential <id>', 'the credential an API key connection reads'],

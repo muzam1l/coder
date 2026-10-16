@@ -24,8 +24,6 @@ export interface AgentEventOptions {
 
 export interface AgentDefinitionIntegration {
   events?: string[] | Record<string, string | true | AgentEventOptions>;
-  /** Platform tools the agent uses: Read-only or Read-write. */
-  tools?: Preset;
 }
 
 /** What an agent IS: `.coder/agents/<id>/agent.json` beside its system.md. */
@@ -38,14 +36,15 @@ export interface AgentDefinition {
   model?: string;
   effort?: Effort;
   permissions?: Permission;
+  /** Read-only or Read-write on its handles and connections; defaults to `write`. */
+  access?: Preset;
   /** MCP servers every task of this agent attaches, in the `.mcp.json` entry shape. */
   mcp?: Record<string, McpConfigEntry>;
   integrations: Record<string, AgentDefinitionIntegration>;
 }
 
-/** Per-integration caps in usage: `allowedTools` and `allowedEvents` intersect the definition's. */
+/** Per-integration caps in usage: `allowedEvents` intersects the definition's. */
 export interface AgentUsageIntegration {
-  allowedTools?: Preset;
   allowedEvents?: string[];
 }
 
@@ -55,6 +54,8 @@ export interface AgentUsage {
   model?: string;
   effort?: Effort;
   permissions?: Permission;
+  /** May only lower the definition's access. */
+  access?: Preset;
   integrations?: Record<string, AgentUsageIntegration>;
   /** Connections its tasks may use, by id; absent allows every connection the task is granted. */
   connections?: string[];
@@ -149,8 +150,8 @@ export interface Connection {
   provider: 'mcp' | (string & {});
   /** The member it belongs to; absent for the workspace's. */
   owner?: string;
-  /** Absent on a platform account: the agent's mode for that platform. */
-  access?: 'read' | 'write';
+  /** Absent follows the mode of the agent whose task uses it. */
+  access?: Preset;
   /** Where the secret goes, without secret values; repository entries can name the connection but never change it. */
   endpoint?: McpConfigEntry;
   auth: 'none' | 'key' | 'oauth';

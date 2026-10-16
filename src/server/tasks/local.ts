@@ -1,3 +1,4 @@
+import { agentAccess } from '../../agent/definition';
 /** A local server's tasks are the CLI's own: `coder task run` tasks show here, and dashboard tasks run through the same broker. */
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -61,7 +62,14 @@ import { nativeToolEnvironment, type ReplyEndpoint } from '../../agent/mcp';
 import { connectionWarnings } from './logs';
 import { assertEnabled, check, TaskInputError, taskCwd, type NewTask } from './create';
 import { rememberPost } from './conversation';
-import { sessionKey, pushInbox, taskTimes, type TaskFence, type InboxEntry, type InboxAck } from './queue';
+import {
+  sessionKey,
+  pushInbox,
+  taskTimes,
+  type TaskFence,
+  type InboxEntry,
+  type InboxAck,
+} from './queue';
 import { kick, scheduleKick } from './kick';
 import { chooseRunner } from '../runners';
 import { syncLocalAgents } from '../store/local';
@@ -268,7 +276,13 @@ export async function startLocalTask(
       ));
     const resolved = await resolveConnections(
       ctx,
-      saved?.task ?? ({ connections: granted, tools: {} } as AgentTask),
+      saved?.task ??
+        ({
+          connections: granted,
+          tools: {},
+          definition: version?.definition ?? { integrations: {} },
+          ...(record?.settings ? { usage: record.settings } : {}),
+        } as AgentTask),
     );
     const connected = connectionEnvironment(resolved.mcp, resolved.env);
     const native = nativeToolEnvironment({ tools: resolved.tools }, resolved.tokens);
@@ -289,7 +303,17 @@ export async function startLocalTask(
         model: input.model ?? (input.engine ? undefined : agent?.model),
         effort: input.effort ?? (input.engine ? undefined : agent?.effort),
         permissions: input.permissions ?? agent?.permissions,
-        ...(agent ? { agentPrompt: { developer: agent.developer, tools: resolved.tools } } : {}),
+        ...(agent
+          ? {
+              agentPrompt: {
+                developer: agent.developer,
+                access: agentAccess({
+                  definition: version?.definition ?? { integrations: {} },
+                  ...(record?.settings ? { usage: record.settings } : {}),
+                }),
+              },
+            }
+          : {}),
         mcp: [...Object.values(native.mcp), ...selectedMcp.mcp],
         mcpBindings: selectedMcp.mcpBindings,
         mcpWarnings: [...(selectedMcp.warnings ?? []), ...resolved.warnings],
@@ -1209,10 +1233,7 @@ function usageCompletions(keys: Iterable<string>): Map<string, number[]> {
   return completions;
 }
 
-function taskUsage(
-  task: Task,
-  known: Map<string, number[]>,
-): Array<[string, UsageRecord]> {
+function taskUsage(task: Task, known: Map<string, number[]>): Array<[string, UsageRecord]> {
   const results = task.turnUsage ?? [];
   const completions = known.get(task.id) ?? [];
   known.set(task.id, completions);

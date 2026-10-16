@@ -86,25 +86,23 @@ async function askPicks(id: string): Promise<AgentPicks> {
     events[integrationId] = picked.values;
     matches[integrationId] = picked.inputs as Record<string, string>;
   }
-  const [tools] = integrations.length
-    ? await pick<Preset>({
-        title: 'Tools',
-        hint: 'What the agent may do on its platforms; Read-write allows all platform tools.',
-        selected: ['write'],
-        options: PRESETS.map(value => ({ value, label: PRESET_LABELS[value] })),
-      })
-    : ['write' as Preset];
+  const [access] = await pick<Preset>({
+    title: 'Access',
+    hint: 'What the agent may do on its platforms and connections; Read-write allows every tool.',
+    selected: ['write'],
+    options: PRESETS.map(value => ({ value, label: PRESET_LABELS[value] })),
+  });
   const name = await ask('Display name', id, undefined, 'Shown in replies and app names.');
-  return { ...(name !== id ? { name } : {}), integrations, events, matches, tools: tools! };
+  return { ...(name !== id ? { name } : {}), integrations, events, matches, access: access! };
 }
 
 export const commandAgentInit = command({
   name: 'agent init',
   help: {
     usage:
-      'coder agent init [id] [--integrations a,b] [--events a,b] [--tools <preset>] [--name <text>] [--description <text>] [--permissions <mode>] [--yes]',
+      'coder agent init [id] [--integrations a,b] [--events a,b] [--access <mode>] [--name <text>] [--description <text>] [--permissions <mode>] [--yes]',
     summary:
-      'Create .coder/agents/<id>/ with an agent.json built from the integration catalog, a system.md to write the prompt in, and one sample event per integration for `coder agent run`. Asks for the id, integrations, events, and tools when run in a terminal without them.',
+      'Create .coder/agents/<id>/ with an agent.json built from the integration catalog, a system.md to write the prompt in, and one sample event per integration for `coder agent run`. Asks for the id, integrations, events, and access when run in a terminal without them.',
     flags: [
       [
         '--integrations <a,b>',
@@ -114,7 +112,7 @@ export const commandAgentInit = command({
         '--events <a,b>',
         'events that start tasks, applied to each integration that has them (default: mention)',
       ],
-      ['--tools <preset>', 'read or write (default: write)'],
+      ['--access <mode>', 'read or write, on its platforms and connections (default: write)'],
       ['--name <text>', 'display name used in replies (default: the id)'],
       ['--description <text>', 'one line for agent list'],
       ['--permissions <mode>', 'engine permission mode (default: read-only)'],
@@ -123,7 +121,7 @@ export const commandAgentInit = command({
     examples: [
       ['coder agent init', 'answer the questions, id included'],
       [
-        'coder agent init triage --integrations github --events issue,mention --tools read',
+        'coder agent init triage --integrations github --events issue,mention --access read',
         'no questions',
       ],
     ],
@@ -134,7 +132,7 @@ export const commandAgentInit = command({
     description: str,
     integrations: str,
     events: str,
-    tools: str,
+    access: str,
     permissions: str,
     match: str,
     yes: flag,

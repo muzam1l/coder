@@ -36,16 +36,16 @@ import type { McpServerSpec, Task } from '../core/types';
 import type { Integration } from '../integrations/types';
 import type { Replies } from '../server/tasks/events';
 import {
+  agentAccess,
   definitionEvents,
   effectiveSettings,
   parseAgentDefinition,
-  resolveTools,
 } from './definition';
 import { loadAgents } from './load';
 import { postReview, resolveReviewTarget, REVIEW_PLATFORM } from '../flow/builtin/review';
 import { INTEGRATIONS } from '../integrations';
 import { nativeToolEnvironment, tokenEnvName, toolServerToken, type ReplyEndpoint } from './mcp';
-import type { Agent, AgentEvent, AgentTask, TaskContext, TaskSource } from './types';
+import type { Agent, AgentEvent, AgentTask, Preset, TaskContext, TaskSource } from './types';
 import { serveMailbox, agentMailboxDir } from '../core/mailbox';
 import {
   developerInstructions,
@@ -75,7 +75,7 @@ export function taskFromEvent(agent: Agent, flow: string, event: AgentEvent): Ag
     ...(agent.usage ? { usage: agent.usage } : {}),
     tools: integration
       ? {
-          [event.integration]: resolveTools(agent, event.integration, integration),
+          [event.integration]: integration.tools.presets[agentAccess(agent)],
         }
       : {},
   };
@@ -108,7 +108,8 @@ export function threadReply(
       text: answer,
       problem: false,
       ...(!progress && lastReply && normalizedReply(answer) === normalizedReply(lastReply)
-        ? { duplicate: true } : {}),
+        ? { duplicate: true }
+        : {}),
     };
   const error = result?.error?.message?.trim() ?? '';
   if (result?.error && lastReply && !progress) return { text: '', problem: true, duplicate: true };
@@ -691,6 +692,13 @@ export function builtinArgs(
   };
 }
 
+/** A repo agent's access mode, which its local Default connections follow; Read-only when it is gone. */
+export async function localAgentAccess(cwd: string, id: string): Promise<Preset> {
+  const agent = (await loadAgents(cwd, INTEGRATIONS).catch(() => [])).find(a => a.id === id);
+
+  return agent ? agentAccess(agent) : 'read';
+}
+
 /** Task options from a local agent definition: `coder task run --agent <id>`. */
 export async function agentTaskOptions(
   cwd: string,
@@ -721,7 +729,12 @@ export async function agentTaskOptions(
   const { definition, usage } = agent;
   const connected =
     connections === undefined
-      ? await localConnections(narrowConnections(usage?.connections, narrowed))
+      ? await localConnections(
+          narrowConnections(usage?.connections, narrowed),
+          undefined,
+          undefined,
+          agentAccess(agent),
+        )
       : undefined;
   const own = definition.mcp ?? {};
   const mcp = selectMcpServers(mcpFlag, loadConfig(cwd).mcp, own, connections ?? connected?.mcp);
@@ -817,7 +830,7 @@ export function defaultTask(
             events: definitionEvents(agent.definition.integrations[event!.integration]),
           }
         : {}),
-      ...(task.tools ? { tools: task.tools } : {}),
+      access: agentAccess(agent),
     },
     prompt: historyPrompt(context?.messages ?? [], turn),
   };

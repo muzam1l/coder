@@ -286,7 +286,6 @@ const agentNameSchema = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agen
 // `agents` holds usage only: how this repo runs an agent. What an agent IS lives in
 // `.coder/agents/<id>/agent.json` (see src/agent/definition.ts).
 const agentUsageIntegrationSchema = z.strictObject({
-  allowedTools: z.optional(agentPresetSchema),
   allowedEvents: z.optional(z.array(z.string())),
 });
 const agentUsageSchema = z.union([
@@ -296,6 +295,7 @@ const agentUsageSchema = z.union([
     model: z.optional(z.string()),
     effort: z.optional(effortSchema),
     permissions: z.optional(permissionSchema),
+    access: z.optional(agentPresetSchema),
     runner: z.optional(z.enum(['local', 'local-docker', 'vercel-sandbox', 'github-actions'])),
     integrations: z.optional(z.record(z.string(), agentUsageIntegrationSchema)),
     connections: z.optional(z.array(z.string())),

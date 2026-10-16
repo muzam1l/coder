@@ -73,11 +73,7 @@ function endpointAllowed(ctx: ServerContext, connection: Connection): boolean {
       connectionEnvName(connection.keyIn.env)
     );
   if (connection.provider !== 'mcp') return !endpoint;
-  if (
-    !endpoint ||
-    !connection.access ||
-    (endpoint.command && connection.access === 'read' && !endpoint.tools?.length)
-  )
+  if (!endpoint || (endpoint.command && connection.access === 'read' && !endpoint.tools?.length))
     return false;
   if (endpoint.tools?.some(tool => !connectionToolName(tool))) return false;
   if (endpoint.url) {
@@ -464,9 +460,7 @@ export async function addConnection(
     name: input.name,
     provider,
     ...(owner ? { owner } : {}),
-    ...(input.access || provider === 'env' || provider === 'mcp'
-      ? { access: input.access ?? (provider === 'env' ? 'write' : 'read') }
-      : {}),
+    ...(input.access || provider === 'env' ? { access: input.access ?? 'write' } : {}),
     auth,
     ...(input.endpoint ? { endpoint: input.endpoint } : {}),
     ...(input.keyIn ? { keyIn: input.keyIn } : {}),

@@ -307,7 +307,6 @@ export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<
               { description, ...(noisy ? { noisy } : {}), ...(addressed ? { addressed } : {}) },
             ]),
           ),
-          presets: integration.tools.presets,
           repositories: Boolean(integration.repos),
           ...(integration.app.createStep && base
             ? {
