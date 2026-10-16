@@ -73,8 +73,9 @@ const HELP: Record<string, string> = {
   platform: 'Sign in with OAuth, and tasks use the account through Coder’s own tools.',
   mcp: 'Search known servers, or paste a URL or command.',
 };
-const READ_ONLY: [string, string] = ['observe', 'Read only'];
-const READ_WRITE: [string, string] = ['write', 'Read and write'];
+const DEFAULT: [string, string] = ['default', 'Default'];
+const READ_ONLY: [string, string] = ['read', 'Read-only'];
+const READ_WRITE: [string, string] = ['write', 'Read-write'];
 
 const STATUS: Record<ConnectionRow['status'], { tone?: 'ok' | 'warn'; label: string }> = {
   ok: { tone: 'ok', label: 'connected' },
@@ -146,22 +147,30 @@ function Who({
   );
 }
 
-/** Read only or read and write, as a dropdown like the scope beside it. */
+/** Read-only or Read-write, as a dropdown like the scope beside it; a platform account adds Default, the agent's mode. */
 function Access({
   value,
   onChange,
   write,
+  platform,
 }: {
   value: string;
   onChange: (value: string) => void;
-  /** Only read and write is possible. */
+  /** Only Read-write is possible. */
   write?: boolean;
+  platform?: boolean;
 }) {
   return (
     <Field label="Access" group>
       <Select
         label="Access"
-        options={write ? [READ_WRITE] : [READ_ONLY, READ_WRITE]}
+        options={
+          write
+            ? [READ_WRITE]
+            : platform
+              ? [DEFAULT, READ_ONLY, READ_WRITE]
+              : [READ_ONLY, READ_WRITE]
+        }
         value={value}
         onChange={onChange}
       />
@@ -204,7 +213,7 @@ function AddPlatform({
   const org = useOrg();
   const platforms = catalog.filter(info => info.personal);
   const [id, setId] = useState(platforms[0]?.id ?? '');
-  const [access, setAccess] = useState('observe');
+  const [access, setAccess] = useState('default');
   const { busy, add, who } = useAdd(props);
   const info = platforms.find(entry => entry.id === id);
   const mine = rows.find(row => row.provider === id && row.mine);
@@ -216,7 +225,11 @@ function AddPlatform({
       onSubmit={event => {
         event.preventDefault();
         if (info?.connectable)
-          add({ name: info.name, provider: info.id, access: access as ConnectionInput['access'] });
+          add({
+            name: info.name,
+            provider: info.id,
+            ...(access === 'default' ? {} : { access: access as ConnectionInput['access'] }),
+          });
       }}
     >
       <div class="add-grid">
@@ -231,7 +244,7 @@ function AddPlatform({
             onChange={setId}
           />
         </Field>
-        <Access value={access} onChange={setAccess} />
+        <Access value={access} onChange={setAccess} platform />
         {who}
       </div>
       {info && !info.connectable ? (
@@ -274,13 +287,13 @@ function AddMcp(props: AddProps) {
   const [target, setTarget] = useState('');
   // A remote server's sign-in is found on Add; a key is asked for only when it needs one.
   const [keyed, setKeyed] = useState(false);
-  const [access, setAccess] = useState('observe');
+  const [access, setAccess] = useState('read');
   const { busy, add, who } = useAdd(props);
   const timer = useRef<ReturnType<typeof setTimeout>>();
   const form = useRef<HTMLFormElement>(null);
   const url = !target.trim() || isUrl(target);
   const asksKey = !url || keyed || secretsOf(picked).length > 0;
-  // A stdio server refuses Read only without a tool list.
+  // A stdio server refuses Read-only without a tool list.
   const level = url ? access : 'write';
   const secrets = secretsOf(picked);
   const secret = secrets.find(input => input.required) ?? secrets[0];
@@ -708,7 +721,13 @@ export function ConnectionsList({
                     badges={
                       <span class="conn-badges">
                         <Badge>{row.owner ? (row.mine ? 'yours' : 'member') : 'workspace'}</Badge>
-                        <Badge>{row.access === 'write' ? 'read and write' : 'read only'}</Badge>
+                        <Badge>
+                          {row.access === 'read'
+                            ? 'Read-only'
+                            : row.access
+                              ? 'Read-write'
+                              : 'Default'}
+                        </Badge>
                         <Badge tone={STATUS[row.status].tone}>{STATUS[row.status].label}</Badge>
                       </span>
                     }

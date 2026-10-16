@@ -615,7 +615,7 @@ async function claimed(
         if (toolScopes[id]) return [id, names];
         // A linked platform without a bound repository gets no tools at all.
         if (id !== event.integration) return [id, []];
-        const reads = new Set(ctx.integrations[id]?.tools.presets.observe ?? []);
+        const reads = new Set(ctx.integrations[id]?.tools.presets.read ?? []);
         return [id, names.filter(name => reads.has(name))];
       })
       .filter(([, names]) => names.length),

@@ -13,6 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends git curl ca-cer
     && curl -fsSL "https://github.com/github/github-mcp-server/releases/${release}/github-mcp-server_Linux_${arch}.tar.gz" -o /tmp/github-mcp.tar.gz \
     && tar -xz -C /usr/local/bin -f /tmp/github-mcp.tar.gz github-mcp-server \
     && rm /tmp/github-mcp.tar.gz \
+    && if [ "$arch" = arm64 ]; then slack=arm64; sum=a307a48d16c2261346bdc257274cdcdb8b2027c867dc971b41d52cef36472c88; else slack=amd64; sum=d1525962e9b9dbfdd2eaf48d0a81ca1eca7d8f1862b8d34931b812c850b3e568; fi \
+    && curl -fsSL "https://github.com/korotovsky/slack-mcp-server/releases/download/v1.3.0/slack-mcp-server-linux-${slack}" -o /usr/local/bin/slack-mcp-server \
+    && echo "${sum}  /usr/local/bin/slack-mcp-server" | sha256sum -c - \
+    && chmod 755 /usr/local/bin/slack-mcp-server \
     && mkdir -p /etc/claude-code \
     && echo '{"sandbox":{"enableWeakerNestedSandbox":true}}' > /etc/claude-code/managed-settings.json
 WORKDIR /work

@@ -2,7 +2,6 @@
 import { isIP } from 'node:net';
 
 import { IntegrationError, type AgentDefinition, type AppTokens, type IntegrationApp, type Preset } from '../types';
-import { SLACK_READ_METHODS } from './tools';
 
 type Fetcher = typeof fetch;
 
@@ -424,7 +423,7 @@ export const slackApp: IntegrationApp = {
   },
 };
 
-const OBSERVE_SCOPES = [
+const SCOPES = [
   'app_mentions:read',
   'channels:history',
   'groups:history',
@@ -434,25 +433,27 @@ const OBSERVE_SCOPES = [
   'im:read',
   'mpim:read',
   'users:read',
+  'users:read.email',
+  'files:read',
+  'usergroups:read',
   'reactions:read',
   'reactions:write',
   'commands',
   'links:read',
   'links:write',
 ];
-/** Every preset can react; comment/write can post and upload files, and `dm` reads group DMs. */
+/** Both modes can reply, react and upload files, and `dm` reads group DMs. */
 export function slackAppScopes(
-  tools: Preset | string[] = 'observe',
+  tools: Preset | string[] = 'write',
   events: string[] = [],
 ): string[] {
-  const observe = new Set(Object.keys(SLACK_READ_METHODS));
-  const readOnly = Array.isArray(tools)
-    ? tools.every(tool => observe.has(tool))
-    : tools === 'observe';
   return [
-    ...OBSERVE_SCOPES,
+    ...SCOPES,
     ...(events.includes('dm') ? ['mpim:history'] : []),
-    ...(readOnly ? [] : ['chat:write', 'files:write', 'im:write', 'assistant:write']),
+    'chat:write', 'files:write', 'im:write', 'assistant:write',
+    ...((Array.isArray(tools) ? tools.includes('write') : tools === 'write')
+      ? ['channels:join', 'channels:manage', 'groups:write', 'mpim:write', 'usergroups:write']
+      : []),
   ];
 }
 const APP_EVENTS: Record<string, string[]> = {

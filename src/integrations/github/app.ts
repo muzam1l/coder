@@ -311,12 +311,11 @@ function presetFor(tools: Preset | string[]): Preset {
   );
 }
 const APP_PERMISSIONS: Record<Preset, Record<string, string>> = {
-  observe: { metadata: 'read', contents: 'read', pull_requests: 'read', issues: 'read' },
-  comment: { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'write' },
+  read: { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'write' },
   write: { metadata: 'read', contents: 'write', pull_requests: 'write', issues: 'write' },
 };
 /** GitHub App manifest permissions for a tools preset or explicit tool list. */
-export function githubAppPermissions(tools: Preset | string[] = 'observe'): Record<string, string> {
+export function githubAppPermissions(tools: Preset | string[] = 'write'): Record<string, string> {
   return { ...APP_PERMISSIONS[presetFor(tools)] };
 }
 const APP_EVENTS: Record<string, string[]> = {

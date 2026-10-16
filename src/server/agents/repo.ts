@@ -230,7 +230,7 @@ async function repositoryAccess(
         contents: integration as Contents,
         token: await integration.auth.token(plain, decryptSecret(options.config, app.credentials), {
           ...(owner && name ? { repo: { owner, name } } : {}),
-          tools: integration.tools.presets.observe,
+          tools: integration.tools.presets.read,
         }),
         app,
         installation,

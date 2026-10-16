@@ -328,7 +328,8 @@ export async function resolveConnections(
         if (!integration) throw new Error('Unknown integration');
         nativeTokens[connection.provider] = token;
         tokens[connection.provider] = token;
-        tools[connection.provider] = [...integration.tools.presets[connection.access]];
+        if (connection.access || !tools[connection.provider])
+          tools[connection.provider] = [...integration.tools.presets[connection.access ?? 'write']];
       }
     } catch (error) {
       if (connection && connectionRevoked(error)) {

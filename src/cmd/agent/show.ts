@@ -55,11 +55,11 @@ function printAgentDetail(detail: ReturnType<typeof agentDetail>): void {
     const allowed = cap?.allowedEvents
       ? events.filter(e => cap.allowedEvents!.includes(e))
       : events;
-    const tools = cap?.allowedTools ?? wiring.tools;
+    const readOnly = cap?.allowedTools === 'read' || wiring.tools === 'read';
     return {
       id: integrationId,
       events: allowed.join(', ') || '-',
-      tools: Array.isArray(tools) ? tools.join(', ') : (tools ?? '-'),
+      tools: readOnly ? 'Read-only' : 'Read-write',
     };
   });
 

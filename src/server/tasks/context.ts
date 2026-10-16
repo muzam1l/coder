@@ -251,7 +251,7 @@ async function connection(
         target,
         linked,
         decryptSecret(ctx.config, app.credentials),
-        tokenBound(read, task ? (task.tools[integration] ?? []) : target.tools.presets.observe),
+        tokenBound(read, task ? (task.tools[integration] ?? []) : target.tools.presets.read),
         task && ctx.config.taskTimeoutMs,
       ),
   };
@@ -307,7 +307,7 @@ export function dispatchTokens(
             integration,
             installation,
             credentials,
-            tokenBound(repo, integration.tools.presets.observe),
+            tokenBound(repo, integration.tools.presets.read),
           ),
         ),
       };
@@ -357,7 +357,7 @@ export async function eventTokens(
     decryptSecret(ctx.config, app.credentials),
     tokenBound(
       task.toolScopes?.[event.integration]?.repo ?? event.repo,
-      task.tools[event.integration] ?? (posts ? integration.tools.presets.comment : []),
+      task.tools[event.integration] ?? (posts ? integration.tools.presets.read : []),
     ),
     taskActAs(task),
   );
@@ -412,13 +412,13 @@ export async function taskContext(
   const event = task.event;
   if (task.flow === 'default' && event?.chat && task.source === event.integration) {
     const integration = ctx.integrations[event.integration]!;
-    const comment = integration.tools.presets.comment;
+    const read = integration.tools.presets.read;
     const tools = task.tools[event.integration] ?? [];
-    // The app's tool token posts too when its scopes are exactly the comment scopes.
+    // The app's tool token posts too when its scopes are exactly the read scopes.
     const shared =
       !taskActAs(task) &&
-      tools.length === comment.length &&
-      comment.every(scope => tools.includes(scope));
+      tools.length === read.length &&
+      read.every(scope => tools.includes(scope));
     if (shared) postToken = tokens[event.integration];
     else {
       const [app, installation] = await Promise.all([
@@ -432,7 +432,7 @@ export async function taskContext(
         integration,
         installation,
         decryptSecret(ctx.config, app.credentials),
-        tokenBound(task.toolScopes?.[event.integration]?.repo ?? event.repo, comment),
+        tokenBound(task.toolScopes?.[event.integration]?.repo ?? event.repo, read),
         ctx.config.taskTimeoutMs,
       );
     }

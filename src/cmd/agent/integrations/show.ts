@@ -12,10 +12,10 @@ function printIntegration(detail: ReturnType<typeof agents.integrations.show>): 
   const s = outStyle;
   const rows: CatalogRow[] = [
     ...Object.entries(detail.events).map(([name, does]) => ({ kind: 'event', name, does })),
-    ...Object.entries(detail.tools).map(([name, tools]) => ({
+    ...Object.entries(detail.tools).map(([name]) => ({
       kind: 'tools',
-      name,
-      does: tools.join(', '),
+      name: name === 'read' ? 'Read-only' : 'Read-write',
+      does: name === 'read' ? 'Platform tools marked read-only' : 'All platform tools',
     })),
   ];
   process.stdout.write(
@@ -37,7 +37,7 @@ export const commandIntegrationsShow = command({
   help: {
     usage: 'coder agent integrations show <id> [--json]',
     summary:
-      'Describe one integration: each event with what triggers it, and the tools each preset (observe, comment, write) allows.',
+      'Describe one integration: each event with what triggers it, and the tools each preset (read, write) allows.',
     examples: [['coder agent integrations show github', 'the GitHub integration in full']],
   },
   options: { json: flag },

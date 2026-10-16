@@ -193,14 +193,6 @@ export async function setAgentSettings(
 
 const PERMISSIONS = ['read-only', 'workspace-write', 'auto'] as const;
 
-function expand(value: Preset | string[], integration?: Integration): string[] {
-  if (Array.isArray(value)) return [...new Set(value)];
-  const through = PRESETS.indexOf(value);
-  return [
-    ...new Set(PRESETS.slice(0, through + 1).flatMap(key => integration?.tools.presets[key] ?? [])),
-  ];
-}
-
 function mergedUsage(
   definition: AgentDefinition,
   base: AgentUsage | undefined,
@@ -224,9 +216,7 @@ function mergedUsage(
           : (right?.allowedEvents ?? left?.allowedEvents);
       const allowedTools =
         left?.allowedTools && right?.allowedTools
-          ? expand(left.allowedTools, integrations[id]).filter(value =>
-              new Set(expand(right.allowedTools!, integrations[id])).has(value),
-            )
+          ? (left.allowedTools === 'read' || right.allowedTools === 'read' ? 'read' : 'write')
           : (right?.allowedTools ?? left?.allowedTools);
       return [
         id,

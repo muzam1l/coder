@@ -33,9 +33,9 @@ Here is a helper that answers in Slack and on GitHub issues:
   "integrations": {
     "slack": {
       "events": { "mention": true, "channel": { "match": "^help\\b" } },
-      "tools": "comment"
+      "tools": "read"
     },
-    "github": { "events": ["mention"], "tools": "observe" }
+    "github": { "events": ["mention"], "tools": "read" }
   }
 }
 ```
@@ -65,7 +65,7 @@ Only pushes to the agents repo's configured branch are imported. An app created 
 | `engine`, `model`, `effort` | As in `coder task run`                                                                                                                                                                                  | Engine defaults                                                                                                                                                                                                            |
 | `permissions`               | `read-only` (default), `workspace-write`, `auto`                                                                                                                                                        | Agent sandbox mode inside the checkout                                                                                                                                                                                     |
 | `integrations.<id>.events`  | Event names from the [integration](#integrations): a list, or a map of event → `true`, a flow name (repo `.coder/flows` or built-in such as `review`), or `{ "flow", "match", "permissions", "actAs" }` | A list or `true` runs the agent, a flow name runs that flow, `match` is a regex the event text must pass, `permissions` overrides the agent's for this event, `"actAs": "requester"` uses the requester's own GitHub token |
-| `integrations.<id>.tools`   | `observe` (default), `comment`, `write`, or tool names from the [integration](#integrations)                                                                                                            | Platform actions the agent uses; also the app's permissions                                                                                                                                                                |
+| `integrations.<id>.tools`   | `read` (Read-only) or `write` (Read-write, default)                                                                                                            | Platform actions the agent uses; also the app's permissions                                                                                                                                                                |
 | `mcp`                       | A map of MCP servers in the `.mcp.json` entry shape, as in [MCP](../mcp.md)                                                                                                                             | Servers every task of the agent attaches                                                                                                                                                                                   |
 
 `permissions` is about the checkout, `tools` is about the platform. An agent can run any [flow](../flows.md#flows-run-by-an-agent), and the tasks it starts never exceed the agent's `permissions`. The server versions imported definitions and activates a new version when their content changes; recreate the app only when `events` or `tools` change.
@@ -87,7 +87,7 @@ How a repo runs an agent goes under `agents` in its `.coder/config.json` ([Confi
 | ------------------------------------------ | ------------------- | ---------------------------------------------------------- |
 | `engine`, `model`, `effort`, `permissions` | As above            | Override the definition                                    |
 | `connections` | Connection id list | Narrow `agents.<id>.connections`; omit for all granted connections |
-| `integrations.<id>.allowedTools`           | Preset or tool list | Cap the definition's tools; omit to allow all it asks for  |
+| `integrations.<id>.allowedTools`           | Read-only or Read-write | Cap the definition's tools; omit to allow all it asks for  |
 | `integrations.<id>.allowedEvents`          | Event names         | Cap the definition's events; omit to allow all it asks for |
 | `disabled`                                 | `true`              | Disable the agent and keep its other settings              |
 
@@ -113,13 +113,13 @@ Disable or Enable any agent, built-in ones included, in its Settings › Manage 
 An integration gives an agent two things:
 
 1. **Chat.** The agent's own app on the platform. Its events start tasks, and the reply goes back to the same thread. Linked workspace members can address an agent, and so can anyone the platform lets write there (on GitHub, write access to the repository); they get the workspace's connections only.
-2. **Platform tools.** Actions beyond replying, through the platform's own MCP server or API. They run outside the agent's sandbox, with a token narrowed to the task, and the token never reaches the agent. The presets add up: `comment` includes `observe`, and `write` includes `comment`.
+2. **Platform tools.** Actions beyond replying, through the platform's MCP server. They run outside the agent's sandbox, with a token narrowed to the task, and the token never reaches the agent. Read-only exposes only tools the platform server marks read-only; Read-write exposes all its tools. Replies, reactions and history work in both modes.
 
 | Platform        | App                                                                                                                                                                              | Events                                                     | Tools                                                                                                                  |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| GitHub          | A [GitHub App](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) per agent                                                           | `mention`, `pull_request`, `issue`, `comment`              | GitHub's [MCP server](https://github.com/github/github-mcp-server); `observe` runs it read-only                        |
-| Slack           | A [Slack app](https://api.slack.com/reference/manifests) per agent                                                                                                               | `mention`, `dm`, `channel`, `command`                      | `slack_api(method, args)` over the [Web API](https://api.slack.com/methods), with writes limited to the event's thread |
-| Linear          | Your [Linear OAuth app](https://linear.app/developers/agents), with webhooks to `<PUBLIC_URL>/hooks/linear?app=<client id>`                                                      | `mention`: an agent session                                | None yet                                                                                                               |
+| GitHub          | A [GitHub App](https://docs.github.com/en/apps/sharing-github-apps/registering-a-github-app-from-a-manifest) per agent                                                           | `mention`, `pull_request`, `issue`, `comment`              | GitHub's [MCP server](https://github.com/github/github-mcp-server); `read` runs it read-only                        |
+| Slack           | A [Slack app](https://api.slack.com/reference/manifests) per agent                                                                                                               | `mention`, `dm`, `channel`, `command`                      | [Slack MCP server](https://github.com/korotovsky/slack-mcp-server), pinned to v1.3.0 with SHA256 verification |
+| Linear          | Your [Linear OAuth app](https://linear.app/developers/agents), with webhooks to `<PUBLIC_URL>/hooks/linear?app=<client id>`                                                      | `mention`: an agent session                                | [Official Linear MCP server](https://linear.app/docs/mcp) at `https://mcp.linear.app/mcp` |
 
 On Slack, `dm` takes every message in direct and group DMs with the agent, and `channel` every message in channels it is in, up to Slack's 30,000 events per workspace per app per hour. A Slack app's Home tab shows the agent and how to use it, and links to this server's tasks and agents unfurl into a short card.
 

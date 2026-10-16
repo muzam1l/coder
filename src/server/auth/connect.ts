@@ -146,7 +146,7 @@ export async function startOAuth(
       userAuth.authorizeUrl(decryptSecret(ctx.config, app.credentials), {
         publicUrl,
         state,
-        access: connection.access,
+        access: connection.access ?? 'write',
       }),
     );
   }
@@ -212,7 +212,7 @@ export async function completeOAuth(
       const user = await userAuth
         .exchange(req, decryptSecret(ctx.config, app.credentials), {
           publicUrl,
-          access: current.access,
+          access: current.access ?? 'write',
           fetch: ((input, init) =>
             (ctx.fetch ?? fetch)(input, {
               ...init,

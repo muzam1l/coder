@@ -1,7 +1,7 @@
 import type { Integration } from '../types';
 import { canWriteLinear, verifyLinearWebhook } from './api';
 import { linearApp, linearToken, linearUserAuth } from './app';
-import { LINEAR_PRESETS, LINEAR_TOOLS } from './tools';
+import { LINEAR_PRESETS, linearToolServer } from './tools';
 
 const PROMPT_CONTEXT_LIMIT = 16 * 1024;
 
@@ -25,7 +25,7 @@ export const linear: Integration = {
   prompt: [
     'A conversation is a Linear agent session on an issue.',
     'get_issue reads the issue by its id or identifier, such as ENG-123.',
-    'reply posts progress in the agent session; your final message completes it. create_comment posts an issue comment outside the session.',
+    'reply posts progress in the agent session; your final message completes it. save_comment posts an issue comment outside the session.',
     'Replies are Markdown about the issue; link pull requests you open.',
   ].join('\n'),
   events: {
@@ -35,8 +35,8 @@ export const linear: Integration = {
       addressed: true,
     },
   },
-  tools: { presets: LINEAR_PRESETS, serve: LINEAR_TOOLS },
-  hosts: ['api.linear.app'],
+  tools: { presets: LINEAR_PRESETS, server: linearToolServer },
+  hosts: ['api.linear.app', 'mcp.linear.app'],
   get app() {
     return linearApp;
   },

@@ -14,6 +14,8 @@ import { currentIntegrationToken } from '../runtime';
 import { mailboxDir, askWorker } from '../../core/mailbox';
 import { reviewPrompt, reviewSystemPrompt } from '../../core/prompts';
 
+export const description = 'Review a code change.';
+
 export const args = z.object({
   /** PR number in the checkout's origin, or a GitHub PR URL. */
   pr: z.union([z.number(), z.string()]).optional(),

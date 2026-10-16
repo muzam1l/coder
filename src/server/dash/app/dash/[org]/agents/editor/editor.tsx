@@ -52,11 +52,10 @@ const PERMISSION_HINTS: Record<string, string> = {
   'workspace-write': 'edits files inside the repository',
   auto: 'edits files, reaches the network, and asks when it needs more',
 };
-const PRESETS = ['observe', 'comment', 'write'];
+const PRESETS = ['read', 'write'];
 const ACCESS: Record<string, [string, string]> = {
-  observe: ['Observe', 'reads the platform only'],
-  comment: ['Comment', 'also replies and reacts'],
-  write: ['Write', 'also changes code there, like opening pull requests'],
+  read: ['Read-only', 'reads the platform; replies and reacts in the conversation'],
+  write: ['Read-write', 'also changes things there, like opening pull requests'],
 };
 const TEMPLATES: Array<[Template, string, string]> = [
   ['blank', 'Blank', 'start from nothing'],
@@ -145,7 +144,7 @@ function fromTemplate(template: Template, catalog: IntegrationInfo[]): Partial<D
       events: Object.fromEntries(
         platforms.map(id => [id, defaultEvents(catalog.find(info => info.id === id))]),
       ),
-      tools: Object.fromEntries(platforms.map(id => [id, 'comment'])),
+      tools: Object.fromEntries(platforms.map(id => [id, 'write'])),
       match: {},
     };
   };
@@ -257,8 +256,8 @@ export function AgentEditor({
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft(current => ({ ...current, [key]: value }));
   const access = (id: string, tools = draft.tools[id]) =>
-    Array.isArray(tools) ? 'custom' : (tools ?? 'observe');
-  const shared = draft.platforms.length ? access(draft.platforms[0]!) : 'comment';
+    Array.isArray(tools) ? 'custom' : (tools ?? 'write');
+  const shared = draft.platforms.length ? access(draft.platforms[0]!) : 'write';
   const uniform = draft.platforms.every(id => access(id) === shared);
 
   const leveled = draft.platforms
@@ -328,7 +327,7 @@ export function AgentEditor({
             : current.events,
         tools:
           on && !current.tools[id]
-            ? { ...current.tools, [id]: uniform && shared !== 'custom' ? shared : 'comment' }
+            ? { ...current.tools, [id]: uniform && shared !== 'custom' ? shared : 'write' }
             : current.tools,
       };
     });

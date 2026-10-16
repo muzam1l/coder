@@ -141,7 +141,7 @@ async function signedIn(opts: ConnectionAddOptions, id: string, url: string) {
 /** The body `add` posts for a name and its flags. */
 async function input(name: string, opts: ConnectionAddOptions): Promise<ConnectionInput> {
   const [command, ...args] = opts.command ?? [];
-  const access = opts.access && ({ access: opts.access === 'read' ? 'observe' : 'write' } as const);
+  const access = opts.access && { access: opts.access };
   const owner = opts.me ? { owner: 'me' as const } : {};
   if (command && opts.url) throw invalid('Use either --url or a command, not both.');
   if (opts.access && !['read', 'write'].includes(opts.access))

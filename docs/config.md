@@ -41,7 +41,7 @@ coder config set engines.codex.model sol
     "helper": {
       "permissions": "read-only",
       "integrations": {
-        "github": { "allowedTools": "comment" }
+        "github": { "allowedTools": "read" }
       }
     }
   },

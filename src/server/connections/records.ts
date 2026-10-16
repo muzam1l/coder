@@ -48,7 +48,7 @@ const inputSchema = z.strictObject({
   id: z.optional(slug),
   provider: z.optional(slug),
   owner: z.optional(z.literal('me')),
-  access: z.optional(z.enum(['observe', 'write'])),
+  access: z.optional(z.enum(['read', 'write'])),
   endpoint: z.optional(mcpEntrySchema),
   auth: z.optional(z.enum(['none', 'key', 'oauth'])),
   key: z.optional(z.string().check(z.minLength(1))),
@@ -57,7 +57,7 @@ const inputSchema = z.strictObject({
 });
 const patchSchema = z.strictObject({
   name: z.optional(z.string().check(z.minLength(1))),
-  access: z.optional(z.enum(['observe', 'write'])),
+  access: z.optional(z.nullable(z.enum(['read', 'write']))),
   key: z.optional(z.string().check(z.minLength(1))),
 });
 
@@ -73,7 +73,11 @@ function endpointAllowed(ctx: ServerContext, connection: Connection): boolean {
       connectionEnvName(connection.keyIn.env)
     );
   if (connection.provider !== 'mcp') return !endpoint;
-  if (!endpoint || (endpoint.command && connection.access === 'observe' && !endpoint.tools?.length))
+  if (
+    !endpoint ||
+    !connection.access ||
+    (endpoint.command && connection.access === 'read' && !endpoint.tools?.length)
+  )
     return false;
   if (endpoint.tools?.some(tool => !connectionToolName(tool))) return false;
   if (endpoint.url) {
@@ -108,7 +112,7 @@ export function connectionRow(
     name: connection.name,
     provider: connection.provider,
     auth: connection.auth,
-    access: connection.access,
+    ...(connection.access ? { access: connection.access } : {}),
     ...(connection.owner
       ? {
           owner: connection.owner,
@@ -155,7 +159,6 @@ export async function nativeConnections(
       name: ctx.integrations[account.platform]!.name ?? account.platform,
       provider: account.platform,
       owner,
-      access: 'observe',
       auth: 'oauth',
       secret: account.token,
       account: account.platformUserId,
@@ -461,7 +464,9 @@ export async function addConnection(
     name: input.name,
     provider,
     ...(owner ? { owner } : {}),
-    access: input.access ?? (provider === 'env' ? 'write' : 'observe'),
+    ...(input.access || provider === 'env' || provider === 'mcp'
+      ? { access: input.access ?? (provider === 'env' ? 'write' : 'read') }
+      : {}),
     auth,
     ...(input.endpoint ? { endpoint: input.endpoint } : {}),
     ...(input.keyIn ? { keyIn: input.keyIn } : {}),
@@ -470,7 +475,7 @@ export async function addConnection(
       : {}),
     createdAt: (ctx.now ?? Date.now)(),
   };
-  if (!endpointAllowed(ctx, connection)) throw refuse(400, 'Invalid endpoint or observe tools');
+  if (!endpointAllowed(ctx, connection)) throw refuse(400, 'Invalid endpoint or read-only tools');
   if (await ctx.store.get('connection', connection.id))
     throw refuse(409, 'Connection already exists');
   let discovered: Awaited<ReturnType<typeof oauthResource>>;
@@ -548,16 +553,18 @@ export async function changeConnection(
   return ctx.store.withAppLock(`connection:${id}`, async store => {
     const current = await findConnection({ ...ctx, store }, id, ctx.session?.user.id);
     if (!current) throw refuse(404, 'Unknown connection');
-    const { key, ...settings } = parsed.data;
+    const { key, access, ...settings } = parsed.data;
     if (key && current.auth !== 'key') throw refuse(400, 'This connection does not use a key');
+    const { access: _, ...kept } = current;
     const next = {
-      ...current,
+      ...(access === null ? kept : current),
       ...settings,
+      ...(access ? { access } : {}),
       ...(key && current.provider !== 'env' ? { secret: encryptSecret(ctx.config, { key }) } : {}),
       ...(key ? { broken: undefined } : {}),
       updatedAt: (ctx.now ?? Date.now)(),
     };
-    if (!endpointAllowed(ctx, next)) throw refuse(400, 'Invalid observe tools');
+    if (!endpointAllowed(ctx, next)) throw refuse(400, 'Invalid read-only tools');
     if (key && current.provider === 'env')
       next.credential = await rotateEnvCredential({ ...ctx, store }, current, key);
     await store.put('connection', next.id, next);

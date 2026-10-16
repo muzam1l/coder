@@ -17,7 +17,11 @@ function printConnections({ connections, declared }: Listed): void {
           [
             { header: 'name', value: row => row.id, paint: c => s.cyan(c) },
             { header: 'connects', value: row => describe(row), paint: c => s.light(c) },
-            { header: 'access', value: row => (row.access === 'observe' ? 'read' : 'write') },
+            {
+              header: 'access',
+              value: row =>
+                row.access === 'read' ? 'Read-only' : row.access ? 'Read-write' : 'Default',
+            },
             {
               header: 'for',
               value: row => (row.mine ? 'you' : row.owner ? row.owner : 'workspace'),

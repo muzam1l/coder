@@ -26,13 +26,13 @@
           "match": "[Cc]oder"
         }
       },
-      "tools": "comment"
+      "tools": "read"
     },
     "linear": {
       "events": {
         "mention": true
       },
-      "tools": "comment"
+      "tools": "read"
     }
   }
 }

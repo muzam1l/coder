@@ -171,11 +171,11 @@ function Platforms({
                     <Chips values={events} />
                   </td>
                   <td class="muted">
-                    {typeof tools === 'string'
-                      ? tools
+                    {tools === 'read'
+                      ? 'Read-only'
                       : Array.isArray(tools)
                         ? `${tools.length} tools`
-                        : 'observe'}
+                        : 'Read-write'}
                   </td>
                   <td>
                     {own.length

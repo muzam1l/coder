@@ -8,8 +8,7 @@ import { CLI_PATH } from '../core/runtime';
 import type { McpServerSpec, Task } from '../core/types';
 import { INTEGRATIONS } from '../integrations';
 import type { AgentEvent, AgentTask } from './types';
-import type { ToolSet } from '../integrations/types';
-import { schema } from '../utils/mcp-server';
+import { schema, type McpTool } from '../utils/mcp-server';
 import { history } from '../core/engines/history';
 import { connectionEnvironment } from '../core/connections';
 import { claudeProjectsDir } from '../core/engines/claude/sessions';
@@ -17,21 +16,11 @@ import { codexHome } from '../core/engines/codex/sessions';
 import { eventJsons } from '../core/event-prompt';
 import { appendTaskDirLog } from '../core/state';
 
-/** Tool sets coder serves over stdio: one per integration plus task history. */
-export function agentTools(id: string, allowed?: string[]): ToolSet | undefined {
-  if (id === 'history') return HISTORY_TOOLS;
-  const integration = INTEGRATIONS[id]?.tools;
-  const tools = integration?.serve;
-  if (
-    !tools ||
-    !allowed ||
-    !Object.values(integration!.presets).some(names =>
-      names.some(name => Object.hasOwn(tools, name)),
-    )
-  )
-    return tools;
+type ToolSet = Record<string, McpTool<{ fetch?: typeof fetch }>>;
 
-  return Object.fromEntries(Object.entries(tools).filter(([name]) => allowed.includes(name)));
+/** The Chat SDK subset served to conversation tasks. */
+export function agentTools(id: string): ToolSet | undefined {
+  return id === 'history' ? HISTORY_TOOLS : undefined;
 }
 
 /** `APP_TOKEN_<UPPER_ID>`: the env var carrying one integration's token inside a task. */
@@ -45,32 +34,19 @@ export function agentToolServer(
   tools: string[],
   context: { token: string; event?: AgentEvent; scope?: unknown },
 ): McpServerSpec {
-  const { serve, server, presets } = INTEGRATIONS[integration]!.tools;
-  if (server) {
-    const spec = server(tools, context.event, context.token);
-    const env = Object.entries(spec.env ?? {}).find(([, value]) => value === context.token)?.[0];
-    return {
-      ...spec,
-      ...(env ? { credentialFields: { env } } : {}),
-      ...(INTEGRATIONS[integration]!.repos?.credentialUsername
-        ? { gitCredential: tools.some(tool => !presets.observe.includes(tool)) }
-        : {}),
-    };
-  }
-  // Only where the task may write; never the payload or a reply capability.
-  const scope =
-    context.scope ?? (context.event?.chat ? { thread: context.event.chat.thread.id } : undefined);
+  const { server, presets } = INTEGRATIONS[integration]!.tools;
+  const { readOnly, ...spec } = server(tools, context.event, context.token);
+  const env = Object.entries(spec.env ?? {}).find(([, value]) => value === context.token)?.[0];
+
   return {
-    name: integration,
-    command: process.execPath,
-    args: [CLI_PATH, 'agent', 'tools', integration],
-    env: {
-      APP_TOKEN: context.token,
-      CODER_AGENT_TOOLS: tools.join(','),
-      ...(scope ? { CODER_AGENT_SCOPE: JSON.stringify(scope) } : {}),
-    },
-    credentialFields: { env: 'APP_TOKEN' },
-    tools: Object.keys(agentTools(integration, tools) ?? serve ?? {}),
+    ...spec,
+    ...(readOnly && spec.command
+      ? { command: process.execPath, args: [CLI_PATH, 'agent', 'tools', integration] }
+      : {}),
+    ...(env ? { credentialFields: { env } } : {}),
+    ...(INTEGRATIONS[integration]!.repos?.credentialUsername
+      ? { gitCredential: tools.some(tool => !presets.read.includes(tool)) }
+      : {}),
   };
 }
 
@@ -79,9 +55,12 @@ export function toolServerToken(servers: McpServerSpec[], integration: string): 
   if (!INTEGRATIONS[integration]) return undefined;
   const probe = agentToolServer(integration, [], { token: '\0' });
   const key = Object.entries(probe.env ?? {}).find(([, value]) => value === '\0')?.[0];
+  const server = servers.find(server => server.name === probe.name);
+  const header = probe.credentialFields?.header;
+
   return key
-    ? servers.find(server => server.name === probe.name)?.env?.[key] || undefined
-    : undefined;
+    ? server?.env?.[key] || undefined
+    : header ? server?.headers?.[header]?.replace(/^Bearer /, '') : undefined;
 }
 
 /** One tool server per integration in `task.tools` that has a token. */

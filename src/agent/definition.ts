@@ -17,8 +17,8 @@ import {
 const slug = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
 const effort = z.enum(['low', 'medium', 'high']);
 const permissions = z.enum(['read-only', 'workspace-write', 'auto']);
-const preset = z.enum(['observe', 'comment', 'write']);
-const tools = z.union([preset, z.array(z.string())]);
+const preset = z.enum(['read', 'write']);
+const tools = preset;
 
 const eventOptionsSchema = z.strictObject({
   flow: z.optional(slug),
@@ -162,31 +162,17 @@ export function validateAgents(
 
 function toolErrors(
   prefix: string,
-  tools: Preset | string[] | undefined,
+  tools: Preset | undefined,
   integration: Integration,
 ): string[] {
   if (tools === undefined) return [];
-  if (typeof tools === 'string') {
-    return PRESETS.includes(tools)
-      ? []
-      : [`${prefix}: unknown preset "${tools}"; valid: ${PRESETS.join(', ')}`];
-  }
-  const valid = new Set(Object.values(integration.tools.presets).flat());
-  return tools
-    .filter(tool => !valid.has(tool))
-    .map(
-      tool => `${prefix}: unknown tool "${tool}"; valid: ${[...valid].sort().join(', ') || 'none'}`,
-    );
+  return PRESETS.includes(tools)
+    ? []
+    : [`${prefix}: unknown preset "${tools}"; valid: ${PRESETS.join(', ')}`];
 }
 
-function expand(tools: Preset | string[], integration: Integration): string[] {
-  if (Array.isArray(tools)) return [...new Set(tools)];
-  const through = PRESETS.indexOf(tools);
-  return [
-    ...new Set(
-      PRESETS.slice(0, through + 1).flatMap(preset => integration.tools.presets[preset] ?? []),
-    ),
-  ];
+function expand(tools: Preset, integration: Integration): string[] {
+  return integration.tools.presets[tools];
 }
 
 /** Effective tools: what the definition uses, capped by the repo's `allowedTools` when set. */
@@ -196,7 +182,7 @@ export function resolveTools(
   integration: Integration,
 ): string[] {
   const used = expand(
-    agent.definition.integrations[integrationId]?.tools ?? 'observe',
+    agent.definition.integrations[integrationId]?.tools ?? 'write',
     integration,
   );
   const allow = agent.usage?.integrations?.[integrationId]?.allowedTools;

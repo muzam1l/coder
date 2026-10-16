@@ -31,7 +31,11 @@ import {
 } from '@/app/dash/[org]/settings/model-options';
 import type { Defaults } from '@/app/dash/[org]/tasks/composer';
 
-const PRESETS = ['observe', 'comment', 'write'].map((preset): Option => [preset, preset]);
+const PRESETS: Option[] = [
+  ['read', 'Read-only'],
+  ['write', 'Read-write'],
+];
+const ACCESS = Object.fromEntries(PRESETS);
 
 function Choice({
   name,
@@ -197,7 +201,10 @@ export function AgentSettingsForm({
                     models,
                     defaultLabel(
                       engine
-                        ? [ENGINE_NAMES[engine] ?? engine, own?.model ?? defaults.engines[engine]?.model]
+                        ? [
+                            ENGINE_NAMES[engine] ?? engine,
+                            own?.model ?? defaults.engines[engine]?.model,
+                          ]
                             .filter(Boolean)
                             .join(' · ')
                         : 'first available engine',
@@ -346,19 +353,17 @@ export function AgentSettingsForm({
                     <Choice
                       name={`tools:${id}`}
                       label="Platform access"
-                      hint={`observe reads, comment also replies, write also pushes and merges; at most ${typeof tools === 'string' ? tools : tools ? 'its tools' : 'observe'}, as the definition grants`}
+                      hint={`Read-only reads and replies; Read-write also pushes and merges. At most ${typeof tools === 'string' ? ACCESS[tools] : tools ? 'its tools' : 'Read-write'}, as the definition grants`}
                       value={
                         typeof current.allowedTools === 'string' ? current.allowedTools : undefined
                       }
                       options={
                         typeof tools === 'string'
                           ? PRESETS.slice(0, PRESETS.findIndex(([key]) => key === tools) + 1)
-                          : tools
-                            ? PRESETS
-                            : PRESETS.slice(0, 1)
+                          : PRESETS
                       }
                       blank={defaultLabel(
-                        typeof tools === 'string' ? tools : tools ? 'custom' : 'observe',
+                        typeof tools === 'string' ? ACCESS[tools] : tools ? 'custom' : 'Read-write',
                       )}
                     />
                   )}

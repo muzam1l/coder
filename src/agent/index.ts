@@ -124,7 +124,7 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
           : [Object.keys(INTEGRATIONS)[0]!],
         events: {},
         matches: {},
-        tools: (opts.tools ?? 'comment') as Preset,
+        tools: (opts.tools ?? 'write') as Preset,
       };
   if (!PRESETS.includes(picks.tools))
     throw new CoderError(

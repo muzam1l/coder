@@ -6,7 +6,7 @@ import { safeEqual } from '../../utils/crypto';
 import type { Integration, OwnEvent } from '../types';
 import { canWriteSlack, slackFetch } from './api';
 import { slackApp, type SlackAppCredentials } from './app';
-import { SLACK_READ_METHODS, SLACK_TOOLS, SLACK_WRITE_METHODS } from './tools';
+import { SLACK_MCP_SERVER_INSTALL, SLACK_PRESETS, slackToolServer } from './tools';
 
 const envelope = z.object({
   type: z.optional(z.string()),
@@ -196,15 +196,12 @@ export const slack: Integration = {
     },
   },
   tools: {
-    presets: {
-      observe: Object.keys(SLACK_READ_METHODS),
-      comment: [...Object.keys(SLACK_READ_METHODS), ...Object.keys(SLACK_WRITE_METHODS)],
-      // Slack has no code-writing actions.
-      write: [...Object.keys(SLACK_READ_METHODS), ...Object.keys(SLACK_WRITE_METHODS)],
-    },
-    serve: SLACK_TOOLS,
+    presets: SLACK_PRESETS,
+    server: slackToolServer,
+    install: SLACK_MCP_SERVER_INSTALL,
+    installHosts: ['github.com', 'release-assets.githubusercontent.com'],
   },
-  hosts: ['slack.com'],
+  hosts: ['slack.com', 'files.slack.com'],
   get app() {
     return slackApp;
   },

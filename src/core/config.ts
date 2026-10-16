@@ -277,13 +277,13 @@ const approvalsSchema = z.strictObject({
   escalationTimeoutMs: z.number().check(z.positive()),
   allowedNetworkHosts: z.array(z.string()),
 });
-const agentPresetSchema = z.enum(['observe', 'comment', 'write']);
+const agentPresetSchema = z.enum(['read', 'write']);
 // Agent and flow names reach shell commands inside runners, so keep them to safe slugs.
 const agentNameSchema = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
 // `agents` holds usage only: how this repo runs an agent. What an agent IS lives in
 // `.coder/agents/<id>/agent.json` (see src/agent/definition.ts).
 const agentUsageIntegrationSchema = z.strictObject({
-  allowedTools: z.optional(z.union([agentPresetSchema, z.array(z.string())])),
+  allowedTools: z.optional(agentPresetSchema),
   allowedEvents: z.optional(z.array(z.string())),
 });
 const agentUsageSchema = z.union([

@@ -3,6 +3,7 @@ import path from 'node:path';
 
 import type { AgentEvent, TaskContext } from '../agent/types';
 import type { Task } from './types';
+import { flowDescriptions } from '../flow/discover';
 
 /** Untrusted text inside a prompt tag, with the three characters that would read as markup escaped. */
 export const xml = (value: string) =>
@@ -51,6 +52,7 @@ export interface AgentPromptParts {
 }
 
 export interface SystemPromptParts extends AgentPromptParts {
+  cwd?: string;
   /** A platform event's task, whose final message is a reply in a thread; otherwise a general task. */
   conversation?: boolean;
   /** The task runs as an agent and may run flows. */
@@ -80,12 +82,15 @@ When mustReply is true, reply at least once, either way.
 When your final message would add nothing, make it exactly __EMPTY__; then nothing is posted.`;
 
 const WORKSPACE =
-  'Never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.); leave changes uncommitted for review.';
+  'Never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.); leave changes uncommitted for review.\nNever print secret values (tokens, keys, passwords); pass them straight into the process that needs them.';
 
 const RESULT = 'When finished, give a concise summary of what you did and found.';
 
 /** Everything fixed for a task, in the order the engine reads it. */
 export function taskSystemPrompt(parts: SystemPromptParts): string {
+  const flows = parts.agent
+    ? [FLOWS, ...flowDescriptions(parts.cwd ?? process.cwd())].join('\n')
+    : '';
   const local = parts.local ? 'Do not load the coder skill.' : '';
   const served = Object.entries(parts.tools ?? {})
     .filter(([, names]) => names.length)
@@ -99,7 +104,7 @@ export function taskSystemPrompt(parts: SystemPromptParts): string {
       parts.developer ?? '',
       block('runtime', [
         'Your turn ends with your final message; verify your work before it.',
-        parts.agent ? FLOWS : '',
+        flows,
         local,
       ]),
       tag('environment', ENVIRONMENT),
@@ -118,7 +123,7 @@ export function taskSystemPrompt(parts: SystemPromptParts): string {
     block('runtime', [
       'Do the work yourself, directly.',
       'Your turn ends with your final message; verify your work before it. Background processes will not re-invoke you.',
-      parts.agent ? FLOWS : 'The coder CLI cannot dispatch nested tasks.',
+      flows || 'The coder CLI cannot dispatch nested tasks.',
       local,
     ]),
     tag('workspace', WORKSPACE),
@@ -309,6 +314,7 @@ ${tag('question', question)}${command ? `\n\nCoder command ${command}` : ''}`;
 export function approvalReviewerPrompt(goal: string | null | undefined, log: string): string {
   return `Review actions a Coder task wants to run outside its OS sandbox.
 Decline git writes (commit, push, checkout, reset and the like).
+Decline commands that print secret values, such as env dumps or CLI config and token output.
 Decline destructive or system-level actions: sudo, rm -rf outside the workspace, killing processes, changing system config, piping downloads to a shell.
 Temp locations (/tmp, $TMPDIR, OS temp dirs) and paths the task created are workspace scratch; delete them only after checking the progress log.
 Accept actions the task goal clearly needs: package installs in the workspace, tests, builds, linters, reading system info, network to well-known package registries.

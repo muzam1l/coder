@@ -26,7 +26,7 @@ The built-in agent. On the hosted service it has an install link per platform; s
 |             |                                                                   |
 | ----------- | ----------------------------------------------------------------- |
 | Permissions | `workspace-write`; `read-only` for pull-request reviews           |
-| Tools       | GitHub `write`; Slack and Linear `comment`                        |
+| Tools       | GitHub `write`; Slack and Linear `read`                        |
 | Flows       | `review`                                                          |
 | Engine      | the workspace's [credential](../self-host.md#credentials)         |
 

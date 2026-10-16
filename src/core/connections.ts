@@ -474,8 +474,8 @@ export async function connectionMcp(
     }
   }
   if (spec.command) {
-    if (connection.access === 'observe' && !spec.tools?.length)
-      throw new Error('Observe requires tools');
+    if (connection.access === 'read' && !spec.tools?.length)
+      throw new Error('Read-only requires tools');
     return spec;
   }
   const signal = AbortSignal.timeout(5_000);

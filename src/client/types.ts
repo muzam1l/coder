@@ -535,7 +535,8 @@ export interface ConnectionRow {
   /** Set on a member's own connection; `mine` when that member is the viewer. */
   owner?: string;
   mine?: true;
-  access: 'observe' | 'write';
+  /** Absent on a platform account: the agent's mode for that platform. */
+  access?: 'read' | 'write';
   auth: 'none' | 'key' | 'oauth';
   /** The remote server, or the stdio command, it is bound to. */
   url?: string;
@@ -557,7 +558,7 @@ export interface ConnectionInput {
   provider?: string;
   /** `me` makes it the viewer's own instead of the workspace's. */
   owner?: 'me';
-  access?: 'observe' | 'write';
+  access?: 'read' | 'write';
   endpoint?: McpEntry;
   auth?: 'none' | 'key' | 'oauth';
   /** For `env`, a new credential holding `key`; without `key` or `credential`, a visible credential with `keyIn.env`. */

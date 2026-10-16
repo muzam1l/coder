@@ -25,6 +25,7 @@ A platform event's task: a Slack thread or DM, a GitHub pull request or issue, a
 <runtime>
  Your turn ends with your final message; verify your work before it.
  The coder CLI cannot dispatch nested tasks; run a flow with `coder flow run <name> --wait --json --args '<json>'`.
+ review: Review a code change.
  Do not load the coder skill.
 </runtime>
 <!-- How platform events become turns. -->
@@ -107,7 +108,7 @@ The new engine conversation's first turn then carries it:
 ### Tools
 
 - The engine's own tools (Claude Code's or Codex's), limited by `permissions`: `read-only` cannot edit.
-- Each platform the agent declared, by its `tools` preset. Slack `slack_api` reads threads, channels, people and reactions; with `comment` or `write` it also posts Block Kit messages (`chat.postMessage`) and uploads files, in this conversation only. GitHub's MCP server works on repositories, pull requests and issues, read-only under `observe`. Linear has none yet.
+- Each platform the agent declared, by its access mode. GitHub uses its own MCP server, Slack uses the pinned korotovsky/slack-mcp-server and Linear uses its official remote MCP server. Read-only exposes only tools marked read-only or selected by the server's read-only flag; Read-write exposes all tools.
 - MCP servers the agent definition declares, and workspace connections bound to the task.
 - Under `permissions: auto`, the approval tool Coder answers itself.
 - This machine's own MCP servers only with `mcp: "all"`.
@@ -146,10 +147,12 @@ Every other task: `coder task run` with or without `--agent`, flow steps, dashbo
  Do the work yourself, directly.
  Your turn ends with your final message; verify your work before it. Background processes will not re-invoke you.
  The coder CLI cannot dispatch nested tasks; run a flow with `coder flow run <name> --wait --json --args '<json>'`.
+ review: Review a code change.
  Do not load the coder skill.
 </runtime>
 <workspace>
  Never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.); leave changes uncommitted for review.
+ Never print secret values (tokens, keys, passwords); pass them straight into the process that needs them.
 </workspace>
 <result>
  When finished, give a concise summary of what you did and found.

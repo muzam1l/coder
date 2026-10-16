@@ -4,8 +4,8 @@ import type { Effort, McpConfigEntry, Permission } from '../core/config';
 import type { TaskTurn, RunnerKind } from '../client/types';
 import type { SinceMessage } from '../integrations/types';
 
-export type Preset = 'observe' | 'comment' | 'write';
-export const PRESETS: Preset[] = ['observe', 'comment', 'write'];
+export type Preset = 'read' | 'write';
+export const PRESETS: Preset[] = ['read', 'write'];
 
 export type { RunnerKind } from '../client/types';
 
@@ -24,8 +24,8 @@ export interface AgentEventOptions {
 
 export interface AgentDefinitionIntegration {
   events?: string[] | Record<string, string | true | AgentEventOptions>;
-  /** Platform tools the agent uses: a preset or an explicit tool list. */
-  tools?: Preset | string[];
+  /** Platform tools the agent uses: Read-only or Read-write. */
+  tools?: Preset;
 }
 
 /** What an agent IS: `.coder/agents/<id>/agent.json` beside its system.md. */
@@ -45,7 +45,7 @@ export interface AgentDefinition {
 
 /** Per-integration caps in usage: `allowedTools` and `allowedEvents` intersect the definition's. */
 export interface AgentUsageIntegration {
-  allowedTools?: Preset | string[];
+  allowedTools?: Preset;
   allowedEvents?: string[];
 }
 
@@ -149,7 +149,8 @@ export interface Connection {
   provider: 'mcp' | (string & {});
   /** The member it belongs to; absent for the workspace's. */
   owner?: string;
-  access: 'observe' | 'write';
+  /** Absent on a platform account: the agent's mode for that platform. */
+  access?: 'read' | 'write';
   /** Where the secret goes, without secret values; repository entries can name the connection but never change it. */
   endpoint?: McpConfigEntry;
   auth: 'none' | 'key' | 'oauth';

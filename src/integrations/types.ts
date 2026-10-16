@@ -2,39 +2,19 @@
 import type { Adapter, Message, SerializedThread, StateAdapter, Thread } from 'chat';
 
 import type { McpServerSpec } from '../core/types';
-import type { McpTool } from '../utils/mcp-server';
 import type { AgentApp, AgentDefinition, AgentEvent, Installation, Preset } from '../agent/types';
 
 export type { McpServerSpec, AgentApp, AgentDefinition, AgentEvent, Installation, Preset };
 export { PRESETS } from '../agent/types';
 
-export interface ToolContext {
-  token: string;
-  fetch: typeof fetch;
-  /** The task's allowed tools for this integration, such as Slack method names. */
-  tools?: string[];
-  /** Where the task may write: its repository, or its Chat SDK thread id. */
-  scope?: {
-    repo?: { owner: string; name: string };
-    thread?: string;
-    /** The covered account the task's event happened in. */
-    within?: string;
-  };
-}
-
-export type AgentTool = McpTool<ToolContext>;
-
-export type ToolSet = Record<string, AgentTool>;
-
-/** Presets map to tool allowlists; `serve` is coder's own `agent tools <integration>` server, `server` an external one. */
+/** Access modes select the platform server's tools. */
 export interface IntegrationTools {
   presets: Record<Preset, string[]>;
-  serve?: ToolSet;
   /** Shell command a Linux runner runs as root to install `server`'s binary. */
   install?: string;
   /** Hosts `install` downloads from, redirects included. */
   installHosts?: string[];
-  server?(tools: string[], event: AgentEvent | undefined, token: string): McpServerSpec;
+  server(tools: string[], event: AgentEvent | undefined, token: string): McpServerSpec & { readOnly?: boolean };
 }
 
 /** What the dashboard's app creation puts in the URL; only `tx` goes to the platform and back. */
@@ -251,13 +231,13 @@ export interface PlatformUser {
 export interface IntegrationUserAuth {
   authorizeUrl(
     credentials: unknown,
-    input: { publicUrl: string; state: string; access?: 'observe' | 'write' },
+    input: { publicUrl: string; state: string; access?: 'read' | 'write' },
   ): string;
   /** Exchange the callback's code for the user and their token. */
   exchange(
     req: Request,
     credentials: unknown,
-    input: { publicUrl: string; fetch: typeof fetch; access?: 'observe' | 'write' },
+    input: { publicUrl: string; fetch: typeof fetch; access?: 'read' | 'write' },
   ): Promise<PlatformUser>;
   /** A usable access token from the stored token JSON, and the JSON to store when it was refreshed. */
   access(

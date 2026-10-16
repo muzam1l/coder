@@ -9,7 +9,7 @@ coder connection approve docs                                         # approve 
 coder run --mcp docs "why do uploads fail after a rename?"
 ```
 
-For a remote URL, Coder detects OAuth, open access or a required key; OAuth needs `--server`, and a required key is read from stdin or a prompt. `--key` reads a server's key directly; it goes in `--header` (default `Authorization`) or, for a stdio server, `--env`, and `--auth` overrides detection. `--access read` keeps only read-only tools, and a read-only stdio server needs `--tools a,b`.
+For a remote URL, Coder detects OAuth, open access or a required key; OAuth needs `--server`, and a required key is read from stdin or a prompt. `--key` reads a server's key directly; it goes in `--header` (default `Authorization`) or, for a stdio server, `--env`, and `--auth` overrides detection. Access defaults to Read-only; `--access write` keeps every tool, and a read-only stdio server needs `--tools a,b`.
 
 ## Config shape
 

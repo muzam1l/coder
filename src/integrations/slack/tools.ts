@@ -1,78 +1,37 @@
-import { type ToolContext, type ToolSet } from '../types';
+import { randomUUID } from 'node:crypto';
+import type { AgentEvent, McpServerSpec, Preset } from '../types';
 
-const HISTORY = ['channels:history', 'groups:history', 'im:history', 'mpim:history'];
-const CONVERSATIONS = ['channels:read', 'groups:read', 'im:read', 'mpim:read'];
-
-/** Web API methods `slack_api` may call, each with the bot scopes that allow it (any one). */
-export const SLACK_READ_METHODS: Record<string, string[]> = {
-  'conversations.history': HISTORY,
-  'conversations.replies': HISTORY,
-  'conversations.info': CONVERSATIONS,
-  'conversations.list': CONVERSATIONS,
-  'users.info': ['users:read'],
-  'users.list': ['users:read'],
-  'reactions.get': ['reactions:read'],
+export const SLACK_PRESETS: Record<Preset, string[]> = {
+  read: ['read'],
+  write: ['read', 'write'],
 };
-export const SLACK_WRITE_METHODS: Record<string, string[]> = {
-  'chat.postMessage': ['chat:write'],
-  'files.getUploadURLExternal': ['files:write'],
-  'files.completeUploadExternal': ['files:write'],
-};
-const SCOPES = { ...SLACK_READ_METHODS, ...SLACK_WRITE_METHODS };
 
-/** Calls one Slack Web API method the task's method list allows; the app's manifest requests its scopes. */
-export async function slackApi(
-  ctx: ToolContext,
-  method: string,
-  args: Record<string, unknown> = {},
-): Promise<unknown> {
-  const allowed = ctx.tools ?? [];
-  if (!Object.hasOwn(SCOPES, method)) throw new Error(`Unknown Slack method: ${method}`);
-  if (!allowed.includes(method))
-    throw new Error(
-      `Slack method ${method} is not allowed for this task; allowed: ${allowed.join(', ') || 'none'}`,
-    );
-  if (method in SLACK_WRITE_METHODS) {
-    // The task's Chat SDK thread: `slack:<channel>:<thread ts>`.
-    const [, channel, thread] = (ctx.scope?.thread ?? '').split(':');
-    const allocation = method === 'files.getUploadURLExternal';
-    const destination = method === 'files.completeUploadExternal' ? args.channel_id : args.channel;
-    if (!channel || (!allocation && (destination !== channel || Object.hasOwn(args, 'channels'))))
-      throw new Error('This task may only write to its connected channel.');
-    // A 1:1 DM is one conversation with no thread ts (`slack:D…:`), so the whole DM is its thread.
-    const dm = !thread && channel.startsWith('D');
-    if (
-      (!thread && !dm) ||
-      (!allocation && (!(dm || args.thread_ts === thread) || args.reply_broadcast))
-    )
-      throw new Error('This task may only write to its triggering thread.');
-  }
-  // An org-wide token acts only in the workspace the task's event came from.
-  const within = ctx.scope?.within;
-  const { callSlackApi } = await import('@chat-adapter/slack/api');
-  const data = await callSlackApi(method, within ? { ...args, team_id: within } : args, {
-    token: ctx.token,
-    fetch: ctx.fetch,
-    contentType: 'json',
-  });
-  if (data.error === 'missing_scope')
-    throw new Error(
-      `Slack method ${method} needs the ${SCOPES[method]!.join(' or ')} scope, which this app does not have`,
-    );
-  if (!data.ok) throw new Error(`Slack ${method} failed: ${data.error}`);
-  return data;
-}
+export const SLACK_MCP_SERVER_INSTALL =
+  'set -eu; arch=$(uname -m); case "$arch" in x86_64) arch=amd64; checksum=d1525962e9b9dbfdd2eaf48d0a81ca1eca7d8f1862b8d34931b812c850b3e568;; aarch64|arm64) arch=arm64; checksum=a307a48d16c2261346bdc257274cdcdb8b2027c867dc971b41d52cef36472c88;; *) exit 1;; esac; file=$(mktemp); trap \'rm -f "$file"\' EXIT; curl -fsSL "https://github.com/korotovsky/slack-mcp-server/releases/download/v1.3.0/slack-mcp-server-linux-$arch" -o "$file"; echo "$checksum  $file" | sha256sum -c -; install -m 755 "$file" /usr/local/bin/slack-mcp-server';
 
-export const SLACK_TOOLS: ToolSet = {
-  slack_api: {
-    description:
-      'Call a Slack Web API method, such as conversations.history or users.info, with its JSON arguments. Only the methods this task allows work; others fail with the allowed list.',
-    inputSchema: {
-      type: 'object',
-      properties: { method: { type: 'string' }, args: { type: 'object' } },
-      required: ['method'],
+export function slackToolServer(
+  tools: string[],
+  _event: AgentEvent | undefined,
+  token: string,
+): McpServerSpec & { readOnly?: boolean } {
+  const readOnly = !tools.includes('write');
+  const cache = `/tmp/coder-slack-${randomUUID()}`;
+
+  return {
+    name: 'slack',
+    command: 'slack-mcp-server',
+    readOnly,
+    args: ['--transport', 'stdio'],
+    env: {
+      SLACK_MCP_XOXB_TOKEN: token,
+      SLACK_MCP_USERS_CACHE: `${cache}-users.json`,
+      SLACK_MCP_CHANNELS_CACHE: `${cache}-channels.json`,
+      SLACK_MCP_LOG_LEVEL: 'error',
+      SLACK_MCP_ADD_MESSAGE_TOOL: readOnly ? '' : 'true',
+      SLACK_MCP_REACTION_TOOL: readOnly ? '' : 'true',
+      SLACK_MCP_ATTACHMENT_TOOL: 'true',
+      SLACK_MCP_MARK_TOOL: readOnly ? '' : 'true',
     },
-    handler: (a, ctx) =>
-      slackApi(ctx, String(a.method ?? ''), (a.args ?? {}) as Record<string, unknown>),
-  },
-};
+    credentialFields: { env: 'SLACK_MCP_XOXB_TOKEN' },
+  };
+}

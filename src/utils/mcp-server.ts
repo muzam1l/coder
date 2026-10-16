@@ -114,3 +114,74 @@ export function schema(
     ...(required.length ? { required } : {}),
   };
 }
+
+/** Forward an MCP server's schemas, admitting only tools it marks read-only. */
+export async function serveReadOnlyTools(
+  server: { command?: string; args?: string[]; env?: Record<string, string> },
+  io: { input: NodeJS.ReadableStream; write: (line: string) => void } = {
+    input: process.stdin,
+    write: line => process.stdout.write(`${line}\n`),
+  },
+): Promise<void> {
+  const { spawn } = await import('node:child_process');
+  if (!server.command) throw new Error('A stdio MCP server is required');
+  const child = spawn(server.command, server.args ?? [], {
+    env: { ...process.env, ...server.env },
+    stdio: ['pipe', 'pipe', 'inherit'],
+  });
+  const allowed = new Set<string>();
+  const lists = new Set<string | number>();
+  const input = readline.createInterface({ input: io.input, terminal: false });
+  const output = readline.createInterface({ input: child.stdout, terminal: false });
+  const closed = new Promise<void>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', code => code ? reject(new Error(`MCP server exited with status ${code}`)) : resolve());
+  });
+  const stop = () => { child.kill(); input.close(); };
+  process.once('SIGTERM', stop);
+  process.once('SIGINT', stop);
+  let shutdown: ReturnType<typeof setTimeout> | undefined;
+  void closed.catch(() => input.close());
+  child.stdin.on('error', () => input.close());
+  const pump = (async () => {
+    for await (const line of output) {
+      const message = JSON.parse(line);
+      if (message.method === 'notifications/tools/list_changed') allowed.clear();
+      if (lists.delete(message.id) && message.result) {
+        message.result.tools = (message.result.tools ?? []).filter(
+          (tool: { name?: unknown; annotations?: { readOnlyHint?: boolean } }) =>
+            typeof tool.name === 'string' && tool.annotations?.readOnlyHint === true,
+        );
+        for (const tool of message.result.tools) allowed.add(tool.name);
+      }
+      io.write(JSON.stringify(message));
+    }
+    input.close();
+  })();
+  void pump.catch(() => input.close());
+  try {
+    for await (const line of input) {
+      if (!line.trim()) continue;
+      const message = JSON.parse(line);
+      if (message.method === 'tools/call' && !allowed.has(message.params?.name)) {
+        io.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32601, message: 'Tool is not marked read-only' } }));
+        continue;
+      }
+      if (message.method === 'tools/list') {
+        if (!message.params?.cursor) allowed.clear();
+        lists.add(message.id);
+      }
+      child.stdin.write(`${line}\n`);
+    }
+    child.stdin.end();
+    shutdown = setTimeout(() => child.kill('SIGKILL'), 2000);
+    await Promise.all([pump, closed]);
+  } finally {
+    if (shutdown) clearTimeout(shutdown);
+    process.removeListener('SIGTERM', stop);
+    process.removeListener('SIGINT', stop);
+    child.kill('SIGKILL');
+    input.close();
+    output.close();
+  }
+}

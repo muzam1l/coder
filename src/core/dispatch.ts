@@ -643,6 +643,7 @@ async function attemptOnce(
     name: taskExtras.name ?? null,
     system: opts.system ?? null,
     systemPrompt: taskSystemPrompt({
+      cwd,
       ...opts.agentPrompt,
       instructions: opts.system ?? undefined,
       conversation: opts.conversation,

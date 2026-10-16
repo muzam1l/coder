@@ -9,10 +9,9 @@ import { ask, canPrompt, pick, pickDetailed } from '../../tui/prompt';
 import { baseOptions, flag, str } from '../../utils/args';
 import { command } from '../../cli';
 
-const PRESET_HINTS: Record<Preset, string> = {
-  observe: 'read the platform only',
-  comment: 'also post replies and reactions',
-  write: 'also push, branch, and open or merge pull requests',
+const PRESET_LABELS: Record<Preset, string> = {
+  read: 'Read-only',
+  write: 'Read-write',
 };
 
 /** What it made and the next steps. */
@@ -90,11 +89,11 @@ async function askPicks(id: string): Promise<AgentPicks> {
   const [tools] = integrations.length
     ? await pick<Preset>({
         title: 'Tools',
-        hint: 'What the agent may do on its platforms; comment suits most agents.',
-        selected: ['comment'],
-        options: PRESETS.map(value => ({ value, hint: PRESET_HINTS[value] })),
+        hint: 'What the agent may do on its platforms; Read-write allows all platform tools.',
+        selected: ['write'],
+        options: PRESETS.map(value => ({ value, label: PRESET_LABELS[value] })),
       })
-    : ['comment' as Preset];
+    : ['write' as Preset];
   const name = await ask('Display name', id, undefined, 'Shown in replies and app names.');
   return { ...(name !== id ? { name } : {}), integrations, events, matches, tools: tools! };
 }
@@ -115,7 +114,7 @@ export const commandAgentInit = command({
         '--events <a,b>',
         'events that start tasks, applied to each integration that has them (default: mention)',
       ],
-      ['--tools <preset>', 'observe, comment, or write (default: comment)'],
+      ['--tools <preset>', 'read or write (default: write)'],
       ['--name <text>', 'display name used in replies (default: the id)'],
       ['--description <text>', 'one line for agent list'],
       ['--permissions <mode>', 'engine permission mode (default: read-only)'],
@@ -124,7 +123,7 @@ export const commandAgentInit = command({
     examples: [
       ['coder agent init', 'answer the questions, id included'],
       [
-        'coder agent init triage --integrations github --events issue,mention --tools comment',
+        'coder agent init triage --integrations github --events issue,mention --tools read',
         'no questions',
       ],
     ],
