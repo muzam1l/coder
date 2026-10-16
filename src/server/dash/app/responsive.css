@@ -21,6 +21,10 @@
   .head .lead {
     white-space: normal;
   }
+  /* a notice's buttons wrap under its text */
+  .notice:not(.slim) > .grow {
+    flex-basis: calc(100% - 28px);
+  }
   .fields,
   .fields.three,
   .agent-form,

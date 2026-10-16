@@ -86,7 +86,8 @@ const sourceIcon = (source: string) => SOURCE_ICONS[source] ?? iPlug;
 const DELTA_ROWS = 200;
 
 /** How long ago, under a day; the date after that. */
-function ago(value: number, now: number, tz: string) {
+function ago(value: number | undefined, now: number, tz: string) {
+  if (value === undefined) return 'Not available';
   const minutes = Math.round((now - value) / 60_000);
   if (minutes < 1) return 'just now';
   if (minutes < 60) return `${minutes} min ago`;
@@ -116,7 +117,7 @@ function TaskRowView({
 }) {
   const org = useOrg();
   const elapsed =
-    task.startedAt === undefined ? undefined : (task.finishedAt ?? now) - task.startedAt;
+    taskActive(task) && task.startedAt !== undefined ? now - task.startedAt : task.lastTurnMs;
   const source = task.task.event?.integration ?? task.task.source ?? 'dashboard';
   const kind = task.task.event?.type ?? (task.task.flow === 'default' ? undefined : task.task.flow);
 
@@ -154,8 +155,8 @@ function TaskRowView({
       <td>
         <Status status={task.status} />
       </td>
-      <td class="when" title={formatDate(task.createdAt, tz)}>
-        {ago(task.createdAt, now, tz)}
+      <td class="when" title={formatDate(task.lastActivityAt, tz)}>
+        {ago(task.lastActivityAt, now, tz)}
       </td>
       <td class="num">{formatDuration(elapsed)}</td>
       <td>
@@ -510,7 +511,7 @@ export function TasksList({
                 <tr>
                   <th>Task</th>
                   <th>Status</th>
-                  <th>Created</th>
+                  <th>Last activity</th>
                   <th class="num">Duration</th>
                   <th>Source</th>
                 </tr>

@@ -335,7 +335,7 @@ export interface EventSpec {
   on?: ChatRoute;
   /** Fires on every message and usually wants a text filter; listed after the other events and off by default. */
   noisy?: true;
-  /** A person asks the agent directly; only linked workspace members run it. */
+  /** A person asks the agent directly. */
   addressed?: true;
 }
 

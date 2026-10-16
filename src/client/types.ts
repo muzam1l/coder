@@ -43,6 +43,10 @@ export interface TaskRow {
   startedAt?: number;
   finishedAt?: number;
   updatedAt: number;
+  /** When it last did anything, its latest turn included. */
+  lastActivityAt?: number;
+  /** How long its latest turn ran. */
+  lastTurnMs?: number;
   /** A task the CLI runs on this machine, listed beside the server's. */
   local?: boolean;
   /** The first lines of its log, when read one task at a time. */
@@ -678,7 +682,6 @@ export interface AgentEvent {
     owner: string;
     name: string;
     cloneUrl: string;
-    ref: string;
     defaultBranch: string;
   };
 }

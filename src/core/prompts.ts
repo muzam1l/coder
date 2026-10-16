@@ -234,9 +234,11 @@ export function reactionsPrompt(
   return data('event', JSON.stringify(json));
 }
 
-/** A dashboard or CLI prompt; a pull request's repository leads it. */
-export function requestPrompt(prompt: string, repo?: AgentEvent['repo']): string {
-  return repo ? `**Repo:** ${repo.owner}/${repo.name}\n\n${prompt}` : prompt;
+/** A dashboard or CLI prompt; its repository leads it, and a selected pull request is named for the tools. */
+export function requestPrompt(prompt: string, repo?: AgentEvent['repo'], pr?: number): string {
+  if (!repo) return prompt;
+  const pull = pr === undefined ? '' : `\n**Pull request:** ${repo.owner}/${repo.name}#${pr}`;
+  return `**Repo:** ${repo.owner}/${repo.name}${pull}\n\n${prompt}`;
 }
 
 /** Earlier messages pasted before a turn when the engine conversation holding them is gone. */

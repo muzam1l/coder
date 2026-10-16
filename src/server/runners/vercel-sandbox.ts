@@ -116,11 +116,14 @@ export function nearestRegion(databaseUrl: string | undefined): string | undefin
   return Object.entries(REGIONS).find(([aws]) => host.includes(aws))?.[1];
 }
 
+/** Where the sandbox firewall injects a variable: at one host, in one header, with a value prefix. */
+export type BrokerRule = { name: string; host: string; header: string; prefix: string };
+
 /** API keys the sandbox firewall injects, so the key never enters the sandbox. */
-export const BROKERED: Record<string, { host: string; header: string; prefix: string }> = {
-  ANTHROPIC_API_KEY: { host: 'api.anthropic.com', header: 'x-api-key', prefix: '' },
-  OPENAI_API_KEY: { host: 'api.openai.com', header: 'authorization', prefix: 'Bearer ' },
-};
+export const BROKERED: BrokerRule[] = [
+  { name: 'ANTHROPIC_API_KEY', host: 'api.anthropic.com', header: 'x-api-key', prefix: '' },
+  { name: 'OPENAI_API_KEY', host: 'api.openai.com', header: 'authorization', prefix: 'Bearer ' },
+];
 export const BROKERED_PLACEHOLDER = 'brokered';
 
 /** Each engine's model API, and the account hosts a subscription uses and signs in with. */
@@ -144,13 +147,19 @@ export function engineHosts(engine: string, env: Record<string, string>): string
 }
 
 /** The machine firewall: brokered keys per host; with `hosts`, nothing else is reachable. */
-export function networkPolicy(credential: Record<string, string> = {}, hosts?: string[]) {
-  const rules = Object.entries(BROKERED)
-    .filter(([name]) => credential[name])
-    .map(([name, rule]) => [
-      rule.host,
-      [{ transform: [{ headers: { [rule.header]: `${rule.prefix}${credential[name]}` } }] }],
-    ]);
+export function networkPolicy(
+  credential: Record<string, string> = {},
+  hosts?: string[],
+  brokered: BrokerRule[] = BROKERED,
+) {
+  const headers: Record<string, Record<string, string>> = {};
+  for (const rule of brokered)
+    if (credential[rule.name])
+      (headers[rule.host] ??= {})[rule.header] = `${rule.prefix}${credential[rule.name]}`;
+  const rules = Object.entries(headers).map(([host, value]) => [
+    host,
+    [{ transform: [{ headers: value }] }],
+  ]);
   if (!hosts)
     return rules.length ? { allow: { ...Object.fromEntries(rules), '*': [] } } : undefined;
   const ips = [...new Set(hosts.filter(host => net.isIP(host)))];
@@ -497,6 +506,7 @@ export class VercelSandboxRunner implements Runner {
       timeoutMs?: number;
       waitUntil?: (work: Promise<unknown>) => void;
       hosts?: string[];
+      brokered?: BrokerRule[];
     } = {},
   ): Promise<string> {
     env = {
@@ -508,6 +518,7 @@ export class VercelSandboxRunner implements Runner {
     const policy = networkPolicy(
       credential,
       options.hosts && [...startHosts(env), ...options.hosts],
+      options.brokered,
     );
     const command = (env: Record<string, string>) => ({
       cmd: 'sh',

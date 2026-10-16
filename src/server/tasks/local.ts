@@ -61,7 +61,7 @@ import { nativeToolEnvironment, type ReplyEndpoint } from '../../agent/mcp';
 import { connectionWarnings } from './logs';
 import { assertEnabled, check, TaskInputError, taskCwd, type NewTask } from './create';
 import { rememberPost } from './conversation';
-import { sessionKey, pushInbox, type TaskFence, type InboxEntry, type InboxAck } from './queue';
+import { sessionKey, pushInbox, taskTimes, type TaskFence, type InboxEntry, type InboxAck } from './queue';
 import { kick, scheduleKick } from './kick';
 import { chooseRunner } from '../runners';
 import { syncLocalAgents } from '../store/local';
@@ -121,7 +121,7 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
       ...(!ACTIVE_STATUSES.includes(task.status) ? { finishedAt: at(task.completedAt) } : {}),
     });
   const flow = task.flowRunId ? readFlowRecord(task.flowRunId)?.name : undefined;
-  return {
+  const status: TaskStatus = {
     task: {
       id: task.id,
       source: (task.source ?? 'cli') as TaskSource,
@@ -182,6 +182,8 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
     local: true,
     ...(detail ? { turns } : {}),
   };
+
+  return { ...status, ...taskTimes(status) };
 }
 
 /** Local tasks after the CLI's auto-archive sweep, without the engine tasks that server tasks ran on. */

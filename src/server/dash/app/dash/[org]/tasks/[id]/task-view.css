@@ -50,6 +50,10 @@
   .head.stuck:has(.fact) .meta {
     display: none;
   }
+  .reply-box,
+  .reply-box textarea {
+    min-width: 0;
+  }
 }
 .agent-link {
   display: inline-flex;

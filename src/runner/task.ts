@@ -142,8 +142,7 @@ export async function checkout(
   const repo = task.event?.repo;
   if (!repo) return root;
   const cwd = path.join(root, 'repo');
-  if (!validRef(repo.ref) || !validRef(repo.defaultBranch))
-    throw new Error('Invalid repository ref');
+  if (!validRef(repo.defaultBranch)) throw new Error('Invalid repository ref');
   const clone = new URL(repo.cloneUrl);
   const hosts = INTEGRATIONS[task.event!.integration]?.repos?.cloneHosts ?? [];
   if (clone.protocol !== 'https:' || !hosts.includes(clone.hostname))
@@ -190,7 +189,6 @@ export async function checkout(
           ['-C', cache, 'fetch', '--depth', '50', 'origin', repo.defaultBranch],
           gitOptions,
         );
-        await exec('git', ['-C', cache, 'fetch', '--depth', '50', 'origin', repo.ref], gitOptions);
         await exec(
           'git',
           ['-C', cache, 'worktree', 'add', '--detach', cwd, 'FETCH_HEAD'],
@@ -205,13 +203,12 @@ export async function checkout(
       .then(() => true)
       .catch(() => false);
     if (!cloned) await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
-    await exec('git', ['-C', cwd, 'fetch', '--depth', '50', 'origin', repo.ref], gitOptions);
-    await exec('git', ['-C', cwd, 'checkout', '--detach', 'FETCH_HEAD'], gitOptions);
     await exec(
       'git',
       ['-C', cwd, 'fetch', '--depth', '50', 'origin', repo.defaultBranch],
       gitOptions,
     );
+    await exec('git', ['-C', cwd, 'checkout', '--detach', 'FETCH_HEAD'], gitOptions);
   } finally {
     await fs.rm(credentialDir, { recursive: true, force: true });
   }
@@ -366,14 +363,7 @@ export async function prepareRepo(id: string, root: string): Promise<{ sha: stri
   const remote = await taskRequest<RemoteTask>(auth.server, auth.token, id);
   const event = remote.task.event;
   if (!event?.repo) throw new Error('The task has no repository');
-  const cwd = await checkout(
-    {
-      ...remote.task,
-      event: { ...event, repo: { ...event.repo, ref: event.repo.defaultBranch } },
-    },
-    root,
-    remote.tokens[event.integration],
-  );
+  const cwd = await checkout(remote.task, root, remote.tokens[event.integration]);
   for (const [lock, command, args] of INSTALLS) {
     if (!(await fs.stat(path.join(cwd, lock)).catch(() => undefined))) continue;
     await exec(command, args, { cwd, maxBuffer: 64 * 1024 * 1024 }).catch(() => {});

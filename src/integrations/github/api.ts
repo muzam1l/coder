@@ -212,7 +212,6 @@ export async function githubRepository(
     owner: data.owner.login,
     name: data.name,
     cloneUrl: data.clone_url,
-    ref: data.default_branch,
     defaultBranch: data.default_branch,
   };
 }

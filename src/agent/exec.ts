@@ -806,7 +806,7 @@ export function defaultTask(
       ? event
         ? eventPrompt([event], user)
         : ''
-      : requestPrompt(task.prompt, event?.repo);
+      : requestPrompt(task.prompt, event?.repo, event && integration?.repos?.pullRequest(event));
 
   return {
     agentPrompt: {

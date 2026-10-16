@@ -154,6 +154,9 @@
   .vsearch {
     position: static;
   }
+  .save {
+    justify-content: flex-start;
+  }
 }
 .fields > .picked {
   grid-column: 1 / -1;

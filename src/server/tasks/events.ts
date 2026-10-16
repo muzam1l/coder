@@ -48,7 +48,6 @@ const PENDING_TTL_MS = 60_000;
 
 export const DELIVERY_TTL_MS = 24 * 60 * 60 * 1000;
 const CONTEXT_LIMIT = 256 * 1024;
-const LINK_PROMPT_TTL_MS = 24 * 60 * 60 * 1000;
 /** A thread hears that no model is configured once in this long. */
 const SETUP_NOTICE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const SETTING_KEYS = ['model', 'engine', 'effort'] as const;
@@ -132,14 +131,6 @@ async function linkedMember(ctx: ServerContext, integration: Integration, event:
   return user?.organizations?.includes(ctx.organizationId) ? user : undefined;
 }
 
-function outsiderEvent(
-  ctx: ServerContext,
-  member: unknown,
-  canWrite: boolean | undefined,
-): boolean {
-  return ctx.auth ? !member : canWrite === false;
-}
-
 /** Whether the actor may write where the event happened, as the platform says; `null` when the check failed, which counts as no, and a platform without one answers nothing. */
 async function writeCheck(
   ctx: ServerContext,
@@ -159,50 +150,29 @@ async function writeCheck(
   });
 }
 
-/** The link that makes an actor known, at most once a day each unless they asked for something that needs it. */
+/** The link that makes an actor known. */
 async function sendLink(
   ctx: ServerContext,
   integration: Integration,
   installation: Installation,
   event: AgentEvent,
   replies: Replies,
-  now: number,
-  always = false,
 ): Promise<void> {
   const base = ctx.config.publicUrl?.replace(/\/$/, '');
-  const owner = randomUUID();
-  const first =
-    always ||
-    (await ctx.store.create(
-      'delivery',
-      `link:${integration.id}:${event.actor.id}`,
-      { at: now, owner },
-      { ttlMs: LINK_PROMPT_TTL_MS },
-    ));
-  if (!base || !first) return;
+  if (!base) return;
   const text = (url: string) => `Link your Coder account so I can work for you here: ${url}`;
   // A public reply carries no secret: the platform's own sign-in proves who follows the link.
-  try {
-    if (integration.auth.user) {
-      await replies.post(
-        text(
-          `${base}/connect/${integration.id}?installation=${encodeURIComponent(installation.id)}`,
-        ),
-      );
-      return;
-    }
-    const link = await issueLinkToken(ctx, {
-      platform: integration.id,
-      platformUserId: event.actor.id,
-    });
-    await replies.whisper(text(`${base}/connect?token=${encodeURIComponent(link)}`));
-  } catch (error) {
-    if (!always)
-      await ctx.store
-        .updateDelivery(`link:${integration.id}:${event.actor.id}`, owner, undefined)
-        .catch(() => {});
-    throw error;
+  if (integration.auth.user) {
+    await replies.post(
+      text(`${base}/connect/${integration.id}?installation=${encodeURIComponent(installation.id)}`),
+    );
+    return;
   }
+  const link = await issueLinkToken(ctx, {
+    platform: integration.id,
+    platformUserId: event.actor.id,
+  });
+  await replies.whisper(text(`${base}/connect?token=${encodeURIComponent(link)}`));
 }
 
 /** The integrations the agent declares that the event can reach, found without minting. */
@@ -484,7 +454,7 @@ async function claimed(
   if (isSettingsCommand(event)) {
     // Installation-wide settings change only for a linked member of this workspace.
     if (ctx.auth && changesSettings(event) && !(await linkedMember(ctx, integration, event)))
-      return effect(() => sendLink(ctx, integration, installation, event, replies, now(), true));
+      return effect(() => sendLink(ctx, integration, installation, event, replies));
     return effect(() =>
       applySettings(event, installation, ctx.store)
         .then(reply => replies.whisper(reply))
@@ -492,27 +462,12 @@ async function claimed(
     );
   }
 
-  // Dispatch reads only: matching, usage, history and write checks, minting only on a cache miss. Execution mints the task's own token.
+  // Dispatch reads only: matching, usage, history and the write check, minting only on a cache miss. Execution mints the task's own token.
   const tokens = dispatchTokens(ctx, integration, installation, event, credentials);
   const [agent, member] = await Promise.all([
     ctx.loadAgent(app, installation, event, tokens, claim?.loaded),
     ctx.auth && event.actor.id ? linkedMember(ctx, integration, event) : undefined,
   ]);
-  // Someone asking the agent directly is a linked member of this workspace, or someone the platform lets write there.
-  const addressed = Boolean(
-    ctx.auth && event.actor.id && integration.events[event.type]?.addressed,
-  );
-  // A failed check drops the event and says so, so every prompt gets an answer.
-  const unchecked = () =>
-    effect(async () => {
-      await replies.problem('Coder could not check your access to this conversation.');
-    });
-  const trusted =
-    addressed && !member ? await writeCheck(ctx, integration, event, tokens) : undefined;
-  if (trusted === null) return unchecked();
-  if (addressed && !member && !trusted)
-    return effect(() => sendLink(ctx, integration, installation, event, replies, now()));
-
   const match = matchAgent(event, agent);
   if (!match) {
     // A message the agent's wiring filters out still shows under `since` on its next turn.
@@ -526,6 +481,14 @@ async function claimed(
       });
     return {};
   }
+
+  // Only someone the platform lets write where the event happened starts or steers a task; a failed check says so, so every prompt gets an answer.
+  const canWrite = await writeCheck(ctx, integration, event, tokens);
+  if (canWrite === null)
+    return effect(async () => {
+      await replies.problem('Coder could not check your access to this conversation.');
+    });
+  if (canWrite === false) return {};
 
   const local = (task: AgentTask, fallbackText?: string, personal?: string) =>
     handoff(
@@ -579,20 +542,7 @@ async function claimed(
   const current = talk
     ? (state?.status ?? (await reservedConversation(ctx, described, agent.id)))
     : undefined;
-  if (current) {
-    // The same gate as a new event: a linked member or a platform writer steers; write tools need the write check.
-    const reads = new Set(integration.tools.presets.observe);
-    const writes = (current.task.tools[event.integration] ?? []).some(name => !reads.has(name));
-    const allowed =
-      trusted ||
-      (Boolean(member) && !writes) ||
-      (await writeCheck(ctx, integration, event, tokens));
-    if (allowed === null) return unchecked();
-
-    return allowed !== false
-      ? effect(() => steerConversation(ctx, current, described, user, now, state))
-      : {};
-  }
+  if (current) return effect(() => steerConversation(ctx, current, described, user, now, state));
 
   // A 1:1 conversation runs on the requester's own credentials; a shared one, where anyone may steer, on the workspace's only.
   const personal = !talk || described.chat?.thread.isDM === true;
@@ -613,12 +563,7 @@ async function claimed(
       agent,
       member ?? null,
     ),
-    connectionGrants(
-      ctx,
-      requester,
-      agent.usage?.connections,
-      Boolean(ctx.auth && !member && !trusted),
-    ),
+    connectionGrants(ctx, requester, agent.usage?.connections),
     actAs === 'requester'
       ? requesterToken(ctx, integration, event, credentials).catch(() => undefined)
       : undefined,
@@ -650,24 +595,10 @@ async function claimed(
     });
   }
 
-  const reads = new Set(integration.tools.presets.observe);
-  const own = match.tools[event.integration] ?? [];
-  const fallback = !!ctx.auth && actAs === 'requester' && !personalToken;
-  const writes = own.some(name => !reads.has(name));
-  const check = ctx.auth
-    ? member && (writes || fallback)
-    : writes ||
-      grants.length > 0 ||
-      Object.entries(match.tools).some(
-        ([id, names]) => id !== event.integration && declared.has(id) && names.length,
-      );
-  const checked =
-    trusted ?? (check ? await writeCheck(ctx, integration, event, tokens) : undefined);
-  const canWrite = checked === null ? false : checked;
-  const outsider = outsiderEvent(ctx, member || trusted, canWrite);
-  const fallbackText = fallback
-    ? `Acting as the app because the requester's account has no usable ${integration.name} token. ${canWrite === true && !outsider ? 'The platform write check passed.' : 'Only reads are allowed.'} [Connect your account](${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${dashPath(await slug(), '/settings/connections')}).`
-    : undefined;
+  const fallbackText =
+    ctx.auth && actAs === 'requester' && !personalToken
+      ? `Acting as the app because the requester's account has no usable ${integration.name} token. [Connect your account](${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${dashPath(await slug(), '/settings/connections')}).`
+      : undefined;
   if (fallbackText)
     context.instructions = [
       context.instructions,
@@ -676,13 +607,6 @@ async function claimed(
     ]
       .filter(Boolean)
       .join('\n\n');
-
-  if (outsider) {
-    const comments = new Set(integration.tools.presets.comment);
-    for (const id of Object.keys(match.tools))
-      match.tools[id] = id === event.integration ? own.filter(name => comments.has(name)) : [];
-  } else if ((member && canWrite === false) || (fallback && canWrite !== true))
-    match.tools[event.integration] = own.filter(name => reads.has(name));
 
   const tools = Object.fromEntries(
     Object.entries(match.tools)
@@ -722,7 +646,7 @@ async function claimed(
     ...(agent.files ? { files: agent.files } : {}),
     usage: { ...agent.usage, engine },
     tools,
-    connections: outsider ? [] : grants,
+    connections: grants,
     ...(Object.keys(toolScopes).length ? { toolScopes } : {}),
     ...(Object.keys(context).length ? { context } : {}),
   };

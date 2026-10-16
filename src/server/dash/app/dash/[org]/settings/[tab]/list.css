@@ -63,6 +63,11 @@
 .add-foot > .btn {
   margin-left: auto;
 }
+@media (max-width: 760px) {
+  .add-foot > .btn {
+    margin-left: 0;
+  }
+}
 .add-form .select:has([aria-label="Kind"]),
 .add-form .select:has([aria-label="Engine"]) {
   min-width: 190px;

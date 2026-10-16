@@ -2,7 +2,12 @@ import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { eventOptions } from '../../agent/definition';
 import { decryptCredential, decryptSecret, encryptSecret } from '../store/secrets';
-import { BROKERED, BROKERED_PLACEHOLDER, engineHosts } from '../runners/vercel-sandbox';
+import {
+  BROKERED,
+  BROKERED_PLACEHOLDER,
+  engineHosts,
+  type BrokerRule,
+} from '../runners/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
 import type { AgentEvent, InstallationLink, Installation } from '../../agent/types';
 import type { EngineCredential, Store, TaskStatus } from '../store/types';
@@ -473,15 +478,18 @@ export async function taskContext(
     connectionSecrets,
   };
   if (task.runner !== 'vercel-sandbox') return common;
-  const brokered = (credential: EngineCredential) => ({
-    ...credential,
-    env: Object.fromEntries(
-      Object.entries(credential.env).map(([name, value]) => [
-        name,
-        name in BROKERED ? BROKERED_PLACEHOLDER : value,
-      ]),
-    ),
-  });
+  const brokered = (credential: EngineCredential) => {
+    const names = new Set(brokeredKeys(config, task, credential).map(rule => rule.name));
+    return {
+      ...credential,
+      env: Object.fromEntries(
+        Object.entries(credential.env).map(([name, value]) => [
+          name,
+          names.has(name) ? BROKERED_PLACEHOLDER : value,
+        ]),
+      ),
+    };
+  };
   return {
     ...common,
     credential: brokered(credential),
@@ -543,6 +551,32 @@ export async function taskEngineCredentials(ctx: ServerContext, task: TaskStatus
 
 const hostOf = (url: string | undefined) =>
   url && URL.canParse(url) ? [new URL(url).hostname] : [];
+
+/** What a sandbox firewall injects for a credential: the engine API keys at their hosts, and for a custom model its key as a bearer at the endpoints the task may use. */
+export function brokeredKeys(
+  config: Partial<CoderConfig>,
+  task: Pick<TaskStatus['task'], 'usage'>,
+  credential: EngineCredential,
+): BrokerRule[] {
+  if (credential.engine !== 'custom') return BROKERED;
+  const models = config.models ?? {};
+  const selected = task.usage?.model ? models[task.usage.model] : undefined;
+  const entries = selected && 'baseUrl' in selected ? [selected] : Object.values(models);
+  const custom = entries.flatMap(entry =>
+    'baseUrl' in entry && entry.envKey && URL.canParse(entry.baseUrl)
+      ? [
+          {
+            name: entry.envKey,
+            host: new URL(entry.baseUrl).hostname,
+            header: 'authorization',
+            prefix: 'Bearer ',
+          },
+        ]
+      : [],
+  );
+
+  return [...BROKERED, ...custom];
+}
 
 /** Hosts a task below `auto` may reach from its machine: engine, integrations, connections, MCP. */
 export async function taskHosts(

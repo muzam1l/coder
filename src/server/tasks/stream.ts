@@ -10,7 +10,7 @@ import { localLog, localTask, localTasks, sweepLocalQueue } from './local';
 import { readLog } from './logs';
 import { inspectTask } from './kick';
 import { DONE, localRows } from './admin';
-import { StoreQueue, TOMBSTONE_MS } from './queue';
+import { StoreQueue, TOMBSTONE_MS, taskTimes } from './queue';
 import { runnerItems } from '../settings/runners';
 
 export async function taskStream(
@@ -179,6 +179,7 @@ function eventState(status: TaskStatus, asked: boolean) {
     createdAt,
     startedAt,
     finishedAt,
+    ...taskTimes(status),
     ...(asked
       ? {
           result: status.result ?? null,

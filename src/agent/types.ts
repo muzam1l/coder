@@ -107,7 +107,6 @@ export interface AgentEvent {
     owner: string;
     name: string;
     cloneUrl: string;
-    ref: string;
     defaultBranch: string;
   };
 }

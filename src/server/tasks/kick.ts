@@ -2,7 +2,8 @@ import type { TaskStatus } from '../store/types';
 import { SERVER_LIMITS } from '../limits';
 import { scoped, type ServerContext } from '../context';
 import { loadedStore } from '../store/primed';
-import { taskCredential, taskEngineCredentials, taskHosts } from './context';
+import { brokeredKeys, taskCredential, taskEngineCredentials, taskHosts } from './context';
+import { taskConfig } from '../settings/config';
 import type { ClaimedTask, TaskFence } from './queue';
 import { taskRunner, type Runner } from '../runners';
 import { startQueuedLocalTask, inspectLocalTask, localTasks, sweepLocalQueue } from './local';
@@ -287,6 +288,9 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
                 hosts: hosts.some(value => value === undefined)
                   ? undefined
                   : [...new Set(hosts.flatMap(value => value ?? []))],
+                brokered: await taskConfig(taskCtx.store).then(config =>
+                  credentials.flatMap(value => brokeredKeys(config, status.task, value)),
+                ),
               }
             : {}),
         },

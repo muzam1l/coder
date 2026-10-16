@@ -111,6 +111,9 @@
   .runner-pick > * {
     flex: 1 1 100%;
   }
+  .runner-pick > .runner-foot {
+    justify-content: flex-start;
+  }
 }
 .runner-help {
   flex: 1 1 100%;

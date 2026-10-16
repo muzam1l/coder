@@ -40,8 +40,7 @@ type Pull = {
   body?: string | null;
   draft?: boolean;
   user?: User;
-  head?: { sha?: string };
-  base?: { sha?: string };
+  head?: { repo?: { full_name?: string } | null };
 };
 type Issue = {
   number?: number;
@@ -114,11 +113,10 @@ function event(
     body?: string;
     number?: number;
     kind?: 'pull' | 'issue';
-    headSha?: string;
   },
 ): AgentEvent | undefined {
   const id = payload.installation?.id;
-  const repo = checkout(payload, input.headSha);
+  const repo = checkout(payload);
   const user = input.user ?? payload.sender;
   if (id === undefined || !repo || !input.number) return;
   const role = user?.author_association;
@@ -142,15 +140,14 @@ function event(
   };
 }
 
-/** The payload's repository as a task checks it out, at `ref` or its default branch. */
-function checkout(payload: Payload, ref?: string): NonNullable<AgentEvent['repo']> | undefined {
+/** The payload's repository as a task checks it out, at its default branch. */
+function checkout(payload: Payload): NonNullable<AgentEvent['repo']> | undefined {
   const repo = payload.repository;
   return repo?.owner?.login && repo.name && repo.clone_url && repo.default_branch
     ? {
         owner: repo.owner.login,
         name: repo.name,
         cloneUrl: repo.clone_url,
-        ref: ref ?? repo.default_branch,
         defaultBranch: repo.default_branch,
       }
     : undefined;
@@ -188,8 +185,8 @@ export function parseGithubEvent(
       pr.draft ||
       (action !== 'review_requested' && agent(pr.user)) ||
       !pr.number ||
-      !pr.head?.sha ||
-      !pr.base?.sha
+      // A fork's pull request starts nothing.
+      pr.head?.repo?.full_name !== payload.repository?.full_name
     )
       return [];
     const parsed = event(req, app, payload, 'pull_request', {
@@ -197,7 +194,6 @@ export function parseGithubEvent(
       body: text(pr.title, pr.body),
       number: pr.number,
       kind: 'pull',
-      headSha: pr.head.sha,
     });
     return parsed ? [parsed] : [];
   }
@@ -422,7 +418,7 @@ export const github: Integration = {
     'A conversation is an issue or pull request with its comments, or one inline review comment thread.',
     'issue_read reads an issue and its comments. pull_request_read reads a pull request: get, get_diff and get_files for the change, get_comments for its conversation, get_reviews and get_review_comments for reviews and inline comments.',
     'Review findings are inline review comments marked coder-review:fp.',
-    "A task on a pull request starts on the default branch; check out the pull request's head before changing code.",
+    "A task starts on the default branch; a pull request's changes are read with pull_request_read. Check out and push a pull request's branch only when it is in this repository and the request asks for changes; a fork pull request gets reads and comments only.",
     'Replies are GitHub Markdown. Cite repository file paths when discussing code; link the pull request after making changes.',
   ].join('\n'),
   sample: 'github:owner/repo:1',

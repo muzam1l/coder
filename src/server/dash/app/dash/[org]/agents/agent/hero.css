@@ -79,4 +79,15 @@
     height: 48px;
     font-size: 20px;
   }
+  .hero-side {
+    justify-items: start;
+  }
+  .hero .handles {
+    text-align: left;
+  }
+  @supports (anchor-scope: --menu) {
+    .hero .more > .more-list {
+      inset: anchor(bottom) auto auto anchor(left);
+    }
+  }
 }

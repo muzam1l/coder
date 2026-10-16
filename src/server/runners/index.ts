@@ -16,6 +16,7 @@ import { HttpRunner } from './http';
 import { LocalRunner } from './local';
 import {
   VercelSandboxRunner,
+  type BrokerRule,
   type VercelSandboxOptions,
   type SnapshotStore,
 } from './vercel-sandbox';
@@ -73,8 +74,13 @@ fetch(url, {
 `;
 
 export function startCommand(tools = '', preflight = '', runtime = 'bun'): string {
-  const extract =
-    'rm -rf .coder-runner/package && tar -xzf .coder-runner/package.tgz -C .coder-runner';
+  // The unpacked package answers `coder` on the engine's PATH, so flows run the same verified build.
+  const extract = [
+    'rm -rf .coder-runner/package && tar -xzf .coder-runner/package.tgz -C .coder-runner',
+    'mkdir -p .coder-runner/bin',
+    `printf '#!/bin/sh\nexec ${runtime} "$(dirname "$0")/../package/bin/coder.mjs" "$@"\n' > .coder-runner/bin/coder`,
+    'chmod +x .coder-runner/bin/coder',
+  ].join(' && ');
   const verified = `node -e 'const fs=require("fs"),crypto=require("crypto");process.exit(/^[a-f0-9]{64}$/.test(process.env.CODER_RUNNER_HASH||"")&&crypto.createHash("sha256").update(fs.readFileSync(".coder-runner/package.tgz")).digest("hex")===process.env.CODER_RUNNER_HASH?0:1)'`;
   const install = [
     'mkdir -p .coder-runner',
@@ -88,7 +94,7 @@ export function startCommand(tools = '', preflight = '', runtime = 'bun'): strin
   const run = [
     ...(preflight ? [preflight] : []),
     `if ${prepared}; then ${extract}; else ${install}; fi`,
-    `CODER_NO_UPDATE_CHECK=1 ${runtime} .coder-runner/package/bin/coder.mjs agent run --task "$1"`,
+    `PATH="$PWD/.coder-runner/bin:$PATH" CODER_NO_UPDATE_CHECK=1 ${runtime} .coder-runner/package/bin/coder.mjs agent run --task "$1"`,
   ].join(' && ');
 
   return [
@@ -368,6 +374,8 @@ export interface Runner {
       waitUntil?: (work: Promise<unknown>) => void;
       /** The only hosts a firewalled machine reaches besides its start; absent allows all. */
       hosts?: string[];
+      /** Variables of `credential` the machine's firewall injects by host, so their values never enter it. */
+      brokered?: BrokerRule[];
     },
   ): Promise<string>;
   status(handle: string): Promise<RunnerStatus>;

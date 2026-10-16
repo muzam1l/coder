@@ -191,7 +191,7 @@ async function repoEvent(
     actor: { id: requester ?? '' },
     text: input.prompt ?? '',
     ...(input.pr ? { chat: { thread: integration.repos!.pullRequestThread(repo, input.pr) } } : {}),
-    repo: input.pr ? { ...found, ref: `refs/pull/${input.pr}/head` } : found,
+    repo: found,
   };
   return { event, author: integration.author?.(app.name) ?? app.name };
 }

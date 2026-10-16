@@ -478,6 +478,9 @@ export interface TaskStatus {
   /** Set by a cancel request while the task runs; the worker stops it at the next check. */
   cancelRequestedAt?: number;
   updatedAt: number;
+  /** Derived for task rows returned by the server. */
+  lastActivityAt?: number;
+  lastTurnMs?: number;
   /** A read-only row for a task the CLI ran on this machine. */
   local?: true;
   turns?: TaskTurn[];

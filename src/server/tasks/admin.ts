@@ -36,6 +36,7 @@ import {
   deltaCursor,
   deltaOrder,
   pushInbox,
+  taskTimes,
   type TaskFilter,
 } from './queue';
 import { randomUUID } from 'node:crypto';
@@ -80,6 +81,7 @@ export function summarizeTask(status: TaskStatus) {
     startedAt: status.startedAt,
     finishedAt: status.finishedAt,
     updatedAt: status.updatedAt,
+    ...taskTimes(status),
   };
 }
 
@@ -89,6 +91,7 @@ export function redactTask(
   const { tokenHash: _tokenHash, handle: _handle, ...safe } = status;
   return {
     ...safe,
+    ...taskTimes(status),
     ...(status.status === 'queued' ? { statusReason: 'Waiting for a task slot' } : {}),
     turns: taskTurns(status),
     ...(status.task.credential

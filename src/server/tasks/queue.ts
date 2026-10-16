@@ -17,6 +17,16 @@ export interface ClaimedTask {
   organizationId: string;
   status: TaskStatus;
 }
+
+export function taskTimes(status: TaskStatus, now = Date.now()) {
+  const active = status.status === 'running' || status.status === 'waiting';
+  const end = active ? now : (status.finishedAt ?? status.updatedAt);
+
+  return {
+    lastActivityAt: status.updatedAt,
+    lastTurnMs: status.startedAt === undefined ? 0 : Math.max(0, end - status.startedAt),
+  };
+}
 /** A message to a running task: a steer, an answer, or an approval. */
 export interface InboxEntry {
   seq: number;

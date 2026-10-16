@@ -155,6 +155,12 @@
     grid-column: 1 / -1;
   }
 }
+@media (max-width: 760px) {
+  .plat.early td:nth-child(3) {
+    grid-column: 1 / -1;
+    justify-self: start;
+  }
+}
 .create-steps a {
   color: var(--acc);
   overflow-wrap: anywhere;

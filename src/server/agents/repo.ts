@@ -60,7 +60,7 @@ export interface RepoPush {
 const fileKey = (installation: string, repo: string, ref: string) =>
   `repo-file:${installation}@${repo}@${ref}:`;
 
-/** The repository file snapshots an event's dispatch may read: the event's repository at its ref and the config repository, through the reader installation. */
+/** The repository file snapshots an event's dispatch may read: the event's repository at its default branch and the config repository, through the reader installation. */
 export function dispatchFilePrefixes(
   integrations: Record<string, Integration>,
   installation: Installation,
@@ -76,7 +76,9 @@ export function dispatchFilePrefixes(
   if (!reader || !via) return [];
 
   return [
-    ...(repo && event.integration === reader.id ? [fileKey(via, repo, event.repo?.ref ?? '')] : []),
+    ...(repo && event.integration === reader.id
+      ? [fileKey(via, repo, event.repo?.defaultBranch ?? '')]
+      : []),
     ...(configRepo ? [fileKey(via, configRepo, '')] : []),
   ];
 }
@@ -269,7 +271,7 @@ export function remoteAgentLoader(
     if (!reader || !access) return undefined;
     const repo = eventRepo(event);
     if (event.integration === reader.id && repo)
-      return readUsage(files, reader, access, repo, event.repo?.ref);
+      return readUsage(files, reader, access, repo, event.repo?.defaultBranch);
     const configRepo = installation.settings?.configRepo;
     if (configRepo) return readUsage(files, reader, access, configRepo);
     return undefined;
@@ -327,7 +329,7 @@ export function remoteAgentLoader(
           options.store,
           access.contents,
           app.agentsRepo,
-          eventRepo(event) === app.agentsRepo ? (event.repo?.ref ?? 'HEAD') : 'HEAD',
+          eventRepo(event) === app.agentsRepo ? (event.repo?.defaultBranch ?? 'HEAD') : 'HEAD',
           access.token,
           now(),
         );
