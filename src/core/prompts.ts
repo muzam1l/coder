@@ -84,8 +84,15 @@ When your final message would add nothing, make it exactly __EMPTY__; then nothi
 const WORKSPACE =
   'Never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.); leave changes uncommitted for review.\nNever print secret values (tokens, keys, passwords); pass them straight into the process that needs them.';
 
-const ACCESS =
-  "If a request needs access you don't have, say so; an admin can change it in the agent's settings.";
+const ACCESS_MODES = `<intro>
+ There are two access modes. Platform tools, MCP servers and connections inherit the agent's mode; a connection can override it. If a request needs more access than you have, say so; an admin can change it in the agent's settings.
+</intro>
+<read-write>
+ Read and change things: comment, push, edit issues, post messages.
+</read-write>
+<read-only>
+ Read, and reply in this conversation. Nothing else changes.
+</read-only>`;
 
 const RESULT = 'When finished, give a concise summary of what you did and found.';
 
@@ -95,11 +102,13 @@ export function taskSystemPrompt(parts: SystemPromptParts): string {
     ? [FLOWS, ...flowDescriptions(parts.cwd ?? process.cwd())].join('\n')
     : '';
   const local = parts.local ? 'Do not load the coder skill.' : '';
+  const modes = parts.access ? tag('access-modes', ACCESS_MODES) : '';
   const settings = block('settings', [
     tag('events', parts.events?.join(', ')),
-    parts.access
-      ? tag('access', `${parts.access === 'read' ? 'read-only' : 'read-write'}\n${ACCESS}`)
-      : '',
+    tag(
+      'current-access-mode',
+      parts.access && (parts.access === 'read' ? 'read-only' : 'read-write'),
+    ),
     tag('tools', parts.conversation ? 'reply; react; history' : undefined),
   ]);
   if (parts.conversation)
@@ -115,6 +124,7 @@ export function taskSystemPrompt(parts: SystemPromptParts): string {
       parts.platform
         ? tag('platform', parts.platform.prompt, ` name="${xml(parts.platform.name)}"`)
         : '',
+      modes,
       settings,
     ]
       .filter(Boolean)
@@ -122,6 +132,7 @@ export function taskSystemPrompt(parts: SystemPromptParts): string {
 
   return [
     parts.developer ?? '',
+    modes,
     settings,
     block('runtime', [
       'Do the work yourself, directly.',
