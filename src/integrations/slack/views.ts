@@ -1,7 +1,7 @@
 /** Block Kit that Coder publishes in Slack: an agent's Home tab and the cards of Coder links. */
 import type { AdapterContext, AgentSummary, TaskSummary } from '../types';
 import { slackApi } from './app';
-import { LINK_ACTION, slack } from './index';
+import { LINK_ACTION, slack, slackWays } from './index';
 
 const mrkdwn = (text: string) => ({ type: 'mrkdwn', text });
 /** Slack refuses a section text over 3,000 characters. */
@@ -34,19 +34,6 @@ const linkButton = (id: string, url: string, text: string, primary?: boolean) =>
   ...(primary ? { style: 'primary' } : {}),
 });
 
-/** How people reach the agent in Slack, from the Slack events it listens to; none when nothing wakes it. */
-function ways(name: string, events: string[]): string | undefined {
-  const all = [
-    events.includes('mention') && `mention @${escaped(name)} in a channel`,
-    events.includes('message') && 'message it here',
-    events.includes('reaction') && 'react to a message',
-  ].filter((way): way is string => Boolean(way));
-  if (!all.length) return undefined;
-  const text = all.length > 1 ? `${all.slice(0, -1).join(', ')}, or ${all.at(-1)}` : all[0]!;
-
-  return `${text[0]!.toUpperCase()}${text.slice(1)}.`;
-}
-
 /** The Home tab: what the agent is, how to use it here, and links to it and to Coder. */
 function homeView(
   urls: { home: string; dash: string },
@@ -56,6 +43,7 @@ function homeView(
   const slug = agent?.slug ?? name;
   const events = agent?.listens.find(entry => entry.integration === slack.id)?.events ?? [];
   const listens = events.map(event => slack.events[event]?.description ?? event);
+  const use = slackWays(escaped(name), events, 'message it here');
 
   return {
     type: 'home',
@@ -65,7 +53,7 @@ function homeView(
           .filter(Boolean)
           .join('\n'),
       ),
-      ...(ways(name, events) ? [section(`*Use it here*\n${ways(name, events)}`)] : []),
+      ...(use ? [section(`*Use it here*\n${use}`)] : []),
       ...(listens.length ? [section(`*Listens to*\n${listens.join('\n')}`)] : []),
       { type: 'divider' },
       {
@@ -106,11 +94,12 @@ export async function welcome(
   if (!ctx.installationId) return;
   const agent = await ctx.agent?.();
   const name = agent?.name ?? ctx.name;
-  const use = ways(
-    ctx.name,
+  const use = slackWays(
+    escaped(ctx.name),
     agent
       ? (agent.listens.find(entry => entry.integration === slack.id)?.events ?? [])
       : ['mention'],
+    'message it here',
   );
   const blocks = [
     section(

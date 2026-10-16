@@ -2,6 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import coder from './builtin/coder/agent.json' with { type: 'json' };
 
 import { loadConfig, resolveWorkspaceConfigFile } from '../core/config';
 import { coderHome, resolveWorkspaceRoot } from '../core/state';
@@ -15,18 +16,19 @@ export interface AgentSource {
   builtin: boolean;
   repository?: boolean;
   dir?: string;
-  /** A built-in marked `"default": true`: tasks that name no agent run it. */
-  default?: true;
 }
 
-/** Built-in agent folders: `builtin/` next to this module in src, `dist/builtin/` once bundled; a literal URL so bundlers ship the folder. */
-function builtinRoot(): string {
-  const here = path.dirname(fileURLToPath(import.meta.url));
-  for (const candidate of [fileURLToPath(new URL('./builtin/', import.meta.url)), here]) {
-    if (Object.keys(definitionsIn(candidate)).length) return candidate;
-  }
-  return here;
-}
+export class AgentLoadError extends Error {}
+
+const BUILTIN_DIR = fileURLToPath(new URL('./builtin/coder/', import.meta.url));
+const BUILTINS = {
+  coder: {
+    json: coder,
+    builtin: true,
+    dir: BUILTIN_DIR,
+    systemPrompt: fs.readFileSync(path.join(BUILTIN_DIR, 'system.md'), 'utf8'),
+  },
+};
 
 /** One agent per folder of `base` that holds an `agent.json`. */
 function definitionsIn(
@@ -48,21 +50,22 @@ function definitionsIn(
     const file = path.join(dir, 'agent.json');
     if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) continue;
     const json = JSON.parse(fs.readFileSync(file, 'utf8'));
-    const preferred = builtin && json.default === true;
-    if (builtin) delete json.default;
-    result[id] = { json, builtin, dir, ...(preferred ? { default: true as const } : {}) };
+    result[id] = { json, builtin, dir };
   }
   return result;
 }
 
 /** Every shipped agent folder holding an agent.json. */
-export function builtinDefinitions(): Record<string, AgentSource & { dir: string }> {
-  return definitionsIn(builtinRoot(), true);
+export function builtinDefinitions(): Record<
+  string,
+  AgentSource & { dir: string; systemPrompt: string }
+> {
+  return BUILTINS;
 }
 
-/** The built-in marked `"default": true`, which tasks naming no agent run. */
+/** Tasks naming no agent run Coder. */
 export function defaultAgent(): string | undefined {
-  return Object.entries(builtinDefinitions()).find(([, source]) => source.default)?.[0];
+  return 'coder';
 }
 
 /** A built-in declares every platform and event; a server keeps the ones its catalog has. */
@@ -110,7 +113,7 @@ export function agentsFromSources(
     } catch (error) {
       // A disabled agent that does not parse is left out, not blocking the runnable ones.
       if (disabled) continue;
-      throw error;
+      throw new AgentLoadError(error instanceof Error ? error.message : String(error));
     }
     const definition = source.builtin ? enabledOnly(parsed, integrations) : parsed;
     agents.push({
@@ -126,7 +129,7 @@ export function agentsFromSources(
     agents.filter(agent => !agent.usage?.disabled),
     integrations,
   );
-  if (errors.length) throw new Error(`Invalid agents:\n  ${errors.join('\n  ')}`);
+  if (errors.length) throw new AgentLoadError(`Invalid agents:\n  ${errors.join('\n  ')}`);
   return agents;
 }
 

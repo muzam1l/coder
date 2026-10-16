@@ -17,8 +17,6 @@ export const COMMANDS: Record<string, Load> = {
   // Standalone commands.
   config: async () => (await import('./config')).commandConfig,
   'setup-host': setupHost,
-  'host-setup': setupHost, // alias for setup-host
-  setup: setupHost, // back-compat alias for setup-host
   model: async () => (await import('./model')).commandModel,
   connection: async () => (await import('./connection')).commandConnection,
   docs: async () => (await import('./docs')).commandDocs,
@@ -37,7 +35,6 @@ export const COMMANDS: Record<string, Load> = {
   auth: async () => (await import('./auth')).commandAuth,
   credentials: async () => (await import('./credentials')).commandCredentials,
   upgrade,
-  update: upgrade,
 };
 
 export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
@@ -52,7 +49,7 @@ export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
     { usage: 'task <cmd>', blurb: 'run, list, result, watch, steer, stop, approve, ...' },
     { usage: 'flow <cmd>', blurb: 'run, list, watch, result, resume, stop, discover, ...' },
     { usage: 'agent <cmd>', blurb: 'list, show, init, push, run, usage, integrations' },
-    { usage: 'credentials <cmd>', blurb: 'engine credentials: list, add, login, remove, default' },
+    { usage: 'credentials <cmd>', blurb: 'engine credentials: list, add, login, remove' },
     { usage: 'server <cmd>', blurb: 'self-host Coder: serve, rotate-key' },
     { usage: 'runner <cmd>', blurb: "run your server's tasks on this machine: serve, list, ..." },
     { usage: 'auth <cmd>', blurb: 'sign in to Coder: login, logout, status' },
@@ -72,7 +69,7 @@ export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
     { usage: 'docs [topic]', blurb: 'print bundled documentation (for agents to read)' },
     {
       usage: 'upgrade [--cli-only|--plugins-only]',
-      blurb: 'update the CLI and host plugins (alias: update)',
+      blurb: 'update the CLI and host plugins',
     },
   ],
   start: [

@@ -99,9 +99,6 @@ export function validateUrl(raw: string): string {
   return url.toString().replace(/\/+$/, '');
 }
 
-const credentialPath = (label: string, suffix: string, workspace?: boolean) =>
-  `/admin/credentials/${encodeURIComponent(label)}${suffix}${workspace ? '?workspace' : ''}`;
-
 const queryPath = (path: string, options: object) => {
   const query = new URLSearchParams();
   if ('cursor' in options && typeof options.cursor === 'string')
@@ -327,7 +324,6 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   };
 
   readonly tasks = {
-    run: (input: TaskInput): Promise<D['task']> => this.post('/admin/tasks', input),
     list: <Q extends TaskQuery = TaskQuery>(
       options?: Q,
     ): Promise<Q extends { cursor: string } ? TasksPage : D['task'][]> =>
@@ -429,23 +425,23 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
           : D['credential'][]
     > => this.request(queryPath('/admin/credentials', options ?? {})),
     add: (input: {
-      label?: string;
+      /** One variable and its key. */
       env: Record<string, string>;
-      engine: 'claude' | 'codex' | 'custom';
       workspace?: boolean;
       noCheck?: boolean;
-      default?: boolean;
-    }): Promise<{ ok: true; label: string }> => this.post('/admin/credentials', input),
-    remove: (label: string, { workspace }: { workspace?: boolean } = {}): Promise<{ ok: true }> =>
-      this.request(credentialPath(label, '', workspace), { method: 'DELETE' }),
-    setDefault: (
-      label: string,
-      { workspace }: { workspace?: boolean } = {},
-    ): Promise<{ ok: true }> => this.post(credentialPath(label, '/default', workspace)),
+    }): Promise<{ ok: true; name: string; replaced: boolean }> =>
+      this.post('/admin/credentials', input),
+    remove: (name: string, { workspace }: { workspace?: boolean } = {}): Promise<{ ok: true }> =>
+      this.request(
+        `/admin/credentials/${encodeURIComponent(name)}${workspace ? '?workspace' : ''}`,
+        { method: 'DELETE' },
+      ),
     login: (engine: 'claude' | 'codex'): Promise<D['login']> =>
       this.post('/admin/logins', { engine }),
-    loginStatus: (id: string): Promise<D['login']> =>
-      this.request(`/admin/logins/${encodeURIComponent(id)}`),
+    loginStatus: (id: string, state?: string): Promise<D['login']> =>
+      this.request(
+        `/admin/logins/${encodeURIComponent(id)}${state ? `?state=${encodeURIComponent(state)}` : ''}`,
+      ),
     loginCode: (id: string, code: string): Promise<{ ok: true }> =>
       this.post(`/admin/logins/${encodeURIComponent(id)}`, { code }),
     cancelLogin: (id: string): Promise<{ ok: true }> =>
@@ -545,8 +541,8 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       ),
   };
   readonly connections = {
-    list: (authorization?: string): Promise<ConnectionRow[]> =>
-      this.request(queryPath('/admin/connections', { authorization })),
+    list: (authorization?: string, wait?: string): Promise<ConnectionRow[]> =>
+      this.request(queryPath('/admin/connections', { authorization, wait })),
     /** `authorize` is where the browser goes next for an OAuth connection. */
     add: (body: ConnectionInput): Promise<ConnectionRow & { authorize?: string }> =>
       this.post('/admin/connections', body),
@@ -566,11 +562,6 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   };
   readonly config = {
     get: (): Promise<ConfigShape> => this.request('/admin/config'),
-    put: (body: Config): Promise<Config> =>
-      this.request('/admin/config', {
-        method: 'PUT',
-        body: JSON.stringify(body),
-      }),
     patch: (body: import('./types').ConfigPatch): Promise<Config> =>
       this.request('/admin/config', {
         method: 'PATCH',

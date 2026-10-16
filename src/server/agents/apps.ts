@@ -25,13 +25,14 @@ export async function sharedApps(
     ServerContext,
     'store' | 'integrations' | 'organizationId' | 'serverOrganizationId' | 'scope'
   >,
+  own?: Promise<Array<{ id: string; value: AgentApp }>>,
 ): Promise<AgentApp[]> {
   const store =
     ctx.serverOrganizationId && ctx.serverOrganizationId !== ctx.organizationId
       ? (ctx.scope?.(ctx.serverOrganizationId).store ?? ctx.store)
       : ctx.store;
 
-  return (await store.list('app'))
+  return (await (store === ctx.store && own ? own : store.list('app')))
     .map(({ value }) => value)
     .filter(app => app.builtin && ctx.integrations[app.integration]?.app.builtin === 'shared');
 }

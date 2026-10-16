@@ -9,18 +9,19 @@ import { useAction } from '@/utils/action';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Link } from '@wular/pnext/link';
-import { editableAgent } from '@/api/types';
+import { editableAgent, eventNames } from '@/api/types';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 import type { AgentRow, AgentSettings, ConnectionRow, IntegrationInfo } from '@coder/client/types';
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { AgentToggle } from '@/app/dash/[org]/agents/agent/agent-toggle';
 import { Field } from '@/comps/ui/field';
 import { Button } from '@/comps/ui/button';
-import { Chips } from '@/comps/ui/badge';
 import { Select, type Option } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
 import {
+  EFFORTS,
   ENGINE_NAMES,
+  PERMISSIONS,
   defaultLabel,
   modelHeadings,
   modelOptions,
@@ -29,16 +30,10 @@ import {
 } from '@/app/dash/[org]/settings/model-options';
 import type { Defaults } from '@/app/dash/[org]/tasks/composer';
 
-const EFFORTS = ['low', 'medium', 'high'];
-const PERMISSIONS = ['read-only', 'workspace-write', 'auto'];
-const PRESETS = ['observe', 'comment', 'write'];
-
-const eventNames = (events: unknown): string[] =>
-  Array.isArray(events)
-    ? events.map(String)
-    : events && typeof events === 'object'
-      ? Object.keys(events)
-      : [];
+const ACCESS: Option[] = [
+  ['read', 'Read-only'],
+  ['write', 'Read-write'],
+];
 
 function Choice({
   name,
@@ -52,17 +47,18 @@ function Choice({
   label: string;
   hint?: string;
   value?: string;
-  options: string[];
+  options: Option[];
   blank: string;
 }) {
-  const list = value && !options.includes(value) ? [...options, value] : options;
+  const list: Option[] =
+    value && !options.some(([key]) => key === value) ? [...options, [value, value]] : options;
   return (
     <Field label={label} hint={hint} group>
       <Select
         name={name}
         label={label}
         defaultValue={value ?? ''}
-        options={[['', blank], ...list.map((option): Option => [option, option])]}
+        options={[['', blank], ...list]}
       />
     </Field>
   );
@@ -70,7 +66,7 @@ function Choice({
 
 type Panel = 'run' | 'platforms' | 'manage';
 
-/** How this agent runs here: engine settings, every platform's access and events on one panel, and deleting it. One Save. */
+/** How this agent runs here: engine settings and access, every platform's events on one panel, and deleting it. One Save. */
 export function AgentSettingsForm({
   agent,
   catalog,
@@ -104,7 +100,7 @@ export function AgentSettingsForm({
   const declared = agent.definition?.integrations ?? {};
   const platforms = Object.keys(declared).sort();
   const own = agent.definition;
-  const engine = own?.engine ?? defaults.engine;
+  const engine = own?.engine;
   const deletable = agent.source !== 'builtin';
 
   // Filters every panel's fields by label, current value and platform, and moves to a panel that has a match.
@@ -154,17 +150,14 @@ export function AgentSettingsForm({
     const values = new FormData(event.currentTarget as HTMLFormElement);
     const text = (key: string) => String(values.get(key) ?? '').trim();
     const next: AgentSettings = {};
-    for (const key of ['effort', 'permissions', 'runner'] as const)
+    for (const key of ['effort', 'permissions', 'access', 'runner'] as const)
       if (text(key)) next[key] = text(key);
     const picked = splitModel(model);
     if (picked.engine) next.engine = picked.engine;
     if (picked.model) next.model = picked.model;
     if (narrowed) next.connections = values.getAll('connection').map(String);
     for (const id of platforms) {
-      const current = settings.integrations?.[id] ?? {};
       const entry: NonNullable<AgentSettings['integrations']>[string] = {};
-      if (Array.isArray(current.allowedTools)) entry.allowedTools = current.allowedTools;
-      else if (text(`tools:${id}`)) entry.allowedTools = text(`tools:${id}`);
       const names = eventNames(declared[id]?.events);
       const picked = values.getAll(`event:${id}`).map(String);
       if (names.length && picked.length < names.length) entry.allowedEvents = picked;
@@ -202,12 +195,14 @@ export function AgentSettingsForm({
                   ...modelOptions(
                     models,
                     defaultLabel(
-                      [
-                        ENGINE_NAMES[engine] ?? engine,
-                        own?.model ?? defaults.engines[engine]?.model,
-                      ]
-                        .filter(Boolean)
-                        .join(' · '),
+                      engine
+                        ? [
+                            ENGINE_NAMES[engine] ?? engine,
+                            own?.model ?? defaults.engines[engine]?.model,
+                          ]
+                            .filter(Boolean)
+                            .join(' · ')
+                        : 'first available engine',
                     ),
                   ),
                   ...(!settings.engine && settings.model
@@ -224,7 +219,7 @@ export function AgentSettingsForm({
               value={settings.effort}
               options={EFFORTS}
               blank={defaultLabel(
-                own?.effort ?? defaults.engines[splitModel(model).engine ?? engine]?.effort,
+                own?.effort ?? defaults.engines[(splitModel(model).engine ?? engine)!]?.effort,
               )}
             />
             <Choice
@@ -234,6 +229,14 @@ export function AgentSettingsForm({
               value={settings.permissions}
               options={PERMISSIONS}
               blank={defaultLabel(own?.permissions ?? 'read-only')}
+            />
+            <Choice
+              name="access"
+              label="Access"
+              hint="what it may do on its platforms and connections"
+              value={settings.access}
+              options={own?.access === 'read' ? ACCESS.slice(0, 1) : ACCESS}
+              blank={defaultLabel(own?.access === 'read' ? 'Read-only' : 'Read-write')}
             />
             {runners.length > 1 ? (
               <Field label="Runs on" group>
@@ -295,7 +298,7 @@ export function AgentSettingsForm({
           <section class="vpanel" data-panel="platforms" hidden={panel !== 'platforms'}>
             <h2>Platforms</h2>
             <p class="muted">
-              Overrides for this workspace: turn events off or lower access.{' '}
+              Turn events off for this workspace.{' '}
               {editableAgent(agent) ? (
                 <>
                   To add an event or a platform,{' '}
@@ -336,7 +339,6 @@ export function AgentSettingsForm({
               const current = settings.integrations?.[id] ?? {};
               const names = eventNames(declared[id]?.events);
               const allowed = current.allowedEvents;
-              const tools = declared[id]?.tools;
               const info = catalog.find(entry => entry.id === id);
               return (
                 <div key={id} class="vplatform">
@@ -344,31 +346,6 @@ export function AgentSettingsForm({
                     {info ? <BrandIcon brand={info.brand} /> : null}
                     {info?.name ?? id}
                   </h3>
-                  {Array.isArray(current.allowedTools) ? (
-                    <div class="field">
-                      <span>Platform access</span>
-                      <Chips values={current.allowedTools} />
-                    </div>
-                  ) : (
-                    <Choice
-                      name={`tools:${id}`}
-                      label="Platform access"
-                      hint={`observe reads, comment also replies, write also pushes and merges; at most ${typeof tools === 'string' ? tools : tools ? 'its tools' : 'observe'}, as the definition grants`}
-                      value={
-                        typeof current.allowedTools === 'string' ? current.allowedTools : undefined
-                      }
-                      options={
-                        typeof tools === 'string'
-                          ? PRESETS.slice(0, PRESETS.indexOf(tools) + 1)
-                          : tools
-                            ? PRESETS
-                            : PRESETS.slice(0, 1)
-                      }
-                      blank={defaultLabel(
-                        typeof tools === 'string' ? tools : tools ? 'custom' : 'observe',
-                      )}
-                    />
-                  )}
                   {names.length ? (
                     <div class="field">
                       <span>

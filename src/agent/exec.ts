@@ -1,8 +1,9 @@
-import { readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import type { ChildProcess } from 'node:child_process';
+import { defaultEmojiResolver, type Message, type Thread } from 'chat';
 
 import { resolveFlow } from '../flow/discover';
 import { runFlowByName } from '../flow/executor';
@@ -16,19 +17,46 @@ import {
   capPermissions,
   resolveMcpServers,
   turnFallbackEngine,
+  type DispatchOptions,
+  type TaskResult,
 } from '../core/dispatch';
-import { loadTask as loadTaskRecord } from '../core/state';
-import { steerTask } from '../core/task/actions';
+import { EMPTY_MESSAGE, EMPTY_MESSAGE_NOTICE, SKIPPED } from '../core/defaults';
+import {
+  watchTask,
+  appendTaskLog,
+  loadTask as loadTaskRecord,
+  readTurnResults,
+  resolveTaskDir,
+  generateTaskId,
+  writeTask,
+  type TurnResultEntry,
+} from '../core/state';
+import { heldConnections, steerTask } from '../core/task/actions';
 import type { McpServerSpec, Task } from '../core/types';
 import type { Integration } from '../integrations/types';
-import { effectiveSettings, parseAgentDefinition, resolveTools } from './definition';
+import type { Replies } from '../server/tasks/events';
+import {
+  agentAccess,
+  definitionEvents,
+  effectiveSettings,
+  parseAgentDefinition,
+} from './definition';
 import { loadAgents } from './load';
 import { postReview, resolveReviewTarget, REVIEW_PLATFORM } from '../flow/builtin/review';
 import { INTEGRATIONS } from '../integrations';
-import { taskToolServers, tokenEnvName, toolServerToken, noteToolServer } from './mcp';
-import type { Agent, AgentEvent, AgentTask, TaskContext, TaskSource } from './types';
+import { nativeToolEnvironment, tokenEnvName, toolServerToken, type ReplyEndpoint } from './mcp';
+import type { Agent, AgentEvent, AgentTask, Preset, TaskContext, TaskSource } from './types';
 import { serveMailbox, agentMailboxDir } from '../core/mailbox';
+import {
+  developerInstructions,
+  eventPrompt,
+  historyPrompt,
+  requestPrompt,
+  type AgentPromptParts,
+} from '../core/prompts';
 import { connectionEnvironment, localConnections, narrowConnections } from '../core/connections';
+import { replyRequired } from '../core/event-prompt';
+import { readJsonFile, writeJsonFileAtomic } from '../utils/fsx';
 
 /** Names the local engine task an agent task runs on, so listings can tell them apart. */
 export const AGENT_TASK_PREFIX = 'agent:';
@@ -47,29 +75,117 @@ export function taskFromEvent(agent: Agent, flow: string, event: AgentEvent): Ag
     ...(agent.usage ? { usage: agent.usage } : {}),
     tools: integration
       ? {
-          [event.integration]: resolveTools(agent, event.integration, integration),
+          [event.integration]: integration.tools.presets[agentAccess(agent)],
         }
       : {},
   };
 }
 
-/** The thread's reply when a run ends: its answer, else what stopped a cancelled one, else the task's failure line as a problem. */
+function normalizedReply(text: string): string {
+  return text
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[“”„‟«»‘’‚‛"'`]/g, '')
+    .replace(/[‐‑‒–—―−]/g, '-')
+    .replace(/[.!?,;:…]+(?=\s|$)/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** The turn's reply, including skipped answers, missing answers and failures. */
 export function threadReply(
-  task: AgentTask,
+  task: Pick<AgentTask, 'event' | 'context' | 'failureReply' | 'taskUrl'>,
   result: { finalMessage?: string | null; error?: { message?: string } | null } | null | undefined,
   cancelled: boolean,
-): { text: string; problem: boolean } {
+  turn?: Pick<TurnResultEntry, 'prompt' | 'steers' | 'lastReply'>,
+): { text: string; problem: boolean; skipped?: true; duplicate?: boolean } {
   const answer = result?.finalMessage?.trim();
-  if (answer) return { text: answer, problem: false };
+  const progress = task.event && INTEGRATIONS[task.event.integration]?.progressReplies;
+  const lastReply = turn?.lastReply?.trim();
+  // Claude Code reports its own errors as the final message; a failed run gets the failure text instead.
+  if (answer && answer.replace(/^`+|`+$/g, '').trim() !== EMPTY_MESSAGE && !result?.error)
+    return {
+      text: answer,
+      problem: false,
+      ...(!progress && lastReply && normalizedReply(answer) === normalizedReply(lastReply)
+        ? { duplicate: true }
+        : {}),
+    };
   const error = result?.error?.message?.trim() ?? '';
+  if (result?.error && lastReply && !progress) return { text: '', problem: true, duplicate: true };
+  if (cancelled) return { text: error, problem: false };
+  if (result && !result.error) {
+    if (progress && lastReply) return { text: lastReply, problem: false };
+    if (
+      turn?.lastReply?.trim() ||
+      replyRequired(
+        turn?.prompt,
+        task.context?.mustReply ?? task.event?.mustReply,
+        turn?.steers,
+      ) === false
+    )
+      return { text: '', problem: false, skipped: true };
+    const link = task.taskUrl ? ` [See the task](${task.taskUrl})` : '';
 
-  return cancelled
-    ? { text: error, problem: false }
-    : { text: task.failureReply ?? error, problem: true };
+    return { text: `${EMPTY_MESSAGE_NOTICE}${link}`, problem: false };
+  }
+
+  return { text: task.failureReply ?? error, problem: true };
 }
 
 /** An adapter that can mark a reply as a failure, as Linear's error activity does. */
-type ProblemAdapter = { postProblem?(threadId: string, text: string): Promise<unknown> };
+type ProblemAdapter = { postProblem?(threadId: string, text: string): ReturnType<Replies['post']> };
+
+type ProgressAdapter = { postProgress?(threadId: string, text: string): Promise<{ id: string }> };
+
+/** Split replies at paragraph boundaries where the platform's limit allows. */
+export function replyParts(text: string, limit?: number): string[] {
+  if (!limit || text.length <= limit) return [text];
+  const parts: string[] = [];
+  let part = '';
+  let fenced = false;
+  const push = () => {
+    if (part.trim()) parts.push(part.trimEnd());
+    part = '';
+  };
+  for (const paragraph of text.split(/\n\n/)) {
+    if (part && !fenced && `${part}\n\n${paragraph}`.length > limit) push();
+    let grown = part ? `${part}\n\n${paragraph}` : paragraph;
+    // Still too long, so a paragraph or fence alone passes the limit: cut on lines, then on characters.
+    while (grown.length > limit) {
+      const cut = grown.lastIndexOf('\n', limit);
+      const at = cut > 0 ? cut : limit;
+      parts.push(grown.slice(0, at).trimEnd());
+      grown = grown.slice(at).replace(/^\n/, '');
+    }
+    part = grown;
+    if ((paragraph.match(/^```/gm) ?? []).length % 2 === 1) fenced = !fenced;
+  }
+  push();
+
+  return parts;
+}
+
+export async function postReplyParts(
+  thread: Thread,
+  text: string,
+  limit?: number,
+  message?: Message | string,
+  progress = false,
+) {
+  const sent: { id: string }[] = [];
+  const ongoing = progress && (thread.adapter as ProgressAdapter).postProgress;
+  for (const part of replyParts(text, limit))
+    sent.push(
+      ongoing
+        ? await ongoing.call(thread.adapter, thread.id, part)
+        : message && thread.adapter.reply
+          ? await thread.reply(message, { markdown: part })
+          : await thread.post({ markdown: part }),
+    );
+
+  return sent;
+}
 
 /** Post into the event's Chat SDK thread through its integration's adapter, on the task's own token. */
 export async function postReply(
@@ -79,8 +195,54 @@ export async function postReply(
   token: string,
   author = integration.id,
   problem = false,
-): Promise<void> {
-  if (!event.chat) throw new Error(`The ${event.integration} event has no thread to reply in`);
+  progress = false,
+  prepared?: Thread,
+): Promise<string[]> {
+  const thread = prepared ?? (await eventThread(integration, event, token, author));
+  const adapter = thread.adapter;
+  const marks = (adapter as ProblemAdapter).postProblem;
+  if (problem && marks) {
+    const sent = await marks.call(adapter, thread.id, text);
+    const id = sent?.id;
+
+    return id ? [id] : [];
+  }
+  // Send Markdown through the platform adapter.
+  const messages = await postReplyParts(
+    thread,
+    text,
+    integration.replyLimit,
+    event.chat?.message?.id,
+    progress,
+  );
+
+  return messages.flatMap(sent => (sent.id ? [sent.id] : []));
+}
+
+/** A durable send intent prevents replay of an ambiguous platform response after a crash. */
+export async function postTurnReply(
+  cwd: string,
+  taskId: string,
+  turn: number,
+  send: () => Promise<string[]>,
+): Promise<string[]> {
+  const file = path.join(resolveTaskDir(cwd, taskId), `post-${turn}.json`);
+  const receipt = readJsonFile<string[]>(file);
+  if (receipt) return receipt;
+  writeFileSync(file, 'null', { flag: 'wx' });
+  const ids = await send();
+  writeJsonFileAtomic(file, ids);
+
+  return ids;
+}
+
+async function eventThread(
+  integration: Integration,
+  event: AgentEvent,
+  token: string,
+  author: string,
+) {
+  if (!event.chat) throw new Error(`The ${event.integration} event has no conversation`);
   const [{ Chat }, { LocalChatState }] = await Promise.all([
     import('chat'),
     import('../server/store/chat'),
@@ -100,11 +262,27 @@ export async function postReply(
     logger: 'error',
   });
   await chat.initialize();
-  const thread = chat.thread(event.chat.thread.id);
-  const marks = (adapter as ProblemAdapter).postProblem;
-  if (problem && marks) await marks.call(adapter, event.chat.thread.id, text);
-  else if (adapter.reply && event.chat.message?.id) await thread.reply(event.chat.message.id, text);
-  else await thread.post(text);
+
+  return chat.thread(event.chat.thread.id);
+}
+
+export async function reactToMessage(thread: Thread, emoji: string, message?: string) {
+  if (!message) throw new Error('This turn has no message to react to; give a message id');
+  const normalized = defaultEmojiResolver.fromSlack(defaultEmojiResolver.fromGChat(emoji).name);
+  await thread.adapter.addReaction(thread.id, message, normalized);
+}
+
+/** Add the app's reaction through the same adapter and token as its replies. */
+export async function postReaction(
+  integration: Integration,
+  event: AgentEvent,
+  emoji: string,
+  token: string,
+  author = integration.id,
+  message = event.chat?.message?.id,
+): Promise<void> {
+  const thread = await eventThread(integration, event, token, author);
+  await reactToMessage(thread, emoji, message);
 }
 
 /** Local runs carry tokens in `APP_TOKEN_<ID>`, or `APP_TOKEN` for the event integration. */
@@ -122,9 +300,10 @@ export interface ExecResult {
   flow: string;
   /** Default flow: the engine's answer, posted to the platform unless `post` was false. */
   reply?: string;
-  note?: string;
   posted?: boolean;
+  postedMessages?: string[];
   taskId?: string;
+  turn?: number;
   runId?: string;
   result?: unknown;
   tokens?: unknown;
@@ -141,14 +320,21 @@ export async function execAgent(options: {
   /** Post the default flow's reply to the platform (default true). */
   post?: boolean;
   resumeTaskId?: string;
-  onTask?: (taskId: string) => void | Promise<void>;
+  resumeTurn?: number;
+  /** An engine conversation saved by an earlier turn, continued instead of starting a new one. */
+  resume?: DispatchOptions['resume'];
+  onTask?: (taskId: string, turn?: number) => void | Promise<void>;
+  onWorker?: DispatchOptions['onWorker'];
+  availability?: DispatchOptions['availability'];
+  onEngine?: (engine: string) => Promise<boolean | void>;
   onStart?: import('../flow/runtime').FlowHooks['onStart'];
   /** Secrets passed only to task-core MCP children, never inherited by the engine. */
   toolEnvironment?: { tokens: Record<string, string> };
+  /** Where the conversation tools post, when the caller posts replies for the task. */
+  replyEndpoint?: ReplyEndpoint;
   connections?: Record<string, McpServerSpec>;
   connectionEnv?: Record<string, string>;
   postToken?: string;
-  noteFile?: string;
   onApproval?: (approval: unknown) => void | Promise<void>;
   /** Run as a listed CLI task started from here, instead of a runner's hidden engine task. */
   source?: TaskSource;
@@ -163,7 +349,7 @@ export async function execAgent(options: {
       flow,
     };
   let agent = agents.find(candidate => candidate.id === options.agent);
-  if (!agent && task) {
+  if (task) {
     agent = {
       id: task.agent,
       name: task.definition.name ?? task.agent,
@@ -180,82 +366,202 @@ export async function execAgent(options: {
   if (event && !integration) throw new Error(`Unknown integration "${event.integration}".`);
   const connected = connectionEnvironment(options.connections ?? {}, options.connectionEnv);
 
-  const native = connectionEnvironment(
-    Object.fromEntries(
-      taskToolServers(task, options.toolEnvironment?.tokens ?? localTokens(task, process.env)).map(
-        server => [`native:${server.name}`, { ...server, resolved: true }],
-      ),
-    ),
+  const native = nativeToolEnvironment(
+    task,
+    options.toolEnvironment?.tokens ?? localTokens(task, process.env),
+    options.replyEndpoint,
   );
 
   if (flow === 'default') {
+    const posting = options.post !== false && Boolean(integration);
+    const token = options.postToken ?? process.env.APP_TOKEN!;
+    const prepared = posting
+      ? eventThread(integration!, event!, token, task.author ?? integration!.id)
+      : undefined;
+    void prepared?.catch(() => {});
     const defaults = defaultTask(agent, task);
-    const noteDir = options.noteFile
-      ? undefined
-      : await fs.mkdtemp(path.join(os.tmpdir(), 'coder-note-'));
-    const noteFile = options.noteFile ?? path.join(noteDir!, 'note');
-    if (!options.noteFile) await fs.writeFile(noteFile, task.context?.note ?? '');
-    const resolved = resolveTaskOptions(effectiveSettings(agent), config);
+    const resumedEngine = options.resumeTaskId && loadTaskRecord(cwd, options.resumeTaskId)?.engine;
+    let resolved = resolveTaskOptions(
+      resumedEngine && resumedEngine !== effectiveSettings(agent).engine
+        ? { engine: resumedEngine }
+        : effectiveSettings(agent),
+      config,
+    );
     const selectedMcp = selectMcpServers(
       task.mcp?.join(','),
       config.mcp,
       agent.definition.mcp,
       connected.mcp,
     );
-    const mcp = [...Object.values(native.mcp), noteToolServer(noteFile), ...selectedMcp.mcp];
-    const dispatched = options.resumeTaskId
-      ? { taskId: options.resumeTaskId }
-      : await dispatchTask({
-          taskId: options.taskId,
-          mcp,
-          mcpBindings: selectedMcp.mcpBindings,
-          mcpWarnings: selectedMcp.warnings,
-          nativeMcp: selectedMcp.nativeMcp,
-          connectionEnv: { ...connected.env, ...native.env },
-          connections: task.connections,
-          cwd,
-          agentId: task.agent,
-          ...(task.author ? { author: task.author } : {}),
-          ...(event?.repo ? { repo: `${event.repo.owner}/${event.repo.name}` } : {}),
-          ...(options.source
-            ? { source: options.source }
-            : { name: `${AGENT_TASK_PREFIX}${task.id}` }),
-          engine: resolved.engine,
-          model: resolved.model ?? undefined,
-          effort: resolved.effort ?? undefined,
-          permissions: task.permissions ?? resolved.permissions,
-          system: defaults.system,
-          prompt: defaults.prompt,
-          outputSchema: task.context?.outputSchema,
-          wait: true,
-        });
-    await options.onTask?.(dispatched.taskId);
-    const completed = await waitForAgentTask(cwd, dispatched.taskId, options.onApproval);
-    const { text: reply, problem } = threadReply(
-      task,
-      completed.result,
-      completed.status === 'cancelled',
-    );
-    const note = (await fs.readFile(noteFile, 'utf8').catch(() => '')).trim();
-    if (noteDir) await fs.rm(noteDir, { recursive: true, force: true });
-    const posted = options.post !== false && Boolean(integration) && Boolean(reply);
-    if (posted)
-      await postReply(
-        integration!,
-        event!,
-        reply,
-        options.postToken ?? process.env.APP_TOKEN!,
-        task.author,
-        problem,
+    const mcp = [...Object.values(native.mcp), ...selectedMcp.mcp];
+    let first =
+      options.resumeTurn ??
+      (options.resumeTaskId ? readTurnResults(cwd, options.resumeTaskId).length : 0);
+    let worker: ChildProcess | undefined;
+    const engineTaskId = options.resumeTaskId ?? options.taskId ?? generateTaskId();
+    const chain = task.engineChain ?? [resolved.engine];
+    let index = Math.max(0, chain.indexOf(resolved.engine));
+    let retry = false;
+    for (const engine of chain.slice(0, index))
+      appendTaskLog(cwd, engineTaskId, {
+        kind: 'warning',
+        message: `${engine} skipped because no applicable credential is connected`,
+      });
+    let dispatched!: { taskId: string };
+    let completed!: TaskResult;
+    for (;;) {
+      const engine = chain[index]!;
+      resolved = resolveTaskOptions(
+        retry ? { engine } : { ...effectiveSettings(agent), engine },
+        config,
       );
+      let startupFailure = false;
+      try {
+        if ((await options.onEngine?.(engine)) === false)
+          throw new CoderError(
+            'chain-exhausted',
+            `No applicable credential is connected for ${engine}`,
+          );
+        if (retry)
+          writeTask(cwd, engineTaskId, {
+            status: 'queued',
+            pid: null,
+            threadId: null,
+            resumeThreadId: null,
+            resumedAt: new Date().toISOString(),
+            error: undefined,
+            completedAt: undefined,
+          });
+        dispatched = options.resumeTaskId
+          ? { taskId: options.resumeTaskId }
+          : await dispatchTask(
+              {
+                onWorker: (id, child) => {
+                  worker = child;
+                  options.onWorker?.(id, child);
+                },
+                availability: options.availability,
+                taskId: engineTaskId,
+                ...(options.resume ? { resume: options.resume } : {}),
+                mcp,
+                mcpBindings: selectedMcp.mcpBindings,
+                mcpWarnings: selectedMcp.warnings,
+                nativeMcp: selectedMcp.nativeMcp,
+                connectionEnv: { ...connected.env, ...native.env },
+                connections: task.connections,
+                cwd,
+                agentId: task.agent,
+                // Platform conversations roll over; dashboard and CLI tasks keep the engine's own compaction.
+                ...(isConversation(task) ? { conversation: true } : {}),
+                ...(task.author ? { author: task.author } : {}),
+                ...(event?.repo ? { repo: `${event.repo.owner}/${event.repo.name}` } : {}),
+                ...(options.source
+                  ? { source: options.source }
+                  : { name: `${AGENT_TASK_PREFIX}${task.id}`, source: task.source }),
+                engine: resolved.engine,
+                model: resolved.model ?? undefined,
+                effort: resolved.effort ?? undefined,
+                permissions: task.permissions ?? resolved.permissions,
+                agentPrompt: defaults.agentPrompt,
+                prompt: defaults.prompt,
+                outputSchema: task.context?.outputSchema,
+                wait: true,
+              },
+              task.engineChain
+                ? { config: { ...config, chain: [resolved.engine] }, waitForStartup: false }
+                : {},
+            );
+        await options.onTask?.(dispatched.taskId, first);
+        completed = await waitForAgentTask(cwd, dispatched.taskId, options.onApproval, (cwd, id) =>
+          waitTask(cwd, id, { turn: first, worker }),
+        );
+      } catch (error) {
+        if (!task.engineChain || !(error instanceof CoderError) || error.code !== 'chain-exhausted')
+          throw error;
+        startupFailure = true;
+        const detail = error.payload?.error ?? error.message;
+        const record = writeTask(cwd, engineTaskId, {
+          status: 'failed',
+          engine: resolved.engine,
+          prompt: defaults.prompt,
+          error: detail,
+          pid: null,
+        });
+        const result = { status: 1, threadId: null, error: { message: detail } };
+        writeJsonFileAtomic(path.join(resolveTaskDir(cwd, record.id), 'result.json'), result);
+        await fs.appendFile(
+          path.join(resolveTaskDir(cwd, record.id), 'results.jsonl'),
+          JSON.stringify({ ...result, prompt: defaults.prompt }) + '\n',
+        );
+        dispatched = { taskId: record.id };
+        await options.onTask?.(record.id, first);
+        completed = {
+          taskId: record.id,
+          task: record,
+          status: 'failed',
+          result,
+          turns: readTurnResults(cwd, record.id),
+          steps: [],
+        };
+      }
+      const next = startupFailure
+        ? (chain[index + 1] ?? null)
+        : task.engineChain
+          ? turnFallbackEngine(cwd, completed, { ...config, chain: chain as typeof config.chain })
+          : undefined;
+      if (next !== undefined)
+        appendTaskLog(cwd, engineTaskId, {
+          kind: 'warning',
+          message: `${resolved.engine} skipped because ${completed.result?.error?.message ?? 'the engine could not start'}`,
+        });
+      if (next === undefined || next === null) break;
+      first = readTurnResults(cwd, dispatched.taskId).length;
+      if (worker)
+        await new Promise<void>(resolve => {
+          if (worker!.exitCode !== null || worker!.signalCode) return resolve();
+          worker!.once('exit', () => resolve());
+        });
+      index++;
+      retry = true;
+      options = { ...options, resumeTaskId: undefined, resume: undefined };
+    }
+    // This turn's own answer: later turns are posted by whoever waits for them.
+    const turn = readTurnResults(cwd, dispatched.taskId)[first];
+    const {
+      text: reply,
+      problem,
+      skipped,
+      duplicate,
+    } = turn
+      ? threadReply(task, turn, false, turn)
+      : threadReply(task, completed.result, completed.status === 'cancelled');
+    if (skipped && posting)
+      appendTaskLog(cwd, dispatched.taskId, { kind: 'status', message: SKIPPED });
+    const posted = posting && Boolean(reply) && !duplicate;
+    const postedMessages = posted
+      ? await postTurnReply(cwd, dispatched.taskId, first, async () =>
+          postReply(
+            integration!,
+            event!,
+            reply,
+            token,
+            task.author,
+            problem,
+            false,
+            await prepared,
+          ),
+        )
+      : [];
+
     return {
       ok: completed.status === 'completed',
       flow,
       reply,
       posted,
+      ...(postedMessages.length ? { postedMessages } : {}),
       taskId: dispatched.taskId,
+      turn: first,
       tokens: completed.result?.tokens ?? undefined,
-      ...(note !== (task.context?.note ?? '').trim() ? { note } : {}),
     };
   }
 
@@ -288,7 +594,11 @@ export async function execAgent(options: {
     },
     {
       ...(options.onTask
-        ? { onTaskStart: (started: { taskId: string }) => options.onTask!(started.taskId) }
+        ? {
+            onEvent: (event: import('../flow/types').FlowEvent) => {
+              if (event.kind === 'task-start') options.onTask!(event.taskId);
+            },
+          }
         : {}),
       ...(options.onStart ? { onStart: options.onStart } : {}),
     },
@@ -307,21 +617,27 @@ export async function waitForAgentTask(
   taskId: string,
   onApproval?: (approval: unknown) => void | Promise<void>,
   wait: typeof waitTask = waitTask,
-  pause: () => Promise<void> = () => new Promise(resolve => setTimeout(resolve, 100)),
+  pause?: () => Promise<void>,
 ) {
   let reportedId: string | undefined;
-  for (;;) {
-    try {
-      return await wait(cwd, taskId);
-    } catch (error) {
-      if (!(error instanceof CoderError) || error.code !== 'approval-pending' || !onApproval)
-        throw error;
-      if (error.approval?.id !== reportedId) {
-        reportedId = error.approval?.id;
-        await onApproval(error.approval);
+  const changes = watchTask(cwd, taskId);
+  try {
+    for (;;) {
+      try {
+        return await wait(cwd, taskId);
+      } catch (error) {
+        if (!(error instanceof CoderError) || error.code !== 'approval-pending' || !onApproval)
+          throw error;
+        if (error.approval?.id !== reportedId) {
+          reportedId = error.approval?.id;
+          await onApproval(error.approval);
+          continue;
+        }
+        await (pause ? pause() : changes.wait(30000));
       }
-      await pause();
     }
+  } finally {
+    changes.close();
   }
 }
 
@@ -376,6 +692,13 @@ export function builtinArgs(
   };
 }
 
+/** A repo agent's access mode, which its local Default connections follow; Read-only when it is gone. */
+export async function localAgentAccess(cwd: string, id: string): Promise<Preset> {
+  const agent = (await loadAgents(cwd, INTEGRATIONS).catch(() => [])).find(a => a.id === id);
+
+  return agent ? agentAccess(agent) : 'read';
+}
+
 /** Task options from a local agent definition: `coder task run --agent <id>`. */
 export async function agentTaskOptions(
   cwd: string,
@@ -388,7 +711,7 @@ export async function agentTaskOptions(
   model?: string;
   effort?: string;
   permissions?: string;
-  system?: string;
+  developer: string;
   mcp: McpServerSpec[];
   mcpBindings?: Task['mcpBindings'];
   nativeMcp: boolean;
@@ -406,7 +729,12 @@ export async function agentTaskOptions(
   const { definition, usage } = agent;
   const connected =
     connections === undefined
-      ? await localConnections(narrowConnections(usage?.connections, narrowed))
+      ? await localConnections(
+          narrowConnections(usage?.connections, narrowed),
+          undefined,
+          undefined,
+          agentAccess(agent),
+        )
       : undefined;
   const own = definition.mcp ?? {};
   const mcp = selectMcpServers(mcpFlag, loadConfig(cwd).mcp, own, connections ?? connected?.mcp);
@@ -416,7 +744,7 @@ export async function agentTaskOptions(
     model: usage?.model ?? definition.model,
     effort: usage?.effort ?? definition.effort,
     permissions: usage?.permissions ?? definition.permissions,
-    system: agentInstructions(agent) || undefined,
+    developer: agentDeveloperInstructions(agent),
     ...mcp,
     mcpWarnings: mcp.warnings,
     connections: usage?.connections,
@@ -426,16 +754,14 @@ export async function agentTaskOptions(
 
 const MAX_SYSTEM_CHARS = 48_000;
 
-/** Core prompt every default agent runs with; the agent folder's markdown is appended, never replaces it. */
-const CORE_AGENT_PROMPT = `You are an agent named "{name}" acting on behalf of a software team. You receive one request, a platform event or a task, and must produce the reply that goes back to its thread verbatim. Be direct and specific, use the attached tools to read context before answering, never invent facts about the repository, and stay within the actions your tools allow. Reply in plain markdown with no preamble.`;
-
-export function agentSystemPrompt(agent: Agent): string {
-  const core = CORE_AGENT_PROMPT.replace('{name}', agent.definition.name ?? agent.id);
-  const parts = [core];
-  if (agent.definition.description) parts.push(`Your role: ${agent.definition.description}`);
-  const extra = agentInstructions(agent);
-  if (extra) parts.push(`## Agent instructions\n\n${extra}`);
-  return parts.join('\n\n');
+/** The developer's part of the system prompt: what whoever built the agent wrote, plus the installation's repository instructions. */
+export function agentDeveloperInstructions(agent: Agent, context?: TaskContext): string {
+  return developerInstructions({
+    description: agent.definition.description,
+    instructions: agentInstructions(agent),
+    repositoryInstructions: context?.instructions,
+    repository: context?.repository,
+  });
 }
 
 export function agentInstructions(agent: Agent): string {
@@ -476,57 +802,37 @@ function filesInstructions(files: Record<string, string>): string {
   return output.trimEnd();
 }
 
-function renderEvent(event: AgentEvent): string {
-  const lines = [
-    `**Integration:** ${event.integration}`,
-    `**Type:** ${event.type}`,
-    `**Actor:** ${event.actor.login ?? event.actor.id}`,
-  ];
-  if (event.repo) lines.push(`**Repo:** ${event.repo.owner}/${event.repo.name}`);
-  if (event.chat)
-    lines.push(
-      `**Thread:** ${event.chat.thread.id}${event.chat.thread.isDM ? ' (direct message)' : ''}`,
-    );
-  return [lines.join('\n'), event.promptContext, event.text].filter(Boolean).join('\n\n');
-}
-
-/** Thread history, note and repo instructions as prompt sections, in that order. */
-export function renderContext(context: TaskContext | undefined): string {
-  if (!context) return '';
-  const sections: string[] = [];
-  if (context.messages?.length)
-    sections.push(
-      `## Recent thread\n\n${context.messages.map(m => `- ${m.user}: ${m.text}`).join('\n')}`,
-    );
-  if (context.note) sections.push(`## Note from earlier in this thread\n\n${context.note}`);
-  if (context.instructions) sections.push(`## Repository instructions\n\n${context.instructions}`);
-  if (context.user)
-    sections.push(
-      `## Who asked\n\n${context.user.name} (${context.user.email}), a member of this Coder server.`,
-    );
-  return sections.join('\n\n');
-}
-
-function renderRequest({ event, prompt }: Pick<AgentTask, 'event' | 'prompt'>): string {
-  if (prompt === undefined) return event ? renderEvent(event) : '';
-  return event?.repo ? `**Repo:** ${event.repo.owner}/${event.repo.name}\n\n${prompt}` : prompt;
-}
+/** A platform event's own task is a conversation; dashboard and CLI tasks are reports. */
+export const isConversation = (task: Pick<AgentTask, 'event' | 'source'>) =>
+  Boolean(task.event && task.source === task.event.integration);
 
 export function defaultTask(
   agent: Agent,
-  task: Pick<AgentTask, 'event' | 'prompt' | 'context'>,
-): { system: string; prompt: string } {
-  const extra = renderContext(task.context);
-  const hint =
-    task.prompt === undefined && task.event
-      ? INTEGRATIONS[task.event.integration]?.hint
-      : undefined;
-  const request = renderRequest(task);
+  task: Pick<AgentTask, 'event' | 'prompt' | 'context' | 'source' | 'tools'>,
+): { agentPrompt: AgentPromptParts; prompt: string } {
+  const { event, context } = task;
+  const conversation = isConversation(task);
+  const user = task.prompt === undefined ? context?.user : undefined;
+  const integration = event && INTEGRATIONS[event.integration];
+  const turn =
+    task.prompt === undefined
+      ? event
+        ? eventPrompt([event], user)
+        : ''
+      : requestPrompt(task.prompt, event?.repo, event && integration?.repos?.pullRequest(event));
+
   return {
-    system: [agentSystemPrompt(agent), hint ? `## Platform\n\n${hint}` : '']
-      .filter(Boolean)
-      .join('\n\n'),
-    prompt: extra ? `${request}\n\n${extra}` : request,
+    agentPrompt: {
+      developer: agentDeveloperInstructions(agent, context),
+      ...(conversation
+        ? {
+            platform: { name: event!.integration, prompt: integration?.prompt },
+            events: definitionEvents(agent.definition.integrations[event!.integration]),
+          }
+        : {}),
+      access: agentAccess(agent),
+    },
+    prompt: historyPrompt(context?.messages ?? [], turn),
   };
 }
 
@@ -648,20 +954,7 @@ export function startAgentMailbox(cwd: string, task: Task): () => void {
       if (!current) throw new CoderError('invalid-option', `No task "${p.taskId}".`);
       return steerTask(taskCwd, current, String(p.text ?? ''), {
         ...(connectionSource === 'server'
-          ? {
-              resolveConnections: async granted => ({
-                ...connectionEnvironment(
-                  Object.fromEntries(
-                    resolveMcpServers(task.mcp, process.env, launchCwd).flatMap(server => {
-                      const id = server.connection ?? server.name;
-
-                      return granted.includes(id) ? [[id, pinned(server)]] : [];
-                    }),
-                  ),
-                ),
-                warnings: [],
-              }),
-            }
+          ? { resolveConnections: heldConnections(task.mcp, launchCwd, pinned) }
           : {}),
         model: p.model,
         effort: p.effort,

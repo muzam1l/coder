@@ -24,9 +24,7 @@ function printLogin(login: LoginView): void {
     return void process.stderr.write(
       `${errStyle.red(login.error ?? 'Sign-in failed.')}\n\n${formatHints(['Try again'], errStyle)}\n`,
     );
-  process.stdout.write(
-    `Signed in. Personal credential ${outStyle.bold(login.label ?? login.engine)} is your ${login.engine} default.\n`,
-  );
+  process.stdout.write(`Signed in. Your ${outStyle.bold(login.engine)} subscription is saved.\n`);
 }
 
 export const commandCredentialsLogin = command({
@@ -35,7 +33,7 @@ export const commandCredentialsLogin = command({
   help: {
     usage: 'coder credentials login <claude|codex> [--server [url]] [--json]',
     summary:
-      "Runs the official claude or codex sign-in on the server's runner, prints the sign-in link or device code, and waits. Claude asks you to paste the code the sign-in page shows. The result is your personal default for that engine. Needs CLAUDE_SUBSCRIPTIONS=1 or CODEX_SUBSCRIPTIONS=1 on the server.",
+      "Runs the official claude or codex sign-in on the server's runner, prints the sign-in link or device code, and waits. Claude asks you to paste the code the sign-in page shows. The result replaces your subscription for that engine. Needs CLAUDE_SUBSCRIPTIONS=1 or CODEX_SUBSCRIPTIONS=1 on the server.",
     flags: [CREDENTIAL_SERVER_FLAG],
   },
   options: { json: flag, server: serverOnly, yes: flag },

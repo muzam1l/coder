@@ -3,9 +3,9 @@ import process from 'node:process';
 
 import type { connection } from '../../core/connection';
 import { formatHints, outStyle, renderTable } from '../../tui/output';
-import { baseOptions } from '../../utils/args';
+import { baseOptions, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-import { describe, serverOptions } from './add';
+import { describe } from './add';
 
 type Listed = Awaited<ReturnType<typeof connection.list>>;
 
@@ -17,7 +17,11 @@ function printConnections({ connections, declared }: Listed): void {
           [
             { header: 'name', value: row => row.id, paint: c => s.cyan(c) },
             { header: 'connects', value: row => describe(row), paint: c => s.light(c) },
-            { header: 'access', value: row => (row.access === 'observe' ? 'read' : 'write') },
+            {
+              header: 'access',
+              value: row =>
+                row.access === 'read' ? 'Read-only' : row.access ? 'Read-write' : 'Default',
+            },
             {
               header: 'for',
               value: row => (row.mine ? 'you' : row.owner ? row.owner : 'workspace'),

@@ -75,6 +75,23 @@ export function nonceUser(ctx: ServerContext, token: string): string | undefined
   return read(ctx, token)?.user;
 }
 
+function claimOf(
+  ctx: ServerContext,
+  token: string,
+  kind: NonceKind,
+  user: string,
+  operator = true,
+): NonceClaim | undefined {
+  const claim = read(ctx, token);
+  return claim &&
+    claim.kind === kind &&
+    (claim.user === user || (operator && claim.user === '*')) &&
+    claim.organization === ctx.organizationId &&
+    claim.exp >= (ctx.now ?? Date.now)()
+    ? claim
+    : undefined;
+}
+
 /** Verify every binding and atomically consume the stored transaction. */
 export async function consumeNonce(
   ctx: ServerContext,
@@ -83,18 +100,9 @@ export async function consumeNonce(
   user: string,
   target: string,
 ): Promise<boolean> {
-  const claim = read(ctx, token);
-  const now = (ctx.now ?? Date.now)();
-  if (
-    !claim ||
-    claim.kind !== kind ||
-    claim.user !== user ||
-    claim.organization !== ctx.organizationId ||
-    claim.exp < now ||
-    (await storedTarget(ctx, token)) !== target
-  )
-    return false;
-  return ctx.store.take('delivery', keyOf(token));
+  if (!claimOf(ctx, token, kind, user, false)) return false;
+  const record = await ctx.store.take('delivery', keyOf(token), { target });
+  return !!record && 'target' in record && record.target === target;
 }
 
 export async function consumeBoundNonce(
@@ -103,21 +111,9 @@ export async function consumeBoundNonce(
   kind: NonceKind,
   user: string,
 ): Promise<string | undefined> {
-  const claim = read(ctx, token);
-  const now = (ctx.now ?? Date.now)();
-  if (
-    !claim ||
-    claim.kind !== kind ||
-    (claim.user !== '*' && claim.user !== user) ||
-    claim.organization !== ctx.organizationId ||
-    claim.exp < now
-  )
-    return undefined;
-
-  const target = await storedTarget(ctx, token);
-  return target !== undefined && (await ctx.store.take('delivery', keyOf(token)))
-    ? target
-    : undefined;
+  if (!claimOf(ctx, token, kind, user)) return;
+  const record = await ctx.store.take('delivery', keyOf(token));
+  return record && 'target' in record ? record.target : undefined;
 }
 
 export async function inspectNonce(
@@ -126,15 +122,5 @@ export async function inspectNonce(
   kind: NonceKind,
   user: string,
 ): Promise<string | undefined> {
-  const claim = read(ctx, token);
-  const now = (ctx.now ?? Date.now)();
-  if (
-    !claim ||
-    claim.kind !== kind ||
-    (claim.user !== '*' && claim.user !== user) ||
-    claim.organization !== ctx.organizationId ||
-    claim.exp < now
-  )
-    return undefined;
-  return storedTarget(ctx, token);
+  return claimOf(ctx, token, kind, user) ? storedTarget(ctx, token) : undefined;
 }

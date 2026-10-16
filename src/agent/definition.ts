@@ -4,21 +4,19 @@ import * as z from 'zod/mini';
 import { mcpEntrySchema, type Permission } from '../core/config';
 import { markRepositoryMcp } from '../core/mcp';
 import type { Integration } from '../integrations/types';
-import {
-  PRESETS,
-  type Agent,
-  type AgentDefinition,
-  type AgentDefinitionIntegration,
-  type AgentEventOptions,
-  type AgentUsage,
-  type Preset,
+import type {
+  Agent,
+  AgentDefinition,
+  AgentDefinitionIntegration,
+  AgentEventOptions,
+  AgentUsage,
+  Preset,
 } from './types';
 
 const slug = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
 const effort = z.enum(['low', 'medium', 'high']);
 const permissions = z.enum(['read-only', 'workspace-write', 'auto']);
-const preset = z.enum(['observe', 'comment', 'write']);
-const tools = z.union([preset, z.array(z.string())]);
+const access = z.enum(['read', 'write']);
 
 const eventOptionsSchema = z.strictObject({
   flow: z.optional(slug),
@@ -34,7 +32,6 @@ const definitionIntegrationSchema = z.strictObject({
       z.record(z.string(), z.union([slug, eventOptionsSchema, z.literal(true)])),
     ]),
   ),
-  tools: z.optional(tools),
 });
 
 const agentDefinitionSchema = z.strictObject({
@@ -47,12 +44,12 @@ const agentDefinitionSchema = z.strictObject({
   model: z.optional(z.string()),
   effort: z.optional(effort),
   permissions: z.optional(permissions),
+  access: z.optional(access),
   mcp: z.optional(z.record(slug, mcpEntrySchema)),
   integrations: z._default(z.record(z.string(), definitionIntegrationSchema), {}),
 });
 
 const usageIntegrationSchema = z.strictObject({
-  allowedTools: z.optional(tools),
   allowedEvents: z.optional(z.array(z.string())),
 });
 
@@ -62,6 +59,7 @@ const agentUsageSchema = z.strictObject({
   model: z.optional(z.string()),
   effort: z.optional(effort),
   permissions: z.optional(permissions),
+  access: z.optional(access),
   integrations: z.optional(z.record(z.string(), usageIntegrationSchema)),
   disabled: z.optional(z.boolean()),
 });
@@ -76,12 +74,29 @@ function issues(error: {
     .join('; ');
 }
 
+/** A stored definition carries the repository marker from its last parse; it is derived again, never read. */
+function withoutMarkers(json: unknown): unknown {
+  const mcp = (json as { mcp?: unknown } | null)?.mcp;
+  if (!mcp || typeof mcp !== 'object') return json;
+
+  return {
+    ...(json as object),
+    mcp: Object.fromEntries(
+      Object.entries(mcp).map(([name, entry]) => {
+        if (!entry || typeof entry !== 'object') return [name, entry];
+        const { repository: _marker, ...rest } = entry as Record<string, unknown>;
+        return [name, rest];
+      }),
+    ),
+  };
+}
+
 export function parseAgentDefinition(
   id: string,
   json: unknown,
   repository = true,
 ): AgentDefinition {
-  const parsed = agentDefinitionSchema.safeParse(json);
+  const parsed = agentDefinitionSchema.safeParse(withoutMarkers(json));
   if (!parsed.success) throw new Error(`Invalid agent definition "${id}": ${issues(parsed.error)}`);
   const { $schema: _ignored, ...definition } = parsed.data;
   markRepositoryMcp(definition.mcp, repository);
@@ -140,7 +155,6 @@ export function validateAgents(
           }
         }
       }
-      errors.push(...toolErrors(`${prefix}.tools`, wiring.tools, integration));
     }
     for (const [integrationId, scope] of Object.entries(agent.usage?.integrations ?? {})) {
       const prefix = `agents.${agent.id}.integrations.${integrationId}`;
@@ -149,7 +163,6 @@ export function validateAgents(
         errors.push(`${prefix}: unknown integration; valid: ${known}`);
         continue;
       }
-      errors.push(...toolErrors(`${prefix}.allowedTools`, scope.allowedTools, integration));
       const valid = Object.keys(integration.events).sort().join(', ') || 'none';
       for (const event of scope.allowedEvents ?? []) {
         if (!(event in integration.events))
@@ -160,49 +173,9 @@ export function validateAgents(
   return errors;
 }
 
-function toolErrors(
-  prefix: string,
-  tools: Preset | string[] | undefined,
-  integration: Integration,
-): string[] {
-  if (tools === undefined) return [];
-  if (typeof tools === 'string') {
-    return PRESETS.includes(tools)
-      ? []
-      : [`${prefix}: unknown preset "${tools}"; valid: ${PRESETS.join(', ')}`];
-  }
-  const valid = new Set(Object.values(integration.tools.presets).flat());
-  return tools
-    .filter(tool => !valid.has(tool))
-    .map(
-      tool => `${prefix}: unknown tool "${tool}"; valid: ${[...valid].sort().join(', ') || 'none'}`,
-    );
-}
-
-function expand(tools: Preset | string[], integration: Integration): string[] {
-  if (Array.isArray(tools)) return [...new Set(tools)];
-  const through = PRESETS.indexOf(tools);
-  return [
-    ...new Set(
-      PRESETS.slice(0, through + 1).flatMap(preset => integration.tools.presets[preset] ?? []),
-    ),
-  ];
-}
-
-/** Effective tools: what the definition uses, capped by the repo's `allowedTools` when set. */
-export function resolveTools(
-  agent: Agent,
-  integrationId: string,
-  integration: Integration,
-): string[] {
-  const used = expand(
-    agent.definition.integrations[integrationId]?.tools ?? 'observe',
-    integration,
-  );
-  const allow = agent.usage?.integrations?.[integrationId]?.allowedTools;
-  if (allow === undefined) return used;
-  const capped = new Set(expand(allow, integration));
-  return used.filter(tool => capped.has(tool));
+/** The agent's one access mode: the definition's, lowered to Read-only by its usage. */
+export function agentAccess(agent: Pick<Agent, 'definition' | 'usage'>): Preset {
+  return agent.definition.access === 'read' || agent.usage?.access === 'read' ? 'read' : 'write';
 }
 
 /** Effective events: the definition's, capped by the repo's `allowedEvents` when set. */

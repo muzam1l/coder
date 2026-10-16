@@ -10,6 +10,7 @@ import {
 
 import type { AdapterContext } from '../types';
 import type { SlackAppCredentials } from './app';
+import { messageEvent } from './index';
 
 /** Stands in for a workspace's bot token until a Web API call needs it, so a webhook is answered before any token lookup. */
 const PENDING = 'coder-pending:';
@@ -58,12 +59,24 @@ class BoundSlackAdapter extends SlackAdapter {
     private readonly privateState?: () => StateAdapter,
     private readonly hears?: AdapterContext['hears'],
     private readonly active?: AdapterContext['active'],
+    private readonly knows?: AdapterContext['knows'],
   ) {
     super(config);
   }
 
-  /** Set for a plain message outside a conversation: its users are named by id, never looked up. */
+  /** Set for a thread reply outside Coder's conversations: its users are named by id, never looked up. */
   private unnamed = false;
+
+  // A reaction on a message Coder does not know is dropped before the thread lookup Chat would spend on it.
+  protected override async handleReactionEvent(
+    event: Parameters<SlackAdapter['handleReactionEvent']>[0],
+    options?: WebhookOptions,
+  ): Promise<void> {
+    const item = event.item as { type?: string; channel?: string; ts?: string };
+    if (this.knows && item.type === 'message' && item.channel && item.ts)
+      if (!(await this.knows(item.channel, item.ts))) return;
+    return super.handleReactionEvent(event, options);
+  }
 
   // Filtered before Chat looks up the author and mentions: a plain message Coder does not take is dropped.
   protected override handleMessageEvent(event: SlackEvent, options?: WebhookOptions): void {
@@ -76,10 +89,9 @@ class BoundSlackAdapter extends SlackAdapter {
     if (!plain || !this.hears) return super.handleMessageEvent(event, options);
 
     const work = (async () => {
-      if (!(await this.hears!(event.text ?? ''))) return;
-      this.unnamed = !(
-        event.thread_ts && (await this.active?.(this.threadIdForMessageEvent(event)))
-      );
+      if (!(await this.hears!(messageEvent(event.channel_type), event.text ?? ''))) return;
+      this.unnamed =
+        Boolean(event.thread_ts) && !(await this.active?.(this.threadIdForMessageEvent(event)));
       super.handleMessageEvent(event, options);
     })();
     options?.waitUntil?.(work);
@@ -173,5 +185,6 @@ export function slackAdapter(ctx: AdapterContext): Adapter {
     ctx.privateState,
     ctx.hears,
     ctx.active,
+    ctx.knows,
   );
 }

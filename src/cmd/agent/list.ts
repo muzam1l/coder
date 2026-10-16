@@ -4,10 +4,8 @@ import process from 'node:process';
 import type { Agent } from '../../agent/types';
 import type { ServerAgent } from '../../server/store/types';
 import { formatHints, outStyle, renderTable } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
+import { baseOptions, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 export const isLocal = (agent: Agent | ServerAgent): agent is Agent => 'builtin' in agent;
 

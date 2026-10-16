@@ -1,8 +1,9 @@
+import { withFileLock } from '../utils/fsx';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import type { Connection } from '../agent/types';
+import type { Connection, Preset } from '../agent/types';
 import type { McpServerSpec } from './types';
 import { coderHome } from './state';
 import { oauthAccessToken, OAuthRevoked, type OAuthSecret } from './oauth';
@@ -243,69 +244,7 @@ export class LocalConnections {
       id === undefined
         ? this.lock
         : `${this.lock}-${createHash('sha256').update(id).digest('hex')}`;
-    fs.mkdirSync(path.dirname(lock), { recursive: true });
-    const staging = fs.mkdtempSync(`${lock}-`);
-    const owner = `${process.pid}-${Date.now()}-${randomUUID()}`;
-    fs.mkdirSync(path.join(staging, owner), { mode: 0o700 });
-    let acquired = false;
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
-    try {
-      for (;;) {
-        try {
-          fs.renameSync(staging, lock);
-          acquired = true;
-          break;
-        } catch (error) {
-          if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? ''))
-            throw error;
-          const entries = (() => {
-            try {
-              return fs.readdirSync(lock);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-              throw error;
-            }
-          })();
-          for (const entry of entries) {
-            const marker = path.join(lock, entry);
-            const pid = Number(entry.split('-')[0]);
-            try {
-              let stale = Date.now() - fs.statSync(marker).mtimeMs > 30_000;
-              if (Number.isInteger(pid) && pid > 0) {
-                try {
-                  process.kill(pid, 0);
-                } catch (error) {
-                  stale ||= (error as NodeJS.ErrnoException).code === 'ESRCH';
-                }
-              }
-              if (stale) fs.rmdirSync(marker);
-            } catch {}
-          }
-          try {
-            fs.rmdirSync(lock);
-          } catch {}
-          await new Promise(resolve => setTimeout(resolve, 25));
-        }
-      }
-      heartbeat = setInterval(() => {
-        try {
-          fs.utimesSync(path.join(lock, owner), new Date(), new Date());
-        } catch {}
-      }, 1_000);
-      heartbeat.unref();
-
-      return await work();
-    } finally {
-      clearInterval(heartbeat);
-      if (acquired) {
-        try {
-          fs.rmdirSync(path.join(lock, owner));
-        } catch {}
-        try {
-          fs.rmdirSync(lock);
-        } catch {}
-      } else fs.rmSync(staging, { recursive: true, force: true });
-    }
+    return withFileLock(lock, work);
   }
 
   list(): Connection[] {
@@ -363,6 +302,14 @@ export class LocalConnections {
         return sealed ? [{ id, value: { ...record, ...JSON.parse(sealed) } }] : [];
       },
     );
+  }
+
+  credential(id: string): SealedCredential | undefined {
+    const record = read<Record<string, CredentialRecord>>(this.credentialFile, {})[id];
+    if (!record) return undefined;
+    const sealed = this.secrets.get(`credential/${id}`);
+
+    return sealed ? { ...record, ...JSON.parse(sealed) } : undefined;
   }
 
   putCredential(id: string, value: SealedCredential): void {
@@ -527,8 +474,8 @@ export async function connectionMcp(
     }
   }
   if (spec.command) {
-    if (connection.access === 'observe' && !spec.tools?.length)
-      throw new Error('Observe requires tools');
+    if (connection.access === 'read' && !spec.tools?.length)
+      throw new Error('Read-only requires tools');
     return spec;
   }
   const signal = AbortSignal.timeout(5_000);
@@ -672,6 +619,7 @@ export async function localConnections(
   allowed?: string[],
   granted?: string[],
   local = new LocalConnections(),
+  mode: Preset = 'write',
 ) {
   const ids =
     granted ??
@@ -713,7 +661,7 @@ export async function localConnections(
       if (connection.provider === 'env') {
         const name = (connection.keyIn as { env: string }).env;
         try {
-          const stored = local.credentials().find(row => row.id === connection!.credential)?.value;
+          const stored = local.credential(connection.credential!);
           const key =
             stored?.iv === 'plain'
               ? (
@@ -769,11 +717,11 @@ export async function localConnections(
         if (connection.auth !== 'none' && !token) throw new Error('Missing credential');
         let spec: McpServerSpec | undefined;
         try {
-          spec = await connectionMcp(connection, token);
+          spec = await connectionMcp({ ...connection, access: connection.access ?? mode }, token);
         } catch (error) {
           if (!(error instanceof ConnectionRefused) || connection.auth !== 'oauth') throw error;
           token = await credential(true, token);
-          spec = await connectionMcp(connection, token);
+          spec = await connectionMcp({ ...connection, access: connection.access ?? mode }, token);
         }
         if (spec) mcp[id] = spec;
       } catch (error) {

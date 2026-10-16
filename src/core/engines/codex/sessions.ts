@@ -13,6 +13,10 @@ import { listBrokerSessions } from '../../broker/session';
 import { CodexAppServerClient } from './app-server';
 import { engineEnvironment } from '../../connections';
 
+export function codexHome(): string {
+  return process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
+}
+
 // A finished thread stays loaded in the broker's app-server (rollout
 // write-locked) for ~30 min, so `codex archive`/`codex delete` from any other
 // process fail with "already has an active writer." This is the same error Codex
@@ -63,10 +67,7 @@ export async function archiveCodexSession(cwd: string, sessionId: string): Promi
 // Archived sessions live as flat rollout-<timestamp>-<id>.jsonl files under
 // $CODEX_HOME/archived_sessions; a directory scan beats spawning the CLI to ask.
 export function isCodexSessionArchived(sessionId: string): boolean {
-  const dir = path.join(
-    process.env.CODEX_HOME || path.join(os.homedir(), '.codex'),
-    'archived_sessions',
-  );
+  const dir = path.join(codexHome(), 'archived_sessions');
   try {
     return fs.readdirSync(dir).some(name => name.endsWith(`-${sessionId}.jsonl`));
   } catch {

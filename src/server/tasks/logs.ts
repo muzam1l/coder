@@ -115,13 +115,13 @@ export async function readLog(
   });
 }
 
-export async function storeLogs(
+export async function taskRedactor(
   ctx: ServerContext,
   status: TaskStatus,
-  entries: TaskLogLine[],
-): Promise<'ok' | 'gap' | 'stale'> {
+  refresh = false,
+): Promise<(text: string) => string> {
   const settings = (ctx.settings ??= {});
-  const cache = (settings.taskLogSecrets ??= new Map<string, Promise<string[]>>());
+  const cache = (settings.taskLogSecrets ??= new Map<string, Promise<(text: string) => string>>());
   const key = JSON.stringify([
     ctx.organizationId,
     status.task.id,
@@ -129,12 +129,22 @@ export async function storeLogs(
     status.generation,
     status.tokenHash,
   ]);
+  if (refresh) cache.delete(key);
   let pending = cache.get(key);
   if (!pending) {
-    pending = taskLogSecrets(ctx, status).catch(error => {
-      cache.delete(key);
-      throw error;
-    });
+    pending = taskLogSecrets(ctx, status)
+      .then(values => {
+        const secrets = values.sort((a, b) => b.length - a.length);
+        return (text: string) =>
+          secrets.reduce(
+            (text, secret) => (secret ? text.replaceAll(secret, '[REDACTED]') : text),
+            text,
+          );
+      })
+      .catch(error => {
+        cache.delete(key);
+        throw error;
+      });
     cache.set(key, pending);
     const timer = setTimeout(
       () => {
@@ -144,9 +154,15 @@ export async function storeLogs(
     );
     timer.unref?.();
   }
-  const secrets = (await pending).sort((a, b) => b.length - a.length);
-  const redact = (line: string) =>
-    secrets.reduce((text, secret) => (secret ? text.replaceAll(secret, '[REDACTED]') : text), line);
+  return pending;
+}
+
+export async function storeLogs(
+  ctx: ServerContext & { callbackTask?: TaskStatus },
+  status: TaskStatus,
+  entries: TaskLogLine[],
+): Promise<'ok' | 'gap' | 'stale'> {
+  const redact = await taskRedactor(ctx, status);
   const value = (entry: unknown): unknown => {
     if (typeof entry === 'string') return redact(entry);
     if (Array.isArray(entry)) return entry.map(value);
@@ -164,7 +180,10 @@ export async function storeLogs(
     }
   };
   for (let attempt = 0; attempt < 5; attempt++) {
-    const current = await ctx.store.get('task', status.task.id);
+    const current =
+      attempt === 0 && ctx.callbackTask === status
+        ? status
+        : await ctx.store.get('task', status.task.id);
     if (
       !current ||
       current.attempts !== status.attempts ||

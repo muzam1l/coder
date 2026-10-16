@@ -14,6 +14,21 @@ export interface TokenUsage {
   total: number;
 }
 
+export function addTokens(
+  a: TokenUsage | null,
+  b: TokenUsage | null | undefined,
+): TokenUsage | null {
+  if (!b) return a;
+  if (!a) return { ...b };
+
+  return {
+    input: a.input + b.input,
+    cachedInput: a.cachedInput + b.cachedInput,
+    output: a.output + b.output,
+    total: a.total + b.total,
+  };
+}
+
 export interface TaskDisplayRow {
   seq: number;
   at: number;

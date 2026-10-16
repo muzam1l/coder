@@ -38,7 +38,7 @@ async function probe(ctx: ServerContext) {
 
 export async function metrics(ctx: ServerContext) {
   const now = (ctx.now ?? Date.now)();
-  if (ctx.queue.metrics && !ctx.local) {
+  if (!ctx.local) {
     return {
       ...(await ctx.queue.metrics(ctx.organizationId, now - 86_400_000)),
       runnersOnline: (await runners(ctx)).online,

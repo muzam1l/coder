@@ -16,6 +16,7 @@ import process from 'node:process';
 
 import { endpointCandidates } from '../../config';
 import type { CustomModelConfig } from '../../types';
+import { jsonReplyPrompt } from '../../prompts';
 
 export interface ChatBridge {
   /** Loopback base URL to hand codex as the provider base_url (ends in /v1). */
@@ -296,7 +297,7 @@ export async function startChatBridge(
     const format = parsed.text?.format;
     const native = passthrough ? parsed : toChatRequest(parsed);
     const fallback = () => {
-      const instructions = `Reply with only a single JSON object matching this JSON Schema:\n${JSON.stringify(format.schema)}\nUse no prose or markdown fences.`;
+      const instructions = jsonReplyPrompt(format.schema);
       if (passthrough) {
         const { format: ignored, ...text } = parsed.text;
         return {

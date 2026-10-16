@@ -1,11 +1,14 @@
+import { agentAccess } from '../../agent/definition';
 /** A local server's tasks are the CLI's own: `coder task run` tasks show here, and dashboard tasks run through the same broker. */
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
-import { execFile, spawn } from 'node:child_process';
+import { execFile, spawn, type ChildProcess } from 'node:child_process';
+
+import { processTiming } from '../../utils/process';
 
 import { AGENT_TASK_PREFIX, execAgent, agentTaskOptions, threadReply } from '../../agent/exec';
-import type { AgentTask, TaskSource } from '../../agent/types';
+import type { AgentTask, TaskContext, TaskSource } from '../../agent/types';
 import { defaultAgent } from '../../agent/load';
 import type { TaskTurn } from '../../client/types';
 import type { TaskLogLine, TaskStatus, UsageRecord } from '../store/types';
@@ -17,10 +20,12 @@ import {
   CoderError,
   dispatchTask,
   readResultJson,
+  resolveTaskOptions,
   spawnWorker,
   selectMcpServers,
 } from '../../core/dispatch';
 import {
+  appendTaskLog,
   archiveDue,
   archiveTask,
   generateTaskId,
@@ -28,6 +33,8 @@ import {
   listArchivedTasks,
   listTasks,
   loadTask,
+  pidIsOurWorker,
+  processStarts,
   reconcileTask,
   resolveArchiveDir,
   resolveUsageFile,
@@ -36,9 +43,12 @@ import {
   type TurnResultEntry,
   resolveTaskDir,
   readTurnResults,
+  watchTask,
   writeTask,
 } from '../../core/state';
-import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Task } from '../../core/types';
+import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Task, type Availability } from '../../core/types';
+import { SKIPPED } from '../../core/defaults';
+import { eventJsons } from '../../core/event-prompt';
 import { readFlowRecord } from '../../flow/runs';
 import { stopRun, stopFlowTasks } from '../../flow/executor';
 import { applyTaskMessage } from '../../runner/task';
@@ -48,15 +58,24 @@ import { eventTokens } from './context';
 import { connectionGrants } from '../connections/grants';
 import { resolveConnections, taskConnectionSecrets } from '../connections/resolve';
 import { connectionEnvironment, narrowConnections } from '../../core/connections';
-import { taskToolServers } from '../../agent/mcp';
+import { nativeToolEnvironment, type ReplyEndpoint } from '../../agent/mcp';
 import { connectionWarnings } from './logs';
 import { assertEnabled, check, TaskInputError, taskCwd, type NewTask } from './create';
-import { noteKey } from './thread';
-import { sessionKey, pushInbox, type TaskFence, type InboxEntry, type InboxAck } from './queue';
+import { rememberPost } from './conversation';
+import {
+  sessionKey,
+  pushInbox,
+  taskTimes,
+  type TaskFence,
+  type InboxEntry,
+  type InboxAck,
+} from './queue';
 import { kick, scheduleKick } from './kick';
 import { chooseRunner } from '../runners';
 import { syncLocalAgents } from '../store/local';
 import { agentWithVersion } from '../agents/records';
+import { getClaudeAvailability } from '../../core/engines/claude';
+import { getCodexAvailability } from '../../core/engines/codex';
 
 const own = (task: Task) => !task.name?.startsWith(AGENT_TASK_PREFIX);
 const at = (value?: string | null) => (value ? Date.parse(value) : undefined);
@@ -110,7 +129,7 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
       ...(!ACTIVE_STATUSES.includes(task.status) ? { finishedAt: at(task.completedAt) } : {}),
     });
   const flow = task.flowRunId ? readFlowRecord(task.flowRunId)?.name : undefined;
-  return {
+  const status: TaskStatus = {
     task: {
       id: task.id,
       source: (task.source ?? 'cli') as TaskSource,
@@ -124,7 +143,12 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
       runner: 'local',
       ...(task.cwd ? { cwd: task.cwd } : {}),
       ...(task.permissions ? { permissions: task.permissions } : {}),
-      ...(task.prompt ? { prompt: task.currentPrompt ?? task.prompt } : {}),
+      // A platform task is titled by its first message, so its row keeps the first turn's event.
+      ...(task.prompt
+        ? {
+            prompt: eventJsons(task.prompt) ? task.prompt : (task.currentPrompt ?? task.prompt),
+          }
+        : {}),
       definition: { integrations: {} },
       ...(task.engine
         ? {
@@ -166,6 +190,8 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
     local: true,
     ...(detail ? { turns } : {}),
   };
+
+  return { ...status, ...taskTimes(status) };
 }
 
 /** Local tasks after the CLI's auto-archive sweep, without the engine tasks that server tasks ran on. */
@@ -250,17 +276,16 @@ export async function startLocalTask(
       ));
     const resolved = await resolveConnections(
       ctx,
-      saved?.task ?? ({ connections: granted, tools: {} } as AgentTask),
+      saved?.task ??
+        ({
+          connections: granted,
+          tools: {},
+          definition: version?.definition ?? { integrations: {} },
+          ...(record?.settings ? { usage: record.settings } : {}),
+        } as AgentTask),
     );
     const connected = connectionEnvironment(resolved.mcp, resolved.env);
-    const native = connectionEnvironment(
-      Object.fromEntries(
-        taskToolServers({ tools: resolved.tools }, resolved.tokens).map(server => [
-          `native:${server.name}`,
-          { ...server, resolved: true },
-        ]),
-      ),
-    );
+    const native = nativeToolEnvironment({ tools: resolved.tools }, resolved.tokens);
     const agent =
       slug !== preferred
         ? await agentTaskOptions(cwd, slug, input.mcp?.join(','), connected.mcp)
@@ -278,7 +303,17 @@ export async function startLocalTask(
         model: input.model ?? (input.engine ? undefined : agent?.model),
         effort: input.effort ?? (input.engine ? undefined : agent?.effort),
         permissions: input.permissions ?? agent?.permissions,
-        system: agent?.system,
+        ...(agent
+          ? {
+              agentPrompt: {
+                developer: agent.developer,
+                access: agentAccess({
+                  definition: version?.definition ?? { integrations: {} },
+                  ...(record?.settings ? { usage: record.settings } : {}),
+                }),
+              },
+            }
+          : {}),
         mcp: [...Object.values(native.mcp), ...selectedMcp.mcp],
         mcpBindings: selectedMcp.mcpBindings,
         mcpWarnings: [...(selectedMcp.warnings ?? []), ...resolved.warnings],
@@ -305,6 +340,8 @@ export interface LocalCompletion {
   task: AgentTask;
   cwd: string;
   fence?: TaskFence;
+  /** Turns the task had before this run; the run posts the ones after them. */
+  turns?: number;
 }
 
 export interface LocalStart {
@@ -335,6 +372,7 @@ async function enqueueLocalTask(
 export async function startQueuedLocalTask(
   ctx: ServerContext,
   status: TaskStatus,
+  token?: string,
 ): Promise<boolean> {
   if (
     !ctx.local ||
@@ -347,15 +385,22 @@ export async function startQueuedLocalTask(
   if (!start) return false;
   try {
     let startedId = status.task.id;
+    let worker: ChildProcess | undefined;
+    const turns = start.resume ? readTurnResults(start.cwd, status.task.id).length : 0;
     const existing =
       status.task.flow === 'default' ? loadTask(start.cwd, status.task.id) : undefined;
+    const reply = token ? replyEndpoint(ctx, status.task.id, token) : undefined;
     if (existing && !start.resume) startedId = existing.id;
     else if (start.resume) {
       const task = loadTask(start.cwd, status.task.id);
       if (!task) throw new Error('Local task is missing');
       await steerTask(start.cwd, task, status.task.prompt ?? '', {
+        onWorker: child => {
+          worker = child;
+        },
         outputSchema: status.task.context?.outputSchema,
         ...start.overrides,
+        resolveConnections: granted => turnConnections(ctx, status.task, granted, reply),
       });
     } else if (start.input)
       await startLocalTask(
@@ -367,7 +412,7 @@ export async function startQueuedLocalTask(
         },
         status.task.id,
       );
-    else startedId = (await runLocalTask(ctx, status.task, status.task.id, true)).task.id;
+    else startedId = (await runLocalTask(ctx, status.task, status.task.id, true, reply)).task.id;
     await ctx.store.put('snapshot', `local-start:${status.task.id}`, { ...start, startedId });
     const fence: TaskFence = {
       attempts: status.attempts,
@@ -389,9 +434,9 @@ export async function startQueuedLocalTask(
       return true;
     }
     if (status.task.flow === 'default') {
-      const completion: LocalCompletion = { task: status.task, cwd: start.cwd, fence };
+      const completion: LocalCompletion = { task: status.task, cwd: start.cwd, fence, turns };
       await ctx.store.put('snapshot', `completion:${startedId}`, completion);
-      watchCompletion(ctx, startedId, completion);
+      watchCompletion(ctx, startedId, completion, worker);
       const inbox = pushInbox(ctx, status.task.id);
       if (ctx.waitUntil) ctx.waitUntil(inbox);
       else void inbox;
@@ -414,6 +459,13 @@ export async function inspectLocalTask(
   now: number,
 ): Promise<boolean> {
   if (status.status !== 'running' && status.status !== 'waiting') return false;
+  if (
+    status.task.flow === 'default' &&
+    ctx.store.localFlows?.has(status.task.id) &&
+    status.cancelRequestedAt === undefined &&
+    (status.startedAt === undefined || now - status.startedAt < ctx.config.taskTimeoutMs)
+  )
+    return false;
   const start = await ctx.store.get<LocalStart>('snapshot', `local-start:${status.task.id}`);
   if (!start) return false;
   const fence: TaskFence = {
@@ -476,18 +528,31 @@ export async function inspectLocalTask(
   );
 }
 
-function watchCompletion(ctx: ServerContext, id: string, saved: LocalCompletion): void {
+function watchCompletion(
+  ctx: ServerContext,
+  id: string,
+  saved: LocalCompletion,
+  worker?: ChildProcess,
+): void {
   const watches = (ctx.store.completionWatches ??= new Map());
   if (watches.has(id)) return;
   const watch = { stopped: false, work: Promise.resolve() };
   watches.set(id, watch);
   watch.work = (async () => {
     const key = `completion:${id}:${saved.fence?.generation ?? 0}`;
-    const previous = await ctx.store.get<{ owner?: string; pid?: number; posted?: boolean }>(
-      'delivery',
-      key,
-    );
+    const previous = await ctx.store.get<{
+      owner?: string;
+      pid?: number;
+      turns?: number;
+      posting?: number;
+    }>('delivery', key);
     if (previous && !previous.owner) return;
+    if (previous?.posting !== undefined) {
+      console.error(
+        `coder server: local completion ${id} has an interrupted post for turn ${previous.posting + 1}; retained for reconciliation`,
+      );
+      return;
+    }
     if (previous?.pid) {
       try {
         process.kill(previous.pid, 0);
@@ -498,98 +563,139 @@ function watchCompletion(ctx: ServerContext, id: string, saved: LocalCompletion)
     }
 
     const owner = randomUUID();
-    let receipt: { owner: string; pid?: number; pending: boolean; posted: boolean } = {
+    let receipt: typeof previous & { owner: string; pending: boolean; turns: number } = {
       owner,
       pid: process.pid,
       pending: true,
-      posted: previous?.posted ?? false,
+      turns: previous?.turns ?? saved.turns ?? 0,
     };
     if (previous?.owner) {
       if (!(await ctx.store.updateDelivery(key, previous.owner, receipt))) return;
     } else if (!(await ctx.store.create('delivery', key, receipt))) return;
 
+    const owns = async (progress = false) => {
+      if (!saved.fence) return true;
+      const current = await ctx.store.get('task', saved.task.id);
+      return (
+        current &&
+        (current.generation ?? 0) === saved.fence.generation &&
+        current.attempts === saved.fence.attempts &&
+        current.tokenHash === saved.fence.tokenHash &&
+        current.status !== 'queued' &&
+        (!progress || ['running', 'waiting'].includes(current.status))
+      );
+    };
+    let replies: Awaited<ReturnType<(typeof import('../chat'))['eventReplies']>> | undefined;
+    const conversationReplies = async (progress: boolean) => {
+      const event = saved.task.event;
+      if (!event || saved.task.source !== event.integration)
+        throw new Error('The task has no conversation');
+
+      if (!(await owns(progress))) throw new Error('The conversation task is no longer running');
+
+      if (!replies) {
+        const app = await ctx.store.get('app', event.appId);
+        if (!app) throw new Error('Local completion has no app');
+        const { eventReplies } = await import('../chat');
+        replies = await eventReplies(ctx, app, event);
+      }
+
+      return replies;
+    };
+    const post = async (text: string, problem = false, progress = false) => {
+      const replies = await conversationReplies(progress);
+      const sent = await (problem ? replies.problem(text) : replies.post(text, progress));
+      if (!progress && receipt.posting !== undefined)
+        receipt = { ...receipt, turns: receipt.posting + 1, posting: undefined };
+      if (sent)
+        await rememberPost(
+          ctx,
+          saved.task.event!,
+          sent.ids ?? (sent.id ? [sent.id] : []),
+          Date.now(),
+        );
+    };
+    const startMs = processStarts();
+    const resultSignal = watchTask(saved.cwd, id, worker);
+    let pollMs = 100;
     try {
       for (let attempt = 0; attempt < 5; attempt++) {
         try {
-          let result: ReturnType<typeof readResultJson> = null;
-          let cancelled = false;
+          const reply = async (
+            result: Parameters<typeof threadReply>[1],
+            cancelled: boolean,
+            turn?: TurnResultEntry,
+          ) => {
+            if (saved.task.source !== saved.task.event?.integration) return;
+            processTiming('completion.reply', { id });
+            const answer = threadReply(saved.task, result, cancelled, turn);
+            if (answer.skipped) appendTaskLog(saved.cwd, id, { kind: 'status', message: SKIPPED });
+            if (answer.text && !answer.duplicate) await post(answer.text, answer.problem);
+          };
 
           for (;;) {
             if (watch.stopped) return;
-            if (saved.fence) {
-              const current = await ctx.store.get('task', saved.task.id);
-              if (
-                !current ||
-                (current.generation ?? 0) !== saved.fence.generation ||
-                current.attempts !== saved.fence.attempts ||
-                current.tokenHash !== saved.fence.tokenHash ||
-                current.status === 'queued'
-              )
-                return;
-            }
+            if (!(await owns())) return;
             const found = loadTask(saved.cwd, id);
             if (!found) return;
-            const task = reconcileTask(saved.cwd, found);
-            if (!ACTIVE_STATUSES.includes(task.status)) {
-              cancelled = task.status === 'cancelled';
-              const file = path.join(resolveTaskDir(saved.cwd, id), 'result.json');
-              const finished = Math.max(
-                at(task.completedAt) ?? 0,
-                at(task.resumedAt) ?? at(task.createdAt) ?? 0,
-              );
-              if (fs.existsSync(file) && fs.statSync(file).mtimeMs >= finished)
-                result = readResultJson(saved.cwd, id);
-              if (result) break;
-              if (task.error || task.status === 'cancelled') {
-                result = {
-                  status: 1,
-                  threadId: task.threadId ?? null,
-                  error: { message: task.error ?? 'Task cancelled' },
-                };
-                break;
-              }
+            const turns = readTurnResults(saved.cwd, id);
+
+            for (const turn of turns.slice(receipt.turns)) {
+              if (turn.status !== 0 && ctx.local) ctx.local.engineChecks = undefined;
+              const result = { finalMessage: turn.finalMessage, error: turn.error };
+              const answer = threadReply(saved.task, result, false, turn);
+              const sending =
+                saved.task.source === saved.task.event?.integration &&
+                answer.text &&
+                !answer.duplicate;
+              if (sending) await conversationReplies(false);
+              const next = receipt.turns + 1;
+              receipt = { ...receipt, posting: sending ? receipt.turns : undefined };
+              if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
+              await reply(result, false, turn);
+              receipt = { ...receipt, turns: next, posting: undefined };
+              if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
             }
-            await new Promise(resolve => setTimeout(resolve, 100));
-          }
+            const task = reconcileTask(saved.cwd, found, startMs);
+            // A completed turn's worker may still run queued steers or a summary.
+            const ended =
+              !ACTIVE_STATUSES.includes(task.status) &&
+              !(task.pid && pidIsOurWorker(task.pid, task, startMs));
+            const done =
+              ended && (task.status !== 'completed' || turns.length > (saved.turns ?? 0));
+            if (done) {
+              const queued = await ctx.store.get('task', saved.task.id);
+              if (
+                saved.fence &&
+                queued &&
+                (queued.generation ?? 0) === saved.fence.generation &&
+                queued.attempts === saved.fence.attempts &&
+                queued.tokenHash === saved.fence.tokenHash &&
+                (await inspectLocalTask(ctx, queued, (ctx.now ?? Date.now)()))
+              )
+                scheduleKick(ctx, true);
 
-          const queued = await ctx.store.get('task', saved.task.id);
-          if (
-            saved.fence &&
-            queued &&
-            (queued.generation ?? 0) === saved.fence.generation &&
-            queued.attempts === saved.fence.attempts &&
-            queued.tokenHash === saved.fence.tokenHash &&
-            (await inspectLocalTask(ctx, queued, (ctx.now ?? Date.now)()))
-          )
-            scheduleKick(ctx, true);
-
-          if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
-          if (!receipt.posted && saved.task.source === saved.task.event?.integration) {
-            const app = await ctx.store.get('app', saved.task.event.appId);
-            if (!app) throw new Error('Local completion has no app');
-
-            const { eventReplies } = await import('../chat');
-            const replies = await eventReplies(ctx, app, saved.task.event);
-            if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
-
-            const reply = threadReply(saved.task, result, cancelled);
-            if (reply.text) await (reply.problem ? replies.problem : replies.post)(reply.text);
-            receipt = { ...receipt, posted: true };
-            if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
-          }
-
-          const noteFile = path.join(resolveTaskDir(saved.cwd, id), 'agent-note');
-          const note = fs.existsSync(noteFile)
-            ? fs.readFileSync(noteFile, 'utf8').trim()
-            : (saved.task.context?.note ?? '').trim();
-          if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
-          if (note !== (saved.task.context?.note ?? '').trim()) {
-            if (note) await ctx.store.put('note', noteKey(saved.task), note);
-            else await ctx.store.delete('note', noteKey(saved.task));
+              // A turn that ended without a recorded result still answers with its failure.
+              const cancelled = task.status === 'cancelled';
+              if (
+                (cancelled || task.error) &&
+                turns.at(-1)?.prompt !== (task.currentPrompt ?? task.prompt ?? null)
+              ) {
+                if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
+                await reply({ error: { message: task.error ?? 'Task cancelled' } }, cancelled);
+              }
+              break;
+            }
+            await resultSignal.wait(pollMs);
+            pollMs = Math.min(1000, pollMs * 2);
           }
 
           if (
-            await ctx.store.updateDelivery(key, owner, { posted: receipt.posted, at: Date.now() })
+            await ctx.store.updateDelivery(key, owner, {
+              posted: true,
+              turns: receipt.turns,
+              at: Date.now(),
+            })
           ) {
             const current = await ctx.store.get<LocalCompletion>('snapshot', `completion:${id}`);
             if (current?.fence?.generation === saved.fence?.generation)
@@ -610,6 +716,7 @@ function watchCompletion(ctx: ServerContext, id: string, saved: LocalCompletion)
         }
       }
     } finally {
+      resultSignal.close();
       await ctx.store.updateDelivery(key, owner, { ...receipt, pid: undefined });
     }
   })()
@@ -643,12 +750,45 @@ export async function stopLocalTasks(ctx: ServerContext): Promise<void> {
   await Promise.all([...watches.values()].map(watch => watch.work));
 }
 
+/** A resumed turn's connections and tool tokens, resolved afresh the way its first turn's were. */
+/** The conversation tools post to this server's own task callback path on the attempt's token. */
+function replyEndpoint(ctx: ServerContext, taskId: string, token: string): ReplyEndpoint {
+  return { url: `http://127.0.0.1:${ctx.local!.port}/tasks/${encodeURIComponent(taskId)}`, token };
+}
+
+async function turnConnections(
+  ctx: ServerContext,
+  task: AgentTask,
+  granted: string[],
+  reply?: ReplyEndpoint,
+) {
+  const handles = task.event ? await eventTokens(ctx, task) : {};
+  const resolved = await resolveConnections(ctx, { ...task, connections: granted }, handles);
+  await taskConnectionSecrets(ctx, task.id, [
+    ...resolved.secrets,
+    ...Object.values(resolved.tokens),
+  ]);
+  const connected = connectionEnvironment(resolved.mcp, resolved.env);
+  const native = nativeToolEnvironment(
+    { ...task, tools: resolved.tools, toolScopes: resolved.toolScopes },
+    resolved.tokens,
+    reply,
+  );
+
+  return {
+    mcp: connected.mcp,
+    env: { ...connected.env, ...native.env },
+    warnings: resolved.warnings,
+  };
+}
+
 /** Run a server task as CLI tasks on this machine, as a runner would, and answer once the first one exists. */
 export async function runLocalTask(
   ctx: ServerContext,
   task: AgentTask,
   taskId?: string,
   admitted = false,
+  reply?: ReplyEndpoint,
 ): Promise<TaskStatus> {
   if (task.event?.repo) {
     const now = (ctx.now ?? Date.now)();
@@ -725,24 +865,24 @@ export async function runLocalTask(
     if (saved && sessionKey(saved.task) !== sessionKey(task))
       throw new Error('Local completion belongs to another session');
     if (!saved) await ctx.store.create('snapshot', key, completion);
-    const noteFile = path.join(resolveTaskDir(cwd, taskId), 'agent-note');
-    if (!fs.existsSync(noteFile)) {
-      fs.mkdirSync(path.dirname(noteFile), { recursive: true });
-      fs.writeFileSync(noteFile, task.context?.note ?? '', { mode: 0o600 });
-    }
   }
 
   const existing = task.flow === 'default' && taskId ? loadTask(cwd, taskId) : undefined;
   if (existing) {
+    let worker: ChildProcess | undefined;
     if (existing.status === 'queued' && !existing.pid)
-      spawnWorker(cwd, existing.id, connectionEnvironment(resolved.mcp, resolved.env).env);
-    watchCompletion(ctx, existing.id, completion);
+      worker = spawnWorker(cwd, existing.id, {
+        ...connectionEnvironment(resolved.mcp, resolved.env).env,
+        ...nativeToolEnvironment(task, tokens, reply).env,
+      });
+    watchCompletion(ctx, existing.id, completion, worker);
     return row(cwd, existing);
   }
 
   let started!: (id: string) => void;
   const first = new Promise<string>(resolve => (started = resolve));
-  let run: Promise<void>;
+  let run: Promise<unknown>;
+  let worker: ChildProcess | undefined;
 
   run = execAgent({
     cwd,
@@ -751,12 +891,15 @@ export async function runLocalTask(
     task,
     taskId,
     toolEnvironment: { tokens },
+    ...(reply ? { replyEndpoint: reply } : {}),
     connections: resolved.mcp,
     connectionEnv: resolved.env,
+    availability:
+      ctx.local?.engineChecks && ctx.local.engineChecks.expiresAt > Date.now()
+        ? ctx.local.engineChecks.availability
+        : undefined,
+    ...(task.engineChain ? { onEngine: (engine: string) => machineSignedIn(ctx, engine) } : {}),
     post: task.flow === 'default' ? false : task.source === task.event?.integration,
-    ...(task.flow === 'default'
-      ? { noteFile: path.join(resolveTaskDir(cwd, taskId!), 'agent-note') }
-      : {}),
     ...(token ? { postToken: token } : {}),
     source: task.source,
     onStart: control => {
@@ -770,15 +913,20 @@ export async function runLocalTask(
       });
       started(task.id);
     },
+    onWorker: (_id, child) => {
+      worker = child;
+    },
     onTask: id => {
-      if (task.flow === 'default') watchCompletion(ctx, id, completion);
       started(id);
     },
   })
     .then(async result => {
-      if (task.flow === 'default' || result.note === undefined) return;
-      if (result.note) await ctx.store.put('note', noteKey(task), result.note);
-      else await ctx.store.delete('note', noteKey(task));
+      if (task.flow === 'default' && result.taskId) {
+        completion.turns = result.turn ?? completion.turns;
+        await ctx.store.put('snapshot', `completion:${result.taskId}`, completion);
+        watchCompletion(ctx, result.taskId, completion, worker);
+      }
+      return result;
     })
     .finally(async () => {
       ctx.store.localFlows?.delete(task.id);
@@ -795,7 +943,17 @@ export async function runLocalTask(
         scheduleKick(ctx, true);
       }
     });
-  run.catch(() => {});
+  if (task.flow === 'default')
+    (ctx.store.localFlows ??= new Map()).set(task.id, {
+      stop: async () => {
+        const current = loadTask(cwd, taskId ?? task.id);
+        if (current) await stopTask(cwd, current);
+      },
+      work: run,
+    });
+  run.catch(() => {
+    if (ctx.local) ctx.local.engineChecks = undefined;
+  });
 
   const id = await Promise.race([first, run.then(() => undefined)]);
   const startedTask = id ? loadTask(cwd, id) : undefined;
@@ -844,7 +1002,9 @@ export async function pushLocalInbox(
     const value =
       entry.kind === 'cancel'
         ? await stopTask(start.cwd, task)
-        : await applyTaskMessage(start.cwd, { ...task, name: undefined }, entry);
+        : await applyTaskMessage(start.cwd, { ...task, name: undefined }, entry, granted =>
+            turnConnections(ctx, status.task, granted),
+          );
     if (entry.kind === 'ask') ack.answers!.push({ seq: entry.seq, value });
 
     ack.seq = entry.seq;
@@ -880,7 +1040,62 @@ export function localTask(cwd: string, id: string, detail = true): TaskStatus | 
   return task && own(task) ? row(cwd, reconcileTask(cwd, task), detail) : undefined;
 }
 
-/** `/admin/tasks/<id>` actions on a CLI task, answered as the queue's would be. */
+/** A finished local task runs again on the same id with `text` as its next turn, in place with its engine history; false when it is still active. */
+export async function resumeLocalTask(
+  ctx: ServerContext,
+  cwd: string,
+  id: string,
+  text: string,
+  outputSchema?: object,
+  overrides: LocalStart['overrides'] = {},
+  context: Partial<TaskContext> = {},
+): Promise<boolean> {
+  const priorWatch = ctx.store.completionWatches?.get(id);
+  if (priorWatch) await priorWatch.work;
+
+  const now = (ctx.now ?? Date.now)();
+  let previous = await ctx.store.get('task', id);
+  if (previous && ['running', 'waiting'].includes(previous.status)) {
+    await inspectLocalTask(ctx, previous, now);
+    previous = await ctx.store.get('task', id);
+  }
+
+  const next = {
+    prompt: text,
+    context: { ...previous?.task.context, ...context, ...(outputSchema ? { outputSchema } : {}) },
+  };
+
+  await ctx.store.put('snapshot', `local-start:${id}`, {
+    cwd,
+    resume: true,
+    ...(Object.keys(overrides).length ? { overrides } : {}),
+  } satisfies LocalStart);
+  if (previous) {
+    if (
+      !(await ctx.queue.continueTask(ctx.organizationId, id, next, now, {
+        attempts: previous.attempts,
+        generation: previous.generation ?? 0,
+      }))
+    )
+      return false;
+  } else {
+    const task = loadTask(cwd, id);
+    if (!task) throw new Error(`No task "${id}"`);
+    await ctx.queue.enqueue(
+      ctx.organizationId,
+      { ...row(cwd, task).task, ...next },
+      now,
+      undefined,
+      ctx.config.maxQueued ?? 1000,
+    );
+  }
+
+  await kick(ctx, false, true, true);
+
+  return true;
+}
+
+/** `/admin/tasks/<id>` actions on a CLI task. */
 export async function localTaskAction(
   req: Request,
   cwd: string,
@@ -947,44 +1162,8 @@ export async function localTaskAction(
       return refuse('outputSchema must be an object', 400);
     try {
       if (!active && ctx) {
-        const priorWatch = ctx.store.completionWatches?.get(id);
-        if (priorWatch) await priorWatch.work;
-
-        const now = (ctx.now ?? Date.now)();
-        let previous = await ctx.store.get('task', id);
-        if (previous && ['running', 'waiting'].includes(previous.status)) {
-          await inspectLocalTask(ctx, previous, now);
-          previous = await ctx.store.get('task', id);
-        }
-
-        const next = {
-          prompt: text,
-          context: { ...previous?.task.context, ...(outputSchema ? { outputSchema } : {}) },
-        };
-
-        await ctx.store.put('snapshot', `local-start:${id}`, {
-          cwd,
-          resume: true,
-          ...(Object.keys(overrides).length ? { overrides } : {}),
-        } satisfies LocalStart);
-        if (previous) {
-          if (
-            !(await ctx.queue.continueTask(ctx.organizationId, id, next, now, {
-              attempts: previous.attempts,
-              generation: previous.generation ?? 0,
-            }))
-          )
-            return refuse('Task is already active');
-        } else
-          await ctx.queue.enqueue(
-            ctx.organizationId,
-            { ...row(cwd, task).task, ...next },
-            now,
-            undefined,
-            ctx.config.maxQueued ?? 1000,
-          );
-
-        await kick(ctx, false, true, true);
+        if (!(await resumeLocalTask(ctx, cwd, id, text, outputSchema as object, overrides)))
+          return refuse('Task is already active');
 
         const saved = await ctx.store.get('task', id);
 
@@ -1038,15 +1217,7 @@ export function localUsage(
 
   return [...listTasks(cwd), ...(archived ? listArchivedTasks(cwd, { migrate: false }) : [])]
     .filter(own)
-    .flatMap(task => {
-      const turns = readTurnResults(cwd, task.id);
-      const result =
-        !turns.length && !ACTIVE_STATUSES.includes(task.status)
-          ? readResultJson(cwd, task.id)
-          : null;
-
-      return taskUsage(task, turns, result, completions);
-    });
+    .flatMap(task => taskUsage(task, completions));
 }
 
 function usageCompletions(keys: Iterable<string>): Map<string, number[]> {
@@ -1062,17 +1233,8 @@ function usageCompletions(keys: Iterable<string>): Map<string, number[]> {
   return completions;
 }
 
-function taskUsage(
-  task: Task,
-  turns: TurnResultEntry[],
-  result: Pick<TurnResultEntry, 'tokens' | 'model'> | null,
-  known: Map<string, number[]>,
-): Array<[string, UsageRecord]> {
-  const results = turns.length
-    ? turns
-    : result
-      ? [{ ...result, at: task.completedAt ?? task.updatedAt ?? task.createdAt }]
-      : [];
+function taskUsage(task: Task, known: Map<string, number[]>): Array<[string, UsageRecord]> {
+  const results = task.turnUsage ?? [];
   const completions = known.get(task.id) ?? [];
   known.set(task.id, completions);
   let previous = at(task.createdAt) ?? 0;
@@ -1085,9 +1247,7 @@ function taskUsage(
       resumedAt !== undefined && resumedAt >= previous && resumedAt <= finishedAt
         ? resumedAt
         : previous;
-    const knownTurn = completions.some(
-      time => time === finishedAt || (time > previous && time <= finishedAt),
-    );
+    const knownTurn = completions.includes(finishedAt);
     previous = finishedAt;
     if (knownTurn) return [];
     completions.push(finishedAt);
@@ -1185,21 +1345,7 @@ async function scanLocalUsage(ctx: ServerContext): Promise<void> {
     if (task.agent) task.engine = task.agent;
     seen.add(id);
     if (own(task)) {
-      const history = await fs.promises
-        .readFile(path.join(dir, 'results.jsonl'), 'utf8')
-        .catch(() => '');
-      const turns = history.split(/\r?\n/).flatMap((line): TurnResultEntry[] => {
-        try {
-          return line ? [JSON.parse(line) as TurnResultEntry] : [];
-        } catch {
-          return [];
-        }
-      });
-      const result =
-        !turns.length && !ACTIVE_STATUSES.includes(task.status)
-          ? await readUsageJson<TurnResultEntry>(path.join(dir, 'result.json'))
-          : null;
-      for (const [key, row] of taskUsage(task, turns, result, completions)) {
+      for (const [key, row] of taskUsage(task, completions)) {
         await ctx.store.put('usage', key, row);
         changed = true;
         await yieldBatch();
@@ -1284,21 +1430,50 @@ function signedIn(check: (typeof CHECKS)[keyof typeof CHECKS]): Promise<boolean>
   );
 }
 
-export async function engineStatus(): Promise<EngineStatus> {
-  const [claude, codex] = await Promise.all([signedIn(CHECKS.claude), signedIn(CHECKS.codex)]);
-  return {
-    claude: { signedIn: claude, command: CHECKS.claude.command },
-    codex: { signedIn: codex, command: CHECKS.codex.command },
-  };
+export async function engineStatus(ctx?: ServerContext): Promise<EngineStatus> {
+  const local = ctx?.local;
+  if (local?.engineChecks && local.engineChecks.expiresAt > Date.now())
+    return local.engineChecks.work;
+  const availability: Partial<Record<'claude' | 'codex', Availability>> = {};
+  const work = Promise.all([signedIn(CHECKS.claude), signedIn(CHECKS.codex)])
+    .then(([claude, codex]) => {
+      if (local) {
+        availability.claude = getClaudeAvailability('claude', process.env, local.cwd);
+        availability.codex = getCodexAvailability(local.cwd);
+      }
+      return {
+        claude: { signedIn: claude, command: CHECKS.claude.command },
+        codex: { signedIn: codex, command: CHECKS.codex.command },
+      };
+    })
+    .catch(error => {
+      if (local?.engineChecks?.work === work) local.engineChecks = undefined;
+      throw error;
+    });
+  if (local) local.engineChecks = { expiresAt: Date.now() + 30_000, availability, work };
+
+  return work;
 }
 
 /** This machine's own logins; an agent without an engine falls back along the chain. */
-export async function machineSignedIn(ctx: ServerContext, engine?: string): Promise<boolean> {
+export async function machineSignedIn(
+  ctx: ServerContext,
+  engine?: string,
+  model?: string,
+): Promise<boolean> {
   if (!ctx.local) return false;
   const engines = engine ? [engine] : loadConfig(ctx.local.cwd).chain;
-  const status = await engineStatus();
+  const status = await engineStatus(ctx);
 
-  return engines.some(
-    name => name === 'custom' || status[name as 'claude' | 'codex']?.signedIn === true,
-  );
+  return engines.some(name => {
+    if (name !== 'custom') return status[name as 'claude' | 'codex']?.signedIn === true;
+    const config = loadConfig(ctx.local!.cwd);
+    try {
+      const selected = resolveTaskOptions({ engine: 'custom', model }, config).model;
+      const entry = selected && config.models?.[selected];
+      return Boolean(entry && 'baseUrl' in entry && process.env[entry.envKey ?? 'OPENAI_API_KEY']);
+    } catch {
+      return false;
+    }
+  });
 }

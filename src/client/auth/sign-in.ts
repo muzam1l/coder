@@ -12,6 +12,11 @@ import { savedSessions, writeSessions, type Session } from './session';
 const SCOPE = 'openid profile email offline_access organizations:read';
 const CALLBACK_TIMEOUT_MS = 5 * 60_000;
 
+const callbackPage = (title: string) =>
+  `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Coder · ${title}</title>
+<style>:root{color-scheme:light dark}body{margin:0;min-height:100vh;display:grid;place-items:center;font:15px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;background:light-dark(#fafafa,#111);color:light-dark(#111,#eee)}main{text-align:center;padding:32px}h1{margin:0 0 8px;font-size:20px}p{margin:0;opacity:.7}</style>
+<main><h1>${title}</h1><p>You can close this tab and return to the terminal.</p></main>`;
+
 export type Tokens = Pick<Session, 'token' | 'refreshToken' | 'expiresAt' | 'issuer' | 'user'>;
 
 const clientId = (server: string) => `${server}/.well-known/oauth-cli-client.json`;
@@ -118,12 +123,8 @@ export async function loopbackSignIn(server: string, open: (url: string) => void
           return;
         }
         res
-          .writeHead(200, { 'content-type': 'text/plain; charset=utf-8' })
-          .end(
-            url.searchParams.has('error')
-              ? 'Sign-in failed. You can close this tab and return to the terminal.'
-              : 'Signed in. You can close this tab and return to the terminal.',
-          );
+          .writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+          .end(callbackPage(url.searchParams.has('error') ? 'Sign-in failed' : 'Signed in'));
         clearTimeout(timer);
         resolve(url);
       });

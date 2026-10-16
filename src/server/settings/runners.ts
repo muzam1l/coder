@@ -30,7 +30,6 @@ export function dockerAvailable(): boolean {
 export function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
   const local = Boolean(ctx.local);
   const docker = local && dockerAvailable();
-  const tarball = { key: 'tarballUrl', label: 'Package URL', hint: "Leave empty for this server's published version.", optional: true };
   return [
     {
       kind: 'local',
@@ -58,7 +57,6 @@ export function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
         },
         { key: 'memory', label: 'Memory limit', placeholder: '4g', optional: true },
         { key: 'cpus', label: 'CPU limit', placeholder: '2', optional: true },
-        tarball,
       ],
       available: docker,
       ...(!docker
@@ -100,7 +98,6 @@ export function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
           hint: 'nearest if empty',
           optional: true,
         },
-        tarball,
       ],
       available: true,
     },
@@ -132,7 +129,6 @@ export function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
           hint: 'default branch if empty',
           optional: true,
         },
-        tarball,
       ],
       available: true,
     },

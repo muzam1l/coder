@@ -12,21 +12,14 @@ function printCredentials(rows: CredentialSummary[]): void {
     `${renderTable(
       [
         {
-          header: 'label',
-          value: (row: CredentialSummary) => row.label,
+          header: 'variable',
+          value: (row: CredentialSummary) =>
+            row.subscription ? `${row.name} subscription` : row.name,
           paint: c => outStyle.cyan(c),
-        },
-        {
-          header: 'engine',
-          value: (row: CredentialSummary) => row.engine,
         },
         {
           header: 'scope',
           value: (row: CredentialSummary) => row.scope,
-        },
-        {
-          header: 'default',
-          value: (row: CredentialSummary) => (row.isDefault ? '✔' : ''),
         },
         {
           header: 'value',
@@ -53,8 +46,8 @@ export const commandCredentialsList = command({
   },
   options: { json: flag, server: serverOnly, yes: flag },
   run: async ({ options }) => {
-    const { connect } = await import('../../core/remote');
-    return connect(options).credentials.list();
+    const { credentials } = await import('../../core/remote');
+    return credentials.list(options);
   },
   print: printCredentials,
 });

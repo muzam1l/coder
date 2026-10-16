@@ -3,6 +3,25 @@ import type { ModelsShape } from '@coder/client/types';
 export const NO_MODELS: ModelsShape = { builtin: {}, models: {} };
 
 export const ENGINES = ['claude', 'codex', 'custom'];
+export const EFFORTS: Array<[string, string]> = [
+  ['low', 'Low'],
+  ['medium', 'Medium'],
+  ['high', 'High'],
+];
+export const PERMISSIONS: Array<[string, string]> = [
+  ['read-only', 'Read only'],
+  ['workspace-write', 'Edit files'],
+  ['auto', 'Auto'],
+];
+export const SCOPES: Array<[string, string]> = [
+  ['personal', 'Just me'],
+  ['workspace', 'Workspace'],
+];
+/** Connections and secrets: `me` is the person's own, blank the workspace's. */
+export const CONNECTION_SCOPES: Array<[string, string]> = [
+  ['me', 'Just me'],
+  ['', 'Workspace'],
+];
 export const ENGINE_NAMES: Record<string, string> = {
   claude: 'Claude',
   codex: 'Codex',

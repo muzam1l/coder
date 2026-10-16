@@ -188,6 +188,7 @@ export function claudeTurnSettings(
         enabled: true,
         failIfUnavailable: true,
         autoAllowBashIfSandboxed: true,
+        network: { strictAllowlist: true },
         filesystem: {
           denyWrite: [cwd, ...additionalDirectories],
           ...(writableDirectories.length ? { allowWrite: writableDirectories } : {}),
@@ -205,17 +206,19 @@ export function claudeTurnSettings(
     sandbox: {
       enabled: true,
       autoAllowBashIfSandboxed: true,
-      ...(permissions === 'auto' && allowedNetworkHosts.length
-        ? {
-            network: {
+      // Headless, nobody answers the proxy's host prompt; refuse at once so the retry reaches the permission prompt tool.
+      network: {
+        strictAllowlist: true,
+        ...(permissions === 'auto' && allowedNetworkHosts.length
+          ? {
               allowedDomains: claudeAllowedDomains(allowedNetworkHosts),
               // An allowlisted loopback host also lets commands serve on it (macOS only), so a local dev server runs sandboxed.
               ...(allowedNetworkHosts.some(host => LOOPBACK_HOSTS.has(host))
                 ? { allowLocalBinding: true }
                 : {}),
-            },
-          }
-        : {}),
+            }
+          : {}),
+      },
     },
   });
 }
@@ -277,13 +280,12 @@ const approvalsSchema = z.strictObject({
   escalationTimeoutMs: z.number().check(z.positive()),
   allowedNetworkHosts: z.array(z.string()),
 });
-const agentPresetSchema = z.enum(['observe', 'comment', 'write']);
+const agentPresetSchema = z.enum(['read', 'write']);
 // Agent and flow names reach shell commands inside runners, so keep them to safe slugs.
 const agentNameSchema = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
 // `agents` holds usage only: how this repo runs an agent. What an agent IS lives in
 // `.coder/agents/<id>/agent.json` (see src/agent/definition.ts).
 const agentUsageIntegrationSchema = z.strictObject({
-  allowedTools: z.optional(z.union([agentPresetSchema, z.array(z.string())])),
   allowedEvents: z.optional(z.array(z.string())),
 });
 const agentUsageSchema = z.union([
@@ -293,6 +295,7 @@ const agentUsageSchema = z.union([
     model: z.optional(z.string()),
     effort: z.optional(effortSchema),
     permissions: z.optional(permissionSchema),
+    access: z.optional(agentPresetSchema),
     runner: z.optional(z.enum(['local', 'local-docker', 'vercel-sandbox', 'github-actions'])),
     integrations: z.optional(z.record(z.string(), agentUsageIntegrationSchema)),
     connections: z.optional(z.array(z.string())),
@@ -324,6 +327,7 @@ export const mcpEntrySchema = z
     ),
   );
 const effectiveConfigSchema = z.strictObject({
+  conversationCompactTokens: z.number().check(z.int(), z.positive()),
   chain: z.array(engineSchema).check(z.minLength(1)),
   engines: z.partial(
     z.strictObject({
@@ -402,11 +406,6 @@ export function removeModel(
 
 /** Returns human-readable errors; empty array means valid. */
 export function validateConfig(candidate: unknown): string[] {
-  const legacy = Object.keys((candidate as { agents?: object } | null)?.agents ?? {}).filter(key =>
-    ['codex', 'claude', 'custom'].includes(key),
-  );
-  if (legacy.length)
-    return legacy.map(key => `agents.${key}: engine defaults moved to engines.${key}`);
   const result = configSchema.safeParse(candidate);
   if (!result.success) {
     return result.error.issues.map(issue => {
@@ -485,23 +484,9 @@ export function resolveUserConfigFile(): string {
   return coderHome('config.json');
 }
 
-// Everything a workspace gives coder lives under .coder/; a root-level file
-// from before that move is migrated in place on first read.
-const LEGACY_WORKSPACE_CONFIG_FILES = ['coder.config.json', 'coder.json'];
-
-/** `<root>/.coder/config.json`, migrating a legacy root-level config file into it once. */
+/** The repository config under its workspace root. */
 export function resolveWorkspaceConfigFile(workspaceRoot: string): string {
-  const filePath = path.join(workspaceRoot, '.coder', 'config.json');
-  if (fs.existsSync(filePath)) return filePath;
-  for (const legacy of LEGACY_WORKSPACE_CONFIG_FILES) {
-    const from = path.join(workspaceRoot, legacy);
-    if (!fs.existsSync(from)) continue;
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.renameSync(from, filePath);
-    process.stderr.write(`coder: moved ${legacy} to .coder/config.json\n`);
-    break;
-  }
-  return filePath;
+  return path.join(workspaceRoot, '.coder', 'config.json');
 }
 
 /** A server task's workspace config, as JSON; the repo's config may then only narrow it. */
@@ -858,3 +843,14 @@ export function writeConfigFile(targetFile: string, mutate: (config: Record<stri
   fs.mkdirSync(path.dirname(targetFile), { recursive: true });
   fs.writeFileSync(targetFile, `${JSON.stringify(current, null, 2)}\n`, 'utf8');
 }
+
+export const config = {
+  /** A config value by dotted key (or the whole effective config). */
+  get: (key?: string, opts: { cwd?: string } = {}) => configGet(path.resolve(opts.cwd ?? '.'), key),
+  /** Set a config value; `workspace` targets the repo file instead of the user file. */
+  set: (
+    key: string,
+    value: unknown,
+    opts: { workspace?: boolean; cwd?: string; unset?: boolean } = {},
+  ) => configSet(path.resolve(opts.cwd ?? '.'), key, value, opts),
+};

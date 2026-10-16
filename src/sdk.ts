@@ -1,116 +1,51 @@
 /** `@wular/coder` public SDK. See docs/sdk.md for the contract. */
-import path from 'node:path';
-import process from 'node:process';
-
 import { agents } from './agent';
 import { sessions } from './client/auth/sign-in';
 import type { Session } from './client/auth/session';
-import { addCredential, loginCredential, connect, type ServerOptions } from './core/remote';
-import { configGet, configSet } from './core/config';
+import { credentials, connect, type ServerOptions } from './core/remote';
+import { config } from './core/config';
 import { connection as connections } from './core/connection';
 import { CoderError, type TaskResult } from './core/dispatch';
 import { docsCore } from './core/docs';
-import { setupHostCore, upgradeCore } from './core/hosts';
-import {
-  modelAddCore,
-  modelAliasCore,
-  modelListData,
-  modelRemoveCore,
-  modelToggleCore,
-  modelUnaliasCore,
-  modelUpdateCore,
-  type ModelWriteOptions,
-} from './core/models';
+import { setupHost, upgradeCore } from './core/hosts';
+import { models as model } from './core/models';
 import type { TaskLogEntry } from './core/state';
 import { tasks, type TaskRunOptions } from './core/task';
 import type { SteerOutcome } from './core/task/actions';
 import type { Approval, Task, TurnResult } from './core/types';
 import type { ReviewArgs, ReviewResult } from './flow/builtin/review';
 import { flowSdk as flow } from './flow';
-import { runFlowByName } from './flow/executor';
+import { review } from './flow/executor';
 import type { FlowEvent, FlowStep } from './flow/types';
-import {
-  listRunners,
-  addRunner,
-  pairRunner,
-  updateRunner,
-  testRunner,
-  removeRunner,
-} from './runner';
-import { serveRunner } from './runner/serve';
+import { runners as runner } from './runner';
 import { serverAppLink } from './server/agents/apps';
 import { rotateKey } from './server/maintenance';
 import { actionsWorkflow } from './server/runners/github-actions';
 import { serve, serverHandler } from './server/serve';
 
-function resolveCwd(cwd?: string): string {
-  return cwd ? path.resolve(cwd) : process.cwd();
-}
-
 /** Run and control coder tasks. Mirrors `coder task`. */
 export const task = tasks;
 
 /** Manage models: custom endpoints, engine aliases, disable toggles. Mirrors `coder model`. */
-export const model = {
-  /** Register a custom OpenAI-compatible endpoint model. */
-  add: (name: string, opts: ModelWriteOptions & { cwd?: string }) =>
-    modelAddCore(resolveCwd(opts.cwd), name, opts),
-  /** Update fields of a configured model entry. */
-  update: (name: string, opts: ModelWriteOptions & { cwd?: string }) =>
-    modelUpdateCore(resolveCwd(opts.cwd), name, opts),
-  /** Remove a configured model entry. */
-  remove: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
-    modelRemoveCore(resolveCwd(opts.cwd), name, opts),
-  /** Every dispatchable model: built-ins, aliases, custom endpoints. */
-  list: (opts: { cwd?: string } = {}) => modelListData(resolveCwd(opts.cwd)),
-  /** Alias a name to an engine spec, e.g. alias('fast', 'codex:luna'). */
-  alias: (name: string, spec: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
-    modelAliasCore(resolveCwd(opts.cwd), name, spec, opts),
-  /** Remove a user-defined alias. */
-  unalias: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
-    modelUnaliasCore(resolveCwd(opts.cwd), name, opts),
-  /** Disable a model name (built-in, alias, or raw slug) without removing it. */
-  disable: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
-    modelToggleCore(resolveCwd(opts.cwd), name, true, opts),
-  /** Re-enable a disabled model name. */
-  enable: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
-    modelToggleCore(resolveCwd(opts.cwd), name, false, opts),
-};
+export { models as model } from './core/models';
 
 /** Read and write coder configuration. Mirrors `coder config`. */
-export const config = {
-  /** A config value by dotted key (or the whole effective config). */
-  get: (key?: string, opts: { cwd?: string } = {}) => configGet(resolveCwd(opts.cwd), key),
-  /** Set a config value; `workspace` targets the repo file instead of the user file. */
-  set: (key: string, value: unknown, opts: { workspace?: boolean; cwd?: string } = {}) =>
-    configSet(resolveCwd(opts.cwd), key, value, opts),
-};
+export { config } from './core/config';
 
 /** Platform accounts, API keys and MCP servers tasks use, on this machine or a Coder server. Mirrors `coder connection`. */
 export const connection = connections;
 
 /** Probe engines, seed the chain, install requested host plugins. */
-export function setupHost(hosts: string[] = [], opts: { cwd?: string } = {}) {
-  return setupHostCore(resolveCwd(opts.cwd), { hosts });
-}
+export { setupHost } from './core/hosts';
 
 /** Update the CLI and/or host plugin installs; returns what moved. */
-export function upgrade(opts: { cliOnly?: boolean; pluginsOnly?: boolean } = {}) {
-  return upgradeCore(opts);
-}
+export const upgrade = upgradeCore;
 
 /** List bundled docs, or return one topic's raw markdown; `claude` picks the Claude Code flavor of the skill. */
-export function docs(topic?: string, opts: { claude?: boolean } = {}) {
-  return docsCore(topic, opts);
-}
+export const docs = docsCore;
 
 /** Run the built-in read-only code-review flow. */
-export const review = {
-  async run(options: ReviewArgs = {}): Promise<ReviewResult & { runId: string }> {
-    const run = await runFlowByName('review', { cwd: options.cwd, args: options });
-    return { ...(run.result as ReviewResult), runId: run.runId };
-  },
-};
+export { review } from './flow/executor';
 
 /** Sign in and manage saved sessions. Mirrors `coder auth`. */
 export const auth = sessions;
@@ -129,15 +64,7 @@ export const server = {
 };
 
 /** Engine credentials on a Coder server. Mirrors `coder credentials`. */
-export const credentials = {
-  list: (options: ServerOptions = {}) => connect(options).credentials.list(),
-  add: addCredential,
-  remove: (label: string, options: ServerOptions & { workspace?: boolean } = {}) =>
-    connect(options).credentials.remove(label, options),
-  default: (label: string, options: ServerOptions & { workspace?: boolean } = {}) =>
-    connect(options).credentials.setDefault(label, options),
-  login: loginCredential,
-};
+export { credentials } from './core/remote';
 
 export const folders = {
   list: (options: ServerOptions = {}) => connect(options).folders.list(),
@@ -145,19 +72,7 @@ export const folders = {
 };
 
 /** Your own runners for a Coder server. Mirrors `coder runner`. */
-export const runner = {
-  list: listRunners,
-  add: addRunner,
-  pair: pairRunner,
-  update: updateRunner,
-  default: (id: string, options: ServerOptions = {}) =>
-    updateRunner(id, { default: true }, options),
-  test: testRunner,
-  rename: (id: string, name: string, options: ServerOptions = {}) =>
-    updateRunner(id, { name }, options),
-  remove: removeRunner,
-  serve: serveRunner,
-};
+export { runners as runner } from './runner';
 
 /** Manage and run agents. Each function mirrors one `coder agent` command. */
 export const agent = agents;

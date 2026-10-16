@@ -75,6 +75,11 @@ export function formatDuration(value?: number) {
   return `${text} ${unit}`;
 }
 
+export const ago = (at: number) =>
+  Date.now() - at < 60_000
+    ? 'just now'
+    : `${formatDuration(Date.now() - at).replace(/\.\d/, '')} ago`;
+
 export const formatCount = (value: number) => value.toLocaleString('en-US');
 
 /** Large counts read as 5.4B or 12.3K; small ones stay exact. */

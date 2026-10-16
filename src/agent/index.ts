@@ -54,7 +54,7 @@ export interface AgentPicks {
   integrations: string[];
   events: Record<string, string[]>;
   matches: Record<string, Record<string, string>>;
-  tools: Preset;
+  access: Preset;
 }
 
 export interface AgentInitOptions {
@@ -64,7 +64,7 @@ export interface AgentInitOptions {
   permissions?: AgentDefinition['permissions'];
   integrations?: string | string[];
   events?: string | string[];
-  tools?: string;
+  access?: string;
   /** `event=regex` pairs. */
   match?: string | string[];
   /** Asks for the id when none is given. */
@@ -124,12 +124,12 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
           : [Object.keys(INTEGRATIONS)[0]!],
         events: {},
         matches: {},
-        tools: (opts.tools ?? 'comment') as Preset,
+        access: (opts.access ?? 'write') as Preset,
       };
-  if (!PRESETS.includes(picks.tools))
+  if (!PRESETS.includes(picks.access))
     throw new CoderError(
       'invalid-option',
-      `Unknown preset "${picks.tools}"; valid: ${PRESETS.join(', ')}`,
+      `Unknown access "${picks.access}"; valid: ${PRESETS.join(', ')}`,
     );
 
   const integrations: AgentDefinition['integrations'] = {};
@@ -180,7 +180,6 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
         events: filtered.length
           ? Object.fromEntries(events.map(e => [e, match[e] ? { match: match[e]! } : true]))
           : events,
-        tools: picks.tools,
       };
   }
 
@@ -188,11 +187,12 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
     ...(picks.name ? { name: picks.name } : {}),
     ...(opts.description ? { description: opts.description } : {}),
     permissions: opts.permissions ?? 'read-only',
+    access: picks.access,
     integrations,
   };
   await fsp.mkdir(dir, { recursive: true });
   await fsp.writeFile(path.join(dir, 'agent.json'), `${JSON.stringify(definition, null, 2)}\n`);
-  await fsp.writeFile(path.join(dir, 'system.md'), `You are ${picks.name ?? id}.\n`);
+  await fsp.writeFile(path.join(dir, 'system.md'), '');
 
   // Sample events live outside the repo; they are fixtures for `coder agent run`, not part of the agent.
   const sampleDir = path.join(os.tmpdir(), 'coder-agent-samples', id);

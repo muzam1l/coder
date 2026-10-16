@@ -1,6 +1,6 @@
 # Review
 
-`coder review` runs one read-only review task over local changes or a pull request, checks every finding against the repository, and prints the ones that hold. With `--post` it comments inline on the pull request and keeps one sticky summary. A local review covers everything since the merge-base with the origin default branch, committed or not, and never touches the index or working tree.
+`coder review` runs one read-only review task over local changes or a pull request, checks every finding against the repository, and prints the ones that hold. With `--post` it comments inline on the pull request and keeps one sticky summary; a posted finding is never posted again, even after its line moves. A local review covers everything since the merge-base with the origin default branch, committed or not, and never touches the index or working tree.
 
 ```sh
 coder review                         # local changes since the default branch

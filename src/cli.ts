@@ -214,6 +214,7 @@ export function command<S extends z.core.$ZodShape, R>(spec: {
   options: S;
   /** The most positional arguments it takes. */
   args?: number;
+  required?: string[];
   run(input: CommandInput<S>): Promise<R> | R;
   /** Human output. */
   print?(result: R, input: CommandInput<S>): void;
@@ -227,6 +228,7 @@ export function command<S extends z.core.$ZodShape, R>(spec: {
       const { options, positionals } = parseArgs(argv, z.object(spec.options), {
         positionals: spec.args ?? 0,
         command: spec.name,
+        required: spec.required,
       });
       const input = { options, args: positionals, cwd: resolveCwd(options) };
       const flags = options as { json?: boolean; server?: string | true; yes?: boolean };
@@ -353,19 +355,6 @@ export const renderTopHelp = () =>
     readVersion(),
   );
 
-// Groups route their own subcommand help.
-const GROUP_HELP = new Set([
-  'task',
-  'model',
-  'flow',
-  'agent',
-  'server',
-  'runner',
-  'auth',
-  'credentials',
-  'connection',
-]);
-
 async function route(): Promise<void> {
   const [subcommand, ...argv] = process.argv.slice(2);
 
@@ -382,7 +371,7 @@ async function route(): Promise<void> {
     subcommand === '-h'
   ) {
     // `coder help <group>` -> its overview; `coder help <cmd>` -> its page.
-    const group = argv[0] && GROUP_HELP.has(argv[0]);
+    const group = argv[0] && (await findCommand(argv[0]))?.groupHelp;
     if (group && argv[1] === undefined)
       return void process.stdout.write((await renderHelp(argv[0]!))!);
     for (const words of [argv.slice(0, 3), argv.slice(0, 2), ...argv.map(token => [token])]) {
@@ -401,14 +390,9 @@ async function route(): Promise<void> {
   // Passive, non-blocking update notice. Skip internal/refresh commands so the
   // detached refresher never re-triggers itself.
   if (
-    ![
-      'task worker',
-      'task archive-sweep',
-      'task mcp',
-      'agent tools',
-      'upgrade refresh',
-      'update refresh',
-    ].includes(`${subcommand} ${argv[0]}`)
+    !['task worker', 'flow drive', 'task mcp', 'agent tools', 'upgrade refresh'].includes(
+      `${subcommand} ${argv[0]}`,
+    )
   ) {
     const latest = newerVersion(readVersion(), CLI_PATH);
     if (latest)
@@ -428,8 +412,8 @@ async function route(): Promise<void> {
     });
   }
 
-  if (!GROUP_HELP.has(subcommand) && wantsHelp(argv)) {
-    const handler = await load();
+  const handler = await load();
+  if (!handler.groupHelp && wantsHelp(argv)) {
     process.stdout.write(
       renderCommandHelp(handler.commandName ?? subcommand, handler.help) ?? renderTopHelp(),
     );
@@ -437,18 +421,8 @@ async function route(): Promise<void> {
   }
 
   try {
-    await (
-      await load()
-    )(argv);
+    await handler(argv);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    // parseArgs throws "Unknown option ..." or "Missing value ...". Steer the
-    // user to that command's help rather than a bare stack trace.
-    if (/^(Unknown option|Missing value)/.test(message)) {
-      if (await getCommandHelp(subcommand)) {
-        fail(message, { hint: `Help: coder ${subcommand} --help` });
-      }
-    }
     if (error instanceof CoderError && error.hint) fail(error.message, { hint: error.hint });
     throw error;
   }

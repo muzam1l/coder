@@ -1,14 +1,12 @@
 import { dynamic } from '@wular/pnext/dynamic';
 
-import { load } from '@/api/load';
+import { load, loadRunDefaults } from '@/api/load';
 import type { Me } from '@coder/client/types';
 import { Page } from '@/comps/frame/page-head';
 import { Settle } from '@/comps/frame/stream';
 import type { Template } from '@/app/dash/[org]/agents/editor/editor';
 import { needsTunnel } from '@/api/types';
-import { NO_MODELS, modelsByEngine } from '@/app/dash/[org]/settings/model-options';
 import { suggestName } from '@/app/dash/[org]/agents/editor/names';
-import { DEFAULT_ENGINE } from '@coder/core/defaults';
 
 const AgentEditor = dynamic(() =>
   import('@/app/dash/[org]/agents/editor/editor').then(m => m.AgentEditor),
@@ -19,12 +17,7 @@ export default function NewAgentPage({ request }: { request?: Request }) {
   if (!request) return null;
   const url = new URL(request.url);
   const catalog = load(request).integrations.list();
-  const models = load(request)
-    .models.list()
-    .catch(() => NO_MODELS);
-  const config = load(request)
-    .config.get()
-    .catch(() => undefined);
+  const run = loadRunDefaults(request);
   const installations = load(request).installations.list();
   const me = load(request).me();
   const asked = url.searchParams.get('template');
@@ -33,39 +26,31 @@ export default function NewAgentPage({ request }: { request?: Request }) {
     <Page>
       <Settle
         load={() =>
-          Promise.all([
-            catalog,
-            models,
-            config,
-            installations.catch(() => []),
-            me.catch((): Me => ({})),
-          ]).then(([integrations, shape, shown, installed, who]) => {
-            const reach = integrations.filter(entry => entry.repositories);
-            const connected = installed.some(
-              ({ value }) =>
-                !value.deletedAt && reach.some(entry => entry.id === value.integration),
-            );
-            const template = ['import', 'reviewer', 'helper', 'blank'].includes(asked ?? '')
-              ? (asked as Template)
-              : 'blank';
-            return (
-              <AgentEditor
-                catalog={integrations}
-                suggested={suggestName()}
-                models={modelsByEngine(shape)}
-                defaults={{
-                  engine: shown?.effective.chain?.[0] ?? DEFAULT_ENGINE,
-                  engines: shown?.effective.engines ?? {},
-                  builtin: shape.builtin,
-                }}
-                template={template}
-                connected={connected}
-                connectLabel={reach[0]?.installLabel ?? 'Connect'}
-                tunnel={needsTunnel(who)}
-                port={url.port || '8787'}
-              />
-            );
-          })
+          Promise.all([catalog, run, installations.catch(() => []), me.catch((): Me => ({}))]).then(
+            ([integrations, { models, defaults }, installed, who]) => {
+              const reach = integrations.filter(entry => entry.repositories);
+              const connected = installed.some(
+                ({ value }) =>
+                  !value.deletedAt && reach.some(entry => entry.id === value.integration),
+              );
+              const template = ['import', 'reviewer', 'helper', 'blank'].includes(asked ?? '')
+                ? (asked as Template)
+                : 'blank';
+              return (
+                <AgentEditor
+                  catalog={integrations}
+                  suggested={suggestName()}
+                  models={models}
+                  defaults={defaults}
+                  template={template}
+                  connected={connected}
+                  connectLabel={reach[0]?.installLabel ?? 'Connect'}
+                  tunnel={needsTunnel(who)}
+                  port={url.port || '8787'}
+                />
+              );
+            },
+          )
         }
       />
     </Page>

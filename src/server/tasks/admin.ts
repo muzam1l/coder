@@ -1,4 +1,3 @@
-import { deleteTaskConnections } from '../connections/resolve';
 import { type TaskStatus } from '../store/types';
 import { decodeCursor, json, page, pageLimit, paged } from '../routes/http';
 import {
@@ -37,6 +36,7 @@ import {
   deltaCursor,
   deltaOrder,
   pushInbox,
+  taskTimes,
   type TaskFilter,
 } from './queue';
 import { randomUUID } from 'node:crypto';
@@ -46,10 +46,12 @@ import { type AgentEvent, type TaskSource } from '../../agent/types';
 import { eventReplies } from '../chat';
 import { dispatchEvent } from './events';
 import { start } from './flows';
+import { ConfigError } from '../settings/config';
 
 export const DONE = new Set<TaskStatus['status']>(['completed', 'failed', 'cancelled']);
 
 export function taskError(error: unknown): Response {
+  if (error instanceof ConfigError) return json({ error: error.message }, 400);
   if (error instanceof TaskInputError)
     return json({ error: error.message, ...(error.fix ? { fix: error.fix } : {}) }, error.status);
   throw error;
@@ -79,6 +81,7 @@ export function summarizeTask(status: TaskStatus) {
     startedAt: status.startedAt,
     finishedAt: status.finishedAt,
     updatedAt: status.updatedAt,
+    ...taskTimes(status),
   };
 }
 
@@ -88,12 +91,29 @@ export function redactTask(
   const { tokenHash: _tokenHash, handle: _handle, ...safe } = status;
   return {
     ...safe,
+    ...taskTimes(status),
     ...(status.status === 'queued' ? { statusReason: 'Waiting for a task slot' } : {}),
     turns: taskTurns(status),
     ...(status.task.credential
-      ? { credential: parseCredentialId(status.task.credential).label }
+      ? { credential: parseCredentialId(status.task.credential).name }
       : {}),
   };
+}
+
+async function target(
+  ctx: ServerContext,
+  id: string,
+): Promise<
+  | { status: TaskStatus; cwd?: never; answer?: never }
+  | { status?: never; cwd: string; answer?: TaskStatus['answer'] }
+  | Response
+> {
+  const status = await ctx.store.get('task', id);
+  if (status && !(ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default'))
+    return { status };
+  const cwd = status?.task.cwd ?? ctx.local?.cwd;
+
+  return cwd ? { cwd, answer: status?.answer } : json({ error: `No task "${id}"` }, 404);
 }
 
 export async function readTask(
@@ -102,29 +122,23 @@ export async function readTask(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const taskId = id;
+  const taskId = params.id!;
   const after = Number(url.searchParams.get('after') ?? -1);
   const cursor = Number.isFinite(after) ? after : -1;
   const lines = url.searchParams.has('limit') ? pageLimit(url, 500, 2000) : undefined;
-  // A stored log read needs nothing from the task row, so it starts beside it.
   const stored = readLog(ctx.store, taskId, cursor, lines ?? 500);
   stored?.catch(() => {});
 
-  const status = await ctx.store.get('task', taskId);
-  if (
-    !status ||
-    (ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default')
-  ) {
-    const cwd = status?.task.cwd ?? ctx.local?.cwd;
-    if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
-
+  const found = await target(ctx, taskId);
+  if (found instanceof Response) return found;
+  const { status, cwd } = found;
+  if (!status) {
     const local = localTask(cwd, taskId, true);
     if (!local) return json({ error: `No task "${taskId}"` }, 404);
 
     return json({
       ...local,
-      ...(status?.answer ? { answer: status.answer } : {}),
+      ...(found.answer ? { answer: found.answer } : {}),
       logs: localLog(cwd, taskId, -1, lines ?? 500),
     });
   }
@@ -138,20 +152,11 @@ export async function removeTask(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const taskId = id;
-  const after = Number(url.searchParams.get('after') ?? -1);
-  const cursor = Number.isFinite(after) ? after : -1;
-  const lines = url.searchParams.has('limit') ? pageLimit(url, 500, 2000) : undefined;
-  // A stored log read needs nothing from the task row, so it starts beside it.
-  const status = await ctx.store.get('task', taskId);
-  if (
-    !status ||
-    (ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default')
-  ) {
-    const cwd = status?.task.cwd ?? ctx.local?.cwd;
-    if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
-
+  const taskId = params.id!;
+  const found = await target(ctx, taskId);
+  if (found instanceof Response) return found;
+  const { status, cwd } = found;
+  if (!status) {
     const response = await localTaskAction(req, cwd, taskId, undefined, ctx);
     // A CLI task's delete reaches events streams, even once it was archived out of their scans.
     if (response.ok && ctx.queue instanceof StoreQueue) ctx.queue.tombstone(taskId);
@@ -185,7 +190,6 @@ export async function removeTask(
   }
   if (!(await deleteTask(ctx, status)))
     return json({ error: 'Task changed while deleting. Try again.' }, 409);
-  await deleteTaskConnections(ctx.store, taskId);
   if (ctx.local) {
     await ctx.store.delete('snapshot', `local-start:${taskId}`);
     await ctx.store.delete('snapshot', `completion:${taskId}`);
@@ -201,23 +205,17 @@ export async function taskLogs(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const taskId = id;
+  const taskId = params.id!;
   const after = Number(url.searchParams.get('after') ?? -1);
   const cursor = Number.isFinite(after) ? after : -1;
   const lines = url.searchParams.has('limit') ? pageLimit(url, 500, 2000) : undefined;
-  // A stored log read needs nothing from the task row, so it starts beside it.
   const stored = readLog(ctx.store, taskId, cursor, lines ?? undefined);
   stored?.catch(() => {});
 
-  const status = await ctx.store.get('task', taskId);
-  if (
-    !status ||
-    (ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default')
-  ) {
-    const cwd = status?.task.cwd ?? ctx.local?.cwd;
-    if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
-
+  const found = await target(ctx, taskId);
+  if (found instanceof Response) return found;
+  const { status, cwd } = found;
+  if (!status) {
     const local = localTask(cwd, taskId, false);
     if (!local) return json({ error: `No task "${taskId}"` }, 404);
 
@@ -235,24 +233,15 @@ export async function steerTask(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const taskId = id;
-  const after = Number(url.searchParams.get('after') ?? -1);
-  const cursor = Number.isFinite(after) ? after : -1;
-  const lines = url.searchParams.has('limit') ? pageLimit(url, 500, 2000) : undefined;
-  // A stored log read needs nothing from the task row, so it starts beside it.
-  const status = await ctx.store.get('task', taskId);
-  if (
-    !status ||
-    (ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default')
-  ) {
-    const cwd = status?.task.cwd ?? ctx.local?.cwd;
-    if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
-
+  const taskId = params.id!;
+  const found = await target(ctx, taskId);
+  if (found instanceof Response) return found;
+  const { status, cwd } = found;
+  if (!status) {
     return localTaskAction(req, cwd, taskId, 'steer', ctx);
   }
   if (status.task.flow !== 'default')
-    return json({ error: `${'steer'} is available only for default-flow tasks` }, 409);
+    return json({ error: 'steer is available only for default-flow tasks' }, 409);
 
   const body = await req.json().catch(() => undefined);
   // A finished task resumes on the same id; a live one takes the follow-up in its inbox.
@@ -270,95 +259,32 @@ export async function steerTask(
       return taskError(error);
     }
   }
-  const entry = await addInbox(
-    ctx,
-    taskId,
-    'steer' as 'steer' | 'ask' | 'approve',
-    body,
-    status.generation ?? 0,
-  );
+  const entry = await addInbox(ctx, status, 'steer', body);
 
   return entry ? json(entry) : json({ error: `Task "${taskId}" is no longer active` }, 409);
 }
 
-export async function askTask(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  const id = params.id!;
-  const taskId = id;
-  const after = Number(url.searchParams.get('after') ?? -1);
-  const cursor = Number.isFinite(after) ? after : -1;
-  const lines = url.searchParams.has('limit') ? pageLimit(url, 500, 2000) : undefined;
-  // A stored log read needs nothing from the task row, so it starts beside it.
-  const status = await ctx.store.get('task', taskId);
-  if (
-    !status ||
-    (ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default')
-  ) {
-    const cwd = status?.task.cwd ?? ctx.local?.cwd;
-    if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
+function inboxAction(kind: 'ask' | 'approve') {
+  return async (req: Request, ctx: ServerContext, params: Params): Promise<Response> => {
+    const id = params.id!;
+    const found = await target(ctx, id);
+    if (found instanceof Response) return found;
+    const { status, cwd } = found;
+    if (!status) return localTaskAction(req, cwd, id, kind, ctx);
+    if (status.task.flow !== 'default')
+      return json({ error: `${kind} is available only for default-flow tasks` }, 409);
+    if (!ACTIVE_STATES.includes(status.status))
+      return json({ error: `Task "${id}" is not active` }, 409);
+    if (kind === 'approve' && !status.approval)
+      return json({ error: `Task "${id}" has no pending approval` }, 409);
+    const entry = await addInbox(ctx, status, kind, await req.json().catch(() => undefined));
 
-    return localTaskAction(req, cwd, taskId, 'ask', ctx);
-  }
-  if (status.task.flow !== 'default')
-    return json({ error: `${'ask'} is available only for default-flow tasks` }, 409);
-  if (!['queued', 'running', 'waiting'].includes(status.status))
-    return json({ error: `Task "${taskId}" is not active` }, 409);
-
-  const body = await req.json().catch(() => undefined);
-  const entry = await addInbox(
-    ctx,
-    taskId,
-    'ask' as 'steer' | 'ask' | 'approve',
-    body,
-    status.generation ?? 0,
-  );
-
-  return entry ? json(entry) : json({ error: `Task "${taskId}" is no longer active` }, 409);
+    return entry ? json(entry) : json({ error: `Task "${id}" is no longer active` }, 409);
+  };
 }
 
-export async function approveTask(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  const id = params.id!;
-  const taskId = id;
-  const after = Number(url.searchParams.get('after') ?? -1);
-  const cursor = Number.isFinite(after) ? after : -1;
-  const lines = url.searchParams.has('limit') ? pageLimit(url, 500, 2000) : undefined;
-  // A stored log read needs nothing from the task row, so it starts beside it.
-  const status = await ctx.store.get('task', taskId);
-  if (
-    !status ||
-    (ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default')
-  ) {
-    const cwd = status?.task.cwd ?? ctx.local?.cwd;
-    if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
-
-    return localTaskAction(req, cwd, taskId, 'approve', ctx);
-  }
-  if (status.task.flow !== 'default')
-    return json({ error: `${'approve'} is available only for default-flow tasks` }, 409);
-  if (!['queued', 'running', 'waiting'].includes(status.status))
-    return json({ error: `Task "${taskId}" is not active` }, 409);
-  if (!status.approval) return json({ error: `Task "${taskId}" has no pending approval` }, 409);
-
-  const body = await req.json().catch(() => undefined);
-  const entry = await addInbox(
-    ctx,
-    taskId,
-    'approve' as 'steer' | 'ask' | 'approve',
-    body,
-    status.generation ?? 0,
-  );
-
-  return entry ? json(entry) : json({ error: `Task "${taskId}" is no longer active` }, 409);
-}
+export const askTask = inboxAction('ask');
+export const approveTask = inboxAction('approve');
 
 export async function cancelTask(
   req: Request,
@@ -366,20 +292,11 @@ export async function cancelTask(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const taskId = id;
-  const after = Number(url.searchParams.get('after') ?? -1);
-  const cursor = Number.isFinite(after) ? after : -1;
-  const lines = url.searchParams.has('limit') ? pageLimit(url, 500, 2000) : undefined;
-  // A stored log read needs nothing from the task row, so it starts beside it.
-  const status = await ctx.store.get('task', taskId);
-  if (
-    !status ||
-    (ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default')
-  ) {
-    const cwd = status?.task.cwd ?? ctx.local?.cwd;
-    if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
-
+  const taskId = params.id!;
+  const found = await target(ctx, taskId);
+  if (found instanceof Response) return found;
+  const { status, cwd } = found;
+  if (!status) {
     return localTaskAction(req, cwd, taskId, 'cancel', ctx);
   }
 
@@ -405,20 +322,11 @@ export async function archiveTask(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const taskId = id;
-  const after = Number(url.searchParams.get('after') ?? -1);
-  const cursor = Number.isFinite(after) ? after : -1;
-  const lines = url.searchParams.has('limit') ? pageLimit(url, 500, 2000) : undefined;
-  // A stored log read needs nothing from the task row, so it starts beside it.
-  const status = await ctx.store.get('task', taskId);
-  if (
-    !status ||
-    (ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default')
-  ) {
-    const cwd = status?.task.cwd ?? ctx.local?.cwd;
-    if (!cwd) return json({ error: `No task "${taskId}"` }, 404);
-
+  const taskId = params.id!;
+  const found = await target(ctx, taskId);
+  if (found instanceof Response) return found;
+  const { status, cwd } = found;
+  if (!status) {
     return localTaskAction(req, cwd, taskId, 'archive', ctx);
   }
 
@@ -552,7 +460,6 @@ export async function listTasks(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
   const status = url.searchParams.get('status');
   if (status && status !== 'active' && !TASK_STATES.has(status as TaskStatus['status']))
     return json({ error: `Unknown status "${status}"` }, 400);

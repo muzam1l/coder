@@ -1,40 +1,20 @@
 /** The contract every integration implements: a Chat SDK adapter, apps, tools, tokens and repository reads. */
-import type { Adapter, Message, ReactionEvent, SerializedThread, StateAdapter, Thread } from 'chat';
+import type { Adapter, Message, SerializedThread, StateAdapter, Thread } from 'chat';
 
 import type { McpServerSpec } from '../core/types';
-import type { McpTool } from '../utils/mcp-server';
 import type { AgentApp, AgentDefinition, AgentEvent, Installation, Preset } from '../agent/types';
 
 export type { McpServerSpec, AgentApp, AgentDefinition, AgentEvent, Installation, Preset };
 export { PRESETS } from '../agent/types';
 
-export interface ToolContext {
-  token: string;
-  fetch: typeof fetch;
-  /** The task's allowed tools for this integration, such as Slack method names. */
-  tools?: string[];
-  /** Where the task may write: its repository, or its Chat SDK thread id. */
-  scope?: {
-    repo?: { owner: string; name: string };
-    thread?: string;
-    /** The covered account the task's event happened in. */
-    within?: string;
-  };
-}
-
-export type AgentTool = McpTool<ToolContext>;
-
-export type ToolSet = Record<string, AgentTool>;
-
-/** Presets map to tool allowlists; `serve` is coder's own `agent tools <integration>` server, `server` an external one. */
+/** Access modes select the platform server's tools. */
 export interface IntegrationTools {
   presets: Record<Preset, string[]>;
-  serve?: ToolSet;
   /** Shell command a Linux runner runs as root to install `server`'s binary. */
   install?: string;
   /** Hosts `install` downloads from, redirects included. */
   installHosts?: string[];
-  server?(tools: string[], event: AgentEvent | undefined, token: string): McpServerSpec;
+  server(tools: string[], event: AgentEvent | undefined, token: string): McpServerSpec & { readOnly?: boolean };
 }
 
 /** What the dashboard's app creation puts in the URL; only `tx` goes to the platform and back. */
@@ -59,6 +39,10 @@ export interface CreateField {
   hint?: string;
   placeholder?: string;
   required?: true;
+  /** Rendered as a select; the first option is the default. */
+  options?: Array<{ value: string; label: string }>;
+  /** Shown, and posted, only while that field holds that value. */
+  when?: { field: string; equals: string };
 }
 
 /** A create form as data: the dashboard renders it and posts the fields with `tx` to `/create/<id>/callback`. */
@@ -68,7 +52,12 @@ export interface CreateStep {
   /** Where the user gets the values. */
   link: string;
   /** Numbered steps; `link` is the platform page the step happens on, `copy` holds values to paste there. `text` marks the platform's own UI names **like this**. */
-  steps: Array<{ text: string; link?: string; copy?: string[] }>;
+  steps: Array<{
+    text: string;
+    link?: string;
+    copy?: string[];
+    when?: { field: string; equals: string };
+  }>;
   /** Advanced notes, shown collapsed under the steps; UI names marked **like this**. */
   notes?: string[];
   fields: CreateField[];
@@ -111,6 +100,23 @@ export interface AppDrift {
   lines: Array<{ text: string; copy?: string }>;
 }
 
+export interface AppTokens {
+  put(value: {
+    workspace: string;
+    user: string;
+    workspaceName: string;
+    credentials: unknown;
+  }): Promise<string>;
+  use<T>(
+    id: string,
+    run: (
+      credentials: unknown,
+      save: (credentials: unknown, workspaceName?: string) => Promise<void>,
+      invalidate: () => Promise<void>,
+    ) => Promise<T>,
+  ): Promise<T>;
+}
+
 /** Creating one app per agent on the user's account, then installing it; all browser-driven. */
 export interface IntegrationApp {
   /** Built-in agents install the server's one shared app (`shared`), or create their own in each workspace like any agent (`own`). */
@@ -127,7 +133,13 @@ export interface IntegrationApp {
   /** The form that creates the app from values the user copies from the platform; used when there is no `createPost`. */
   createStep?(
     publicUrl: string,
-    input?: { name?: string; shared?: boolean; public?: boolean },
+    input?: {
+      name?: string;
+      shared?: boolean;
+      public?: boolean;
+      /** Saved configuration tokens, most recently used first. */
+      saved?: Array<{ id: string; label: string }>;
+    },
   ): CreateStep;
   /** `/create/<id>/callback`: finish creation; credentials are stored encrypted by the caller, or `shared` keeps the shared app's. */
   createCallback(
@@ -139,6 +151,7 @@ export interface IntegrationApp {
       fetch: typeof fetch;
       /** Credentials of this server's shared app on the platform, when one exists. */
       shared?: unknown;
+      tokens?: AppTokens;
     },
   ): Promise<
     { platformAppId: string; name: string } & ({ credentials: unknown } | { shared: true })
@@ -154,6 +167,7 @@ export interface IntegrationApp {
       definition: AgentDefinition;
       fetch: typeof fetch;
       saveCredentials(credentials: unknown): Promise<void>;
+      tokens?: AppTokens;
     },
   ): Promise<unknown | undefined>;
   /** Changes the app on the platform needs for a definition, read from the platform; none when it is up to date. */
@@ -187,6 +201,7 @@ export interface IntegrationApp {
       credentials: unknown;
       publicUrl: string;
       fetch: typeof fetch;
+      tokens?: AppTokens;
       /** A platform-started install to verify, from Coder's own state. */
       installation?: string;
     },
@@ -216,13 +231,13 @@ export interface PlatformUser {
 export interface IntegrationUserAuth {
   authorizeUrl(
     credentials: unknown,
-    input: { publicUrl: string; state: string; access?: 'observe' | 'write' },
+    input: { publicUrl: string; state: string; access?: 'read' | 'write' },
   ): string;
   /** Exchange the callback's code for the user and their token. */
   exchange(
     req: Request,
     credentials: unknown,
-    input: { publicUrl: string; fetch: typeof fetch; access?: 'observe' | 'write' },
+    input: { publicUrl: string; fetch: typeof fetch; access?: 'read' | 'write' },
   ): Promise<PlatformUser>;
   /** A usable access token from the stored token JSON, and the JSON to store when it was refreshed. */
   access(
@@ -253,10 +268,12 @@ export interface AdapterContext {
   saveSelf?(installationId: string, self: string): Promise<void>;
   /** A fresh in-memory Chat SDK state for caches the adapter must not share. */
   privateState?(): StateAdapter;
-  /** Whether Coder acts on a plain message that neither mentions the app nor is direct, by its raw text; the adapter reads nothing more of one it does not. */
-  hears?(text: string): Promise<boolean>;
+  /** Whether the app takes this plain message. */
+  hears?(type: string, text: string): Promise<boolean>;
   /** Whether Coder answered in this Chat SDK thread lately; only mentions, direct messages and such threads look up users. */
   active?(thread: string): Promise<boolean>;
+  /** Whether the message belongs to a conversation Coder knows. */
+  knows?(channel: string, message: string): Promise<boolean>;
   /** Coder's public address. */
   publicUrl?: string;
   /** The dashboard of the installation's workspace, for links to its pages. */
@@ -289,24 +306,51 @@ export interface TaskSummary {
 }
 
 /** Chat SDK handlers that raise Coder events. */
-export type ChatRoute = 'mention' | 'message' | 'reaction' | 'command';
+export type ChatRoute = 'mention' | 'message' | 'command';
 
 /** One catalog event: what it is, the Chat SDK handler that raises it, and how it is gated. */
 export interface EventSpec {
   description: string;
   /** The Chat SDK handler that raises it; events the integration parses itself have none. */
   on?: ChatRoute;
-  /** Fires on every message and usually wants a text filter. */
+  /** Fires on every message and usually wants a text filter; listed after the other events and off by default. */
   noisy?: true;
-  /** A person asks the agent directly; only linked workspace members run it. */
+  /** A person asks the agent directly. */
   addressed?: true;
-  /** A follow-up in a thread whose task still runs steers that task instead of starting another. */
-  steers?: true;
+}
+
+/** A message the agent did not get as a turn, as `since` lists it. */
+export interface SinceMessage {
+  /** The platform's message id, so a message counts once; not shown to the agent. */
+  id?: string;
+  author: string;
+  text: string;
+  sentAt: string;
+}
+
+/** What Coder lends an integration's conversation hook. */
+export interface ConversationAccess {
+  /** The installation's read token. */
+  token(): Promise<string | undefined>;
+  fetch: typeof fetch;
+  /** Whether every message of the conversation reaches Coder as an event, so none needs fetching. */
+  delivered: boolean;
+  /** The id of the last message the agent saw in this conversation; absent on a task's first turn. */
+  after?: string;
+}
+
+/** Conversation facts for the event the agent reads; each part is best-effort and absent where it has no meaning. */
+export interface ConversationFacts {
+  /** The message's position in its conversation, 0 = first. */
+  index?: number;
+  /** Messages posted after `after` that the agent has not seen, oldest first, with bots and the app's own posts left out. */
+  since?: SinceMessage[];
 }
 
 /** A signed webhook the adapter does not cover, verified by the integration itself. */
 export type OwnEvent =
   | { invalid: true }
+  | { uninstalled: string }
   | { events: AgentEvent[] }
   | {
       installation: {
@@ -344,6 +388,8 @@ export interface WebhookTarget {
   repo?: NonNullable<AgentEvent['repo']>;
   /** The app's own platform user, so mentions of it are recognized. */
   self?: string;
+  /** The message's position in its conversation when the webhook states it (GitHub's comment count), 0 = first. */
+  index?: number;
 }
 
 /** What Coder lends a token mint. */
@@ -386,6 +432,8 @@ export interface Repositories {
   ): Promise<'unchanged' | { text?: string; etag?: string }>;
   /** Entry names in a directory; `[]` when it does not exist. */
   listDir(repo: string, path: string, token: string, ref?: string): Promise<string[]>;
+  /** File paths below a directory, relative to it. */
+  tree(repo: string, path: string, token: string, ref?: string): Promise<string[]>;
   /** The commit a ref points at; `undefined` when it does not exist. */
   commit(repo: string, ref: string, token: string): Promise<string | undefined>;
   /** `owner/name` of every repository an installation's token can read. */
@@ -413,9 +461,13 @@ export interface Integration {
   /** The button that installs an app, in the platform's own words. */
   readonly installLabel?: string;
   /** How people reach an installed agent there, `{handle}` standing for its handle. */
-  readonly use?: string;
+  readonly use?: string | ((events: string[]) => string | undefined);
   /** Every prompt waits for its own answer, as a Linear agent session does, so notices repeat instead of going out once per thread. */
   readonly answersEveryPrompt?: true;
+  /** Replies during a turn are progress; a final response must close it. */
+  readonly progressReplies?: true;
+  /** An outbound call proved the installation's token revoked. */
+  isUninstalled?(error: unknown): boolean;
   /** What one account an installation covers is called, such as a Slack workspace of an org install. */
   readonly covered?: string;
   /** Apps may live under an organization instead of the creator's own account. */
@@ -424,8 +476,10 @@ export interface Integration {
   readonly publicApps?: boolean;
   /** Listed first among an agent's handles. */
   readonly featured?: true;
-  /** How an agent should write for this platform, added to its prompt for events from it. */
-  readonly hint?: string;
+  /** The platform section of an agent's prompt for events from it. */
+  readonly prompt?: string;
+  /** The most characters one posted reply may hold; a longer reply goes out as several, split between paragraphs. */
+  readonly replyLimit?: number;
   readonly events: Record<string, EventSpec>;
   /** Where the sample events `agent init` writes happen: a Chat SDK thread id. */
   readonly sample?: string;
@@ -441,8 +495,7 @@ export interface Integration {
   target(req: Request, raw: string): WebhookTarget | Response | undefined;
   /** The app's Chat SDK adapter, built per request; every secret is passed explicitly, never read from the environment. */
   adapter(ctx: AdapterContext): Promise<Adapter>;
-  /** The platform delivery or activity that raised a reaction. */
-  reactionId?(reaction: ReactionEvent): string | undefined;
+  requestFetch?(request: typeof fetch, installation?: string): typeof fetch;
   /** The platform page of the thread or issue an event came from. */
   link?(event: AgentEvent): string | undefined;
   /** Greets the person who installed the app, right after the install: `open` is the agent in Coder, `setup` the missing model. */
@@ -451,6 +504,8 @@ export interface Integration {
     installer: string,
     links: { open: string; setup?: string },
   ): Promise<void>;
+  /** The event's position and messages since its last turn. */
+  conversation?(event: AgentEvent, access: ConversationAccess): Promise<ConversationFacts>;
   /** Signed webhooks the adapter does not handle (GitHub pull requests, issues, installs and pushes); `undefined` leaves it to the adapter. */
   ownEvents?(req: Request, raw: string, app: AgentApp, credentials: unknown): OwnEvent | undefined;
   /** What core cannot read from a Chat SDK message, such as the actor's role; `undefined` drops it. */

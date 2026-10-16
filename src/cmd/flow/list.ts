@@ -4,12 +4,12 @@ import process from 'node:process';
 import { ageMs } from '../../core/state';
 import type { FlowRecord } from '../../flow/types';
 import {
-  clipPad,
   formatAge,
   formatHints,
   formatTokenCount,
   outStyle,
   paintStatus,
+  renderTable,
 } from '../../tui/output';
 import { baseOptions, flag, limitOption } from '../../utils/args';
 import { command } from '../../cli';
@@ -47,33 +47,36 @@ function printRuns(
     return;
   }
   const s = outStyle;
-  const col = (min: number, max: number, values: string[]) =>
-    Math.min(max, Math.max(min, ...values.map(v => v.length)));
-  const w = {
-    id: col(
-      'run-id'.length,
-      28,
-      runs.map(r => r.runId),
-    ),
-    name: col(
-      'name'.length,
-      30,
-      runs.map(r => r.name),
-    ),
-  };
   process.stdout.write(
-    s.bold(
-      s.light(
-        `${'run-id'.padEnd(w.id)}  ${'name'.padEnd(w.name)}  ${'status'.padEnd(10)}  ${'tasks'.padEnd(9)}  ${'tokens'.padEnd(10)}  age\n`,
-      ),
-    ),
+    `${renderTable(
+      [
+        {
+          header: 'run-id',
+          value: (r: FlowRecord) => r.runId,
+          max: 28,
+          paint: cell => s.cyan(cell),
+        },
+        { header: 'name', value: r => r.name, max: 30 },
+        {
+          header: 'status',
+          value: r => r.status,
+          paint: (cell, row) => paintStatus(row.status, cell.length),
+        },
+        { header: 'tasks', value: r => `${r.taskCount} tasks`, paint: cell => s.light(cell) },
+        {
+          header: 'tokens',
+          value: r => {
+            const tokens = Object.values(r.ledger).reduce((sum, t) => sum + t.total, 0);
+            return tokens ? `${formatTokenCount(tokens)} tok` : '-';
+          },
+          paint: cell => s.light(cell),
+        },
+        { header: 'age', value: r => formatAge(ageMs(r.startedAt)), paint: cell => s.light(cell) },
+      ],
+      runs,
+      s,
+    )}\n`,
   );
-  for (const r of runs) {
-    const tokens = Object.values(r.ledger).reduce((sum, t) => sum + t.total, 0);
-    process.stdout.write(
-      `${s.cyan(clipPad(r.runId, w.id))}  ${clipPad(r.name, w.name)}  ${paintStatus(r.status, 10)}  ${s.light(clipPad(`${r.taskCount} tasks`, 9))}  ${s.light(clipPad(tokens ? `${formatTokenCount(tokens)} tok` : '-', 10))}  ${s.light(formatAge(ageMs(r.startedAt)))}\n`,
-    );
-  }
   if (clipped) {
     process.stdout.write(s.dim(`\n... ${clipped} more not shown (--limit ${options.limit})\n`));
   }

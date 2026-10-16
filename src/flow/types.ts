@@ -42,13 +42,9 @@ export interface FlowSteerOptions {
   permissions?: string;
 }
 
-export type FlowRunStatus = 'queued' | 'running' | 'completed' | 'failed' | 'stopped';
+export type FlowRunStatus = 'running' | 'completed' | 'failed' | 'stopped';
 
-/**
- * One line of a run's events.jsonl: a hook payload tagged with its kind. The
- * attached orchestrator appends these; `flow stream` / `flow.stream()` replay
- * and follow them.
- */
+/** An event recorded by the flow runtime and delivered to its hooks and followers. */
 export type FlowEvent =
   | {
       kind: 'task-start';
@@ -89,6 +85,7 @@ export interface FlowRecord {
   pid?: number;
   pidStartedAt?: string;
   concurrency: number;
+  concurrencySet?: boolean;
   maxTasks: number;
   taskCount: number;
   ledger: Record<string, TokenUsage>;

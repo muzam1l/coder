@@ -2,6 +2,7 @@
 dist/
 dist.next-*/
 node_modules/
+.vercel/
 .DS_Store
 
 src/server/dash/pnext-env.d.ts

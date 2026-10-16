@@ -49,14 +49,14 @@ function disconnected(error?: { code?: string; severity?: string }): boolean {
   );
 }
 
-/** Separate statements retain fresh snapshots after the lock; the driver owns rollback and disconnects. */
+/** `BEGIN`, the locks, the statement and `COMMIT` written back to back on one reserved connection, so the driver pipelines them into one network round trip; a failed statement aborts the transaction and its `COMMIT` rolls back. Each statement keeps its own snapshot, taken after the locks. */
 export async function pipeline<T extends postgres.Row>(
   db: Db,
   locks: SQL[],
   statement: SQL,
 ): Promise<T[]> {
-  const client = (db as Db & { $client?: postgres.Sql }).$client;
-  if (!client?.begin)
+  const client = (db as Db & { $client?: Pool }).$client;
+  if (!client?.reserve)
     return db.transaction(async tx => {
       for (const lock of locks) await tx.execute(lock);
       const result = (await tx.execute(statement)) as unknown as T[] | { rows: T[] };
@@ -65,20 +65,44 @@ export async function pipeline<T extends postgres.Row>(
   const dialect = new PgDialect({ casing: CASING });
   const logger = (db._.session as { logger?: { logQuery(query: string, params: unknown[]): void } })
     .logger;
-  const results = await client.begin(tx =>
-    Promise.all(
-      [...locks, statement].map(query => {
-        const compiled = dialect.sqlToQuery(query);
-        logger?.logQuery(compiled.sql, compiled.params);
-        return tx.unsafe<T[]>(compiled.sql, compiled.params as postgres.ParameterOrJSON<never>[]);
-      }),
-    ).catch(error => {
-      // The driver's onclose rejects begin; its callback must not send rollback on a closed socket.
-      if (disconnected(error)) return new Promise<T[][]>(() => {});
-      throw error;
-    }),
-  );
-  return results[results.length - 1] as T[];
+  const reserved = prepared(await client.reserve(), client.options.prepare, client.profile);
+  // The connection behind the reservation; a drop mid-flight rejects here, since postgres.js forgets the queries still queued on it.
+  let connection: { onclose?: (error: Error) => void } | undefined;
+  let dropped = false;
+  let drop!: (error: Error) => void;
+  const closed = new Promise<never>((_, reject) => (drop = reject));
+  const begin = reserved.unsafe('begin', [], {
+    onexecute: (c: typeof connection & object) => {
+      connection = c;
+      c.onclose = error => {
+        dropped = true;
+        drop(error);
+      };
+      return true;
+    },
+  } as postgres.UnsafeQueryOptions);
+  try {
+    const sent = [...locks, statement].map(query => {
+      const compiled = dialect.sqlToQuery(query);
+      logger?.logQuery(compiled.sql, compiled.params);
+      return reserved.unsafe<T[]>(
+        compiled.sql,
+        compiled.params as postgres.ParameterOrJSON<never>[],
+      );
+    });
+    const settled = await Promise.race([
+      Promise.allSettled([begin, ...sent, reserved.unsafe('commit')]),
+      closed,
+    ]);
+    const failed = settled.find(result => result.status === 'rejected');
+    if (failed) throw failed.reason;
+
+    return (settled[settled.length - 2] as PromiseFulfilledResult<T[]>).value;
+  } finally {
+    if (connection) connection.onclose = undefined;
+    // A dropped connection is already back in the pool's closed set; releasing it would hand out a dead socket.
+    if (!dropped) reserved.release();
+  }
 }
 
 // drizzle sends every statement through unsafe(), which postgres.js never prepares: two round trips per query.
@@ -191,6 +215,9 @@ function retryDead(
   return sql;
 }
 
+/** The driver pool as `connect` hands it out, with its profile and read-retry scope. */
+type Pool = postgres.Sql & { profile: DatabaseProfile; reads: AsyncLocalStorage<boolean> };
+
 export interface PoolOptions {
   max?: number;
   idleTimeout?: number;
@@ -203,16 +230,28 @@ export function connect(databaseUrl: string, options: PoolOptions = {}): Connect
     idle_timeout: options.idleTimeout ?? 240,
     onnotice: () => {},
   });
+  const direct = new URL(databaseUrl);
+  let listener: postgres.Sql | undefined;
+  if (direct.hostname.endsWith('.neon.tech') && direct.hostname.includes('-pooler.')) {
+    direct.hostname = direct.hostname.replace('-pooler.', '.');
+    raw.listen = (...args) => {
+      listener ??= postgres(direct.href, { max: 1, onnotice: () => {} });
+      return listener.listen(...args);
+    };
+  }
   const profile = new DatabaseProfile();
   const reads = new AsyncLocalStorage<boolean>();
   const bounds = new AsyncLocalStorage<number>();
   const sql = Object.assign(retryDead(prepared(raw, raw.options.prepare, profile), reads, bounds), {
     reads,
+    profile,
   });
   return {
     db: drizzle(sql, { schema: tables, casing: CASING }),
     profile,
     statementTimeout: (ms, work) => bounds.run(ms, work),
-    close: () => sql.end(),
+    close: async () => {
+      await Promise.all([sql.end(), listener?.end()]);
+    },
   };
 }

@@ -41,9 +41,10 @@ export interface McpServerSpec {
   credentialFields?: { env?: string; header?: string };
   /** Tool allowlist; omit or empty for every tool the server offers. */
   tools?: string[];
+  /** Schemas load before the first prompt instead of behind tool search. */
+  alwaysLoad?: boolean;
 }
 
-export type TaskKind = 'task';
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 /** A persisted task record (task.json). Most fields accrete over the lifecycle. */
@@ -52,7 +53,6 @@ export interface Task {
   createdAt: string;
   updatedAt?: string;
   status: TaskStatus;
-  kind?: TaskKind;
   name?: string | null;
   // custom runs on the codex runtime.
   engine?: Engine;
@@ -64,19 +64,27 @@ export interface Task {
   // Harness-supplied standing instructions (--system), kept separate from the
   // task prompt so previews (list/result/stream) show only the task itself.
   system?: string | null;
+  // The engine's system prompt, passed on every turn.
+  systemPrompt?: string;
   model?: string | null;
   effort?: Effort | null;
   permissions?: Permission;
   resumeThreadId?: string | null;
   cwd?: string;
-  background?: boolean;
   pid?: number | null;
   dispatchId?: string;
   threadId?: string | null;
+  previousThreadIds?: string[];
+  pendingRollover?: { summary: string; recent: string; exchanges: number };
+  rollingOver?: boolean;
+  steerClosed?: boolean;
+  // A conversation's task (an agent's default flow): its history rolls over past the context budget.
+  conversation?: boolean;
   turnId?: string | null;
   // Ephemeral worker-owned endpoint used for live Codex controls or Claude
   // stream-json input. Cleared as soon as that turn stops accepting controls.
   steerEndpoint?: string | null;
+  turnUsage?: Array<Pick<TurnResult, 'tokens' | 'model'> & { at: string }>;
   completedAt?: string;
   resumedAt?: string;
   error?: string;
@@ -110,6 +118,8 @@ export interface Task {
 
 export const TERMINAL_STATUSES: readonly TaskStatus[] = ['completed', 'failed', 'cancelled'];
 export const ACTIVE_STATUSES: readonly TaskStatus[] = ['queued', 'running'];
+/** Logged when a resumed turn cannot load its engine conversation and starts a new one. */
+export const HISTORY_LOST = 'History lost, starting fresh';
 
 /** Task options after resolving CLI flags against config defaults. */
 export interface ResolvedTaskOptions {
@@ -155,6 +165,7 @@ export interface TurnResult {
   finalMessage?: string;
   touchedFiles?: string[];
   tokens?: TokenUsage | null;
+  contextTokens?: number;
   /** The model that ran the turn (tokens are only comparable per model). */
   model?: string | null;
   error?: { message?: string } | null;

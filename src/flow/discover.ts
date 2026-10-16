@@ -81,6 +81,27 @@ export function discoverFlows(cwd: string): DiscoveredFlow[] {
   return out;
 }
 
+/** Descriptions are literal exports; importing a flow would execute it. */
+export function flowDescriptions(cwd: string): string[] {
+  const order = { builtin: 0, workspace: 1, global: 2 };
+
+  return discoverFlows(cwd)
+    .sort((a, b) => order[a.scope] - order[b.scope])
+    .map(flow => {
+      const source = fs.readFileSync(flow.path, 'utf8');
+      // A minified build exports it as `x as description`.
+      const alias = source
+        .match(/[{,]\s*([\w$]+) as description\s*[,}]/)?.[1]
+        ?.replace(/\$/g, '\\$');
+      const literal = alias
+        ? new RegExp(`(?:\\b(?:const|let|var)\\s+|,)${alias}\\s*=\\s*(['"\`])([\\s\\S]*?)\\1`)
+        : /^export\s+const\s+description(?:\s*:\s*string)?\s*=\s*(['"`])([\s\S]*?)\1/m;
+      const description = source.match(literal)?.[2]?.replace(/\s+/g, ' ').trim().slice(0, 200);
+
+      return description ? `${flow.name}: ${description}` : flow.name;
+    });
+}
+
 function isExplicitPath(ref: string): boolean {
   return ref.includes('/') || EXTS.includes(path.extname(ref));
 }

@@ -50,21 +50,12 @@ export class CoderError extends Error {
   constructor(
     code: CoderErrorCode,
     message: string,
-    extra: {
-      hint?: string | string[];
-      taskId?: string;
-      payload?: FallbackPayload;
-      approval?: {
-        id: string;
-        summary: string;
-        cwd?: string | null;
-        networkHost?: string | null;
-      };
-      result?: unknown;
-      runId?: string;
-      status?: number;
-      needs?: 'key';
-    } = {},
+    extra: Partial<
+      Pick<
+        CoderError,
+        'hint' | 'taskId' | 'payload' | 'approval' | 'result' | 'runId' | 'status' | 'needs'
+      >
+    > = {},
   ) {
     super(message);
     this.name = 'CoderError';

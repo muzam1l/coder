@@ -8,7 +8,7 @@
 }
 .card.accent {
   border-color: var(--warn);
-  background: var(--warnbg);
+  background: linear-gradient(var(--warnbg), var(--warnbg)), var(--panel);
 }
 .card.danger {
   border-color: var(--bad);
@@ -93,6 +93,9 @@
   align-items: center;
   gap: 10px;
   animation: loader-in 0s 60ms both;
+}
+.loading.late > span {
+  animation-delay: 300ms;
 }
 .loading .spin {
   flex: none;

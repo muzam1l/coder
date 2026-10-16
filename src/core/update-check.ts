@@ -31,6 +31,13 @@ interface PackageManagerInfo {
   command: [string, ...string[]];
 }
 
+export const PM_COMMANDS: Record<string, [string, ...string[]]> = {
+  npm: ['npm', 'install', '-g', `${PKG}@latest`],
+  pnpm: ['pnpm', 'add', '-g', `${PKG}@latest`],
+  yarn: ['yarn', 'global', 'add', `${PKG}@latest`],
+  bun: ['bun', 'add', '-g', `${PKG}@latest`],
+};
+
 function cacheFile(): string {
   return coderCache('update-check.json');
 }
@@ -112,13 +119,10 @@ export async function refreshUpdateCache(currentVersion: string) {
   const prev = readCache();
   let latest: string | null = prev?.latest ?? null;
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 3000);
     const res = await fetch(REGISTRY, {
-      signal: controller.signal,
+      signal: AbortSignal.timeout(3000),
       headers: { accept: 'application/json' },
     });
-    clearTimeout(timer);
     if (res.ok) {
       const body = await res.json();
       if (body?.version) latest = body.version;
@@ -144,17 +148,17 @@ export function detectPackageManager(cliPath: string): PackageManagerInfo {
   const p = real.replace(/\\/g, '/');
 
   if (/\/\.bun\//.test(p)) {
-    return { pm: 'bun', command: ['bun', 'add', '-g', `${PKG}@latest`] };
+    return { pm: 'bun', command: PM_COMMANDS.bun! };
   }
   if (/\/\.pnpm\//.test(p) || /\/pnpm(-global)?\//i.test(p) || /\/Library\/pnpm\//.test(p)) {
-    return { pm: 'pnpm', command: ['pnpm', 'add', '-g', `${PKG}@latest`] };
+    return { pm: 'pnpm', command: PM_COMMANDS.pnpm! };
   }
   if (
     /\/\.config\/yarn\/global\//.test(p) ||
     /\/yarn\/global\//.test(p) ||
     /\/Yarn\/Data\/global\//.test(p)
   ) {
-    return { pm: 'yarn', command: ['yarn', 'global', 'add', `${PKG}@latest`] };
+    return { pm: 'yarn', command: PM_COMMANDS.yarn! };
   }
-  return { pm: 'npm', command: ['npm', 'install', '-g', `${PKG}@latest`] };
+  return { pm: 'npm', command: PM_COMMANDS.npm! };
 }

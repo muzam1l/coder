@@ -1,5 +1,41 @@
 import type { AgentEvent } from '../types';
 
+export function slackFetch(request: typeof fetch, installation?: string): typeof fetch {
+  const users = new Map<string, Promise<Response>>();
+
+  return (async (input, init) => {
+    const outbound = new Request(input, init);
+    if (
+      new URL(outbound.url).origin !== 'https://slack.com' ||
+      new URL(outbound.url).pathname !== '/api/users.info'
+    )
+      return request(input, init);
+    const form = new URLSearchParams(await outbound.clone().text());
+    const token =
+      outbound.headers.get('authorization')?.replace(/^Bearer /, '') ?? form.get('token');
+    const key = JSON.stringify([token, form.get('team_id') ?? installation, form.get('user')]);
+    let pending = users.get(key);
+    if (!pending) {
+      pending = request(input, init)
+        .then(async response => {
+          const body = await response
+            .clone()
+            .json()
+            .catch(() => undefined);
+          if (!response.ok || body?.ok !== true) users.delete(key);
+          return response;
+        })
+        .catch(error => {
+          users.delete(key);
+          throw error;
+        });
+      users.set(key, pending);
+    }
+
+    return (await pending).clone();
+  }) as typeof fetch;
+}
+
 export async function canWriteSlack(
   event: AgentEvent,
   token: string,

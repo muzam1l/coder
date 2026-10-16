@@ -22,6 +22,8 @@ export interface TaskRow {
       integration: string;
       type: string;
       text?: string;
+      actor?: { id: string; login?: string };
+      mustReply?: boolean;
       thread?: { number?: number };
     };
     /** The agent's engine settings, and what this task ran with over them. */
@@ -41,6 +43,10 @@ export interface TaskRow {
   startedAt?: number;
   finishedAt?: number;
   updatedAt: number;
+  /** When it last did anything, its latest turn included. */
+  lastActivityAt?: number;
+  /** How long its latest turn ran. */
+  lastTurnMs?: number;
   /** A task the CLI runs on this machine, listed beside the server's. */
   local?: boolean;
   /** The first lines of its log, when read one task at a time. */
@@ -65,7 +71,8 @@ export interface AgentDefinition {
   model?: string;
   effort?: string;
   permissions?: string;
-  integrations?: Record<string, { events?: string[] | Record<string, unknown>; tools?: unknown }>;
+  access?: string;
+  integrations?: Record<string, { events?: string[] | Record<string, unknown> }>;
 }
 
 /** Organization overrides for one agent (`AgentUsage` on the server). */
@@ -76,7 +83,8 @@ export interface AgentSettings {
   permissions?: string;
   /** A registered runner id; unset follows the requester's default. */
   runner?: string;
-  integrations?: Record<string, { allowedTools?: string | string[]; allowedEvents?: string[] }>;
+  access?: string;
+  integrations?: Record<string, { allowedEvents?: string[] }>;
   /** Connections its tasks may use, by id; absent allows every granted one. */
   connections?: string[];
   /** Off in this workspace: no platform events, no new tasks. */
@@ -104,13 +112,14 @@ export interface AgentRow {
   files?: Record<string, string>;
   settings?: AgentSettings;
   versions?: VersionRow[];
-  /** The names its platform apps answer to where it wakes on a mention. */
   /** The names it answers to, one per app that wakes on mentions, with the platform's display name. */
   handles?: Array<{ name: string; integration: string; platform: string }>;
   /** Platform events it failed to handle in the last day, with the newest; absent when none. */
   deliveries?: { failed: number; recent: FailedDeliveryRow[] };
   /** Nothing can run its engine for the caller: no credential of theirs or the workspace's, no sign-in on this machine. */
   needsModel?: true;
+  /** Why its definition is invalid; it answers no events until fixed. */
+  problems?: string[];
 }
 
 /** A platform event Coder failed to handle. */
@@ -146,7 +155,6 @@ export interface IntegrationInfo {
   /** Apps may be public: installable by any account, not only the one that owns them. */
   publicApps: boolean;
   events: Record<string, { description: string; noisy?: true; addressed?: true }>;
-  presets: Record<string, string[]>;
   repositories?: boolean;
   /** The form that creates an app; absent where creation happens on the platform itself. */
   create?: CreateStep;
@@ -216,12 +224,11 @@ export interface SetupOutcome {
 }
 
 export interface CredentialRow {
-  label: string;
-  engine: 'claude' | 'codex' | 'custom';
+  /** The variable of an API key, the engine of a subscription. */
+  name: string;
   scope: 'personal' | 'workspace';
-  isDefault?: boolean;
+  subscription: boolean;
   createdAt?: number;
-  env: string[];
   masked: string;
   account?: { email?: string; plan?: string };
 }
@@ -322,6 +329,8 @@ export interface InstallationRow {
   covers?: string[];
   repos?: string[];
   deletedAt?: number;
+  /** The app was removed or uninstalled on the platform. */
+  uninstalled?: boolean;
   settings?: {
     configRepo?: string;
     model?: string;
@@ -527,7 +536,8 @@ export interface ConnectionRow {
   /** Set on a member's own connection; `mine` when that member is the viewer. */
   owner?: string;
   mine?: true;
-  access: 'observe' | 'write';
+  /** Absent follows the mode of the agent whose task uses it. */
+  access?: 'read' | 'write';
   auth: 'none' | 'key' | 'oauth';
   /** The remote server, or the stdio command, it is bound to. */
   url?: string;
@@ -549,7 +559,7 @@ export interface ConnectionInput {
   provider?: string;
   /** `me` makes it the viewer's own instead of the workspace's. */
   owner?: 'me';
-  access?: 'observe' | 'write';
+  access?: 'read' | 'write';
   endpoint?: McpEntry;
   auth?: 'none' | 'key' | 'oauth';
   /** For `env`, a new credential holding `key`; without `key` or `credential`, a visible credential with `keyIn.env`. */
@@ -674,7 +684,6 @@ export interface AgentEvent {
     owner: string;
     name: string;
     cloneUrl: string;
-    ref: string;
     defaultBranch: string;
   };
 }

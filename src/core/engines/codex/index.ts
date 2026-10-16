@@ -20,11 +20,12 @@ import {
 import { describeUnsupportedModel, errorText, isStaleAuthError } from './errors';
 import type { MailboxKey } from '../../mailbox';
 import { requestCodexControl, startCodexControlServer } from './control';
-import { binaryAvailable } from '../../../utils/process';
+import { binaryAvailable, processTiming } from '../../../utils/process';
 import { engineEnvironment } from '../../connections';
 import { MACHINE_SANDBOX_ENV } from '../../config';
 import { isCodexSessionArchived, unarchiveCodexSession } from './sessions';
 import type { Availability, AuthStatus, Effort, McpServerSpec, TurnResult } from '../../types';
+import { HISTORY_LOST } from '../../types';
 import {
   type TurnCaptureState,
   type ProgressReporter,
@@ -41,6 +42,7 @@ const SERVICE_NAME = 'coder_runtime';
 
 /** Options accepted by runTurn. */
 export interface RunTurnOptions {
+  availabilityChecked?: boolean;
   prompt?: string;
   model?: string | null;
   /** Codex model provider id (custom OpenAI-compatible endpoints). */
@@ -60,6 +62,8 @@ export interface RunTurnOptions {
   approvalsReviewer?: string | null;
   onApprovalRequest?: ApprovalRequestHandler;
   resumeThreadId?: string | null;
+  /** The thread's developer instructions, sent on start and resume. */
+  developerInstructions?: string;
   onProgress?: ProgressReporter;
   onHeartbeat?: () => void;
   onResult?: (result: TurnResult) => void;
@@ -96,22 +100,15 @@ export function codexReadOnlyProfile(
   };
 }
 
-/**
- * Per-thread config overrides attaching MCP servers, as dotted `mcp_servers.<name>`
- * keys (the same overlay shape custom model providers use). `enabled_tools` is
- * codex's per-server tool allowlist.
- */
+/** Thread-scoped MCP servers, with Codex's per-server tool allowlists. */
 export function buildCodexMcpOverrides(
   servers: McpServerSpec[] = [],
   nativeServers: string[] = [],
   nativeMcp = false,
-): Record<string, unknown> {
-  const overrides: Record<string, unknown> = {};
-  if (!nativeMcp && nativeServers.length) {
-    overrides.mcp_servers = Object.fromEntries(
-      nativeServers.map(name => [name, { enabled: false }]),
-    );
-  }
+): { mcp_servers?: Record<string, unknown> } {
+  const configured: Record<string, unknown> = Object.fromEntries(
+    (nativeMcp ? [] : nativeServers).map(name => [name, { enabled: false }]),
+  );
   const names = new Set([...nativeServers, ...servers.map(server => server.name)]);
   for (const server of servers) {
     let name = server.name;
@@ -119,7 +116,7 @@ export function buildCodexMcpOverrides(
       for (let suffix = 1; names.has(name); suffix++) name = `${server.name}_coder_${suffix}`;
       names.add(name);
     }
-    overrides[`mcp_servers.${name}`] = {
+    configured[name] = {
       ...(server.url
         ? { url: server.url, ...(server.headers ? { http_headers: server.headers } : {}) }
         : {
@@ -128,9 +125,45 @@ export function buildCodexMcpOverrides(
             ...(server.env ? { env: server.env } : {}),
           }),
       ...(server.tools?.length ? { enabled_tools: server.tools } : {}),
+      default_tools_approval_mode: 'approve',
     };
   }
-  return overrides;
+  return Object.keys(configured).length ? { mcp_servers: configured } : {};
+}
+
+/** Codex starts MCP servers in the background; waits for the thread's own so their tools reach the first request, and logs each failure. */
+async function awaitMcpStartup(
+  client: AppServerClient,
+  threadId: string,
+  servers: Record<string, unknown>,
+  onProgress?: ProgressReporter | null,
+) {
+  const names = Object.entries(servers)
+    .filter(([, entry]) => (entry as { enabled?: boolean }).enabled !== false)
+    .map(([name]) => name);
+
+  await Promise.all(
+    names.map(async serverName => {
+      const status = await client
+        .request('mcpServerStatus/list', { threadId, serverName, detail: 'toolsAndAuthOnly' })
+        .catch(error => {
+          emitProgress(
+            onProgress,
+            `MCP server ${serverName} status unavailable. ${errorText(error)}`,
+            null,
+            { kind: 'warning' },
+          );
+        });
+      for (const server of status?.data ?? [])
+        if (server.name === serverName && server.runtimeStatus === 'failed')
+          emitProgress(
+            onProgress,
+            `MCP server ${server.name} failed to start. ${server.toolsError ?? ''}`.trim(),
+            null,
+            { kind: 'error' },
+          );
+    }),
+  );
 }
 
 function cleanCodexStderr(stderr: string) {
@@ -370,9 +403,10 @@ export async function runTurn(
   options: RunTurnOptions = {},
   internals: { connect?: typeof CodexAppServerClient.connect } = {},
 ): Promise<TurnResult> {
-  const availability = getCodexAvailability(cwd);
-  if (!availability.available) {
-    throw new Error(`Codex CLI is not available: ${availability.detail}`);
+  if (!options.availabilityChecked) {
+    const availability = getCodexAvailability(cwd);
+    if (!availability.available)
+      throw new Error(`Codex CLI is not available: ${availability.detail}`);
   }
 
   const prompt = options.prompt?.trim();
@@ -394,7 +428,9 @@ export async function runTurn(
   const turnOn = async (client: AppServerClient): Promise<TurnResult> => {
     let controlServer: Awaited<ReturnType<typeof startCodexControlServer>> | null = null;
     let threadId: string;
+    processTiming('codex.config.start');
     const effective = await client.request('config/read', { cwd, includeLayers: false });
+    processTiming('codex.config.done');
     const threadConfig = {
       ...(!options.modelProvider ? { model_reasoning_summary: 'auto' } : {}),
       ...configOverrides,
@@ -406,6 +442,10 @@ export async function runTurn(
       ...(!options.nativeMcp ? { 'features.apps': false, 'features.plugins': false } : {}),
     };
 
+    const developer = options.developerInstructions
+      ? { developerInstructions: options.developerInstructions }
+      : {};
+    let resumed: { thread: { id: string } } | undefined;
     if (options.resumeThreadId) {
       emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, 'starting', {
         kind: 'status',
@@ -415,22 +455,34 @@ export async function runTurn(
       if (isCodexSessionArchived(options.resumeThreadId)) {
         await unarchiveCodexSession(options.resumeThreadId);
       }
-      const response = await client.request('thread/resume', {
-        threadId: options.resumeThreadId,
-        cwd,
-        model: options.model ?? null,
-        modelProvider: options.modelProvider ?? null,
-        config: threadConfig,
-        approvalPolicy: options.approvalPolicy ?? 'never',
-        ...sandbox,
-        // Only sent when set: older codex builds reject unknown enum-bearing fields.
-        ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
-      });
-      threadId = response.thread.id;
+      resumed = await client
+        .request('thread/resume', {
+          threadId: options.resumeThreadId,
+          cwd,
+          model: options.model ?? null,
+          modelProvider: options.modelProvider ?? null,
+          config: threadConfig,
+          approvalPolicy: options.approvalPolicy ?? 'never',
+          ...sandbox,
+          // Only sent when set: older codex builds reject unknown enum-bearing fields.
+          ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
+          ...developer,
+        })
+        .catch(error => {
+          emitProgress(options.onProgress, HISTORY_LOST, 'starting', {
+            kind: 'warning',
+            detail: String(error?.message ?? error),
+          });
+          return undefined;
+        });
+    }
+    if (resumed) {
+      threadId = resumed.thread.id;
     } else {
       emitProgress(options.onProgress, 'Starting Codex task thread.', 'starting', {
         kind: 'status',
       });
+      processTiming('codex.thread.start');
       const response = await client.request('thread/start', {
         cwd,
         model: options.model ?? null,
@@ -439,6 +491,7 @@ export async function runTurn(
         approvalPolicy: options.approvalPolicy ?? 'never',
         ...sandbox,
         ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
+        ...developer,
         serviceName: SERVICE_NAME,
         // Persist by default so status/steer/stop can target the thread later.
         ephemeral: options.ephemeral ?? false,
@@ -457,10 +510,12 @@ export async function runTurn(
       }
     }
 
+    processTiming('codex.thread.ready');
     emitProgress(options.onProgress, `Thread ready (${threadId}).`, 'starting', {
       kind: 'status',
       threadId,
     });
+    await awaitMcpStartup(client, threadId, threadConfig.mcp_servers ?? {}, options.onProgress);
 
     let turnState: TurnCaptureState;
     try {
@@ -470,7 +525,13 @@ export async function runTurn(
         () =>
           client.request('turn/start', {
             threadId,
-            input: [{ type: 'text', text: prompt, text_elements: [] }],
+            input: [
+              {
+                type: 'text',
+                text: prompt,
+                text_elements: [],
+              },
+            ],
             model: options.model ?? null,
             effort: options.effort ?? null,
             outputSchema: options.outputSchema ?? null,
@@ -489,12 +550,13 @@ export async function runTurn(
             : undefined,
         },
       );
+      processTiming('codex.result');
       options.onResult?.({
         status: turnState.finalTurn?.status === 'completed' ? 0 : 1,
         threadId,
         turnId: turnState.turnId,
         finalMessage: turnState.lastAgentMessage,
-        error: turnState.error ?? null,
+        error: turnState.error ?? (turnState.finalTurn?.error as TurnCaptureState['error']) ?? null,
       });
     } finally {
       await (controlServer as Awaited<ReturnType<typeof startCodexControlServer>> | null)?.close();
@@ -512,6 +574,7 @@ export async function runTurn(
       fileChanges: turnState.fileChanges,
       touchedFiles: collectTouchedFiles(turnState.fileChanges),
       tokens: collectTokenUsage(turnState),
+      contextTokens: turnState.contextTokens,
       model: options.model ?? null,
       commandExecutions: turnState.commandExecutions,
     };

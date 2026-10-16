@@ -214,6 +214,7 @@ export async function runLogin(id: string, root: string): Promise<void> {
   let from = 0;
   let sent: number | undefined;
   let retry: ReturnType<typeof setInterval> | undefined;
+  let exitDrain: ReturnType<typeof setTimeout> | undefined;
   const finished = new Promise<number | null>((resolve, reject) => {
     child.once('error', reject);
     child.once('close', resolve);
@@ -262,7 +263,7 @@ export async function runLogin(id: string, root: string): Promise<void> {
     if (engine === 'claude' && !shown && TOKEN.test(screen.text())) {
       shown = true;
       process.stdout.write('Sign-in token shown\n');
-      setTimeout(kill, 2000);
+      exitDrain = setTimeout(kill, 2000);
     }
     // A rejected code: Enter makes claude show a new link, which the dialog then offers.
     // Claude redraws in place and skips the spaces, so the prompt is matched without them.
@@ -314,6 +315,7 @@ export async function runLogin(id: string, root: string): Promise<void> {
     process.stdout.write('Sign-in finished\n');
   } finally {
     clearTimeout(timer);
+    clearTimeout(exitDrain);
     clearInterval(retry);
     for (const signal of SIGNALS) process.off(signal, kill);
     stopped.abort();

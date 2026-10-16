@@ -2,9 +2,10 @@ import type { SerializedMessage, SerializedThread } from 'chat';
 
 import type { Effort, McpConfigEntry, Permission } from '../core/config';
 import type { TaskTurn, RunnerKind } from '../client/types';
+import type { SinceMessage } from '../integrations/types';
 
-export type Preset = 'observe' | 'comment' | 'write';
-export const PRESETS: Preset[] = ['observe', 'comment', 'write'];
+export type Preset = 'read' | 'write';
+export const PRESETS: Preset[] = ['read', 'write'];
 
 export type { RunnerKind } from '../client/types';
 
@@ -23,8 +24,6 @@ export interface AgentEventOptions {
 
 export interface AgentDefinitionIntegration {
   events?: string[] | Record<string, string | true | AgentEventOptions>;
-  /** Platform tools the agent uses: a preset or an explicit tool list. */
-  tools?: Preset | string[];
 }
 
 /** What an agent IS: `.coder/agents/<id>/agent.json` beside its system.md. */
@@ -37,14 +36,15 @@ export interface AgentDefinition {
   model?: string;
   effort?: Effort;
   permissions?: Permission;
+  /** Read-only or Read-write on its handles and connections; defaults to `write`. */
+  access?: Preset;
   /** MCP servers every task of this agent attaches, in the `.mcp.json` entry shape. */
   mcp?: Record<string, McpConfigEntry>;
   integrations: Record<string, AgentDefinitionIntegration>;
 }
 
-/** Per-integration caps in usage: `allowedTools` and `allowedEvents` intersect the definition's. */
+/** Per-integration caps in usage: `allowedEvents` intersects the definition's. */
 export interface AgentUsageIntegration {
-  allowedTools?: Preset | string[];
   allowedEvents?: string[];
 }
 
@@ -54,6 +54,8 @@ export interface AgentUsage {
   model?: string;
   effort?: Effort;
   permissions?: Permission;
+  /** May only lower the definition's access. */
+  access?: Preset;
   integrations?: Record<string, AgentUsageIntegration>;
   /** Connections its tasks may use, by id; absent allows every connection the task is granted. */
   connections?: string[];
@@ -92,11 +94,20 @@ export interface AgentEvent {
   within?: string;
   /** The Chat SDK thread and message it happened in, without raw platform payloads; replies go to this thread. */
   chat?: { thread: SerializedThread; message?: SerializedMessage };
+  /** Whether the agent must answer: a mention, a 1:1 direct message, or a handle that answers every prompt. */
+  mustReply?: boolean;
+  /** The event's place in its conversation, gathered at dispatch; `more` counts messages past `since`'s cap. */
+  conversation?: {
+    index?: number;
+    since?: SinceMessage[];
+    more?: number;
+    /** Internal acknowledgement watermark of the recorded unseen snapshot. */
+    unseen?: { version: number; epoch?: string };
+  };
   repo?: {
     owner: string;
     name: string;
     cloneUrl: string;
-    ref: string;
     defaultBranch: string;
   };
 }
@@ -139,7 +150,8 @@ export interface Connection {
   provider: 'mcp' | (string & {});
   /** The member it belongs to; absent for the workspace's. */
   owner?: string;
-  access: 'observe' | 'write';
+  /** Absent follows the mode of the agent whose task uses it. */
+  access?: Preset;
   /** Where the secret goes, without secret values; repository entries can name the connection but never change it. */
   endpoint?: McpConfigEntry;
   auth: 'none' | 'key' | 'oauth';
@@ -189,6 +201,7 @@ export interface Installation {
   settings?: InstallationSettings;
   createdAt: number;
   deletedAt?: number;
+  uninstalled?: boolean;
 }
 
 /** Where a task came from: a Coder surface, or the id of the integration whose event started it. */
@@ -222,6 +235,10 @@ export interface AgentTask {
   definition: AgentDefinition;
   /** Frozen id of the credential selected for this task. */
   credential?: string;
+  /** The engine order for this task; a pinned engine has one entry. */
+  engineChain?: string[];
+  /** Applicable credentials frozen with the engine order, without their values. */
+  engineCredentials?: Record<string, string>;
   /** Wular user who asked, when known; their personal credential comes first. */
   requester?: string;
   /** Stored agent body for runners whose checkout does not contain the agent. */
@@ -239,22 +256,28 @@ export interface AgentTask {
       within?: string;
     }
   >;
-  /** Conversation context gathered by the receiver: recent thread messages and the stored note. */
+  /** Context gathered by the receiver: repository instructions and who asked. */
   context?: TaskContext;
-  /** What the platform thread gets when the run ends without an answer. */
+  /** What the platform thread gets when the run fails without an answer. */
   failureReply?: string;
+  /** The task's dashboard page, linked when the agent returns no reply where one is due. */
+  taskUrl?: string;
 }
 
 export interface TaskContext {
   outputSchema?: object;
-  /** Most recent thread messages, oldest first. */
+  /** Earlier turns a dashboard continuation pastes in, oldest first. */
   messages?: Array<{ user: string; text: string; ts: string }>;
   /** Completed turns of this task, kept across dashboard continuations. */
   turns?: TaskTurn[];
-  /** Rolling note the agent wrote at the end of its previous turn in this thread. */
-  note?: string;
   /** Extra instructions from the config repo (`.coder/<agent>.md`). */
   instructions?: string;
+  /** The config repo `instructions` came from. */
+  repository?: string;
+  /** Whether this turn requires a reply. */
+  mustReply?: boolean;
+  /** The last conversation batch each kind admitted, by steer or resume. */
+  admissions?: Partial<Record<'batch' | 'reactions', string>>;
   /** The Coder account behind the event's actor, when they connected it. */
   user?: { name: string; email: string };
 }

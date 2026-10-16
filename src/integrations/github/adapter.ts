@@ -20,7 +20,7 @@ export function githubAdapter(ctx: AdapterContext): Adapter {
     botUserId: 0,
     installationToken: () =>
       installationId
-        ? (minted ??= ctx.token(installationId, { tools: GITHUB_PRESETS.comment }))
+        ? (minted ??= ctx.token(installationId, { tools: GITHUB_PRESETS.read }))
         : Promise.reject(new Error('The webhook names no GitHub installation')),
     // Without the app's secret (a task's runner, which only posts) no webhook is ever accepted.
     webhookVerifier: (req, body) =>

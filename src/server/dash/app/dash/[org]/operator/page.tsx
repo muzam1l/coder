@@ -1,4 +1,3 @@
-import './page.css';
 import '@/app/dash/[org]/settings/[tab]/list.css';
 import { ClientError } from '@coder/client';
 import { notFound } from '@wular/pnext/navigation';

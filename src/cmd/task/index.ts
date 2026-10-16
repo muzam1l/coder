@@ -91,7 +91,6 @@ export const TASK_MENU: {
 export const commandTaskGroup = group(
   'task',
   {
-    'archive-sweep': async () => (await import('./archive-sweep')).commandArchiveSweep,
     worker: async () => (await import('./worker')).commandWorker,
     mcp: async () => (await import('./mcp')).commandTaskMcp,
     run: async () => (await import('./run')).commandTask,

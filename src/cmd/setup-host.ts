@@ -1,19 +1,18 @@
-/** `coder setup-host [claude|agents|codex]`: probe engines, seed the chain, install host plugins. */
+/** `coder setup-host [claude|agents]`: probe engines, seed the chain, install host plugins. */
 import process from 'node:process';
 
 import { setupHostCore, type PluginResult, type SetupHostReport } from '../core/hosts';
 import type { Engine } from '../core/types';
 import { bad, good, outStyle } from '../tui/output';
-import { baseOptions, flag } from '../utils/args';
+import { baseOptions } from '../utils/args';
 import { command } from '../cli';
 
-// Hosts are named positionally; the --claude/--codex/--agents flags stay as silent aliases.
 export const commandSetupHost = command({
   name: 'setup-host',
   help: {
-    usage: 'coder setup-host [claude] [codex] [agents] [--json]',
+    usage: 'coder setup-host [claude] [agents] [--json]',
     summary:
-      'Set up coder in your host: check engines and auth, seed the config, and\ninstall the host plugin/skill for the named host(s). Claude Code gets its\nmarketplace plugin; "agents" installs a skill into ~/.agents/skills for\nevery host that reads the Agent Skills standard dir (Codex, Pi, OpenCode,\n...). "codex" is an alias for agents. With no host, checks and seeds.',
+      'Set up coder in your host: check engines and auth, seed the config, and\ninstall the host plugin/skill for the named host(s). Claude Code gets its\nmarketplace plugin; "agents" installs a skill into ~/.agents/skills for\nevery host that reads the Agent Skills standard dir (Codex, Pi, OpenCode,\n...). With no host, checks and seeds.',
     examples: [
       ['coder setup-host claude', 'install the Claude Code plugin'],
       [
@@ -22,7 +21,7 @@ export const commandSetupHost = command({
       ],
     ],
   },
-  options: { ...baseOptions, codex: flag, claude: flag, agents: flag },
+  options: baseOptions,
   args: Number.POSITIVE_INFINITY,
   run: ({ options, args, cwd }) =>
     setupHostCore(cwd, { ...options, hosts: args }, () => options.json || printSetupHostHeader()),

@@ -1,4 +1,5 @@
 import type { AgentApp, AgentTask, Connection } from '../../agent/types';
+import { agentAccess } from '../../agent/definition';
 import {
   ConnectionRefused,
   connectionMcp,
@@ -8,7 +9,7 @@ import {
   connectionEnvConflicts,
 } from '../../core/connections';
 import type { McpServerSpec } from '../../core/types';
-import { encryptSecret, decryptSecret } from '../store/secrets';
+import { decryptCredential, encryptSecret, decryptSecret } from '../store/secrets';
 import {
   findConnection,
   nativeApp,
@@ -20,8 +21,6 @@ import { sharedApps } from '../agents/apps';
 import { IntegrationError } from '../../integrations/types';
 import { OAuthRevoked } from './oauth';
 import { oauthAccessToken, type OAuthSecret } from './oauth';
-import { LocalStore } from '../store/local';
-import { credentialValue } from '../settings/credentials';
 import { createHash } from 'node:crypto';
 import type { Store, TaskStatus } from '../store/types';
 
@@ -44,7 +43,7 @@ async function envKey(ctx: ConnectionContext, connection: Connection): Promise<s
     : undefined;
   if (!stored || (stored.owner && stored.owner !== connection.owner))
     throw new Error('Missing credential');
-  const key = credentialValue(ctx.config, stored).env[(connection.keyIn as { env: string }).env];
+  const key = decryptCredential(ctx.config, stored).env[(connection.keyIn as { env: string }).env];
   if (!key) throw new Error('Missing key');
 
   return key;
@@ -59,6 +58,7 @@ export async function resolveConnections(
   const env: Record<string, string> = {};
   const tokens = { ...handles };
   const tools = { ...task.tools };
+  const mode = agentAccess(task);
   const nativeTokens: Record<string, string> = {};
   const warnings: string[] = [];
   const secrets: string[] = [];
@@ -187,15 +187,11 @@ export async function resolveConnections(
             ? undefined
             : current.secret &&
               decryptSecret<{ app: string; token: string }>(ctx.config, current.secret);
-          const stored = current.owner
-            ? account?.token && nativeCredential(ctx.config, account.token).token
-            : secret && secret.token;
+          const decoded = account?.token ? nativeCredential(ctx.config, account.token) : undefined;
+          const stored = current.owner ? decoded?.token : secret && secret.token;
           if (!stored) throw new Error('Missing native credential');
           secrets.push(...nativeSecretValues(stored));
-          const boundApp =
-            (account?.token ? nativeCredential(ctx.config, account.token).app : undefined) ??
-            current.oauthApp ??
-            (secret ? secret.app : undefined);
+          const boundApp = decoded?.app ?? current.oauthApp ?? (secret ? secret.app : undefined);
           if (boundApp && boundApp !== app.id)
             throw new Error('OAuth client changed during resolution');
           let access;
@@ -319,14 +315,15 @@ export async function resolveConnections(
       if (connection.provider === 'env') {
         env[(connection.keyIn as { env: string }).env] = token!;
       } else if (connection.provider === 'mcp') {
+        const access = connection.access ?? mode;
         let spec: McpServerSpec | undefined;
         try {
-          spec = await connectionMcp(connection, token, ctx.fetch ?? fetch);
+          spec = await connectionMcp({ ...connection, access }, token, ctx.fetch ?? fetch);
         } catch (error) {
           if (!(error instanceof ConnectionRefused) || !credential) throw error;
           token = await credential(true, token);
           secrets.push(token);
-          spec = await connectionMcp(connection, token, ctx.fetch ?? fetch);
+          spec = await connectionMcp({ ...connection, access }, token, ctx.fetch ?? fetch);
         }
         if (spec) mcp[id] = spec;
       } else if (!nativeTokens[connection.provider] && token) {
@@ -334,7 +331,8 @@ export async function resolveConnections(
         if (!integration) throw new Error('Unknown integration');
         nativeTokens[connection.provider] = token;
         tokens[connection.provider] = token;
-        tools[connection.provider] = [...integration.tools.presets[connection.access]];
+        if (connection.access || !tools[connection.provider])
+          tools[connection.provider] = [...integration.tools.presets[connection.access ?? mode]];
       }
     } catch (error) {
       if (connection && connectionRevoked(error)) {
@@ -380,11 +378,7 @@ export async function resolvedTaskConnections(
     .slice(0, 12);
   const id = `connections:${status.task.id}:${status.generation ?? 0}:${status.attempts}:${grants}`;
 
-  const local = ctx.store instanceof LocalStore;
-  const cached = local ? ctx.store.connectionContexts?.get(id) : undefined;
-  if (cached && !cached.warnings.length)
-    return { ...cached, tokens: { ...cached.tokens, ...handles, ...cached.nativeTokens } };
-  const known = local ? undefined : await ctx.store.get('snapshot', id);
+  const known = await ctx.store.get('snapshot', id);
   if (known && 'resolvedConnections' in known) {
     const resolved = decryptSecret<Awaited<ReturnType<typeof resolveConnections>>>(
       ctx.config,
@@ -405,24 +399,38 @@ export async function resolvedTaskConnections(
         (current.generation ?? 0) !== (status.generation ?? 0)
       )
         return;
-      if (store instanceof LocalStore) (store.connectionContexts ??= new Map()).set(id, resolved);
-      else {
-        const expiresAt =
-          (status.startedAt ?? (ctx.now ?? Date.now)()) +
-          (ctx.config.taskTimeoutMs ?? 60 * 60 * 1000);
-        await store.put(
-          'snapshot',
-          id,
-          {
-            resolvedConnections: encryptSecret(ctx.config, resolved),
-            expiresAt,
-          },
-          { ttlMs: Math.max(1, expiresAt - (ctx.now ?? Date.now)()) },
-        );
-      }
+      const expiresAt =
+        (status.startedAt ?? (ctx.now ?? Date.now)()) +
+        (ctx.config.taskTimeoutMs ?? 60 * 60 * 1000);
+      await store.put(
+        'snapshot',
+        id,
+        {
+          resolvedConnections: encryptSecret(ctx.config, resolved),
+          expiresAt,
+        },
+        { ttlMs: Math.max(1, expiresAt - (ctx.now ?? Date.now)()) },
+      );
     });
 
   return resolved;
+}
+
+/** A task's redaction secrets, one sealed row each under `connection-secrets:<task>:`, kept for the task's timeout. */
+export function secretRows(
+  ctx: ConnectionContext,
+  taskId: string,
+  values: string[],
+): Array<{ id: string; value: string; expiresAt: number }> {
+  const expiresAt = (ctx.now ?? Date.now)() + (ctx.config.taskTimeoutMs ?? 60 * 60 * 1000);
+
+  return [...new Set(values)]
+    .filter(value => value.length >= 8)
+    .map(value => ({
+      id: `connection-secrets:${taskId}:${createHash('sha256').update(value).digest('hex').slice(0, 24)}`,
+      value: encryptSecret(ctx.config, value),
+      expiresAt,
+    }));
 }
 
 export async function taskConnectionSecrets(
@@ -430,41 +438,10 @@ export async function taskConnectionSecrets(
   taskId: string,
   values: string[],
 ): Promise<string[]> {
-  const id = `connection-secrets:${taskId}`;
+  const rows = secretRows(ctx, taskId, values);
+  if (rows.length) await ctx.store.saveTaskSecrets(taskId, rows);
 
-  return ctx.store.withAppLock(`connections:${taskId}`, async store => {
-    const status = await store.get('task', taskId);
-    const active = status && !['completed', 'failed', 'cancelled'].includes(status.status);
-    if (store instanceof LocalStore) {
-      const cache = (store.connectionSecrets ??= new Map());
-      const secrets = [...new Set([...(cache.get(taskId) ?? []), ...values])].filter(
-        value => value.length >= 8,
-      );
-      if (active) cache.set(taskId, secrets);
-
-      return secrets;
-    }
-    const known = await store.get('snapshot', id);
-    const previous =
-      known && 'connectionSecrets' in known
-        ? decryptSecret<string[]>(ctx.config, known.connectionSecrets)
-        : [];
-    const secrets = [...new Set([...previous, ...values])].filter(value => value.length >= 8);
-    const expiresAt =
-      (status?.startedAt ?? (ctx.now ?? Date.now)()) + (ctx.config.taskTimeoutMs ?? 60 * 60 * 1000);
-    if (secrets.length && active)
-      await store.put(
-        'snapshot',
-        id,
-        {
-          connectionSecrets: encryptSecret(ctx.config, secrets),
-          expiresAt,
-        },
-        { ttlMs: Math.max(1, expiresAt - (ctx.now ?? Date.now)()) },
-      );
-
-    return secrets;
-  });
+  return [...new Set(values)].filter(value => value.length >= 8);
 }
 
 export async function connectionSecretValues(
@@ -472,8 +449,19 @@ export async function connectionSecretValues(
   task: AgentTask,
 ): Promise<string[]> {
   const secrets: string[] = [];
-  for (const id of task.connections ?? []) {
-    const connection = await findConnection(ctx, id, task.requester);
+  const ids = [...new Set(task.connections ?? [])];
+  const stored = ids.length
+    ? await ctx.store.list('connection', { ids, visibleTo: task.requester, secrets: 'all' })
+    : [];
+  const native = ids.some(id => !stored.some(row => row.id === id))
+    ? await nativeConnections(ctx, task.requester)
+    : [];
+  const available = new Map([
+    ...native.map(value => [value.id, value] as const),
+    ...stored.map(({ id, value }) => [id, value] as const),
+  ]);
+  for (const id of ids) {
+    const connection = available.get(id);
     if (connection?.provider === 'env') {
       secrets.push(
         ...(await envKey(ctx, connection).then(
@@ -506,22 +494,20 @@ export async function connectionSecretValues(
   return secrets;
 }
 
+/** A task's kept secrets and its connections' current ones; a row in the old single-row layout is refused, never read as nothing. */
 export async function readTaskConnectionSecrets(
   ctx: ConnectionContext,
   task: AgentTask,
 ): Promise<string[]> {
-  const [known, current] = await Promise.all([
-    ctx.store instanceof LocalStore
-      ? undefined
-      : ctx.store.get('snapshot', `connection-secrets:${task.id}`),
+  const [old, rows, current] = await Promise.all([
+    ctx.store.get('snapshot', `connection-secrets:${task.id}`),
+    ctx.store.list('snapshot', { prefix: `connection-secrets:${task.id}:` }),
     connectionSecretValues(ctx, task),
   ]);
-  const previous =
-    ctx.store instanceof LocalStore
-      ? (ctx.store.connectionSecrets?.get(task.id) ?? [])
-      : known && 'connectionSecrets' in known
-        ? decryptSecret<string[]>(ctx.config, known.connectionSecrets)
-        : [];
+  if (old) throw new Error(`Task ${task.id} keeps its secrets in the old single-row layout`);
+  const previous = rows.flatMap(row =>
+    'secret' in row.value ? [decryptSecret<string>(ctx.config, row.value.secret)] : [],
+  );
 
   return [...new Set([...previous, ...current])];
 }
@@ -529,13 +515,8 @@ export async function readTaskConnectionSecrets(
 export async function deleteTaskConnections(store: Store, taskId: string): Promise<void> {
   await store.withAppLock(`connections:${taskId}`, async store => {
     await store.delete('snapshot', `connection-secrets:${taskId}`);
-    const prefix = `connections:${taskId}:`;
-    for (const row of await store.list('snapshot', { prefix }))
-      await store.delete('snapshot', row.id);
-    if (store instanceof LocalStore) {
-      store.connectionSecrets?.delete(taskId);
-      for (const id of store.connectionContexts?.keys() ?? [])
-        if (id.startsWith(prefix)) store.connectionContexts!.delete(id);
-    }
+    for (const prefix of [`connection-secrets:${taskId}:`, `connections:${taskId}:`])
+      for (const row of await store.list('snapshot', { prefix }))
+        await store.delete('snapshot', row.id);
   });
 }

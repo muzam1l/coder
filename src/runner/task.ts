@@ -1,5 +1,5 @@
 /** Runs one server task on this machine: fetch it, check out its repository, run the agent, report back. */
-import { execFile } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs/promises';
 import http from 'node:http';
 import net from 'node:net';
@@ -9,21 +9,62 @@ import process from 'node:process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 
-import { execAgent, AGENT_TASK_PREFIX } from '../agent/exec';
+import { processTiming } from '../utils/process';
+
+import {
+  AGENT_TASK_PREFIX,
+  execAgent,
+  threadReply,
+  postReply,
+  postTurnReply,
+  waitForAgentTask,
+} from '../agent/exec';
 import { INTEGRATIONS } from '../integrations';
 import { tokenEnvName } from '../agent/mcp';
 import type { AgentTask } from '../agent/types';
 import type { EngineCredential } from '../server/store/types';
 import { answerApproval } from '../core/approvals';
-import { MACHINE_SANDBOX_ENV, WORKSPACE_CONFIG_ENV, type CoderConfig } from '../core/config';
-import { loadTask, listTasks, resolveTaskDir, coderCache, enqueueSteer } from '../core/state';
-import { askTask, steerTask, stopTask } from '../core/task/actions';
+import {
+  loadConfig,
+  MACHINE_SANDBOX_ENV,
+  WORKSPACE_CONFIG_ENV,
+  type CoderConfig,
+} from '../core/config';
+import {
+  loadTask,
+  listTasks,
+  resolveTaskDir,
+  coderCache,
+  enqueueSteer,
+  withTaskAdmission,
+  readTurnResults,
+  hasQueuedSteers,
+  appendTaskLog,
+  watchTask,
+} from '../core/state';
+import {
+  askTask,
+  heldConnections,
+  steerTask,
+  stopTask,
+  type ConnectionResolver,
+} from '../core/task/actions';
+import { addTokens } from '../core/task/log-view';
+import { readResultJson, resolveTaskOptions, waitTask } from '../core/dispatch';
+import { SKIPPED } from '../core/defaults';
 import { connectionVariables } from '../core/connections';
 import type { InboxEntry, InboxAck } from '../server/tasks/queue';
 import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mailbox';
 import type { Task } from '../core/types';
 import type { McpServerSpec } from '../core/types';
-import { readJsonFile, writeJsonFileAtomic, createJsonlTail } from '../utils/fsx';
+import {
+  readJsonFile,
+  writeJsonFileAtomic,
+  createJsonlTail,
+  watchChanges,
+  withFileLock,
+} from '../utils/fsx';
+import { CLAUDE_PROJECT, taskHistory } from './history';
 
 const exec = promisify(execFile);
 type RemoteTask = {
@@ -33,7 +74,9 @@ type RemoteTask = {
   timeoutMs?: number;
   tokens: Record<string, string>;
   nativeTokens?: Record<string, string>;
+  postToken?: string;
   credential: EngineCredential;
+  engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
   config?: Partial<CoderConfig>;
   connections?: Record<string, McpServerSpec>;
   connectionEnv?: Record<string, string>;
@@ -99,8 +142,7 @@ export async function checkout(
   const repo = task.event?.repo;
   if (!repo) return root;
   const cwd = path.join(root, 'repo');
-  if (!validRef(repo.ref) || !validRef(repo.defaultBranch))
-    throw new Error('Invalid repository ref');
+  if (!validRef(repo.defaultBranch)) throw new Error('Invalid repository ref');
   const clone = new URL(repo.cloneUrl);
   const hosts = INTEGRATIONS[task.event!.integration]?.repos?.cloneHosts ?? [];
   if (clone.protocol !== 'https:' || !hosts.includes(clone.hostname))
@@ -147,7 +189,6 @@ export async function checkout(
           ['-C', cache, 'fetch', '--depth', '50', 'origin', repo.defaultBranch],
           gitOptions,
         );
-        await exec('git', ['-C', cache, 'fetch', '--depth', '50', 'origin', repo.ref], gitOptions);
         await exec(
           'git',
           ['-C', cache, 'worktree', 'add', '--detach', cwd, 'FETCH_HEAD'],
@@ -162,13 +203,12 @@ export async function checkout(
       .then(() => true)
       .catch(() => false);
     if (!cloned) await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
-    await exec('git', ['-C', cwd, 'fetch', '--depth', '50', 'origin', repo.ref], gitOptions);
-    await exec('git', ['-C', cwd, 'checkout', '--detach', 'FETCH_HEAD'], gitOptions);
     await exec(
       'git',
       ['-C', cwd, 'fetch', '--depth', '50', 'origin', repo.defaultBranch],
       gitOptions,
     );
+    await exec('git', ['-C', cwd, 'checkout', '--detach', 'FETCH_HEAD'], gitOptions);
   } finally {
     await fs.rm(credentialDir, { recursive: true, force: true });
   }
@@ -185,44 +225,7 @@ export function checkoutCache(task: AgentTask): string | undefined {
 }
 
 export async function withCheckoutLock<T>(cache: string, work: () => Promise<T>): Promise<T> {
-  await fs.mkdir(path.dirname(cache), { recursive: true });
-  const lock = `${cache}.lock`;
-  const staging = await fs.mkdtemp(`${lock}-`);
-  const owner = `${process.pid}-${randomUUID()}`;
-  const deadline = Date.now() + 5 * 60_000;
-  let acquired = false;
-  try {
-    await fs.mkdir(path.join(staging, owner));
-    for (;;) {
-      try {
-        await fs.rename(staging, lock);
-        acquired = true;
-        break;
-      } catch (error) {
-        if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? ''))
-          throw error;
-        for (const entry of await fs.readdir(lock).catch(() => [])) {
-          const pid = Number(entry.split('-')[0]);
-          if (!Number.isInteger(pid) || pid <= 0) continue;
-          try {
-            process.kill(pid, 0);
-          } catch (error) {
-            if ((error as NodeJS.ErrnoException).code === 'ESRCH')
-              await fs.rmdir(path.join(lock, entry)).catch(() => {});
-          }
-        }
-        await fs.rmdir(lock).catch(() => {});
-        if (Date.now() >= deadline) throw new Error('Repository cache lock timed out');
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-    }
-    return await work();
-  } finally {
-    if (acquired) {
-      await fs.rmdir(path.join(lock, owner));
-      await fs.rmdir(lock).catch(() => {});
-    } else await fs.rm(staging, { recursive: true, force: true });
-  }
+  return withFileLock(`${cache}.lock`, work, Infinity, 5 * 60_000);
 }
 
 /** Remove a linked task worktree, including task edits. Ordinary clones stay intact. */
@@ -262,6 +265,8 @@ async function applyEnvironment(remote: RemoteTask, root: string): Promise<strin
   delete process.env.CODER_TASK_TOKEN;
   delete process.env.APP_TOKEN;
   for (const id of Object.keys(remote.tokens)) delete process.env[tokenEnvName(id)];
+  for (const row of remote.engineCredentials ?? [])
+    for (const name of Object.keys(row.credential.env)) delete process.env[name];
   const { CODEX_AUTH_JSON: authJson, [MACHINE_SANDBOX_ENV]: _, ...env } = remote.credential.env;
   Object.assign(process.env, env);
   process.env[WORKSPACE_CONFIG_ENV] = JSON.stringify(remote.config ?? {});
@@ -276,6 +281,57 @@ async function applyEnvironment(remote: RemoteTask, root: string): Promise<strin
   return home;
 }
 
+/** A Claude credential gets its own config folder, so transcripts land where the runner saves them from. */
+async function applyClaudeHome(remote: RemoteTask, root: string): Promise<string | undefined> {
+  const { ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN } = remote.credential.env;
+  if (remote.credential.engine !== 'claude' || (!ANTHROPIC_API_KEY && !CLAUDE_CODE_OAUTH_TOKEN))
+    return undefined;
+  const home = await fs.mkdtemp(path.join(root, '.claude-'));
+  process.env.CLAUDE_CONFIG_DIR = home;
+  process.env.CLAUDE_CODE_PROJECT_DIR_NAME = CLAUDE_PROJECT;
+  return home;
+}
+
+/** Every secret value the runner was given, stripped from engine history before it leaves. */
+async function historySecrets(
+  remote: RemoteTask,
+  token: string,
+  codexHome: string | undefined,
+): Promise<string[]> {
+  const rotated = codexHome
+    ? await fs.readFile(path.join(codexHome, 'auth.json'), 'utf8').catch(() => '')
+    : '';
+  const tokens = (authJson = '') => {
+    const found: string[] = [];
+    try {
+      JSON.parse(authJson, (key, value) => {
+        if (typeof value === 'string' && /token|key/i.test(key)) found.push(value);
+        return value;
+      });
+    } catch (error) {
+      if (authJson) console.error('coder runner: history credentials could not be parsed');
+    }
+    return found;
+  };
+
+  return [
+    token,
+    ...Object.values(remote.tokens),
+    ...(remote.postToken ? [remote.postToken] : []),
+    ...Object.values(remote.nativeTokens ?? {}),
+    ...Object.values(remote.connectionEnv ?? {}),
+    ...Object.entries(remote.credential.env)
+      .filter(([name]) => /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH/i.test(name))
+      .map(([, value]) => value),
+    ...tokens(remote.credential.env.CODEX_AUTH_JSON),
+    ...(remote.engineCredentials?.flatMap(row => [
+      ...Object.values(row.credential.env),
+      ...tokens(row.credential.env.CODEX_AUTH_JSON),
+    ]) ?? []),
+    ...tokens(rotated),
+  ];
+}
+
 /** Codex rotates its tokens; hand the new `auth.json` back so the next task starts from it. */
 async function writeBack(
   auth: { server: string; token: string },
@@ -288,7 +344,7 @@ async function writeBack(
   if (authJson && authJson !== remote.credential.env.CODEX_AUTH_JSON)
     await taskRequest(auth.server, auth.token, id, '/credential', {
       method: 'POST',
-      body: JSON.stringify({ authJson }),
+      body: JSON.stringify({ authJson, credentialId: remote.task.credential }),
     }).catch(() => {});
   await fs.rm(home, { recursive: true, force: true });
 }
@@ -307,14 +363,7 @@ export async function prepareRepo(id: string, root: string): Promise<{ sha: stri
   const remote = await taskRequest<RemoteTask>(auth.server, auth.token, id);
   const event = remote.task.event;
   if (!event?.repo) throw new Error('The task has no repository');
-  const cwd = await checkout(
-    {
-      ...remote.task,
-      event: { ...event, repo: { ...event.repo, ref: event.repo.defaultBranch } },
-    },
-    root,
-    remote.tokens[event.integration],
-  );
+  const cwd = await checkout(remote.task, root, remote.tokens[event.integration]);
   for (const [lock, command, args] of INSTALLS) {
     if (!(await fs.stat(path.join(cwd, lock)).catch(() => undefined))) continue;
     await exec(command, args, { cwd, maxBuffer: 64 * 1024 * 1024 }).catch(() => {});
@@ -374,6 +423,8 @@ export async function applyTaskMessage(
   cwd: string,
   task: Task,
   entry: InboxEntry,
+  // A runner's turn resumes with the connections its task already resolved, not this machine's.
+  resolveConnections: ConnectionResolver = heldConnections(task.mcp),
 ): Promise<unknown> {
   const command: MailboxKey = {
     task: task.name?.slice(6) ?? task.id,
@@ -385,39 +436,52 @@ export async function applyTaskMessage(
     'inbox-control',
     `${mailboxId(command)}.transcript.jsonl`,
   );
-  const lines = await fs.readFile(transcript, 'utf8').catch(error => {
-    if (error.code === 'ENOENT') return '';
-    throw error;
-  });
-  for (const line of lines.split('\n')) {
-    if (!line.trim()) continue;
-    let recorded: { command: MailboxKey; result: unknown };
-    try {
-      recorded = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    if (mailboxId(recorded.command) === mailboxId(command) && Object.hasOwn(recorded, 'result'))
-      return recorded.result;
-  }
-  const value = entry.value as Record<string, unknown> | undefined;
-  if (entry.kind === 'steer') {
-    const text = String(value?.text ?? entry.value ?? '');
-    if (!task.threadId) enqueueSteer(cwd, task.id, text);
-    else await steerTask(cwd, task, text, { command });
-  } else if (entry.kind === 'ask') {
-    const result = await askTask(cwd, task, String(value?.question ?? entry.value ?? ''), {
-      command,
+  return withFileLock(`${transcript}.lock`, async () => {
+    const lines = await fs.readFile(transcript, 'utf8').catch(error => {
+      if (error.code === 'ENOENT') return '';
+      throw error;
     });
-    return result.finalMessage ?? result.error?.message ?? '';
-  } else if (entry.kind === 'approve')
-    answerApproval(
-      resolveTaskDir(cwd, task.id),
-      String(value?.approvalId ?? value?.id ?? ''),
-      value?.decision === 'deny' || value?.decision === 'decline' ? 'decline' : 'accept',
-    );
-  await fs.mkdir(path.dirname(transcript), { recursive: true });
-  await fs.appendFile(transcript, JSON.stringify({ command, result: null }) + '\n');
+    for (const line of lines.split('\n')) {
+      if (!line.trim()) continue;
+      let recorded: { command: MailboxKey; result: unknown };
+      try {
+        recorded = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (mailboxId(recorded.command) === mailboxId(command) && Object.hasOwn(recorded, 'result'))
+        return recorded.result;
+    }
+    const value = entry.value as Record<string, unknown> | undefined;
+    if (entry.kind === 'steer') {
+      const text = String(value?.text ?? entry.value ?? '');
+      let queued = false;
+      if (!task.threadId) {
+        queued = await withTaskAdmission(cwd, task.id, () => {
+          const current = loadTask(cwd, task.id) ?? task;
+          if (current.threadId) return false;
+          if (current.steerClosed || !['running', 'queued'].includes(current.status))
+            throw new Error('Task stopped before it opened a conversation');
+          enqueueSteer(cwd, task.id, text);
+          return true;
+        });
+      }
+      if (!queued)
+        await steerTask(cwd, loadTask(cwd, task.id) ?? task, text, { command, resolveConnections });
+    } else if (entry.kind === 'ask') {
+      const result = await askTask(cwd, task, String(value?.question ?? entry.value ?? ''), {
+        command,
+      });
+      return result.finalMessage ?? result.error?.message ?? '';
+    } else if (entry.kind === 'approve')
+      answerApproval(
+        resolveTaskDir(cwd, task.id),
+        String(value?.approvalId ?? value?.id ?? ''),
+        value?.decision === 'deny' || value?.decision === 'decline' ? 'decline' : 'accept',
+      );
+    await fs.mkdir(path.dirname(transcript), { recursive: true });
+    await fs.appendFile(transcript, JSON.stringify({ command, result: null }) + '\n');
+  });
 }
 
 /** A request a task cannot do without, its start and its result: a dropped connection or 5xx gets paced tries. */
@@ -438,6 +502,7 @@ async function landing<T>(send: () => Promise<T>): Promise<T> {
 
 export async function runTask(id: string, root: string): Promise<unknown> {
   const auth = taskServer();
+  processTiming('runner.credentials.start');
   const remote = await landing(() => taskRequest<RemoteTask>(auth.server, auth.token, id)).catch(
     async error => {
       await taskRequest(auth.server, auth.token, id, '/result', {
@@ -450,13 +515,20 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       throw error;
     },
   );
+  processTiming('runner.credentials.done');
   const event = remote.task.event;
   const eventToken = event && remote.tokens[event.integration];
   const polling = process.env.CODER_INBOX_MODE === 'poll';
   delete process.env.CODER_INBOX_MODE;
   const cache = process.env.CODER_CHECKOUT_CACHE;
   delete process.env.CODER_CHECKOUT_CACHE;
-  const codexHome = await applyEnvironment(remote, root);
+  let codexHome: string | undefined;
+  let claudeHome: string | undefined;
+  const machineHomes = {
+    CODEX_HOME: process.env.CODEX_HOME,
+    CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
+  };
+  let history: ReturnType<typeof taskHistory> | undefined;
   const timeout = new AbortController();
   const timer = setTimeout(
     () => timeout.abort(new Error('timeout')),
@@ -469,7 +541,18 @@ export async function runTask(id: string, root: string): Promise<unknown> {
     }).catch(() => {});
   }, 30_000);
   let cwd: string | undefined;
-  const beforeResult = () => writeBack(auth, id, remote, codexHome);
+  const beforeResult = async () => {
+    const started = readJsonFile<{ generation: number; id: string }>(
+      path.join(root, '.runner-task.json'),
+    );
+    const current =
+      cwd && started?.generation === remote.generation ? loadTask(cwd, started.id) : undefined;
+    await history
+      ?.save(current ?? undefined)
+      .catch(error => console.error('coder runner: history upload failed', error));
+    if (claudeHome) await fs.rm(claudeHome, { recursive: true, force: true });
+    await writeBack(auth, id, remote, codexHome);
+  };
   let reportingResult = false;
   const reportResult = async (body: unknown) => {
     reportingResult = true;
@@ -482,32 +565,85 @@ export async function runTask(id: string, root: string): Promise<unknown> {
     );
   };
   try {
-    cwd = await Promise.race([
+    const setup = (async () => {
+      [codexHome, claudeHome] = await Promise.all([
+        applyEnvironment(remote, root),
+        applyClaudeHome(remote, root),
+      ]);
+      history =
+        remote.task.flow === 'default'
+          ? taskHistory(
+              (suffix, init) => taskRequest(auth.server, auth.token, id, suffix, init),
+              () => historySecrets(remote, auth.token, codexHome),
+            )
+          : undefined;
+      processTiming('runner.environment.done');
+      const restored = await history?.restore();
+      processTiming('runner.history.done');
+      return restored;
+    })();
+    processTiming('runner.checkout.start');
+    const prepared = Promise.race([
       checkout(remote.task, root, eventToken, cache, timeout.signal),
       new Promise<never>((_, reject) =>
         timeout.signal.addEventListener('abort', () => reject(timeout.signal.reason), {
           once: true,
         }),
       ),
-    ]);
+    ]).then(value => {
+      cwd = value;
+      processTiming('runner.checkout.done');
+      return value;
+    });
+    const [repository, restored] = await Promise.allSettled([prepared, setup]);
+    if (repository.status === 'rejected') throw repository.reason;
+    if (restored.status === 'rejected') throw restored.reason;
     timeout.signal.throwIfAborted();
     return await runCheckedOutTask(
       id,
       root,
       auth,
       remote,
-      cwd,
+      repository.value,
       eventToken,
       polling,
       timeout.signal,
       beforeResult,
       reportResult,
+      restored.value,
+      remote.engineCredentials
+        ? async engine => {
+            if (engine === remote.credential.engine) return true;
+            const selected = remote.engineCredentials!.find(
+              row => row.credential.engine === engine,
+            );
+            if (!selected) return false;
+            await beforeResult();
+            for (const [name, value] of Object.entries(machineHomes)) {
+              if (value === undefined) delete process.env[name];
+              else process.env[name] = value;
+            }
+            remote.credential = selected.credential;
+            remote.task = {
+              ...remote.task,
+              credential: selected.id,
+              usage: { ...remote.task.usage, engine, model: undefined, effort: undefined },
+            };
+            [codexHome, claudeHome] = await Promise.all([
+              applyEnvironment(remote, root),
+              applyClaudeHome(remote, root),
+            ]);
+            return true;
+          }
+        : undefined,
     );
   } catch (error) {
     if (!reportingResult)
       await reportResult({
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
+        ...(remote.task.event && INTEGRATIONS[remote.task.event.integration]?.isUninstalled?.(error)
+          ? { installationRevoked: true } : {}),
       }).catch(failure => console.error('coder runner: result delivery failed', failure));
     throw error;
   } finally {
@@ -534,8 +670,11 @@ async function runCheckedOutTask(
   timeout: AbortSignal,
   beforeResult: () => Promise<void>,
   reportResult: (body: unknown) => Promise<void>,
+  resumed?: Awaited<ReturnType<ReturnType<typeof taskHistory>['restore']>>,
+  onEngine?: (engine: string) => Promise<boolean>,
 ): Promise<unknown> {
   const event = remote.task.event;
+  const postToken = remote.task.flow === 'default' ? remote.postToken : eventToken;
   const controller = new AbortController();
   let taskId: string | undefined;
   let flow: { runId: string; requestStop(): void; runningIds(): string[] } | undefined;
@@ -597,10 +736,13 @@ async function runCheckedOutTask(
   const ackTimer = setInterval(() => {
     void ack().catch(() => {});
   }, 1000);
-  const savedTask = readJsonFile<{ generation: number; id: string }>(
-    path.join(root, '.runner-task.json'),
-  );
-  let logTimer: ReturnType<typeof setInterval> | undefined;
+  const savedTask = readJsonFile<{
+    generation: number;
+    id: string;
+    turn: number;
+    usageStart: number;
+  }>(path.join(root, '.runner-task.json'));
+  const logWatchers = new Map<string, ReturnType<typeof watchChanges>>();
   const logged = new Map<string, () => string[]>();
   let sequence = (remote.logCursor ?? -1) + 1;
   let logBytes = 0;
@@ -652,27 +794,66 @@ async function runCheckedOutTask(
     });
   let shortPoll: ReturnType<typeof setInterval> | undefined;
   let fetching: Promise<unknown> | undefined;
+  let inboxClosed = false;
+  const previousTurns = savedTask?.generation === remote.generation ? savedTask.usageStart : 0;
+  const firstTurn = savedTask?.generation === remote.generation ? savedTask.turn : 0;
+  let deliveredTurns = firstTurn + 1;
+  const post = (text: string, problem = false, progress = false) =>
+    postReply(
+      INTEGRATIONS[event!.integration]!,
+      event!,
+      text,
+      postToken!,
+      remote.task.author,
+      problem,
+      progress,
+    );
+  const onApproval = async (approval: unknown) => {
+    await taskRequest(auth.server, auth.token, id, '/result', {
+      method: 'POST',
+      body: JSON.stringify({ status: 'waiting', approval }),
+    });
+  };
   try {
-    if (savedTask?.generation !== remote.generation)
-      await fs.writeFile(path.join(root, '.runner-note'), remote.task.context?.note ?? '', {
-        mode: 0o600,
-      });
+    const restored =
+      resumed?.restored &&
+      resumed.resume?.engine ===
+        resolveTaskOptions(
+          {
+            engine: remote.task.usage?.engine ?? remote.task.definition.engine,
+            model: remote.task.usage?.model ?? remote.task.definition.model,
+          },
+          loadConfig(cwd),
+        ).engine;
+    let worker: ChildProcess | undefined;
     const running = execAgent({
       cwd,
-      ...(savedTask?.generation === remote.generation ? { resumeTaskId: savedTask.id } : {}),
-      noteFile: path.join(root, '.runner-note'),
+      ...(savedTask?.generation === remote.generation
+        ? { resumeTaskId: savedTask.id, resumeTurn: firstTurn }
+        : {}),
+      ...(resumed?.resume ? { resume: resumed.resume } : {}),
       agent: remote.task.agent,
       flow: remote.task.flow,
-      task: remote.task,
+      // A resumed conversation already holds the earlier messages.
+      task: restored
+        ? { ...remote.task, context: { ...remote.task.context, messages: undefined } }
+        : remote.task,
       toolEnvironment: { tokens: { ...remote.tokens, ...remote.nativeTokens } },
+      replyEndpoint: { url: `${auth.server}/tasks/${encodeURIComponent(id)}`, token: auth.token },
       connections: remote.connections,
       connectionEnv: remote.connectionEnv,
       post: remote.task.source === event?.integration,
-      ...(eventToken ? { postToken: eventToken } : {}),
+      ...(postToken ? { postToken } : {}),
       onStart(started) {
         flow = started;
       },
-      async onTask(started) {
+      onWorker(_id, child) {
+        worker = child;
+        child.once('error', () => {
+          worker = undefined;
+        });
+      },
+      async onTask(started, turn) {
         taskId = started;
         if (timeout.aborted) {
           const task = loadTask(cwd, started);
@@ -684,13 +865,19 @@ async function runCheckedOutTask(
             started,
             createJsonlTail(path.join(resolveTaskDir(cwd, started), 'log.jsonl')),
           );
+        if (!logWatchers.has(started))
+          logWatchers.set(
+            started,
+            watchChanges(resolveTaskDir(cwd, started), file => {
+              if (!file || file === 'log.jsonl') void forwardLogs().catch(() => {});
+            }),
+          );
         void forwardLogs().catch(() => {});
-        logTimer ??= setInterval(() => {
-          void forwardLogs().catch(() => {});
-        }, 1000);
         writeJsonFileAtomic(path.join(root, '.runner-task.json'), {
           generation: remote.generation,
           id: started,
+          turn: turn ?? firstTurn,
+          usageStart: previousTurns,
         });
         await ack().catch(() => {});
         await fetchMessages().catch(() => {});
@@ -705,21 +892,76 @@ async function runCheckedOutTask(
                 });
           }, 4000);
       },
-      onApproval(approval) {
-        return taskRequest(auth.server, auth.token, id, '/result', {
-          method: 'POST',
-          body: JSON.stringify({ status: 'waiting', approval }),
-        });
-      },
+      onApproval,
+      onEngine,
     });
-    const result = await Promise.race([
-      running,
-      new Promise<never>((_, reject) => {
-        const abort = () => reject(timeout.reason);
-        timeout.addEventListener('abort', abort, { once: true });
-        if (timeout.aborted) abort();
-      }),
-    ]);
+    const aborted = new Promise<never>((_, reject) => {
+      const abort = () => reject(timeout.reason);
+      timeout.addEventListener('abort', abort, { once: true });
+      if (timeout.aborted) abort();
+    });
+    const result = await Promise.race([running, aborted]);
+    deliveredTurns = (result.turn ?? firstTurn) + 1;
+    if (taskId && remote.task.flow === 'default') {
+      const postedMessages = [...(result.postedMessages ?? [])];
+      const resultSignal = watchTask(cwd, taskId, worker);
+      try {
+        for (;;) {
+          const turns = readTurnResults(cwd, taskId);
+          for (const [offset, turn] of turns.slice(deliveredTurns).entries()) {
+            const reply = threadReply(remote.task, turn, cancelled, turn);
+            if (reply.skipped) appendTaskLog(cwd, taskId, { kind: 'status', message: SKIPPED });
+            if (remote.task.source === event?.integration && reply.text && !reply.duplicate)
+              postedMessages.push(
+                ...(await postTurnReply(cwd, taskId, deliveredTurns + offset, () =>
+                  post(reply.text, reply.problem),
+                )),
+              );
+            result.reply = reply.text;
+            result.ok = turn.status === 0;
+          }
+          deliveredTurns = Math.max(deliveredTurns, turns.length);
+          const current = loadTask(cwd, taskId);
+          if (current?.status === 'running' || current?.status === 'queued') {
+            await Promise.race([
+              waitForAgentTask(cwd, taskId, onApproval, (cwd, id) =>
+                waitTask(cwd, id, { turn: deliveredTurns, worker, signal: timeout }),
+              ),
+              aborted,
+            ]);
+            continue;
+          }
+          if (current?.rollingOver) {
+            await Promise.race([
+              waitTask(cwd, taskId, { rollover: true, worker, signal: timeout }),
+              aborted,
+            ]);
+            continue;
+          }
+          if ((worker?.exitCode === null && !worker.signalCode) || hasQueuedSteers(cwd, taskId)) {
+            await Promise.race([resultSignal.wait(30000), aborted]);
+            continue;
+          }
+          if (!inboxClosed) {
+            clearInterval(shortPoll);
+            await fetching;
+            await inbox.close();
+            inboxClosed = true;
+            continue;
+          }
+          if (readTurnResults(cwd, taskId).length <= deliveredTurns) break;
+        }
+      } finally {
+        resultSignal.close();
+      }
+      const usage = (loadTask(cwd, taskId)?.turnUsage ?? [])
+        .slice(previousTurns)
+        .flatMap(turn => (turn.tokens ? [turn.tokens] : []));
+      result.tokens = usage.length
+        ? usage.reduce((total, tokens) => addTokens(total, tokens)!)
+        : (readResultJson(cwd, taskId)?.tokens ?? result.tokens);
+      if (postedMessages.length) result.postedMessages = postedMessages;
+    }
     await flushLogs();
     while (pendingAck) {
       timeout.throwIfAborted();
@@ -730,7 +972,7 @@ async function runCheckedOutTask(
       status: cancelled ? 'cancelled' : result.ok ? 'completed' : 'failed',
       result: result.reply ?? result.result,
       tokens: result.tokens,
-      ...(result.note !== undefined ? { note: result.note } : {}),
+      ...(result.postedMessages?.length ? { postedMessages: result.postedMessages } : {}),
       ...(cwd !== root ? { diff: await changes(cwd).catch(() => undefined) } : {}),
     });
     return result;
@@ -757,13 +999,13 @@ async function runCheckedOutTask(
     await flushLogs();
     throw error;
   } finally {
-    clearInterval(logTimer);
+    for (const watcher of logWatchers.values()) watcher.close();
     await forwarding?.catch(() => {});
     clearInterval(ackTimer);
     clearInterval(shortPoll);
     controller.abort();
     await Promise.allSettled([fetching, acknowledging]);
-    await inbox.close();
+    if (!inboxClosed) await inbox.close();
   }
 }
 

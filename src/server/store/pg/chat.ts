@@ -6,6 +6,7 @@ import type { Lock, QueueEntry, StateAdapter } from 'chat';
 
 import { readQuery, type Db } from './client';
 import { chatItem as i, chatState as t } from './schema';
+import { rows as queryRows } from './tables/shared';
 
 export class PgChatState implements StateAdapter {
   constructor(
@@ -20,12 +21,6 @@ export class PgChatState implements StateAdapter {
   /** An expiry as the ISO text Postgres casts; postgres-js does not serialize a `Date` inside raw SQL. */
   private stamp(ttlMs?: number): string | null {
     return ttlMs === undefined ? null : new Date(this.now() + ttlMs).toISOString();
-  }
-
-  // postgres-js answers with the rows, PGlite with `{ rows }`.
-  private async rows<T>(statement: SQL): Promise<T[]> {
-    const result = (await this.db.execute(statement)) as unknown as T[] | { rows: T[] };
-    return Array.isArray(result) ? result : result.rows;
   }
 
   private live(): SQL {
@@ -100,9 +95,12 @@ export class PgChatState implements StateAdapter {
   async getList<T = unknown>(key: string): Promise<T[]> {
     const k = `k:${key}`;
     const rows = await readQuery(this.db, () =>
-      this.rows<{ value: T }>(sql`
+      queryRows<{ value: T }>(
+        this.db,
+        sql`
       with newest as (select expires_at from ${i} where key = ${k} order by seq desc limit 1)
-      select value from ${i}, newest where key = ${k} and (newest.expires_at is null or newest.expires_at > ${this.stamp(0)}::timestamptz) order by seq`),
+      select value from ${i}, newest where key = ${k} and (newest.expires_at is null or newest.expires_at > ${this.stamp(0)}::timestamptz) order by seq`,
+      ),
     );
     return rows.map(row => row.value);
   }
@@ -133,11 +131,14 @@ export class PgChatState implements StateAdapter {
     const k = `q:${threadId}`;
     const now = this.stamp(0);
     // Expired entries go, and the newest `maxSize` stay, in the same statement.
-    const [row] = await this.rows<{ depth: number }>(sql`
+    const [row] = await queryRows<{ depth: number }>(
+      this.db,
+      sql`
       with added as (insert into ${i} (key, value, expires_at) values (${k}, ${JSON.stringify(entry)}::jsonb, ${new Date(entry.expiresAt).toISOString()}::timestamptz)),
       dropped as (delete from ${i} where key = ${k} and (expires_at <= ${now}::timestamptz
         or seq <= coalesce((select seq from ${i} where key = ${k} and expires_at > ${now}::timestamptz order by seq desc offset ${maxSize - 1} limit 1), -1)))
-      select least((select count(*) from ${i} where key = ${k} and expires_at > ${now}::timestamptz) + 1, ${maxSize})::int as depth`);
+      select least((select count(*) from ${i} where key = ${k} and expires_at > ${now}::timestamptz) + 1, ${maxSize})::int as depth`,
+    );
     return Number(row?.depth ?? 0);
   }
 
@@ -145,17 +146,23 @@ export class PgChatState implements StateAdapter {
     const k = `q:${threadId}`;
     const now = this.stamp(0);
     // Takes the oldest live entry and drops expired ones in the same statement.
-    const rows = await this.rows<{ value: QueueEntry; live: boolean }>(sql`
+    const rows = await queryRows<{ value: QueueEntry; live: boolean }>(
+      this.db,
+      sql`
       delete from ${i} where key = ${k} and (expires_at <= ${now}::timestamptz
         or seq = (select seq from ${i} where key = ${k} and expires_at > ${now}::timestamptz order by seq limit 1 for update skip locked))
-      returning value, expires_at > ${now}::timestamptz as live`);
+      returning value, expires_at > ${now}::timestamptz as live`,
+    );
     return rows.find(row => row.live)?.value ?? null;
   }
 
   async queueDepth(threadId: string): Promise<number> {
     const [row] = await readQuery(this.db, () =>
-      this.rows<{ depth: number }>(sql`
-      select count(*)::int as depth from ${i} where key = ${`q:${threadId}`} and expires_at > ${this.stamp(0)}::timestamptz`),
+      queryRows<{ depth: number }>(
+        this.db,
+        sql`
+      select count(*)::int as depth from ${i} where key = ${`q:${threadId}`} and expires_at > ${this.stamp(0)}::timestamptz`,
+      ),
     );
     return Number(row?.depth ?? 0);
   }

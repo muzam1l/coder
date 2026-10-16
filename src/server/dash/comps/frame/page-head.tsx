@@ -20,6 +20,7 @@ function backTo(back: string | null | undefined): { to: To; label: string } | un
   if (url.origin !== 'http://dash' || !/^\/dash(\/|$)/.test(url.pathname)) return;
   const [, , , section, slug] = url.pathname.split('/');
   let label: string = HEADS[section as keyof typeof HEADS]?.title ?? 'Back';
+  if (section === 'tasks' && slug) label = 'Task';
   if (section === 'agents' && slug)
     try {
       label = decodeURIComponent(slug);

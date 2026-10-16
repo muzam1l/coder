@@ -5,7 +5,7 @@ const MODEL_MENU: { usage: string; blurb: string }[] = [
   { usage: 'list', blurb: 'list built-ins, custom models, and aliases' },
   {
     usage: 'add <name> --base-url <url> --model <id> [--env-key VAR]',
-    blurb: 'connect a model (alias: setup)',
+    blurb: 'connect a model',
   },
   {
     usage: 'update <name> [--base-url|--model|--env-key]',
@@ -27,7 +27,6 @@ export const commandModel = group(
     list: async () => (await import('./list')).commandModelList,
     ls: async () => (await import('./list')).commandModelList,
     add: async () => (await import('./add')).commandModelAdd,
-    setup: async () => (await import('./add')).commandModelAdd, // alias
     update: async () => (await import('./update')).commandModelUpdate,
     remove: async () => (await import('./remove')).commandModelRemove,
     disable: async () => (await import('./disable')).commandModelDisable,

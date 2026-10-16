@@ -2,10 +2,8 @@ import { dynamic } from '@wular/pnext/dynamic';
 
 import { load, orgOf } from '@/api/load';
 import { Settle } from '@/comps/frame/stream';
-import { loadAgent } from '@/api/load';
-import { NO_MODELS, modelsByEngine } from '@/app/dash/[org]/settings/model-options';
+import { loadAgent, loadRunDefaults } from '@/api/load';
 import { runnerOptions } from '@/app/dash/[org]/tasks/composer-data';
-import { DEFAULT_ENGINE } from '@coder/core/defaults';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
 
 const AgentSettingsForm = dynamic(() =>
@@ -23,33 +21,23 @@ export default async function AgentSettingsPage({
   const { slug: raw } = await params;
   const slug = Array.isArray(raw) ? raw[0]! : raw!;
   const agent = loadAgent(request, slug);
-  const models = load(request)
-    .models.list()
-    .catch(() => NO_MODELS);
-  const config = load(request)
-    .config.get()
-    .catch(() => undefined);
+  const run = loadRunDefaults(request);
   const catalog = load(request)
     .integrations.list()
     .catch(() => []);
+  // A failed list fails the form: Save replaces settings whole, so a missing list would wipe them.
   const connections = load(request)
     .connections.list()
-    .then(
-      rows => rows.filter(row => !row.owner),
-      () => [],
-    );
+    .then(rows => rows.filter(row => !row.owner));
   const runners = load(request)
     .runners.list()
-    .then(
-      rows => rows.items,
-      () => [],
-    );
+    .then(rows => rows.items);
 
   return (
     <Settle
       load={() =>
-        Promise.all([agent, models, config, runners, catalog, connections]).then(
-          ([row, shape, shown, rows, integrations, workspace]) => (
+        Promise.all([agent, run, runners, catalog, connections]).then(
+          ([row, { models, defaults }, rows, integrations, workspace]) => (
             <>
               {row.needsModel ? (
                 <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
@@ -57,11 +45,8 @@ export default async function AgentSettingsPage({
               <AgentSettingsForm
                 agent={row}
                 catalog={integrations}
-                models={modelsByEngine(shape)}
-                defaults={{
-                  engine: shown?.effective.chain?.[0] ?? DEFAULT_ENGINE,
-                  engines: shown?.effective.engines ?? {},
-                }}
+                models={models}
+                defaults={defaults}
                 runners={runnerOptions(rows)}
                 connections={workspace}
               />

@@ -7,7 +7,8 @@ import { inspectNonce, issueNonce } from '../auth/nonce';
 import { encodeJson } from '../../utils/base64url';
 import { sha256 } from '../../utils/crypto';
 import { decodeParam, json, redirect } from '../routes/http';
-import { serveDash } from '../dash/serve';
+import { notBuilt, serveDash } from '../dash/serve';
+import { appTokens, savedAppTokens } from './tokens';
 import { sharedApps } from './apps';
 import { syncKey } from './repo';
 import { dashPath, sessionSlug } from '../auth/account';
@@ -96,8 +97,6 @@ export async function createPage(
   params: Params,
   url: URL,
 ): Promise<Response | undefined> {
-  if (!/^[a-z0-9_-]+$/.test(url.pathname.split('/')[2]!)) return undefined;
-
   // A signed operator link needs no workspace, so its page is served here, outside the dashboard shell; so is how it ended.
   const tx = url.searchParams.get('tx');
   if (
@@ -106,10 +105,7 @@ export async function createPage(
     ((await inspectNonce(ctx, tx, 'create', OPERATOR)) ||
       (await finishedTarget(ctx, tx)) === params.id)
   )
-    return (
-      (await serveDash(req, undefined, ctx.dashboardHosts)) ??
-      new Response('UI is not built', { status: 503 })
-    );
+    return (await serveDash(req, ctx.dashboardHosts)) ?? notBuilt();
 
   const query = new URLSearchParams(url.searchParams);
   query.set('create', params.id!);
@@ -128,6 +124,7 @@ async function startedCreate(ctx: AppsContext, id: string, source: URLSearchPara
   const create =
     app.createStep && (ctx.operatorApp || started.state.public)
       ? app.createStep(ctx.config.publicUrl!, {
+          saved: await savedAppTokens(ctx, id),
           name: started.definition.name,
           public: started.state.public,
         })
@@ -159,8 +156,6 @@ export async function createStart(
   params: Params,
   url: URL,
 ): Promise<Response | undefined> {
-  if (!/^[a-z0-9_-]+$/.test(url.pathname.split('/')[2]!)) return undefined;
-
   return startedCreate(ctx, params.id!, url.searchParams);
 }
 
@@ -221,6 +216,7 @@ async function finishCreate(
       publicUrl,
       ...parsed,
       fetch: ctx.fetch ?? fetch,
+      tokens: appTokens(ctx, id),
       ...(shared ? { shared: decryptSecret(ctx.config, shared.credentials) } : {}),
     })
     .catch((error: unknown) => {
@@ -279,8 +275,6 @@ export async function completeCreate(
   params: Params,
   url: URL,
 ): Promise<Response | undefined> {
-  if (!/^[a-z0-9_-]+$/.test(url.pathname.split('/')[2]!)) return undefined;
-
   const state = decodeParam<{ tx?: string; back?: string }>(url.searchParams.get('state'));
 
   return finishCreate(req, ctx, params.id!, state?.tx, backPath(state?.back));
@@ -293,8 +287,6 @@ export async function completeCreateForm(
   params: Params,
   url: URL,
 ): Promise<Response | undefined> {
-  if (!/^[a-z0-9_-]+$/.test(url.pathname.split('/')[2]!)) return undefined;
-
   const transaction = new URLSearchParams(await req.clone().text()).get('tx');
   const done = await finishCreate(req, ctx, params.id!, transaction, undefined);
   const next = done.headers.get('location');

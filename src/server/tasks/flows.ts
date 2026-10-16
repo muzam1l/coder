@@ -1,11 +1,11 @@
 import { type Params } from '../routes/match';
 import { appOwner, forInstallation, scoped, type ServerContext } from '../context';
 import { builtinFlowsDir, flowsIn } from '../../flow/discover';
-import { ConfigError, body } from '../settings/config';
+import { body } from '../settings/config';
 import { TaskInputError, createTask, repoAccess, type NewTask } from './create';
 import { redactTask, taskError } from './admin';
 import { json } from '../routes/http';
-import { type AgentApp } from '../../agent/types';
+import { type AgentApp, type AgentEvent } from '../../agent/types';
 import { type Integration, type OwnEvent } from '../../integrations/types';
 import { importAgents, pushedFiles, sourceEvent } from '../agents/repo';
 import { storeInstallation } from '../agents/install';
@@ -18,8 +18,10 @@ import {
   later,
   type Target,
 } from '../chat';
-import { dropTokens } from './context';
+import { dropTokens, uninstall } from './context';
+import { appendLog } from './logs';
 import { recordFailure } from './failures';
+import { reviewKey } from './queue';
 import { updateMetadata } from '../store';
 import { decryptSecret } from '../store/secrets';
 import { InstallationBoundError } from '../store/types';
@@ -69,15 +71,7 @@ export async function listFlows(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  try {
-    {
-      return flowList(ctx, url.searchParams.get('repo'));
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+  return flowList(ctx, url.searchParams.get('repo')).catch(taskError);
 }
 
 export async function listPulls(
@@ -86,15 +80,7 @@ export async function listPulls(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  try {
-    {
-      return await pullList(ctx, url.searchParams.get('repo'));
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+  return pullList(ctx, url.searchParams.get('repo')).catch(taskError);
 }
 
 export async function runFlow(
@@ -103,19 +89,9 @@ export async function runFlow(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const named = params.name;
-
-  try {
-    {
-      const input = await body<NewTask>(req);
-
-      return run(ctx, { ...input, flow: named });
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+  return body<NewTask>(req)
+    .then(input => run(ctx, { ...input, flow: params.name }))
+    .catch(taskError);
 }
 
 export async function review(
@@ -124,22 +100,13 @@ export async function review(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  try {
-    {
-      const { post, ...input } = await body<
-        NewTask & {
-          post?: boolean;
-        }
-      >(req);
+  return body<NewTask & { post?: boolean }>(req)
+    .then(({ post, ...input }) => {
       if (!input.repo || !input.pr) throw new TaskInputError('repo and pr are required');
 
       return run(ctx, { ...input, flow: 'review', args: { post: post === true } });
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+    })
+    .catch(taskError);
 }
 
 export function start(
@@ -149,6 +116,49 @@ export function start(
 ): Promise<Response> {
   (ctx.waitUntil ?? ((pending: Promise<unknown>) => void pending.catch(() => {})))(work);
   return Promise.resolve(json({ tasks }, 202));
+}
+
+/** Cancels queued reviews replaced by this event. */
+async function dropQueuedReviews(
+  ctx: ServerContext,
+  integration: Integration,
+  event: AgentEvent,
+): Promise<void> {
+  const pr = integration.repos?.pullRequest(event);
+  const tenant =
+    pr === undefined
+      ? undefined
+      : await forInstallation(ctx, `${event.appId}:${event.installationId}`);
+  if (!tenant) return;
+
+  const key = reviewKey({ flow: 'review', event });
+  if (!key) return;
+  const queued = await tenant.queue.list(tenant.organizationId, {
+    status: 'queued',
+    reviewKey: key,
+  });
+  const now = (ctx.now ?? Date.now)();
+  const replaced = JSON.stringify({
+    kind: 'status',
+    message: 'Replaced by a newer review of this pull request.',
+  });
+  for (const status of queued.filter(
+    status =>
+      status.task.event?.type === event.type && status.task.event.deliveryId !== event.deliveryId,
+  ))
+    if (
+      await tenant.queue.cancel(tenant.organizationId, status.task.id, now, {
+        statuses: ['queued'],
+      })
+    )
+      await appendLog(
+        tenant.store,
+        status.task.id,
+        [{ level: 'sys', line: replaced }],
+        status.logSeq ?? 0,
+        now,
+        status.logBytes ?? 0,
+      );
 }
 
 async function ownEvent(
@@ -161,6 +171,11 @@ async function ownEvent(
   target?: Target,
 ): Promise<Response> {
   if ('ack' in own) return new Response(null, { status: 200 });
+  if ('uninstalled' in own) {
+    const tenant = await forInstallation(ctx, own.uninstalled);
+    if (tenant) await uninstall(tenant.store, own.uninstalled, now);
+    return json({ ok: true });
+  }
   if ('unhandled' in own) {
     console.warn(`coder server: ${app.id} sent ${own.unhandled}, which Coder does not handle yet`);
     return new Response(null, { status: 200 });
@@ -197,9 +212,10 @@ async function ownEvent(
             )
         : own.installation.installation.repos;
       await updateMetadata(store, 'installation', existing.id, {
-        account: own.installation.installation.account,
+        account: own.installation.op === 'delete' ? current.account : own.installation.installation.account,
         ...(change || repos ? { repos } : {}),
         deletedAt: own.installation.op === 'delete' ? now : undefined,
+        uninstalled: own.installation.installation.uninstalled,
       });
     });
     // Its repositories or permissions may have changed.
@@ -269,7 +285,9 @@ async function ownEvent(
       app,
       event,
       eventReplies(ctx, app, event).then(replies =>
-        deliver(ctx, integration, app, credentials, event, replies),
+        deliver(ctx, integration, app, credentials, event, replies, () =>
+          dropQueuedReviews(ctx, integration, event),
+        ),
       ),
     );
 

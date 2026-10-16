@@ -107,14 +107,12 @@ async function rows(opts: ConnectionOptions): Promise<ConnectionRow[]> {
 async function credentialHolds(opts: ConnectionAddOptions, name: string): Promise<boolean> {
   if (remote(opts))
     return (await api(opts).credentials.list()).some(
-      row => row.env.includes(name) && (opts.me || row.scope === 'workspace'),
+      row => row.name === name && (opts.me || row.scope === 'workspace'),
     );
-  const { credentialSummary } = await import('../server/settings/credentials');
+  const { parseCredentialId } = await import('../server/settings/credentials');
   const { ctx } = await local(cwdOf(opts));
 
-  return (await ctx.store.list('credential')).some(row =>
-    credentialSummary(ctx.config, row.id, row.value).env.includes(name),
-  );
+  return (await ctx.store.list('credential')).some(row => parseCredentialId(row.id).name === name);
 }
 
 async function keyOf(opts: ConnectionAddOptions, what: string): Promise<string> {
@@ -131,9 +129,9 @@ async function signedIn(opts: ConnectionAddOptions, id: string, url: string) {
   if (!attempt) throw invalid('Sign-in did not start.');
   const authorization = createHash('sha256').update(attempt).digest('hex');
   opts.onAuthorize!(authorize.href);
-  for (let waited = 0; waited < 600; waited++) {
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    const row = (await client(opts).list(authorization)).find(row => row.id === id);
+  const deadline = Date.now() + 600000;
+  while (Date.now() < deadline) {
+    const row = (await client(opts).list(authorization, id)).find(row => row.id === id);
     if (!row) throw invalid('The connection was removed before sign-in finished.');
     if (row.status === 'ok') return row;
   }
@@ -143,7 +141,7 @@ async function signedIn(opts: ConnectionAddOptions, id: string, url: string) {
 /** The body `add` posts for a name and its flags. */
 async function input(name: string, opts: ConnectionAddOptions): Promise<ConnectionInput> {
   const [command, ...args] = opts.command ?? [];
-  const access = opts.access && ({ access: opts.access === 'read' ? 'observe' : 'write' } as const);
+  const access = opts.access && { access: opts.access };
   const owner = opts.me ? { owner: 'me' as const } : {};
   if (command && opts.url) throw invalid('Use either --url or a command, not both.');
   if (opts.access && !['read', 'write'].includes(opts.access))

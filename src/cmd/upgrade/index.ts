@@ -12,7 +12,7 @@ const upgrade = command({
   help: {
     usage: 'coder upgrade [--cli-only] [--plugins-only] [--codex] [--claude] [--pm <mgr>]',
     summary:
-      'Update the coder CLI through whichever package manager installed it, then refresh\nthe host plugins to match. Alias: update.',
+      'Update the coder CLI through whichever package manager installed it, then refresh\nthe host plugins to match.',
     flags: [
       ['--cli-only', 'update just the CLI'],
       ['--plugins-only', 'refresh just the host plugins'],

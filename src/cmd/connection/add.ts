@@ -3,10 +3,8 @@ import process from 'node:process';
 
 import type { ConnectionRow } from '../../client/types';
 import { errStyle, outStyle } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
+import { baseOptions, flag, str, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-
-export const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 /** Shows an OAuth sign-in page and opens it in the browser. */
 export async function openSignIn(url: string): Promise<void> {
@@ -51,7 +49,7 @@ const addCommand = (serverCommand: string[]) =>
         ],
         [
           '--access <read|write>',
-          'read keeps only read-only tools (default: read; API keys are write)',
+          "read keeps only read-only tools (default: the agent's mode, write for API keys)",
         ],
         ['--tools <a,b>', 'tool allowlist; a read-only stdio server needs one'],
         ['--credential <id>', 'the credential an API key connection reads'],

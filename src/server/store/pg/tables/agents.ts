@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { AgentRecord, AgentVersionRecord, AgentPublication } from '../../types';
 import { agent, agentVersion } from '../schema';
 import type { DrizzleStore } from '../store';
-import { agentRowId, agentValue, date, versionValue, type Kind } from './shared';
+import { agentValue, date, versionValue, type Kind } from './shared';
 
 export function publishAgent(
   s: DrizzleStore,
@@ -69,7 +69,7 @@ export function publishAgent(
       returning version
     )`;
     await tx.execute(sql`${insert} update ${agent} set
-      name = ${record.name}, description = ${record.description ?? null}, source = ${record.source},
+      name = ${record.name}, description = ${record.description ?? null}, problems = null, source = ${record.source},
       repo = ${record.repo ?? null}, path = ${record.path ?? null},
       current_version = ${unchanged ? sql`${version.version}` : sql`(select version from published)`}, updated_at = ${date(record.updatedAt).toISOString()}::timestamptz
       where id = ${locked!.id}`);
@@ -94,6 +94,7 @@ export function agents(s: DrizzleStore): Kind<AgentRecord> {
       const row = {
         name: value.name,
         description: value.description ?? null,
+        problems: value.problems ?? null,
         source: value.source,
         repo: value.repo ?? null,
         path: value.path ?? null,
@@ -123,7 +124,7 @@ export async function insertVersion(
   const rows = await s.db
     .insert(agentVersion)
     .values({
-      agentId: await agentRowId(s, id.slice(0, split)),
+      agentId: sql`(select id from ${agent} where organization_id = ${s.organizationId} and slug = ${id.slice(0, split)})`,
       version: Number(id.slice(split + 1)),
       definition: value.definition,
       systemPrompt: value.systemPrompt,
@@ -165,11 +166,10 @@ export function agentVersions(s: DrizzleStore): Kind<AgentVersionRecord> {
     },
     delete: async id => {
       const split = id.lastIndexOf(':');
-      const owner = await agentRowId(s, id.slice(0, split)).catch(() => undefined);
-      if (owner !== undefined)
-        await s.db
-          .delete(t)
-          .where(and(eq(t.agentId, owner), eq(t.version, Number(id.slice(split + 1)))));
+      const owner = sql`(select id from ${agent} where organization_id = ${s.organizationId} and slug = ${id.slice(0, split)})`;
+      await s.db
+        .delete(t)
+        .where(and(eq(t.agentId, owner), eq(t.version, Number(id.slice(split + 1)))));
     },
   };
 }

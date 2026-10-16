@@ -107,3 +107,9 @@
 .add-form > .notice {
   margin-top: 12px;
 }
+
+@media (max-width: 760px) {
+  .conn-add + .add-form .add-grid > div.field:has([aria-label='Scope']) {
+    margin-left: 0;
+  }
+}

@@ -18,6 +18,7 @@ export const optStr = z.optional(z.union([z.string(), z.literal(true)]));
 export const serverOnly = z._default(optStr, true);
 // Almost every command takes --cwd and --json.
 export const baseOptions = { cwd: str, json: flag };
+export const serverOptions = { server: optStr, workspace: str, yes: flag };
 // --limit <n|all>: a positive integer, or 'all' for no cap (task list, flow list).
 export const limitOption = z.optional(
   z.union([z.literal('all'), z.coerce.number().check(z.int(), z.positive())], {
@@ -31,35 +32,26 @@ export const tailOption = z.optional(
   }),
 );
 
-// A flag takes no value iff its schema unwraps to a boolean.
-function isOptionalValueOption(field: z.ZodMiniType): boolean {
-  let def: any = (field as any).def;
-  while (def) {
-    if (def.type === 'union')
-      return def.options.some((option: any) => option.def.type === 'literal');
-    const inner = def.innerType ?? def.in;
-    def = inner ? inner.def : undefined;
-  }
-  return false;
+function optionDef(field: z.ZodMiniType): any {
+  let def: any = field.def;
+  while (def.innerType ?? def.in) def = (def.innerType ?? def.in).def;
+
+  return def;
 }
 
-function unwrapsTo(field: z.ZodMiniType, type: string): boolean {
-  let def: any = (field as any).def;
-  while (def) {
-    if (def.type === type) return true;
-    const inner = def.innerType ?? def.in;
-    def = inner ? inner.def : undefined;
-  }
-  return false;
-}
-
-const isBooleanOption = (field: z.ZodMiniType) => unwrapsTo(field, 'boolean');
+const isBooleanOption = (field: z.ZodMiniType) => optionDef(field).type === 'boolean';
 
 export function parseArgs<S extends z.ZodMiniObject>(
   argv: string[],
   schema: S,
-  settings: { positionals?: number; command?: string } = {},
+  settings: { positionals?: number; required?: string[]; command?: string } = {},
 ): ParsedArgs<z.output<S>> {
+  const invalid = (message: string) =>
+    new CoderError(
+      'invalid-option',
+      message,
+      settings.command ? { hint: `Help: coder ${settings.command} --help` } : {},
+    );
   const shape = schema.shape as unknown as Record<string, z.ZodMiniType>;
   const raw: Record<string, unknown> = {};
   const positionals: string[] = [];
@@ -69,7 +61,7 @@ export function parseArgs<S extends z.ZodMiniObject>(
     const field = shape[key];
     const dash = short ? '-' : '--';
     if (!field) {
-      throw new Error(
+      throw invalid(
         `Unknown option ${dash}${rawKey} (use -- to pass literal text starting with -)`,
       );
     }
@@ -77,14 +69,19 @@ export function parseArgs<S extends z.ZodMiniObject>(
       raw[key] = value === undefined ? true : value !== 'false';
       return 0;
     }
-    if (isOptionalValueOption(field) && (value === undefined || value.startsWith('-'))) {
+    if (
+      optionDef(field).type === 'union' &&
+      optionDef(field).options.some((option: any) => option.def.type === 'literal') &&
+      (value === undefined || value.startsWith('-'))
+    ) {
       raw[key] = true;
       return 0;
     }
     if (value === undefined) {
-      throw new Error(`Missing value for ${dash}${rawKey}`);
+      throw invalid(`Missing value for ${dash}${rawKey}`);
     }
-    raw[key] = unwrapsTo(field, 'array') ? [...((raw[key] as string[]) ?? []), value] : value;
+    raw[key] =
+      optionDef(field).type === 'array' ? [...((raw[key] as string[]) ?? []), value] : value;
     return 1;
   };
 
@@ -131,12 +128,14 @@ export function parseArgs<S extends z.ZodMiniObject>(
     const issue = result.error.issues[0];
     const key = String(issue.path[0] ?? '');
     const value = raw[key];
-    throw new Error(
+    throw invalid(
       value === undefined
         ? `Missing required --${key}.`
         : `Invalid --${key} value ${JSON.stringify(value)}: ${issue.message}`,
     );
   }
+  const missing = settings.required?.[positionals.length];
+  if (missing) throw invalid(`Missing ${missing}.`);
   const maximum = settings.positionals ?? 0;
   if (positionals.length > maximum) {
     const extra = positionals.slice(maximum);

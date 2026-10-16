@@ -3,7 +3,6 @@ import { builtinDefinitions, loadAgents } from '../../agent/load';
 import { type ServerContext } from '../context';
 import { syncLocalUsage } from './local';
 import { json, decodeCursor, page, pageLimit, paged } from '../routes/http';
-import { usageTotals as sumUsage } from './usage';
 import {
   type UsageRecord,
   type Store,
@@ -39,7 +38,10 @@ export const addUsage = (total: UsageAmount, row: UsageAmount) => {
 
 /** Usage in a range grouped by one key, keys ascending. */
 export async function usageTotals(store: Store, query: UsageQuery): Promise<UsageTotalRow[]> {
-  if (store.usageTotals) return store.usageTotals(query);
+  return store.usageTotals(query);
+}
+
+export async function sumUsageTotals(store: Store, query: UsageQuery): Promise<UsageTotalRow[]> {
   if (query.top) {
     const { top, ...rest } = query;
     const leaders = (await usageTotals(store, { ...rest, by: 'agent', parts: undefined }))
@@ -181,7 +183,7 @@ export async function usageReport(ctx: ServerContext, url: URL): Promise<Respons
   const parts = param('parts')?.split(',').filter(Boolean);
   const top = Math.min(Number(param('top') ?? 0), 8);
   const measure = USAGE_MEASURE[param('sort') ?? 'tokens'] ?? 'tokenCount';
-  const totals = await sumUsage(ctx.store, {
+  const totals = await usageTotals(ctx.store, {
     by: by as 'agent' | 'installation' | 'engine' | 'day',
     since,
     ...(until !== undefined ? { until } : {}),
@@ -266,12 +268,9 @@ export async function readUsageTotals(
   if (!Number.isFinite(since) || (by && !['agent', 'installation', 'engine'].includes(by)))
     return json({ error: 'Invalid usage query' }, 400);
 
-  if (ctx.store.usageSummary)
-    return json({
-      since,
-      totals: await ctx.store.usageSummary(since, by as UsageGroup | undefined),
-    });
-  const rows = (await ctx.store.list('usage')).map(entry => entry.value);
+  return json({
+    since,
+    totals: await ctx.store.usageSummary(since, by as UsageGroup | undefined),
+  });
 
-  return json(usageSummary(rows, since, by as UsageGroup | undefined));
 }

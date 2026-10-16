@@ -1,5 +1,6 @@
 /** Custom endpoint models and aliases: list, probe, add, update, remove, alias, enable and disable. */
 import process from 'node:process';
+import path from 'node:path';
 
 import { getCodexAvailability } from './engines/codex';
 import {
@@ -15,13 +16,11 @@ import {
   normalizeBaseUrl,
   parseEngineSpec,
   removeModel,
-  resolveUserConfigFile,
-  resolveWorkspaceConfigFile,
+  configTargetFile,
 } from './config';
 import { CoderError } from './dispatch';
 import { ensureCodexInstalled } from './hosts';
 import { detectWireApi } from './engines/codex/wire';
-import { resolveWorkspaceRoot } from './state';
 import type { AliasModelConfig, CoderConfig, CustomModelConfig, ModelEntry } from './types';
 import type { ProbeResult } from '../client/types';
 import { writeConfigFile } from './config';
@@ -110,12 +109,6 @@ function writeModels(targetFile: string, mutate: (models: Record<string, ModelEn
     current.models = current.models ?? {};
     mutate(current.models);
   });
-}
-
-export function resolveTargetFile(options: Record<string, any>, cwd: string): string {
-  return options.workspace
-    ? resolveWorkspaceConfigFile(resolveWorkspaceRoot(cwd))
-    : resolveUserConfigFile();
 }
 
 // Compute the model-list rows shared by the text and JSON views (and the SDK):
@@ -314,7 +307,7 @@ export async function modelAddCore(
     model: opts.model,
     ...(opts.envKey ? { envKey: opts.envKey } : {}),
   };
-  return persistModel(name, entry, resolveTargetFile({ workspace: opts.workspace }, cwd), cwd);
+  return persistModel(name, entry, configTargetFile(cwd, opts.workspace), cwd);
 }
 
 // Print-free core: update an existing custom endpoint model.
@@ -348,7 +341,7 @@ export async function modelUpdateCore(
     ...(opts.model ? { model: opts.model } : {}),
     ...(opts.envKey ? { envKey: opts.envKey } : {}),
   };
-  return persistModel(name, entry, resolveTargetFile({ workspace: opts.workspace }, cwd), cwd);
+  return persistModel(name, entry, configTargetFile(cwd, opts.workspace), cwd);
 }
 
 // Print-free core: remove a configured model entry.
@@ -366,7 +359,7 @@ export function modelRemoveCore(
       },
     );
   }
-  const targetFile = resolveTargetFile({ workspace: opts.workspace }, cwd);
+  const targetFile = configTargetFile(cwd, opts.workspace);
   writeConfigFile(targetFile, current => removeModel(current, name));
   return { removed: name, file: targetFile };
 }
@@ -418,7 +411,7 @@ export function modelAliasCore(
     model: builtins[parsed.model] ?? parsed.model,
     ...(effortGiven && parsed.effort ? { effort: parsed.effort } : {}),
   };
-  const targetFile = resolveTargetFile({ workspace: opts.workspace }, cwd);
+  const targetFile = configTargetFile(cwd, opts.workspace);
   writeModels(targetFile, models => {
     models[name] = entry;
   });
@@ -441,7 +434,7 @@ export function modelUnaliasCore(
       },
     );
   }
-  const targetFile = resolveTargetFile({ workspace: opts.workspace }, cwd);
+  const targetFile = configTargetFile(cwd, opts.workspace);
   writeConfigFile(targetFile, current => removeModel(current, name));
   return { unaliased: name, file: targetFile };
 }
@@ -458,7 +451,7 @@ export function modelToggleCore(
       hint: `Usage: coder model ${disable ? 'disable' : 'enable'} <name>`,
     });
   const configuredElsewhere = Boolean(loadConfig(cwd).models?.[name]);
-  const targetFile = resolveTargetFile({ workspace: opts.workspace }, cwd);
+  const targetFile = configTargetFile(cwd, opts.workspace);
   writeModels(targetFile, models => {
     const entry = models[name];
     if (!entry) {
@@ -484,3 +477,29 @@ export function modelToggleCore(
   });
   return { name, disabled: disable, file: targetFile };
 }
+
+export const models = {
+  /** Register a custom OpenAI-compatible endpoint model. */
+  add: (name: string, opts: ModelWriteOptions & { cwd?: string }) =>
+    modelAddCore(path.resolve(opts.cwd ?? '.'), name, opts),
+  /** Update fields of a configured model entry. */
+  update: (name: string, opts: ModelWriteOptions & { cwd?: string }) =>
+    modelUpdateCore(path.resolve(opts.cwd ?? '.'), name, opts),
+  /** Remove a configured model entry. */
+  remove: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
+    modelRemoveCore(path.resolve(opts.cwd ?? '.'), name, opts),
+  /** Every dispatchable model: built-ins, aliases, custom endpoints. */
+  list: (opts: { cwd?: string } = {}) => modelListData(path.resolve(opts.cwd ?? '.')),
+  /** Alias a name to an engine spec, e.g. alias('fast', 'codex:luna'). */
+  alias: (name: string, spec: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
+    modelAliasCore(path.resolve(opts.cwd ?? '.'), name, spec, opts),
+  /** Remove a user-defined alias. */
+  unalias: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
+    modelUnaliasCore(path.resolve(opts.cwd ?? '.'), name, opts),
+  /** Disable a model name (built-in, alias, or raw slug) without removing it. */
+  disable: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
+    modelToggleCore(path.resolve(opts.cwd ?? '.'), name, true, opts),
+  /** Re-enable a disabled model name. */
+  enable: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
+    modelToggleCore(path.resolve(opts.cwd ?? '.'), name, false, opts),
+};

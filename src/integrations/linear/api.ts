@@ -1,4 +1,20 @@
+import { createHmac } from 'node:crypto';
+import { safeEqual } from '../../utils/crypto';
 import type { AgentEvent } from '../types';
+
+/** Linear's webhook check: an HMAC of the body under the app's secret, sent within the last minute. */
+export function verifyLinearWebhook(
+  raw: string,
+  signature: string | null,
+  secret: string | undefined,
+  now = Date.now(),
+): boolean {
+  if (!secret || !signature) return false;
+  const expected = createHmac('sha256', secret).update(raw).digest();
+  if (!safeEqual(Buffer.from(signature, 'hex'), expected)) return false;
+  const sent = (JSON.parse(raw) as { webhookTimestamp?: unknown }).webhookTimestamp;
+  return typeof sent === 'number' && Math.abs(now - sent) <= 60_000;
+}
 
 export async function canWriteLinear(
   event: AgentEvent,

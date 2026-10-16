@@ -1,4 +1,4 @@
-/** `coder credentials <list|add|login|remove|default>`. */
+/** `coder credentials <list|add|login|remove>`. */
 import { group } from '../../cli';
 
 export const commandCredentials = group(
@@ -8,14 +8,13 @@ export const commandCredentials = group(
     add: async () => (await import('./add')).commandCredentialsAdd,
     login: async () => (await import('./login')).commandCredentialsLogin,
     remove: async () => (await import('./remove')).commandCredentialsRemove,
-    default: async () => (await import('./default')).commandCredentialsDefault,
   },
   undefined,
   {
     help: {
-      usage: 'coder credentials [list|add|login|remove|default] ...',
+      usage: 'coder credentials [list|add|login|remove] ...',
       summary:
-        "Manage engine credentials. Your personal ones are yours alone; workspace ones serve every member, and only owners and admins change them. A task runs on its requester's default for the engine, else the workspace's.",
+        "Manage subscriptions and API keys, one per variable in each scope. Your personal ones are yours alone; workspace ones serve every member, and only owners and admins change them. A task runs on its requester's own, else the workspace's.",
     },
   },
 );

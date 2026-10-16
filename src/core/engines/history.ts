@@ -1,0 +1,205 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import readline from 'node:readline';
+
+import type { Task } from '../types';
+import { resolveTaskDir } from '../state';
+import { readJsonFile, writeJsonFileAtomic } from '../../utils/fsx';
+import { claudeProjectsDir } from './claude/sessions';
+import { codexHome } from './codex/sessions';
+
+export const HISTORY_CONVERSATION = /^[A-Za-z0-9-]{1,128}$/;
+
+type HistoryTask = Pick<Task, 'engine'> & Partial<Pick<Task, 'id' | 'cwd'>>;
+
+interface TranscriptMessage {
+  speaker: string;
+  time: string;
+  text: string;
+  startsExchange: boolean;
+  reply: boolean;
+  calls: string[];
+  results: string[];
+}
+
+export function conversationIds(task: Pick<Task, 'threadId' | 'previousThreadIds'>): string[] {
+  return [
+    ...new Set([...(task.previousThreadIds ?? []), ...(task.threadId ? [task.threadId] : [])]),
+  ];
+}
+
+export async function transcriptFiles(task: HistoryTask, id: string): Promise<string[]> {
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) return [];
+  const claude = task.engine === 'claude';
+  const home = claude ? claudeProjectsDir() : codexHome();
+  const cacheFile = task.id
+    ? path.join(resolveTaskDir(task.cwd ?? '', task.id), 'history-files.json')
+    : undefined;
+  const key = JSON.stringify([task.engine, home, id]);
+  const cache = cacheFile ? (readJsonFile<Record<string, string[]>>(cacheFile) ?? {}) : {};
+  const cached = cache[key];
+  if (
+    cached?.length &&
+    cached.every(file => file.startsWith(`${home}${path.sep}`) && fs.existsSync(file))
+  )
+    return cached;
+  const files: string[] = [];
+  const visit = async (dir: string, depth: number) => {
+    for (const entry of await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => [])) {
+      const file = path.join(dir, entry.name);
+      if (entry.isDirectory() && depth) await visit(file, depth - 1);
+      else if (
+        entry.isFile() &&
+        (claude ? entry.name === `${id}.jsonl` : entry.name.endsWith(`-${id}.jsonl`))
+      )
+        files.push(file);
+    }
+  };
+  if (claude) await visit(home, 1);
+  else {
+    await visit(path.join(home, 'sessions'), 3);
+    await visit(path.join(home, 'archived_sessions'), 0);
+  }
+
+  if (cacheFile && files.length) writeJsonFileAtomic(cacheFile, { ...cache, [key]: files });
+
+  return files;
+}
+
+function transcriptMessage(record: any, claude: boolean): TranscriptMessage | undefined {
+  const item = claude
+    ? record.message
+    : record.type === 'response_item'
+      ? record.payload
+      : undefined;
+  if (!item) return;
+  if (!claude && item.type === 'reasoning') return;
+  const content = item.content;
+  const blocks = Array.isArray(content) ? content : [];
+  const speaker = item.role ?? (item.type?.endsWith('_output') ? 'tool' : 'assistant');
+  const calls = blocks.filter(block => block.type === 'tool_use').map(block => String(block.id));
+  const results = blocks
+    .filter(block => block.type === 'tool_result')
+    .map(block => String(block.tool_use_id));
+  if (['function_call', 'custom_tool_call'].includes(item.type)) calls.push(String(item.call_id));
+  if (['function_call_output', 'custom_tool_call_output'].includes(item.type))
+    results.push(String(item.call_id));
+  const text =
+    typeof content === 'string'
+      ? content
+      : blocks.length
+        ? blocks
+            .map(block => (typeof block.text === 'string' ? block.text : JSON.stringify(block)))
+            .join('\n')
+        : JSON.stringify(item);
+
+  return {
+    speaker: results.length && !calls.length ? 'tool' : speaker,
+    time: String(record.timestamp ?? ''),
+    text,
+    calls,
+    results,
+    startsExchange: speaker === 'user' && !results.length,
+    reply:
+      speaker === 'assistant' &&
+      (claude
+        ? blocks.some(block => block.type === 'text') || typeof content === 'string'
+        : item.type === 'message'),
+  };
+}
+
+async function* transcript(task: HistoryTask, id: string) {
+  for (const file of await transcriptFiles(task, id)) {
+    const input = fs.createReadStream(file, { encoding: 'utf8' });
+    const lines = readline.createInterface({ input, crlfDelay: Infinity });
+    try {
+      for await (const line of lines) {
+        let record: any;
+        try {
+          record = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        const message = transcriptMessage(record, task.engine === 'claude');
+        if (message) yield message;
+      }
+    } finally {
+      lines.close();
+      input.destroy();
+    }
+  }
+}
+
+export async function recentExchanges(
+  task: HistoryTask & Pick<Task, 'threadId'>,
+  { exchanges = 6, maxBytes = 20_000 }: { exchanges?: number; maxBytes?: number } = {},
+): Promise<{ text: string; exchanges: number }> {
+  if (!task.threadId) return { text: '', exchanges: 0 };
+  const recent: string[] = [];
+  let current = '';
+  let bytes = 0;
+  let answered = false;
+  const open = new Set<string>();
+  const finish = () => {
+    if (bytes > maxBytes) recent.length = 0;
+    else if (current && answered && !open.size) {
+      recent.push(current);
+      while (recent.length > exchanges || Buffer.byteLength(recent.join('\n\n')) > maxBytes)
+        recent.shift();
+    }
+    current = '';
+    bytes = 0;
+    answered = false;
+    open.clear();
+  };
+  for await (const message of transcript(task, task.threadId)) {
+    if (message.startsExchange && !open.size) finish();
+    if (!current && !message.startsExchange) continue;
+    for (const call of message.calls) open.add(call);
+    for (const result of message.results) open.delete(result);
+    if (message.reply) answered = true;
+    const text = `[${message.time}] ${message.speaker}\n${message.text}`;
+    bytes += Buffer.byteLength(text) + 2;
+    if (bytes <= maxBytes) current += `${current ? '\n\n' : ''}${text}`;
+    else current = '[exchange exceeds the recent history budget]';
+  }
+  if (bytes > maxBytes) current = '';
+  finish();
+
+  return { text: recent.join('\n\n'), exchanges: recent.length };
+}
+
+export async function history(
+  task: HistoryTask & Pick<Task, 'threadId' | 'previousThreadIds'>,
+  { query, from = 0, limit = 10 }: { query?: string; from?: number; limit?: number } = {},
+) {
+  if (query !== undefined && (typeof query !== 'string' || !query.length || query.length > 500))
+    throw new Error('Provide a query of 1 to 500 characters');
+  if (!Number.isSafeInteger(from) || from < 0)
+    throw new Error('Provide from as a nonnegative message index');
+  if (!Number.isInteger(limit) || limit < 1 || limit > 20)
+    throw new Error('Provide a limit of 1 to 20 messages');
+
+  const messages: { index: number; speaker: string; time: string; text: string }[] = [];
+  const needle = query?.toLowerCase();
+  let index = 0;
+  for (const id of conversationIds(task)) {
+    for await (const message of transcript(task, id)) {
+      const current = index++;
+      if (current < from) continue;
+      const at = needle === undefined ? 0 : message.text.toLowerCase().indexOf(needle);
+      if (at < 0) continue;
+      if (messages.length === limit)
+        return { messages, next: messages[messages.length - 1]!.index + 1 };
+      const start = Math.max(0, at - 200);
+      messages.push({
+        index: current,
+        speaker: message.speaker,
+        time: message.time,
+        text: message.text.slice(start, start + 1200),
+      });
+    }
+  }
+
+  return { messages };
+}

@@ -91,19 +91,22 @@ export function Loading({
   label,
   inline,
   dots,
+  late,
   h,
 }: {
   label: string;
   inline?: boolean;
   /** Three pulsing dots instead of the ring, for a quiet wait. */
   dots?: boolean;
+  /** Shows only after 300 ms, for a client load that a fast answer replaces unseen. */
+  late?: boolean;
   /** The height, in pixels, of what arrives in its place. */
   h?: number;
 }) {
   const Tag = inline ? 'span' : 'div';
   return (
     <Tag
-      class={inline ? 'loading inline' : 'loading'}
+      class={['loading', inline && 'inline', late && 'late'].filter(Boolean).join(' ')}
       role="status"
       style={h ? `--h:${h}px` : undefined}
     >

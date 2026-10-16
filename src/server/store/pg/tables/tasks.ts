@@ -1,19 +1,19 @@
-/** The task kinds: `task`, `tasklog`, `inbox`, `usage`, and the `delivery` and `note` rows that expire. */
+/** The task kinds: `task`, `history`, `tasklog`, `inbox`, `usage`, and the `delivery` rows that expire. */
 import { and, asc, eq, gt, sql } from 'drizzle-orm';
 
-import type { TaskLogLine, TaskStatus, UsageRecord } from '../../types';
-import { task, taskInbox, taskLog, usage } from '../schema';
+import type { TaskHistory, TaskLogLine, TaskStatus, UsageRecord } from '../../types';
+import { task, taskHistory, taskInbox, taskLog, usage } from '../schema';
 import type { DrizzleStore } from '../store';
+import { reviewKey } from '../../../tasks/queue';
 import {
-  appRowId,
+  app,
+  UNSCOPED_ORGANIZATION,
   date,
   defined,
   install,
-  installationRowId,
   ms,
   taskRecord,
   storedTaskContext,
-  taskRowId,
   type Kind,
 } from './shared';
 
@@ -37,11 +37,14 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
         status: value.status,
         agent: j.agent,
         flow: j.flow,
+        reviewKey: reviewKey(j) ?? null,
         runner: j.runner,
         permissions: j.permissions ?? null,
-        appId: j.event ? await appRowId(s, j.event.appId) : null,
+        appId: j.event
+          ? sql`(select id from ${app} where organization_id in (${s.organizationId}, ${UNSCOPED_ORGANIZATION}) and key = ${j.event.appId} order by organization_id desc limit 1)`
+          : null,
         installationId: j.event
-          ? await installationRowId(s, `${j.event.appId}:${j.event.installationId}`)
+          ? sql`(select id from ${install} where organization_id = ${s.organizationId} and key = ${`${j.event.appId}:${j.event.installationId}`})`
           : null,
         event: j.event ?? null,
         prompt: j.prompt ?? null,
@@ -110,6 +113,84 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
   };
 }
 
+export async function historySummaries(
+  s: DrizzleStore,
+  id: string,
+): Promise<Array<Omit<TaskHistory, 'data' | 'state'>>> {
+  const rows = await s.db
+    .select({
+      engine: taskHistory.engine,
+      conversation: taskHistory.conversation,
+      savedAt: taskHistory.savedAt,
+    })
+    .from(taskHistory)
+    .innerJoin(task, eq(task.id, taskHistory.taskId))
+    .where(
+      and(s.mine(taskHistory.organizationId), s.mine(task.organizationId), eq(task.publicId, id)),
+    )
+    .orderBy(asc(taskHistory.savedAt));
+
+  return rows.map(row => ({ ...row, savedAt: ms(row.savedAt) }));
+}
+
+export function histories(s: DrizzleStore): Kind<TaskHistory> {
+  const t = taskHistory;
+  const key = sql<string>`${task.publicId} || ':' || ${t.conversation}`;
+  const parts = (id: string) => [id.slice(0, id.indexOf(':')), id.slice(id.indexOf(':') + 1)];
+  return {
+    key,
+    where: ({ id, prefix }) => {
+      const [publicId, conversation] = parts(id ?? prefix ?? '');
+      return and(
+        s.mine(task.organizationId),
+        eq(task.publicId, publicId!),
+        id === undefined ? undefined : eq(t.conversation, conversation!),
+      )!;
+    },
+    rows: async (where, limit) => {
+      const q = s.db
+        .select({ row: t, key })
+        .from(t)
+        .innerJoin(task, eq(task.id, t.taskId))
+        .where(and(s.mine(t.organizationId), where))
+        .orderBy(asc(t.savedAt));
+      const rows = await (limit === undefined ? q : q.limit(limit));
+      return rows.map(({ row, key: id }) => ({
+        id,
+        value: defined({
+          engine: row.engine,
+          conversation: row.conversation,
+          data: row.data,
+          state: row.state,
+          savedAt: ms(row.savedAt),
+        }),
+      }));
+    },
+    put: async (id, value) => {
+      const row = {
+        engine: value.engine,
+        data: value.data,
+        state: value.state ?? null,
+        savedAt: date(value.savedAt),
+      };
+      await s.db
+        .insert(t)
+        .values({
+          organizationId: s.organizationId,
+          taskId: sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${parts(id)[0]})`,
+          conversation: value.conversation,
+          ...row,
+        })
+        .onConflictDoUpdate({ target: [t.taskId, t.conversation], set: row });
+    },
+    delete: async id => {
+      const [publicId, conversation] = parts(id);
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${publicId})`;
+      await s.db.delete(t).where(and(eq(t.taskId, taskId), eq(t.conversation, conversation!)));
+    },
+  };
+}
+
 export function logs(s: DrizzleStore): Kind<Omit<TaskLogLine, 'seq'>> {
   const t = taskLog;
   const key = sql`${task.publicId} || ':' || lpad(${t.seq}::text, 6, '0')`;
@@ -145,7 +226,7 @@ export function logs(s: DrizzleStore): Kind<Omit<TaskLogLine, 'seq'>> {
         .insert(t)
         .values({
           organizationId: s.organizationId,
-          taskId: await taskRowId(s, id.slice(0, split)),
+          taskId: sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id.slice(0, split)})`,
           seq: Number(id.slice(split + 1)),
           ...row,
         })
@@ -153,11 +234,8 @@ export function logs(s: DrizzleStore): Kind<Omit<TaskLogLine, 'seq'>> {
     },
     delete: async id => {
       const split = id.lastIndexOf(':');
-      const taskId = await taskRowId(s, id.slice(0, split)).catch(() => undefined);
-      if (taskId !== undefined)
-        await s.db
-          .delete(t)
-          .where(and(eq(t.taskId, taskId), eq(t.seq, Number(id.slice(split + 1)))));
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id.slice(0, split)})`;
+      await s.db.delete(t).where(and(eq(t.taskId, taskId), eq(t.seq, Number(id.slice(split + 1)))));
     },
   };
 }
@@ -202,7 +280,7 @@ export function inboxes(s: DrizzleStore): Kind<{
       const split = id.lastIndexOf(':');
       await s.db.insert(t).values({
         organizationId: s.organizationId,
-        taskId: await taskRowId(s, id.slice(0, split)),
+        taskId: sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id.slice(0, split)})`,
         seq: value.seq,
         generation: value.generation,
         kind: value.kind,
@@ -212,11 +290,8 @@ export function inboxes(s: DrizzleStore): Kind<{
     },
     delete: async id => {
       const split = id.lastIndexOf(':');
-      const taskId = await taskRowId(s, id.slice(0, split)).catch(() => undefined);
-      if (taskId !== undefined)
-        await s.db
-          .delete(t)
-          .where(and(eq(t.taskId, taskId), eq(t.seq, Number(id.slice(split + 1)))));
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id.slice(0, split)})`;
+      await s.db.delete(t).where(and(eq(t.taskId, taskId), eq(t.seq, Number(id.slice(split + 1)))));
     },
   };
 }
@@ -251,10 +326,10 @@ export function usages(s: DrizzleStore): Kind<UsageRecord> {
       }));
     },
     put: async (id, value) => {
-      const taskId = await taskRowId(s, id);
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id})`;
       const row = {
         installationId: value.installationId
-          ? await installationRowId(s, value.installationId)
+          ? sql`(select id from ${install} where organization_id = ${s.organizationId} and key = ${value.installationId})`
           : null,
         agent: value.agent,
         target: value.target,
@@ -272,8 +347,8 @@ export function usages(s: DrizzleStore): Kind<UsageRecord> {
         .onConflictDoUpdate({ target: t.taskId, set: row });
     },
     delete: async id => {
-      const taskId = await taskRowId(s, id).catch(() => undefined);
-      if (taskId !== undefined) await s.db.delete(t).where(eq(t.taskId, taskId));
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id})`;
+      await s.db.delete(t).where(eq(t.taskId, taskId));
     },
   };
 }

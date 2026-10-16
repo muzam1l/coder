@@ -4,15 +4,17 @@ import './task-view.css';
 
 import { Fragment } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
+import { useFollowEnd } from '@/utils/follow';
 
 import { serverEvents } from '@coder/client';
 import { LogView, type TaskDisplayRow } from '@coder/core/task/log-view';
+import { EMPTY_MESSAGE, EMPTY_MESSAGE_NOTICE, SKIPPED } from '@coder/core/defaults';
 import { client } from '@/utils/client';
 import { formatDate, formatDuration, reasonText } from '@/utils/format';
 import { Link } from '@wular/pnext/link';
 import { useSearchParams } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
-import type { TaskLog, TaskRow } from '@coder/client/types';
+import type { TaskLog, TaskRow, TaskTurn } from '@coder/client/types';
 import { iAgent, iClock, iDown, iFolder, iPlug, iRight, iTerminal } from '@/comps/ui/icons';
 import { Badge } from '@/comps/ui/badge';
 import { Button } from '@/comps/ui/button';
@@ -22,16 +24,23 @@ import { Icon } from '@/comps/ui/icon';
 import { Menu } from '@/comps/ui/menu';
 import { MenuRadio } from '@/comps/ui/menu-items';
 import { Back, PageHead } from '@/comps/frame/page-head';
-import { backFrom } from '@/comps/frame/heads';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
 import { Status } from '@/app/dash/[org]/tasks/list/status';
-import { folderName, sourceLabel, taskActive, taskTitle } from '@/app/dash/[org]/tasks/list/task';
+import {
+  eventMessages,
+  folderName,
+  replyRequired,
+  sourceLabel,
+  taskActive,
+  taskTitle,
+  TASK_TABS,
+  type EventMessage,
+} from '@/app/dash/[org]/tasks/list/task';
 import { useAction } from '@/utils/action';
+import { useZone } from '@/app/zone';
 import { Approval, TaskActions } from './task-actions';
 import { Activity, RunPreview, runSummary } from './activity';
 import { toastError, useTaskEvents, watchTask } from '@/comps/frame/task-toasts';
-
-const TABS = ['Conversation', 'Activity'];
 
 type Tab = 'conversation' | 'activity';
 
@@ -42,6 +51,42 @@ function messageOf(value: unknown, fallback: string): string {
   for (const key of ['output', 'answer', 'message'])
     if (typeof record[key] === 'string') return record[key];
   return fallback;
+}
+
+/** Who made a turn and what they said: a platform turn's messages, else its prompt. */
+function turnMessages(task: TaskRow, prompt: string, first: boolean): EventMessage[] {
+  const { event } = task.task;
+
+  return (
+    eventMessages(prompt) ??
+    (first && event?.actor && prompt === event.text
+      ? [{ author: event.actor.login ?? event.actor.id, text: prompt }]
+      : [{ author: 'Prompt', text: prompt }])
+  );
+}
+
+/** Whether a log line came before the end of a turn: a hosted turn's log sequence, else its finish time. */
+const within = (turn: TaskTurn, line: TaskLog) =>
+  turn.logSeq !== undefined
+    ? line.seq < turn.logSeq
+    : turn.finishedAt === undefined || line.at <= turn.finishedAt;
+
+/** Each turn's posts from the reply tool, in order, from the lines loaded so far; a line past every turn goes to the last. */
+function turnReplies(turns: TaskTurn[], lines: TaskLog[]): string[][] {
+  const replies = turns.map((): string[] => []);
+  for (const line of lines) {
+    const message = line.entry?.kind === 'reply' ? line.entry.message : undefined;
+    if (!message) continue;
+    const index = turns.findIndex(turn => within(turn, line));
+    replies.at(index)!.push(message);
+  }
+
+  return replies;
+}
+
+function isEmpty(text: string) {
+  const bare = text.trim().replace(/^`+|`+$/g, '');
+  return bare.trim() === EMPTY_MESSAGE;
 }
 
 /** A result's message as pretty JSON when it is JSON, else as markdown. */
@@ -84,8 +129,10 @@ function Findings({ findings }: { findings: Finding[] }) {
   );
 }
 
-function ResultBody({ value }: { value: unknown }) {
+/** A result as the platform got it: an empty answer is the notice when a reply was due, else the skip. */
+function ResultBody({ value, required }: { value: unknown; required: boolean }) {
   const text = messageOf(value, 'Result received.');
+  if (isEmpty(text)) return <p class="body muted">{required ? EMPTY_MESSAGE_NOTICE : SKIPPED}</p>;
   let json: unknown;
   if (/^\s*[[{]/.test(text))
     try {
@@ -97,20 +144,11 @@ function ResultBody({ value }: { value: unknown }) {
   return <div class="body md">{markdown(text)}</div>;
 }
 
-/** Back to where the task was opened from: a `back` path, a `from` list, or Tasks. */
+/** Back to where the task was opened from, a `back` path, or Tasks. */
 function TaskBack() {
   const search = useSearchParams();
   const org = useOrg();
-  return (
-    <Back
-      {...backFrom(search.get('from'), {
-        href: '/dash/[org]/tasks',
-        params: { org },
-        label: 'Tasks',
-      })}
-      back={search.get('back')}
-    />
-  );
+  return <Back href="/dash/[org]/tasks" params={{ org }} label="Tasks" back={search.get('back')} />;
 }
 
 /** The task's one-row head: back, title, status, source and agent, its actions, and a muted line with created time, source, folder, and the agent with its model. */
@@ -121,10 +159,12 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
   const source = task.task.event?.integration ?? task.task.source;
   const kind = task.task.event?.type ?? (task.task.flow !== 'default' ? task.task.flow : undefined);
 
+  const title = useMemo(() => taskTitle(task).split('\n')[0], [task.task, task.turns]);
+
   return (
     <PageHead
       back={<TaskBack />}
-      title={taskTitle(task).split('\n')[0]}
+      title={title}
       meta={
         <>
           <Status status={task.status} />
@@ -155,7 +195,7 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
               class="agent-link"
               href="/dash/[org]/agents/[slug]"
               params={{ org, slug: task.task.agent }}
-              search={{ from: `/dash/${org}/tasks/${task.task.id}` }}
+              search={{ back: `/dash/${org}/tasks/${task.task.id}` }}
             >
               <Icon d={iAgent} />
               {task.task.agent}
@@ -189,10 +229,12 @@ function useDisplayRows(lines: TaskLog[]) {
 }
 
 /** A task as a conversation with its activity; the box at the bottom steers, asks, or continues. */
-export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
+export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: string }) {
+  const tz = useZone(serverZone);
   const [task, setTask] = useState(initial);
   const [lines, setLines] = useState(initial.logs ?? []);
-  const [complete, setComplete] = useState((initial.logs?.length ?? 0) < LOG_CHUNK);
+  // A full first page leaves older lines for the stream to replay; turns wait for them.
+  const [caughtUp, setCaughtUp] = useState((initial.logs?.length ?? 0) < LOG_PAGE);
   const [tab, setTab] = useState<Tab>('conversation');
   const [at, setAt] = useState<number | 'end'>();
   const [sent, setSent] = useState<Array<{ kind: string; text: string; turn: number }>>([]);
@@ -214,6 +256,8 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
     observer.observe(form);
     return () => observer.disconnect();
   }, [task.task.flow]);
+  // A sent message takes the page to its end, which then follows the conversation while you stay there.
+  const { follow } = useFollowEnd();
   const sender = useAction({ toast: 'Not sent' });
   const asker = useAction({ toast: 'Not sent' });
   const sending = Boolean(sender.pending);
@@ -248,7 +292,14 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
   }, []);
 
   // Logs stream from when the task runs until the stream ends them, which waits for logs still arriving.
-  const [streaming, setStreaming] = useState(live);
+  const [streaming, setStreaming] = useState(live || !caughtUp);
+  // Each catch-up opens a fresh stream, which says again when it has caught up.
+  const [follows, setFollows] = useState(0);
+  const resume = () => {
+    setCaughtUp(false);
+    setStreaming(true);
+    setFollows(n => n + 1);
+  };
 
   // Each turn's reads apply to it alone: a continue, here or from elsewhere, starts the next.
   const [round, setRound] = useState(0);
@@ -267,10 +318,10 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       .catch(reason => toastError('Task not refreshed', reasonText(reason)));
   };
 
-  // A running stream follows its own cursor; a stopped page fetches the lines it missed.
+  // A running stream follows its own cursor; a stopped page streams the lines it missed.
   const catchUp = () => {
     reload();
-    if (!streaming) setComplete(false);
+    if (!streaming) resume();
   };
 
   // A new turn's prompt, from this page or elsewhere; its state comes from the events stream.
@@ -298,7 +349,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       // A turn continued and finished elsewhere while this page heard nothing of it.
       if (!live && !taskActive(event) && event.finishedAt !== task.finishedAt) {
         reload();
-        setComplete(false);
+        resume();
       }
       setTask(current => ({
         ...current,
@@ -320,21 +371,9 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
     catchUp,
   );
 
-  // Older lines a chunk at a time, then the stream follows the run.
-  useEffect(() => {
-    if (complete) return;
-    void client.tasks
-      .logs(task.task.id, after.current, LOG_CHUNK)
-      .then(more => {
-        append(more);
-        if (more.length < LOG_CHUNK) setComplete(true);
-      })
-      .catch(reason => toastError('Activity not loaded', reasonText(reason)));
-  }, [complete, lines.length]);
-
   // A hidden tab holds no log stream and resumes from its cursor.
   useEffect(() => {
-    if (!complete || !streaming || !visible) return;
+    if (!streaming || !visible) return;
     const abort = new AbortController();
     const follow = async () => {
       while (!abort.signal.aborted) {
@@ -347,17 +386,22 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
           for await (const event of serverEvents(response.body)) {
             if (abort.signal.aborted) return;
             if (event.event === 'log') append([JSON.parse(event.data)]);
-            else if (event.event === 'end') return setStreaming(false);
+            else if (event.event === 'caught-up') setCaughtUp(true);
+            else if (event.event === 'end') {
+              setCaughtUp(true);
+              return setStreaming(false);
+            }
           }
-        } catch {
+        } catch (reason) {
           if (abort.signal.aborted) return;
+          console.error('coder dashboard: task stream', reason);
         }
         await new Promise(done => setTimeout(done, 1000));
       }
     };
     void follow();
     return () => abort.abort();
-  }, [complete, streaming, visible, round]);
+  }, [streaming, visible, round, follows]);
 
   const turns = task.turns ?? [
     {
@@ -367,11 +411,26 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       finishedAt: task.finishedAt,
     },
   ];
+  const parsed = useMemo(
+    () =>
+      turns.map((turn, index) => ({
+        messages: turnMessages(task, turn.prompt, index === 0),
+        required: replyRequired(task, turn.prompt),
+      })),
+    [turns, task.task],
+  );
+  const replied = useMemo(() => turnReplies(turns, lines), [turns, lines]);
+  // Turns show once their log lines are in, so a reply never pushes what is already shown.
+  const loaded = turns.findIndex(
+    turn => !caughtUp && (!lines.length || within(turn, lines.at(-1)!)),
+  );
+  const shown = loaded < 0 ? turns : turns.slice(0, loaded);
 
   const send = async () => {
     const text = input.current?.value.trim();
     if (!text || sending) return;
     const kind = live ? (ask ? 'ask' : 'steer') : 'continue';
+    follow();
     if (kind === 'ask') {
       // A question never blocks the box: it shows at once and its answer lands under it.
       input.current!.value = '';
@@ -450,7 +509,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
         </p>
       ))}
       <nav class="tabs" role="tablist" aria-label="Task">
-        {TABS.map(label => {
+        {TASK_TABS.map(label => {
           const key = label.toLowerCase() as Tab;
           return (
             <button
@@ -466,18 +525,27 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
           );
         })}
       </nav>
+      {task.approval ? <Approval task={task} /> : null}
       {tab === 'activity' ? (
         <Activity rows={rows} live={live} tz={tz} at={at} />
       ) : (
         <div class="convo">
-          {turns.map((turn, index) => {
+          {shown.map((turn, index) => {
             const last = index === turns.length - 1;
+            const posts = replied[index]!;
+            // A turn that posted with the reply tool and ended empty posted nothing more.
+            const body =
+              posts.length > 0 && isEmpty(messageOf(turn.result, '')) ? null : (
+                <ResultBody value={turn.result} required={parsed[index]!.required} />
+              );
             return (
               <Fragment key={index}>
-                <div class="turn prompt">
-                  <p class="who">Prompt</p>
-                  <Collapse class="prose">{turn.prompt}</Collapse>
-                </div>
+                {parsed[index]!.messages.map((message, index) => (
+                  <div key={`p${index}`} class="turn prompt">
+                    <p class="who">{message.author}</p>
+                    <Collapse class="prose">{message.text}</Collapse>
+                  </div>
+                ))}
                 {last
                   ? (task.answer ?? []).slice(0, knownAnswers.current).map((answer, index) => (
                       <div key={`a${index}`} class="turn answer">
@@ -486,6 +554,12 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
                       </div>
                     ))
                   : null}
+                {posts.map((text, index) => (
+                  <div key={`r${index}`} class="turn reply">
+                    <p class="who">{task.task.agent}</p>
+                    <div class="prose md">{markdown(text)}</div>
+                  </div>
+                ))}
                 {sent
                   .filter(message => message.turn === index)
                   .map((message, index) => {
@@ -516,9 +590,9 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
                       </div>
                     );
                   })}
-                {turn.result ? (
+                {turn.result && (body || (last && foot)) ? (
                   <Card title="Result">
-                    <ResultBody value={turn.result} />
+                    {body}
                     {last ? foot : null}
                   </Card>
                 ) : last && live ? (
@@ -535,6 +609,7 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
               </Fragment>
             );
           })}
+          {shown.length < turns.length ? <Loading label="Loading the conversation." /> : null}
         </div>
       )}
       {replies ? (
@@ -602,10 +677,9 @@ export function TaskView({ initial, tz }: { initial: TaskRow; tz: string }) {
       ) : (
         <p class="muted no-reply">This flow takes no follow-ups.</p>
       )}
-      <div class="approval-dock">{task.approval ? <Approval task={task} /> : null}</div>
     </>
   );
 }
 
-/** Lines per request when a task's log loads or follows. */
-export const LOG_CHUNK = 500;
+/** Lines the task read carries; a full page means more wait in the log. */
+const LOG_PAGE = 500;

@@ -1,7 +1,6 @@
 /** `coder runner remove <id>`. */
 import process from 'node:process';
 
-import { CoderError } from '../../core/dispatch';
 import { outStyle } from '../../tui/output';
 import { flag, serverOnly } from '../../utils/args';
 import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
@@ -17,10 +16,10 @@ export const commandRunnerRemove = command({
   },
   options: runnerOptions,
   args: 1,
+  required: ['<id>'],
   async run({ options, args: [id] }) {
     const { removeRunner } = await import('../../runner');
 
-    if (!id) throw new CoderError('invalid-option', 'Missing runner id.');
     return removeRunner(id, options);
   },
   print: (_, { args: [id] }) => process.stdout.write(`Removed ${outStyle.bold(id!)}.\n`),

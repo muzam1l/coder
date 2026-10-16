@@ -40,9 +40,7 @@ coder config set engines.codex.model sol
     "review": false,
     "helper": {
       "permissions": "read-only",
-      "integrations": {
-        "github": { "allowedTools": "comment" }
-      }
+      "access": "read"
     }
   },
   "mcp": {
@@ -54,6 +52,10 @@ coder config set engines.codex.model sol
 ## `chain`
 
 Fallback order. When an engine can't start (missing binary, auth, quota), the task automatically retries on the next entry. Default `["codex", "claude"]`.
+
+## `conversationCompactTokens`
+
+Context size in tokens at which a platform conversation's task, such as a Slack thread or a pull request, continues from a summary plus its recent messages. Default `70000`.
 
 ## `engines`
 

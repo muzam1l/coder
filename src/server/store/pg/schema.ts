@@ -24,7 +24,7 @@ import type {
   TaskContext,
   TaskSource,
 } from '../../../agent/types';
-import type { AgentRecord, EngineCredential, TaskLogLine, TaskOutcome, TaskState } from '../types';
+import type { AgentRecord, TaskHistory, TaskLogLine, TaskOutcome, TaskState } from '../types';
 
 /** Everything Coder owns lives in its own Postgres schema, so a database can be shared. */
 export const coder = pgSchema('coder');
@@ -72,6 +72,7 @@ export const agent = pgTable(
     slug: text().notNull(),
     name: text().notNull(),
     description: text(),
+    problems: jsonb().$type<string[]>(),
     source: text().$type<AgentRecord['source']>().notNull(),
     repo: text(),
     path: text(),
@@ -89,7 +90,7 @@ export const agentVersion = pgTable(
     id: bigserial({ mode: 'number' }).primaryKey(),
     agentId: bigint({ mode: 'number' })
       .notNull()
-      .references(() => agent.id),
+      .references(() => agent.id, { onDelete: 'cascade' }),
     version: integer().notNull(),
     definition: jsonb().$type<AgentDefinition>().notNull(),
     systemPrompt: text().notNull(),
@@ -162,11 +163,12 @@ export const integrationAppInstallation = pgTable(
     settings: jsonb().$type<InstallationSettings>(),
     ...timestamps,
     deletedAt: at(),
+    uninstalled: boolean(),
   },
   t => [unique().on(t.key), index().on(t.organizationId, t.appId)],
 );
 
-/** One named engine credential: a member's own when `owner` is set, else the workspace's. */
+/** One engine credential, labelled by its variable or subscription engine: a member's own when `owner` is set, else the workspace's. */
 export const engineCredential = pgTable(
   'engine_credential',
   {
@@ -177,9 +179,7 @@ export const engineCredential = pgTable(
       .unique(),
     /** Wular user id of a personal credential; null for a workspace one. */
     owner: text(),
-    engine: text().$type<EngineCredential['engine']>().notNull(),
     label: text().notNull(),
-    isDefault: boolean().notNull().default(false),
     /** What the engine's CLI reported at sign-in. */
     account: jsonb().$type<{ email?: string; plan?: string }>(),
     ...timestamps,
@@ -224,6 +224,7 @@ export const task = pgTable(
     status: text().$type<TaskState>().notNull(),
     agent: text().notNull(),
     flow: text().notNull(),
+    reviewKey: text(),
     runner: text().notNull(),
     permissions: text().$type<AgentDefinition['permissions']>(),
     appId: bigint({ mode: 'number' }).references(() => integrationApp.id, { onDelete: 'set null' }),
@@ -273,6 +274,9 @@ export const task = pgTable(
       .on(t.organizationId)
       .where(sql`${t.status} = 'queued'`),
     index().on(t.status, t.createdAt),
+    index()
+      .on(t.organizationId, t.reviewKey)
+      .where(sql`${t.status} in ('running', 'waiting')`),
   ],
 );
 
@@ -310,6 +314,23 @@ export const taskLog = pgTable(
     line: text().notNull(),
   },
   t => [uniqueIndex('task_log_taskId_seq_unique').on(t.taskId, t.seq)],
+);
+
+/** A task's engine conversations, one row each, gzipped and encrypted. */
+export const taskHistory = pgTable(
+  'task_history',
+  {
+    ...owned,
+    taskId: bigint({ mode: 'number' })
+      .notNull()
+      .references(() => task.id, { onDelete: 'cascade' }),
+    engine: text().$type<TaskHistory['engine']>().notNull(),
+    conversation: text().notNull(),
+    data: text().notNull(),
+    state: text(),
+    savedAt: at().notNull(),
+  },
+  t => [uniqueIndex('task_history_taskId_conversation_unique').on(t.taskId, t.conversation)],
 );
 
 /** A deleted task's id for a while, so every server's events streams drop it from their lists. */
@@ -393,6 +414,7 @@ export const tables = {
   task,
   taskInbox,
   taskLog,
+  taskHistory,
   taskTombstone,
   usage,
   chatState,

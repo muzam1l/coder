@@ -1,6 +1,4 @@
 /** `coder task worker <task-id>`: runs a task's turns, detached. */
-import process from 'node:process';
-
 import { loadTask } from '../../core/state';
 import { fail } from '../../tui/output';
 import { str } from '../../utils/args';
@@ -16,6 +14,6 @@ export const commandWorker = command({
 
     const task = loadTask(cwd, id!);
     if (!task) fail(`Worker: task ${id} not found.`);
-    await runWorker(cwd, task, startAgentMailbox).catch(() => process.exit(1));
+    await runWorker(cwd, task, startAgentMailbox);
   },
 });

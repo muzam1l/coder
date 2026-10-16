@@ -31,7 +31,7 @@ export function Tail({
           </Button>
         </>
       ) : busy ? (
-        <Loading label={`Loading more ${noun}`} inline />
+        <Loading label={`Loading more ${noun}`} inline late />
       ) : null}
     </div>
   );

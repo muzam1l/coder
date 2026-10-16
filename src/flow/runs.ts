@@ -11,7 +11,6 @@ import { resolveFlow } from './discover';
 import { readJournal } from './journal';
 import type { FlowHooks } from './runtime';
 import {
-  STOP_KEEP_TASKS_MARKER,
   markRunFailed,
   prepareRun,
   resumeFlow,
@@ -21,6 +20,7 @@ import {
   type RunOptions,
   type RunSummary,
   orchestratorAlive,
+  drivePreparedRun,
 } from './executor';
 import type { FlowEvent, FlowRecord, FlowStep, JournalEntry } from './types';
 import { mailboxDir } from '../core/mailbox';
@@ -28,21 +28,20 @@ import {
   AUTO_ARCHIVE_MS,
   assertValidId,
   isValidId,
-  listTasks,
+  loadTask,
+  reconcileTask,
+  processStartMs,
+  processStarts,
   resolveFlowsDir,
   resolveFlowsArchiveDir,
   ageMs,
 } from '../core/state';
 import { moveDirectory } from '../utils/fsx';
-import { spawnArchiveSweep } from '../core/task/actions';
-
-// Marks the detached orchestrator child with the run id to attach to; unlike WORKER_ENV it may still dispatch tasks.
-const FLOW_ATTACH_ENV = 'CODER_FLOW_ATTACH';
 
 export interface StartOptions extends RunOptions {
-  /** The `coder flow` argv this run came from (CLI only): a real run re-runs it as a detached orchestrator, and a .ts flow re-runs under bun when this runtime cannot load it. */
-  argv?: string[];
-  /** With argv, follow the detached run until it ends. */
+  /** Run in a detached orchestrator (CLI). */
+  detached?: boolean;
+  /** Follow the detached run until it ends. */
   wait?: boolean;
 }
 
@@ -96,82 +95,60 @@ function ensureTsRuntime(scriptPath: string, argv: string[]): void {
   process.exit(result.status ?? 1);
 }
 
-// SIGINT in the detached child (sent by `flow stop`): stop dispatching, stop its running tasks unless
-// `flow stop --keep-tasks` left its marker, stamp the run stopped and exit 130. Stderr here is flow.log.
 function installStop(h: {
   runId: string;
   requestStop: () => void;
   runningIds: () => string[];
 }): void {
-  process.once('SIGINT', () => {
+  let stopping = false;
+  const stop = (keep: boolean) => {
+    if (stopping) return;
+    stopping = true;
     void (async () => {
       const { runId } = h;
-      const keep = fs.existsSync(path.join(runDirFor(runId), STOP_KEEP_TASKS_MARKER));
       process.stderr.write(`\n[flow] Stopping run ${runId}. No new tasks will dispatch.\n`);
-      if (keep) {
-        const ids = h.runningIds();
-        if (ids.length) process.stderr.write(`[flow] left running: ${ids.join(', ')}\n`);
-      } else {
-        const stopped = await stopFlowTasks(runId, h.runningIds());
-        if (stopped.length) process.stderr.write(`[flow] stopped tasks: ${stopped.join(', ')}\n`);
-      }
+      const ids = keep ? h.runningIds() : await stopFlowTasks(runId, h.runningIds());
+      if (ids.length)
+        process.stderr.write(
+          `[flow] ${keep ? 'left running' : 'stopped tasks'}: ${ids.join(', ')}\n`,
+        );
       process.stderr.write(`\n${formatHints([`Resume: coder flow resume ${runId}`], errStyle)}\n`);
       h.requestStop();
       process.exit(130);
     })();
-  });
+  };
+  process.once('SIGINT', () => stop(false));
+  process.once('SIGTERM', () => stop(true));
 }
 
-// The detached child's hooks: append every event to events.jsonl (what followers tail) and arm the stop handler.
-function fileHooks(runId: string): FlowHooks {
-  const file = path.join(runDirFor(runId), 'events.jsonl');
-  const append = (e: FlowEvent) => {
-    try {
-      fs.appendFileSync(file, `${JSON.stringify(e)}\n`, 'utf8');
-    } catch {
-      // Best-effort stream.
-    }
-  };
-  return {
-    onStart: h => installStop(h),
-    onTaskStart: info => append({ kind: 'task-start', ...info }),
-    onTaskEnd: info => append({ kind: 'task-end', ...info }),
-    onGateStart: info => append({ kind: 'gate-start', ...info }),
-    onGate: info => append({ kind: 'gate', ...info }),
-    onLog: (message, depth) => append({ kind: 'log', message, depth }),
-    onFlowStart: info => append({ kind: 'flow-start', ...info }),
-    onReplay: count => append({ kind: 'replay', count }),
-  };
-}
-
-// In the detached child (FLOW_ATTACH_ENV set), drive the run the parent prepared and exit; otherwise return.
-async function attachRun(opts: RunOptions): Promise<void> {
-  const runId = process.env[FLOW_ATTACH_ENV];
-  if (!runId) return;
-  delete process.env[FLOW_ATTACH_ENV];
+export async function driveRun(runId: string, cwd: string): Promise<void> {
+  const record = readRawRecord(runId);
+  if (!record) throw new Error(`No flow run "${runId}".`);
   try {
-    await resumeFlow(runId, opts, fileHooks(runId));
-    process.exit(0);
+    await drivePreparedRun(record, cwd, { onStart: installStop });
   } catch (error) {
-    // drive() records flow failures itself; this covers a crash before it got there.
     markRunFailed(runId, error instanceof Error ? error.message : String(error));
-    process.exit(1);
+    throw error;
   }
 }
 
-// Spawn the orchestrator as a detached child re-running the same command with the attach marker.
-function detachRun(record: FlowRecord, argv: string[], wait?: boolean): DetachedRun {
-  const runDir = runDirFor(record.runId);
-  // A fresh stream per attempt, so a resume does not replay the prior attempt's events.
-  fs.writeFileSync(path.join(runDir, 'events.jsonl'), '', 'utf8');
-  const logFd = fs.openSync(path.join(runDir, 'flow.log'), 'a');
-  const child = spawn(process.execPath, [CLI_PATH, ...argv], {
-    detached: true,
-    stdio: ['ignore', logFd, logFd],
-    env: { ...process.env, [FLOW_ATTACH_ENV]: record.runId },
-  });
+function detachRun(record: FlowRecord, cwd: string, wait?: boolean): DetachedRun {
+  const needsBun =
+    record.script.endsWith('.ts') && !process.versions.bun && !process.features.typescript;
+  if (needsBun && !bunAvailable()) throw new Error('TypeScript flows need bun or Node 23.6+.');
+  const logFd = fs.openSync(path.join(runDirFor(record.runId), 'flow.log'), 'a');
+  const child = spawn(
+    needsBun ? 'bun' : process.execPath,
+    [CLI_PATH, 'flow', 'drive', record.runId, '--cwd', cwd],
+    {
+      detached: true,
+      stdio: ['ignore', logFd, logFd],
+      env: process.env,
+    },
+  );
   child.unref();
   fs.closeSync(logFd);
+
   return {
     runId: record.runId,
     status: 'running',
@@ -213,19 +190,23 @@ function findRun(runId: string | undefined, none: string): FlowRecord {
   return record;
 }
 
-/** Run a flow: here (awaiting its result), or with `argv` in a detached orchestrator unless `dryRun`. */
+/** Run a flow: here (awaiting its result), or in a detached orchestrator unless `dryRun`. */
 export async function startRun(
   ref: string,
   opts: StartOptions = {},
   hooks: FlowHooks = {},
 ): Promise<RunSummary | DetachedRun> {
-  if (opts.argv) {
+  if (opts.detached) {
+    if (!opts.dryRun)
+      return detachRun(
+        prepareRun(ref, opts),
+        opts.cwd ? path.resolve(opts.cwd) : process.cwd(),
+        opts.wait,
+      );
     ensureTsRuntime(
       resolveFlow(ref, opts.cwd ? path.resolve(opts.cwd) : process.cwd()).path,
-      opts.argv,
+      process.argv.slice(2),
     );
-    await attachRun(opts);
-    if (!opts.dryRun) return detachRun(prepareRun(ref, opts), opts.argv, opts.wait);
   }
   return driven('run', opts.dryRun, () => runFlowByName(ref, opts, hooks));
 }
@@ -237,10 +218,14 @@ export async function resumeRun(
   hooks: FlowHooks = {},
 ): Promise<RunSummary | DetachedRun> {
   const record = findRun(runId, 'No flow runs to resume.');
-  if (opts.argv) {
-    ensureTsRuntime(record.script, opts.argv);
-    await attachRun(opts);
-    if (!opts.dryRun) return detachRun(prepareRun('', opts, record.runId), opts.argv, opts.wait);
+  if (opts.detached) {
+    if (!opts.dryRun)
+      return detachRun(
+        prepareRun('', opts, record.runId),
+        opts.cwd ? path.resolve(opts.cwd) : process.cwd(),
+        opts.wait,
+      );
+    ensureTsRuntime(record.script, process.argv.slice(2));
   }
   return driven('resume', opts.dryRun, () => resumeFlow(record.runId, opts, hooks));
 }
@@ -309,7 +294,7 @@ function requireStoppedRun(runId: string): FlowRecord {
     throw new CoderError('flow-failed', `No flow run "${runId}".`, {
       hint: 'Recent runs: coder flow list',
     });
-  if (record.status === 'running' || record.status === 'queued') {
+  if (record.status === 'running') {
     throw new CoderError('flow-failed', `Run ${record.runId} is still running.`, {
       runId: record.runId,
       hint: `Stop it first: coder flow stop ${record.runId}`,
@@ -333,7 +318,7 @@ export function archiveRuns(
   opts: { allStopped?: boolean } = {},
 ): Archived | ArchivedAll {
   if (opts.allStopped) {
-    const targets = listRuns().filter(r => r.status !== 'running' && r.status !== 'queued');
+    const targets = listRuns().filter(r => r.status !== 'running');
     for (const record of targets) archiveRun(record);
     const ids = targets.map(record => record.runId);
     return { archived: ids, count: ids.length };
@@ -394,46 +379,29 @@ function flowsStateDir(): string {
   return resolveFlowsDir(mailbox);
 }
 
-function flowsArchiveDir(): string {
-  return resolveFlowsArchiveDir();
-}
-
 // Resolves to whichever bin holds the run (live wins); a fresh run id falls
 // through to the live bin.
 export function runDirFor(runId: string): string {
   assertValidId(runId, 'flow run id');
   const live = path.join(flowsStateDir(), runId);
   if (fs.existsSync(path.join(live, 'flow.json'))) return live;
-  const archived = path.join(flowsArchiveDir(), runId);
+  const archived = path.join(resolveFlowsArchiveDir(), runId);
   if (fs.existsSync(path.join(archived, 'flow.json'))) return archived;
   return live;
 }
 
-// Flag a run archived without moving its dir; listRuns/listArchivedRuns
-// tolerate the flag-without-move interim and finish the move.
-export function markRunArchived(record: FlowRecord): FlowRecord {
-  if (record.archived) return record;
-  const next: FlowRecord = { ...record, archived: true, archivedAt: new Date().toISOString() };
-  writeFlowRecord(runDirFor(record.runId), next);
-  return next;
-}
-
-// Archive a run fully: flag the record and move its dir into the archive bin.
-// The run's tasks are ordinary tasks and are left alone.
 export function archiveRun(record: FlowRecord): FlowRecord {
   const from = runDirFor(record.runId);
-  const to = path.join(flowsArchiveDir(), record.runId);
+  const to = path.join(resolveFlowsArchiveDir(), record.runId);
   if (from !== to) moveDirectory(from, to);
+  const next: FlowRecord = {
+    ...record,
+    archived: true,
+    archivedAt: record.archivedAt ?? new Date().toISOString(),
+  };
+  writeFlowRecord(to, next);
 
-  return markRunArchived(record);
-}
-
-/** The detached half of a run archive sweep. */
-export function archiveFlaggedRuns(ids: string[]): void {
-  for (const id of ids) {
-    const record = readFlowRecord(id);
-    if (record) archiveRun(record);
-  }
+  return next;
 }
 
 // Resuming an archived run makes it running again: move it back to the live
@@ -471,9 +439,9 @@ export function readRawRecord(runId: string): FlowRecord | null {
 // Self-heal a zombie run on read. This mirrors reconcileTask for tasks. Pidless
 // records are left alone: no pid means the run is still booting
 // (streamFlowCore's boot-pid bridge covers that window).
-export function reconcileRun(record: FlowRecord): FlowRecord {
+export function reconcileRun(record: FlowRecord, startMs = processStartMs): FlowRecord {
   if (record.status !== 'running' || !record.pid) return record;
-  if (orchestratorAlive(record)) return record;
+  if (orchestratorAlive(record, startMs)) return record;
   markRunFailed(record.runId, 'orchestrator died');
   return readRawRecord(record.runId) ?? record;
 }
@@ -495,11 +463,13 @@ function scanRuns(dir: string): FlowRecord[] {
     return [];
   }
   const runs: FlowRecord[] = [];
+  const startMs = processStarts();
   for (const id of ids) {
     try {
       runs.push(
         reconcileRun(
           JSON.parse(fs.readFileSync(path.join(dir, id, 'flow.json'), 'utf8')) as FlowRecord,
+          startMs,
         ),
       );
     } catch {
@@ -512,30 +482,13 @@ function scanRuns(dir: string): FlowRecord[] {
 const byStart = (a: FlowRecord, b: FlowRecord) =>
   String(b.startedAt).localeCompare(String(a.startedAt));
 
-/** Live runs newest-first (by startedAt); runs flagged archived in place migrate out. */
+/** Live runs newest-first. */
 export function listRuns(): FlowRecord[] {
-  const runs: FlowRecord[] = [];
-  for (const r of scanRuns(flowsStateDir())) {
-    if (r.archived) archiveRun(r);
-    else runs.push(r);
-  }
-  return runs.sort(byStart);
+  return scanRuns(flowsStateDir()).sort(byStart);
 }
 
-/**
- * Archived runs. Scans the live bin too so flagged-in-place runs show up (and
- * migrate); migrate: false skips the dir moves for cheap counts on hot paths.
- */
-export function listArchivedRuns(opts?: { migrate?: boolean }): FlowRecord[] {
-  const migrate = opts?.migrate ?? true;
-  const archived = scanRuns(flowsArchiveDir());
-  const seen = new Set(archived.map(r => r.runId));
-  for (const r of scanRuns(flowsStateDir())) {
-    if (r.archived && !seen.has(r.runId)) {
-      archived.push(migrate ? archiveRun(r) : r);
-    }
-  }
-  return archived.sort(byStart);
+export function listArchivedRuns(): FlowRecord[] {
+  return scanRuns(resolveFlowsArchiveDir()).sort(byStart);
 }
 
 export function latestRun(): FlowRecord | null {
@@ -544,17 +497,30 @@ export function latestRun(): FlowRecord | null {
   return [...listRuns(), ...listArchivedRuns()].sort(byStart)[0] ?? null;
 }
 
-/**
- * A run's journal-derived step rows (SDK `flow.result` / `coder flow result`),
- * each task step with its current task status. `tail` keeps only the last n
- * ('all', the default, keeps every step; 0 none).
- */
+export function flowTaskIds(runId: string): string[] {
+  const journal = readJournal(path.join(runDirFor(runId), 'journal.jsonl'));
+
+  return [
+    ...new Set([
+      ...journal.flatMap(entry => (entry.kind === 'task' && entry.taskId ? [entry.taskId] : [])),
+      ...readEvents(runId).flatMap(event => (event.kind === 'task-start' ? [event.taskId] : [])),
+    ]),
+  ];
+}
+
+/** A run's task steps, from its journal and dispatch events. */
 export function flowSteps(runId: string, tail: number | 'all' = 'all'): FlowStep[] {
   if (tail === 0) return [];
   const entries = readJournal(path.join(runDirFor(runId), 'journal.jsonl')).filter(
     e => e.kind === 'task',
   );
-  const tasks = listTasks(process.cwd());
+  const cwd = process.cwd();
+  const startMs = processStarts();
+  const tasks = flowTaskIds(runId).flatMap(id => {
+    const task = loadTask(cwd, id);
+
+    return task ? [reconcileTask(cwd, task, startMs)] : [];
+  });
   const byId = new Map(tasks.map(j => [j.id, j]));
   // Display name: the task's name, else the prompt's opening line as-is (the
   // same fallback the task lists use).
@@ -593,18 +559,12 @@ export function collectFlowRuns(opts: { archived?: boolean; limit?: number | 'al
   if (opts.archived) {
     runs = listArchivedRuns();
   } else {
-    // Auto-archive sweep: any terminal run older than AUTO_ARCHIVE_MS drops
-    // out of the default view. Flag it archived inline (cheap, keeps the
-    // record correct) but defer the slow dir move to a detached sweep.
-    const toArchive: string[] = [];
     runs = listRuns().filter(r => {
-      if (r.status === 'running' || r.status === 'queued') return true;
+      if (r.status === 'running') return true;
       if (ageMs(r.endedAt ?? r.startedAt) <= AUTO_ARCHIVE_MS) return true;
-      markRunArchived(r);
-      toArchive.push(r.runId);
+      archiveRun(r);
       return false;
     });
-    spawnArchiveSweep(process.cwd(), toArchive, { flows: true });
   }
   const clipped = limit !== undefined ? Math.max(0, runs.length - limit) : 0;
   return { runs: limit !== undefined ? runs.slice(0, limit) : runs, clipped };

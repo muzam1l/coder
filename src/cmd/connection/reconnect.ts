@@ -2,9 +2,9 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions } from '../../utils/args';
+import { baseOptions, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-import { askKey, openSignIn, serverOptions } from './add';
+import { askKey, openSignIn } from './add';
 
 export const commandConnectionReconnect = command({
   name: 'connection reconnect',

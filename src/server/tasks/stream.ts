@@ -5,13 +5,12 @@ import { type Params } from '../routes/match';
 import { loadTask, resolveTaskDir } from '../../core/state';
 import { type RunnerRecord, type TaskLogLine, type TaskStatus } from '../store/types';
 import { type ServerContext } from '../context';
-import { start } from './flows';
 import { json, pageLimit } from '../routes/http';
 import { localLog, localTask, localTasks, sweepLocalQueue } from './local';
 import { readLog } from './logs';
 import { inspectTask } from './kick';
 import { DONE, localRows } from './admin';
-import { StoreQueue, TOMBSTONE_MS } from './queue';
+import { StoreQueue, TOMBSTONE_MS, taskTimes } from './queue';
 import { runnerItems } from '../settings/runners';
 
 export async function taskStream(
@@ -180,6 +179,7 @@ function eventState(status: TaskStatus, asked: boolean) {
     createdAt,
     startedAt,
     finishedAt,
+    ...taskTimes(status),
     ...(asked
       ? {
           result: status.result ?? null,
@@ -602,6 +602,8 @@ type LogRead = (cursor: number) => Promise<
 type LogWatch = {
   /** The last line this stream has. */
   cursor: number;
+  /** A read has reached the log's end for this stream, which says so once with `caught-up`. */
+  caught?: boolean;
   feed: LogFeed;
   timers: Array<ReturnType<typeof setTimeout>>;
   send: (text: string) => void;
@@ -723,7 +725,10 @@ export class LogWatcher {
     feed.reading = Date.now();
     this.reads++;
     // The guard holds until the read settles, so a feed never has two reads out.
-    const found = await feed.read(from).catch(() => null);
+    const found = await feed.read(from).catch(error => {
+      console.error('coder server: task log read failed', error);
+      return null;
+    });
     feed.reading = undefined;
     if (this.feeds.get(feed.key) !== feed) return;
     const current = readers.filter(watch => feed.watches.has(watch));
@@ -741,7 +746,11 @@ export class LogWatcher {
       feed.head = Math.max(from, lines.at(-1)?.seq ?? from);
       if (full) next = 0;
       for (const watch of current) {
-        const text = events.flatMap(([seq, text]) => (seq > watch.cursor ? [text] : [])).join('');
+        let text = events.flatMap(([seq, text]) => (seq > watch.cursor ? [text] : [])).join('');
+        if (!full && !done && !watch.caught) {
+          watch.caught = true;
+          text += 'event: caught-up\ndata: {}\n\n';
+        }
         watch.cursor = Math.max(watch.cursor, lines.at(-1)?.seq ?? -1);
         if (done) this.end(watch, `${text}event: end\ndata: {}\n\n`);
         else if (text) this.send(watch, text);

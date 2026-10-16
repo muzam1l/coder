@@ -19,7 +19,7 @@ import { InfoTip, MoreList } from '@/comps/ui/menu';
 import { Settle } from '@/comps/frame/stream';
 import { loadAgent } from '@/api/load';
 import { needsTunnel } from '@/api/types';
-import { editableAgent } from '@/api/types';
+import { editableAgent, eventNames } from '@/api/types';
 import { TunnelGuide } from '@/app/dash/[org]/settings/tunnel-guide';
 import { Platform } from '@/app/dash/[org]/agents/agent/agent-pills';
 import {
@@ -43,13 +43,6 @@ const OutcomeDialog = dynamic(() =>
 
 /** Outcomes the person fixes by installing again. */
 const RETRY = new Set(['cancelled', 'install-expired', 'platform-error', 'missing-code', 'failed']);
-
-const eventNames = (events: unknown): string[] =>
-  Array.isArray(events)
-    ? events.map(String)
-    : events && typeof events === 'object'
-      ? Object.keys(events)
-      : [];
 
 const REACH_BADGE: Record<Reach, { tone?: 'ok' | 'warn'; label: string }> = {
   installed: { tone: 'ok', label: 'installed' },
@@ -81,6 +74,7 @@ function Platforms({
   issues?: string;
 }) {
   const declared = agent.definition?.integrations ?? {};
+  const readOnly = agent.definition?.access === 'read' || agent.settings?.access === 'read';
   const ids = Object.keys(declared).sort();
   if (!ids.length)
     return (
@@ -138,10 +132,12 @@ function Platforms({
               const info = catalog.find(entry => entry.id === id);
               const own = apps.filter(app => app.integration === id);
               const installs = installations.filter(entry => own.some(app => app.id === entry.app));
-              const state: Reach = !own.length ? 'none' : installs.length ? 'installed' : 'created';
+              const live = installs.filter(entry => !entry.uninstalled);
+              const state: Reach = !own.length ? 'none' : live.length ? 'installed' : 'created';
+              // Every install was removed on the platform; Reinstall puts the first back.
+              const gone = live.length ? undefined : installs[0];
               const narrowed = agent.settings?.integrations?.[id];
               const events = narrowed?.allowedEvents ?? eventNames(declared[id]?.events);
-              const tools = narrowed?.allowedTools ?? declared[id]?.tools;
               const place = (entry: InstallationRow) => (
                 <span key={entry.id} class="inst">
                   {entry.account.url ? (
@@ -153,6 +149,7 @@ function Platforms({
                   )}
                   <span class="sub">
                     {[
+                      entry.uninstalled && 'uninstalled',
                       entry.account.type?.toLowerCase(),
                       entry.covers &&
                         `${entry.covers.length} ${info?.covered ?? 'account'}${entry.covers.length === 1 ? '' : 's'}`,
@@ -173,13 +170,7 @@ function Platforms({
                   <td>
                     <Chips values={events} />
                   </td>
-                  <td class="muted">
-                    {typeof tools === 'string'
-                      ? tools
-                      : Array.isArray(tools)
-                        ? `${tools.length} tools`
-                        : 'observe'}
-                  </td>
+                  <td class="muted">{readOnly ? 'Read-only' : 'Read-write'}</td>
                   <td>
                     {own.length
                       ? own.map(app => (
@@ -246,7 +237,11 @@ function Platforms({
                       </>
                     ) : (
                       <>
-                        <Badge tone={REACH_BADGE[state].tone}>{REACH_BADGE[state].label}</Badge>
+                        {gone ? (
+                          <Badge tone="warn">uninstalled</Badge>
+                        ) : (
+                          <Badge tone={REACH_BADGE[state].tone}>{REACH_BADGE[state].label}</Badge>
+                        )}
                         <PlatformActions
                           integration={id}
                           name={info?.name ?? id}
@@ -256,7 +251,8 @@ function Platforms({
                             settingsUrl: app.settingsUrl,
                             changed: app.changed,
                           }))}
-                          installed={installs.length > 0}
+                          installed={live.length > 0}
+                          reinstall={gone?.app}
                           createUrl={createUrl(id)}
                           create={info?.create}
                           unreachable={catalog.some(entry => entry.unreachable)}

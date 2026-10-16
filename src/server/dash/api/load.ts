@@ -1,10 +1,8 @@
 import { ServerClient, ClientError } from '@coder/client';
 import { CoderError } from '@coder/core/errors';
 import type { StoredRow } from '@coder/client/types';
-
-declare global {
-  var __coder: { handle(request: Request): Promise<Response> } | undefined;
-}
+import { DEFAULT_ENGINE } from '@coder/core/defaults';
+import { NO_MODELS, modelsByEngine } from '@/app/dash/[org]/settings/model-options';
 
 export function encodeDefinition(definition: unknown): string {
   return Buffer.from(JSON.stringify(definition), 'utf8').toString('base64url');
@@ -67,4 +65,23 @@ export function loadAgent(request: Request, slug: string) {
     path === `/dash/${encodeURIComponent(orgOf(request))}/agents/${encodeURIComponent(slug)}` ||
     path.endsWith('/edit');
   return load(request).agents.get(slug, { versions: false, content, handles: true });
+}
+
+/** Each engine's models, and what an agent runs with when it sets nothing. */
+export function loadRunDefaults(request: Request) {
+  return Promise.all([
+    load(request)
+      .models.list()
+      .catch(() => NO_MODELS),
+    load(request)
+      .config.get()
+      .catch(() => undefined),
+  ]).then(([shape, shown]) => ({
+    models: modelsByEngine(shape),
+    defaults: {
+      engine: shown?.effective.chain?.[0] ?? DEFAULT_ENGINE,
+      engines: shown?.effective.engines ?? {},
+      builtin: shape.builtin,
+    },
+  }));
 }

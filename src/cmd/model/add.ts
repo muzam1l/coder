@@ -1,7 +1,7 @@
 /** `coder model add`: a custom endpoint model, run on the codex engine pointed at its URL. */
 import process from 'node:process';
 
-import { modelAddCore, type PersistedModel } from '../../core/models';
+import { models, type PersistedModel } from '../../core/models';
 import { outStyle } from '../../tui/output';
 import { baseOptions, flag, str } from '../../utils/args';
 import { command } from '../../cli';
@@ -53,7 +53,7 @@ export const commandModelAdd = command({
   },
   options: modelOptions,
   args: 1,
-  run: ({ options, args: [name], cwd }) => modelAddCore(cwd, name, writeOptions(options)),
+  run: ({ options, args: [name], cwd }) => models.add(name, { ...writeOptions(options), cwd }),
   json: modelSavedJson,
   print: result => printModelSaved(result, 'saved'),
 });

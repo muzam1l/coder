@@ -3,17 +3,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
+import { processTiming } from '../../utils/process';
+
 import {
   appendTaskLog,
   claimSteers,
+  withTaskAdmission,
+  LIVE_STEER,
   loadTask,
   resolveTaskDir,
   resolveWorkspaceRoot,
   touchActivity,
   writeTask,
   type TaskLogEntry,
+  type TurnResultEntry,
 } from '../state';
-import { writeJsonFileAtomic } from '../../utils/fsx';
+import { createJsonlTail, writeJsonFileAtomic } from '../../utils/fsx';
+import { addTokens, logEntry } from './log-view';
 import { runTurn } from '../engines/codex';
 import { runClaudeTurn } from '../engines/claude';
 import { createApprovalHandler, probeApproval } from '../approvals';
@@ -32,32 +38,174 @@ import { resolveMcpServers } from '../dispatch';
 import { injectedConnectionEnvironment, redactConnectionSecrets } from '../connections';
 import type { Task, ProgressUpdate, TurnResult } from '../types';
 import { agentMailboxDir, MAILBOX_ENV } from '../mailbox';
-import { gitToolEnvironment } from '../../agent/mcp';
+import { gitToolEnvironment, turnToolServers } from '../../agent/mcp';
+import { recentExchanges } from '../engines/history';
+import { rolloverPrompt, SUMMARY_REQUEST } from '../prompts';
 
-// Prepended to the initial turn only; resumed turns inherit it from the thread.
-const WORKER_SYSTEM_PROMPT = `
-You are running inside a coder task: do the work yourself, directly.
-Do not load the coder skill (recursive), and never dispatch through the \`coder\` CLI - nested dispatch is disabled.
-When finished, provide a concise implementation result summary.
-Your turn is one-shot: background processes will not re-invoke you after it ends, so verify synchronously before finishing.
-Never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.); leave changes uncommitted for the caller to review.
-`.trim();
+// Agent tasks serve several people in one workspace, so the engine keeps no memories between them.
+const AGENT_MEMORY_OFF = {
+  claude: { CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' },
+  codex: { 'features.memories': false },
+};
 
-// Agent tasks may run flows from their shell.
-const AGENT_FLOW_PROMPT =
-  "Flows are the exception: run one from your shell with `coder flow run <name> --wait --json --args '<json>'`; it runs as a script in your sandbox.";
+type TurnControls = {
+  echo: boolean;
+  env?: Record<string, string>;
+  privateTurn?: boolean;
+  steerable?: boolean;
+  onResult?: (result: TurnResult) => void;
+};
 
 function taskPrompt(task: Task): string {
   // Resumed turns run currentPrompt; task.prompt stays the original task text.
-  if (task.resumeThreadId) return task.currentPrompt ?? task.prompt ?? '';
-  // --system instructions sit below the worker preamble inside the <system> element.
-  const system = task.system ? `\n-------\n${task.system}` : '';
-  const flows = task.agentId ? `\n${AGENT_FLOW_PROMPT}` : '';
-  return `<system>
-${WORKER_SYSTEM_PROMPT}${flows}${system}
-</system>
+  const prompt = task.currentPrompt ?? task.prompt ?? '';
+  if (task.resumeThreadId || !task.pendingRollover) return prompt;
 
-${task.prompt ?? ''}`;
+  return rolloverPrompt(task.pendingRollover, prompt);
+}
+
+export async function runConversationTurn(
+  cwd: string,
+  task: Task,
+  budget: number,
+  execute: (
+    task: Task,
+    options: Pick<TurnControls, 'privateTurn' | 'steerable' | 'onResult'>,
+  ) => Promise<TurnResult>,
+): Promise<TurnResult> {
+  const switching = Boolean(task.pendingRollover);
+  writeTask(cwd, task.id, {
+    status: 'running',
+    steerEndpoint: null,
+    turnId: null,
+    turnUsage: task.turnUsage ?? [],
+  });
+  const taskDir = resolveTaskDir(cwd, task.id);
+  const log = path.join(taskDir, 'log.jsonl');
+  const logged = createJsonlTail(log, fs.existsSync(log) ? fs.statSync(log).size : 0);
+  const current = switching ? { ...task, resumeThreadId: null } : task;
+  let recordedAt: string | undefined;
+  const record = (result: TurnResult) => {
+    const entries = logged().flatMap(line => {
+      const entry = logEntry(line);
+      return entry ? [entry] : [];
+    });
+    const steers = entries.flatMap(entry =>
+      entry.message?.startsWith(LIVE_STEER) ? [entry.message.slice(LIVE_STEER.length)] : [],
+    );
+    const lastReply = entries.filter(entry => entry.kind === 'reply').at(-1)?.message;
+    processTiming('worker.record.start', { taskId: task.id, finalized: false });
+    return recordTurnResult(cwd, task, result, { steers, lastReply });
+  };
+  let result: TurnResult;
+  try {
+    // The new conversation's first turn is a normal turn, steerable only once it succeeds.
+    result = await execute(current, {
+      privateTurn: false,
+      steerable: !switching,
+      onResult: result => {
+        if (!recordedAt && result.status === 0 && !result.error) recordedAt = record(result);
+      },
+    });
+  } catch (error) {
+    if (switching)
+      writeTask(cwd, task.id, {
+        threadId: task.threadId,
+        resumeThreadId: task.threadId,
+        steerEndpoint: null,
+      });
+    throw error;
+  }
+  if (result.status !== 0 && switching) result = { ...result, threadId: task.threadId ?? null };
+  const previousThreadIds = [...(task.previousThreadIds ?? [])];
+  if (
+    result.status === 0 &&
+    task.threadId &&
+    result.threadId &&
+    task.threadId !== result.threadId &&
+    !previousThreadIds.includes(task.threadId)
+  )
+    previousThreadIds.push(task.threadId);
+  const rollingOver =
+    result.status === 0 && Boolean(result.threadId) && Number(result.contextTokens) > budget;
+  const completedAt = new Date().toISOString();
+  processTiming('worker.engine.closed', { taskId: task.id });
+  recordedAt ??= record(result);
+  writeJsonFileAtomic(
+    path.join(taskDir, 'result.json'),
+    JSON.parse(redactConnectionSecrets(result)),
+  );
+  processTiming('worker.record.start', { taskId: task.id, finalized: true });
+  const active = writeTask(cwd, task.id, {
+    turnUsage: [
+      ...(loadTask(cwd, task.id)?.turnUsage ?? []),
+      { at: recordedAt, tokens: result.tokens, model: result.model },
+    ],
+    status: result.status === 0 ? 'completed' : 'failed',
+    completedAt,
+    rollingOver,
+    ...(rollingOver ? { pid: process.pid } : {}),
+    threadId: result.threadId,
+    resumeThreadId: result.threadId,
+    previousThreadIds,
+    ...(result.status === 0 ? { pendingRollover: undefined } : {}),
+    steerEndpoint: null,
+    turnId: result.turnId ?? null,
+  });
+  processTiming('worker.result.recorded', { taskId: task.id, finalized: true });
+  if (switching && result.status === 0)
+    appendTaskLog(cwd, task.id, {
+      kind: 'status',
+      message: `Context rolled over: summary plus the last ${task.pendingRollover!.exchanges} exchanges`,
+    });
+  if (!rollingOver) return result;
+
+  try {
+    const recent = await recentExchanges(active);
+    const summary = await execute(
+      { ...active, currentPrompt: SUMMARY_REQUEST, outputSchema: undefined },
+      { privateTurn: true },
+    );
+    if (!loadTask(cwd, task.id)) return result;
+    if (summary.tokens) {
+      const at = new Date(Math.max(Date.now(), Date.parse(recordedAt) + 1)).toISOString();
+      writeTask(cwd, task.id, {
+        turnUsage: [
+          ...(loadTask(cwd, task.id)?.turnUsage ?? []),
+          { at, tokens: summary.tokens, model: summary.model },
+        ],
+      });
+      result = {
+        ...result,
+        tokens: addTokens(result.tokens ?? null, summary.tokens),
+      };
+      writeJsonFileAtomic(
+        path.join(taskDir, 'result.json'),
+        JSON.parse(redactConnectionSecrets(result)),
+      );
+    }
+    if (summary.status !== 0 || !summary.finalMessage?.trim())
+      throw new Error(summary.error?.message ?? 'Summary turn returned no summary');
+    if (Buffer.byteLength(summary.finalMessage) > 64_000)
+      throw new Error('Summary exceeded the context budget');
+    if (loadTask(cwd, task.id)?.status === 'cancelled') return result;
+    writeTask(cwd, task.id, {
+      pendingRollover: {
+        summary: summary.finalMessage,
+        recent: recent.text,
+        exchanges: recent.exchanges,
+      },
+    });
+  } catch (error) {
+    appendTaskLog(cwd, task.id, {
+      kind: 'warning',
+      message: `Context rollover deferred: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  } finally {
+    if (loadTask(cwd, task.id)) writeTask(cwd, task.id, { rollingOver: false });
+  }
+
+  return result;
 }
 
 // Throttled sign-of-life marker: engines fire this on every server event
@@ -95,7 +243,7 @@ function buildProgressLogger(cwd: string, taskId: string, { echo }: { echo: bool
 async function executeCodexTurn(
   cwd: string,
   task: Task,
-  { echo, env = {} }: { echo: boolean; env?: Record<string, string> },
+  { echo, env = {}, privateTurn = false, steerable = !privateTurn, onResult }: TurnControls,
 ): Promise<TurnResult> {
   const workspaceRoot = resolveWorkspaceRoot(cwd);
   const taskDir = resolveTaskDir(cwd, task.id);
@@ -151,21 +299,25 @@ async function executeCodexTurn(
   const mailbox = agentMailboxDir(cwd, task);
   try {
     const result = await runTurn(cwd, {
+      availabilityChecked: process.env.CODER_ENGINE_CHECKED === '1',
       prompt: taskPrompt(task),
+      developerInstructions: task.systemPrompt,
       outputSchema: task.outputSchema,
       model: custom?.model ?? resolveCodexModel(task.model),
       modelProvider: custom?.modelProvider ?? null,
       // The mailbox path reaches the sandboxed shell per thread, not through the shared app-server's env.
-      configOverrides:
-        mailbox || Object.keys(env).length
+      configOverrides: {
+        ...custom?.configOverrides,
+        ...(mailbox || Object.keys(env).length
           ? {
-              ...custom?.configOverrides,
               'shell_environment_policy.set': {
                 ...env,
                 ...(mailbox ? { [MAILBOX_ENV]: mailbox } : {}),
               },
             }
-          : (custom?.configOverrides ?? null),
+          : {}),
+        ...(task.agentId ? AGENT_MEMORY_OFF.codex : {}),
+      },
       effort: task.effort,
       sandbox: mode.sandbox,
       approvalPolicy: mode.approvalPolicy,
@@ -174,9 +326,13 @@ async function executeCodexTurn(
         config.engines.codex?.network,
       ),
       approvalsReviewer: mode.approvalMode === 'auto' ? 'auto_review' : null,
-      mcpServers: resolveMcpServers(task.mcp, process.env, undefined, {
-        onWarning: message => onProgress({ kind: 'warning', message }),
-      }),
+      mcpServers: turnToolServers(
+        task,
+        taskDir,
+        resolveMcpServers(task.mcp, process.env, undefined, {
+          onWarning: message => onProgress({ kind: 'warning', message }),
+        }),
+      ),
       nativeMcp: task.nativeMcp ?? false,
       // Read-only: the mailbox is the one writable path; extra directories stay read-only.
       writableRoots: [
@@ -185,12 +341,17 @@ async function executeCodexTurn(
       ],
       onApprovalRequest,
       onHeartbeat: buildHeartbeat(cwd, task.id),
+      onResult,
       resumeThreadId: task.resumeThreadId ?? null,
-      onControlReady: (steerEndpoint, threadId, turnId) => {
-        writeTask(cwd, task.id, { status: 'running', steerEndpoint, threadId, turnId });
-      },
+      onControlReady: steerable
+        ? (steerEndpoint, threadId, turnId) => {
+            writeTask(cwd, task.id, { status: 'running', steerEndpoint, threadId, turnId });
+          }
+        : undefined,
       onProgress: (update: ProgressUpdate) => {
+        if (privateTurn) return;
         onProgress(update);
+        if (!steerable) return;
         const threadId = typeof update === 'object' ? update.threadId : null;
         const turnId = typeof update === 'object' ? update.turnId : null;
         if (threadId || turnId) {
@@ -203,14 +364,6 @@ async function executeCodexTurn(
       },
     });
 
-    writeTask(cwd, task.id, {
-      status: result.status === 0 ? 'completed' : 'failed',
-      threadId: result.threadId,
-      turnId: result.turnId,
-      steerEndpoint: null,
-      completedAt: new Date().toISOString(),
-    });
-    recordTurnResult(cwd, task, taskDir, result);
     return result;
   } finally {
     // Clear the owner endpoint after normal completion, client close, or any
@@ -223,7 +376,7 @@ async function executeCodexTurn(
 async function executeClaudeTurn(
   cwd: string,
   task: Task,
-  { echo, env = {} }: { echo: boolean; env?: Record<string, string> },
+  { echo, env = {}, privateTurn = false, steerable = !privateTurn, onResult }: TurnControls,
 ): Promise<TurnResult> {
   const taskDir = resolveTaskDir(cwd, task.id);
   const config = loadConfig(cwd);
@@ -233,8 +386,18 @@ async function executeClaudeTurn(
   const mailbox = agentMailboxDir(cwd, task);
   try {
     const result = await runClaudeTurn(cwd, {
-      env: { ...env, ...(mailbox ? { [MAILBOX_ENV]: mailbox } : {}) },
+      env: {
+        ...env,
+        ...(mailbox ? { [MAILBOX_ENV]: mailbox } : {}),
+        ...(task.agentId ? AGENT_MEMORY_OFF.claude : {}),
+      },
       prompt: taskPrompt(task),
+      systemPrompt: task.systemPrompt,
+      excludeDynamicSections: task.conversation,
+      settingSources:
+        task.agentId && task.source && !['cli', 'dashboard', 'schedule'].includes(task.source)
+          ? 'project,local'
+          : undefined,
       outputSchema: task.outputSchema,
       model: task.model,
       effort: task.effort,
@@ -243,31 +406,36 @@ async function executeClaudeTurn(
       allowedNetworkHosts: config.approvals.allowedNetworkHosts,
       additionalDirectories: task.addDirs,
       ...(mailbox ? { writableDirectories: [mailbox] } : {}),
-      mcpServers: resolveMcpServers(task.mcp, process.env, undefined, {
-        onWarning: message => onProgress({ kind: 'warning', message }),
-      }),
+      mcpServers: turnToolServers(
+        task,
+        taskDir,
+        resolveMcpServers(task.mcp, process.env, undefined, {
+          onWarning: message => onProgress({ kind: 'warning', message }),
+        }),
+      ),
       nativeMcp: task.nativeMcp ?? false,
+      promptCacheTtl:
+        task.conversation && (env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY)
+          ? '1h'
+          : undefined,
       taskRoot: taskDir,
       resumeSessionId: task.resumeThreadId ?? null,
       onHeartbeat: buildHeartbeat(cwd, task.id),
-      onSteerReady: steerEndpoint => {
-        writeTask(cwd, task.id, { status: 'running', steerEndpoint });
-      },
+      onResult,
+      onSteerReady: steerable
+        ? steerEndpoint => {
+            writeTask(cwd, task.id, { status: 'running', steerEndpoint });
+          }
+        : undefined,
       onProgress: update => {
+        if (privateTurn) return;
         onProgress(update);
-        if (update.threadId) {
+        if (steerable && update.threadId) {
           writeTask(cwd, task.id, { status: 'running', threadId: update.threadId });
         }
       },
     });
 
-    writeTask(cwd, task.id, {
-      status: result.status === 0 ? 'completed' : 'failed',
-      threadId: result.threadId,
-      steerEndpoint: null,
-      completedAt: new Date().toISOString(),
-    });
-    recordTurnResult(cwd, task, taskDir, result);
     return result;
   } finally {
     // Also clear a stale endpoint on spawn/protocol failures. The worker's
@@ -278,14 +446,24 @@ async function executeClaudeTurn(
 
 // result.json holds the LATEST turn; results.jsonl accretes every turn so a
 // follow-up never displaces the original deliverable (`result --turns`).
-function recordTurnResult(cwd: string, task: Task, taskDir: string, result: TurnResult): void {
+function recordTurnResult(
+  cwd: string,
+  task: Task,
+  result: TurnResult,
+  metadata: Pick<TurnResultEntry, 'steers' | 'lastReply'> = {},
+): string {
+  const { steers = [], lastReply } = metadata;
+  const after = task.turnUsage?.at(-1)?.at;
+  const taskDir = resolveTaskDir(cwd, task.id);
   writeJsonFileAtomic(
     path.join(taskDir, 'result.json'),
     JSON.parse(redactConnectionSecrets(result)),
   );
   const entry = {
-    at: new Date().toISOString(),
+    at: new Date(Math.max(Date.now(), after ? Date.parse(after) + 1 : 0)).toISOString(),
     prompt: task.currentPrompt ?? task.prompt ?? null,
+    ...(steers.length ? { steers } : {}),
+    ...(lastReply ? { lastReply } : {}),
     ...result,
   };
   fs.appendFileSync(
@@ -293,6 +471,10 @@ function recordTurnResult(cwd: string, task: Task, taskDir: string, result: Turn
     `${redactConnectionSecrets(entry)}\n`,
     'utf8',
   );
+
+  processTiming('worker.result.recorded', { taskId: task.id, finalized: false });
+  if (process.connected) process.send?.('result');
+  return entry.at;
 }
 
 // The turn executor for a task's engine. Exported so the detached worker can run it.
@@ -306,37 +488,40 @@ export function executeTurnFor(task: Task) {
     try {
       const execute = current.engine === 'claude' ? executeClaudeTurn : executeCodexTurn;
 
-      return await execute(cwd, current, { ...options, env: git.env });
+      return await runConversationTurn(
+        cwd,
+        current,
+        current.conversation ? loadConfig(cwd).conversationCompactTokens : Infinity,
+        (next, controls) => execute(cwd, next, { ...options, ...controls, env: git.env }),
+      );
     } finally {
       await git.close();
     }
   };
 }
 
-// After a turn completes, run any follow-ups that were queued by `coder task
-// steer` while the task was running but could not be injected into the live
-// turn (an engine startup/completion race). Each runs as a
-// resumed turn on the same thread, in order. A short grace re-check closes the
-// race with a steer that lands as the turn is completing; a failed/cancelled
-// task is left terminal rather than resumed.
+// Close admission and claim the last queued follow-ups under the same fence as steer callers.
 export async function drainSteerQueue(cwd: string, taskId: string): Promise<void> {
-  for (let idleChecks = 0; idleChecks < 2;) {
-    const current = loadTask(cwd, taskId);
-    if (!current || current.status === 'failed' || current.status === 'cancelled') {
-      return;
-    }
-    const followUps = claimSteers(cwd, taskId);
-    if (followUps.length === 0) {
-      idleChecks += 1;
-      await new Promise(resolve => setTimeout(resolve, 300));
-      continue;
-    }
-    idleChecks = 0;
+  for (;;) {
+    const followUps = await withTaskAdmission(cwd, taskId, () => {
+      const current = loadTask(cwd, taskId);
+      if (!current) return [];
+      const queued =
+        current.status === 'failed' || current.status === 'cancelled'
+          ? []
+          : claimSteers(cwd, taskId);
+      if (!queued.length) {
+        writeTask(cwd, taskId, { steerClosed: true, steerEndpoint: null });
+        if (process.connected) process.send?.('settled');
+      }
+      return queued;
+    });
+    if (!followUps.length) return;
     for (const text of followUps) {
       const resumeTask = writeTask(cwd, taskId, {
         status: 'running',
         currentPrompt: text,
-        resumeThreadId: current.threadId ?? null,
+        resumeThreadId: loadTask(cwd, taskId)?.threadId ?? null,
       });
       appendTaskLog(cwd, taskId, { message: 'Running steered follow-up.' });
       try {
@@ -367,7 +552,7 @@ export async function runWorker(
       throw error;
     }
   }
-  writeTask(cwd, task.id, { status: 'running', pid: process.pid });
+  writeTask(cwd, task.id, { status: 'running', pid: process.pid, steerClosed: false });
   let stopMailbox = () => {};
   let inbox: { close(): Promise<void> } | undefined;
   try {
@@ -403,6 +588,12 @@ export async function runWorker(
     appendTaskLog(cwd, task.id, { kind: 'error', message });
     throw error;
   } finally {
+    await withTaskAdmission(cwd, task.id, () => {
+      if (loadTask(cwd, task.id)?.pid === process.pid) {
+        writeTask(cwd, task.id, { steerClosed: true, steerEndpoint: null });
+        if (process.connected) process.send?.('settled');
+      }
+    });
     stopMailbox();
     await inbox?.close();
   }

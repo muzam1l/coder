@@ -12,7 +12,7 @@ export function markRepositoryMcp(
   repository: boolean,
 ) {
   for (const entry of Object.values(entries ?? {}))
-    Object.defineProperty(entry, 'repository', { value: repository, configurable: true });
+    entry.repository = repository;
 }
 
 export function mcpApprovalHash(entry: McpConfigEntry | McpServerSpec): string {

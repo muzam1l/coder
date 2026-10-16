@@ -11,11 +11,7 @@ import { Button, IconButton } from '@/comps/ui/button';
 import { Select } from '@/comps/ui/select';
 import { Row } from './list';
 import type { ConnectionRow } from '@coder/client/types';
-
-const SCOPES: Array<[string, string]> = [
-  ['me', 'Just me'],
-  ['', 'Workspace'],
-];
+import { CONNECTION_SCOPES } from '@/app/dash/[org]/settings/model-options';
 
 /** Secrets tasks read as environment variables; Enter adds one, and a broken one takes a new value in place. */
 export function TaskSecrets({
@@ -88,12 +84,14 @@ export function TaskSecrets({
                           name="key"
                           type="password"
                           aria-label={`New value for ${row.env ?? row.name}`}
-                          placeholder="New value, then Enter"
+                          placeholder="New value"
                           autocomplete="off"
                           aria-busy={busy}
                           ref={input => input?.focus()}
                         />
-                        <button hidden />
+                        <Button type="submit" loading={busy}>
+                          Save
+                        </Button>
                       </form>
                     ) : (
                       <Button variant="ghost" size="sm" onClick={() => setRenewing(row.id)}>
@@ -129,19 +127,23 @@ export function TaskSecrets({
                 const env = String(values.get('env') ?? '').trim();
                 const key = String(values.get('key') ?? '').trim();
                 if (!env || !key) return;
-                void action.run('add', async () => {
-                  put(
-                    await client.connections.add({
-                      name: env,
-                      provider: 'env',
-                      key,
-                      keyIn: { env },
-                      ...(scope ? { owner: 'me' as const } : {}),
-                    }),
-                  );
-                  box.reset();
-                  setAdding(false);
-                });
+                void action.run(
+                  'add',
+                  async () => {
+                    put(
+                      await client.connections.add({
+                        name: env,
+                        provider: 'env',
+                        key,
+                        keyIn: { env },
+                        ...(scope ? { owner: 'me' as const } : {}),
+                      }),
+                    );
+                    box.reset();
+                    setAdding(false);
+                  },
+                  { toast: 'Not saved' },
+                );
               }}
             >
               <input
@@ -158,7 +160,7 @@ export function TaskSecrets({
                 name="key"
                 type="password"
                 aria-label="Secret value"
-                placeholder="Value, then Enter"
+                placeholder="Value"
                 autocomplete="off"
                 aria-busy={busy}
                 required
@@ -166,12 +168,14 @@ export function TaskSecrets({
               {admin && !local ? (
                 <Select
                   label="Who can use this secret"
-                  options={SCOPES}
+                  options={CONNECTION_SCOPES}
                   value={scope}
                   onChange={setScope}
                 />
               ) : null}
-              <button hidden />
+              <Button type="submit" loading={busy}>
+                Add
+              </Button>
             </form>
           </div>
         ) : null}

@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.4.9",
+  "version": "0.4.10",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "main": "./dist/sdk.js",
@@ -25,6 +25,7 @@
   "scripts": {
     "build": "bun scripts/build.ts",
     "build:dash": "bun scripts/build.ts dash",
+    "deploy:vercel": "bun scripts/deploy-vercel.ts",
     "dev:dash": "pnext dev src/server/dash",
     "dev": "tsdown --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit && pnext typegen src/server/dash && tsc -p src/server/dash/tsconfig.json --noEmit",

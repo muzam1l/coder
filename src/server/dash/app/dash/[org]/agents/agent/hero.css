@@ -50,6 +50,14 @@
   line-height: 1;
   cursor: pointer;
 }
+/* the description keeps two lines before and after it loads, so nothing under it moves */
+.hero .lead {
+  display: -webkit-box;
+  min-height: 2lh;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
 .hero-mark {
   display: grid;
   place-items: center;
@@ -71,12 +79,15 @@
     height: 48px;
     font-size: 20px;
   }
-  /* the description keeps two lines before and after it loads, so nothing under it moves */
-  .hero .lead {
-    display: -webkit-box;
-    min-height: 2lh;
-    overflow: hidden;
-    -webkit-box-orient: vertical;
-    -webkit-line-clamp: 2;
+  .hero-side {
+    justify-items: start;
+  }
+  .hero .handles {
+    text-align: left;
+  }
+  @supports (anchor-scope: --menu) {
+    .hero .more > .more-list {
+      inset: anchor(bottom) auto auto anchor(left);
+    }
   }
 }

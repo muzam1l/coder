@@ -12,7 +12,7 @@ import { flushInbox } from './tasks/queue';
 import { requireBunServer } from './env';
 import { handleRequest } from './routes';
 import { LOOPBACK, serverMode, socketAllowed, type ServerMode } from './routes/guards';
-import { bodyLimit, nodeListener } from './routes/http';
+import { nodeListener } from './routes/http';
 import { RUNNER_KINDS } from './runners';
 import { describeDatabase } from './store/pg/client';
 
@@ -41,6 +41,7 @@ export function serverHandler(
   requireBunServer();
 
   let pending: Promise<Contexts> | undefined;
+  let lastMaintenance: number | undefined;
 
   const getContext = () =>
     (pending ??= createContext({ env, host }).catch(error => {
@@ -48,11 +49,33 @@ export function serverHandler(
       throw error;
     }));
 
+  const maintain = (server: Contexts) =>
+    Promise.all([
+      server.sweep(),
+      kick(server.defaultContext, false, true),
+      flushInbox(server.defaultContext),
+    ]).then(() => undefined);
+
   const handler = async (request: Request, waitUntil?: (work: Promise<unknown>) => void) => {
     const server = await getContext();
     const background = waitUntil
       ? (work: Promise<unknown>) => waitUntil(work)
       : (work: Promise<unknown>) => void work.catch(() => {});
+    const now = Date.now();
+    if (lastMaintenance === undefined || now - lastMaintenance >= SWEEP_MS) {
+      lastMaintenance = now;
+      background(
+        server.defaultContext.store
+          .create(
+            'delivery',
+            `maintenance:${server.config.publicUrl}`,
+            { at: now },
+            { ttlMs: SWEEP_MS },
+          )
+          .then(claimed => (claimed ? maintain(server) : undefined))
+          .catch(error => console.error('coder server: maintenance failed', error)),
+      );
+    }
     const requestContext = (organizationId: string): ServerContext => ({
       ...server.context(organizationId),
       waitUntil: background,
@@ -67,15 +90,12 @@ export function serverHandler(
   return Object.assign(handler, {
     scheduled: async () => {
       const server = await getContext();
-      await Promise.all([
-        server.sweep(),
-        kick(server.defaultContext, false, true),
-        flushInbox(server.defaultContext),
-      ]);
+      await maintain(server);
     },
     close: async () => {
       const server = pending;
       pending = undefined;
+      lastMaintenance = undefined;
       await (await server)?.close();
     },
   });
@@ -212,21 +232,24 @@ async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
   const context = host.defaultContext;
 
   const sweep = () => {
-    void host.sweep().catch(() => {});
+    void host.sweep().catch(error => console.error('coder server: sweep failed', error));
   };
   sweep();
   const sweepTimer = setInterval(sweep, SWEEP_MS);
   sweepTimer.unref();
 
   const kickTimer = setInterval(() => {
-    void kick(context, false, true).catch(() => {});
-    void flushInbox(context).catch(() => {});
+    void kick(context, false, true).catch(error =>
+      console.error('coder server: scheduled kick failed', error),
+    );
+    void flushInbox(context).catch(error =>
+      console.error('coder server: inbox flush failed', error),
+    );
   }, 60_000);
   kickTimer.unref();
 
   const listener = http.createServer(
     nodeListener((request, clientIp) => handleRequest(request, context, { clientIp }), {
-      limit: bodyLimit,
       admit: incoming =>
         database || socketAllowed(incoming.socket.remoteAddress, incoming.url ?? '/'),
     }),
@@ -247,7 +270,7 @@ async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
     throw (error as NodeJS.ErrnoException).code === 'EADDRINUSE' ? portInUse(port) : error;
   });
 
-  const cacheStart = startCache ? setTimeout(startCache, 0) : undefined;
+  startCache?.();
   let closed = false;
   const close = async () => {
     if (closed) return;
@@ -260,7 +283,6 @@ async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
       listener.close(error => (error ? reject(error) : resolve())),
     );
     await cacheMaintenance;
-    if (cacheStart) clearTimeout(cacheStart);
     await host.close();
   };
   const signIn = context.auth ? `Wular Auth (${context.auth.issuer})` : undefined;

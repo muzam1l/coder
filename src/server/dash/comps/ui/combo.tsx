@@ -1,7 +1,7 @@
 import { useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import { MenuOption } from './menu-items';
-import { SelectList } from './select';
+import { SelectList, usePlace } from './select';
 
 const SHOWN = 50;
 
@@ -30,7 +30,6 @@ export function Combo({
   // Only text typed since opening filters; opening on a picked value shows every option.
   const [typed, setTyped] = useState(false);
   const [active, setActive] = useState(0);
-  const [place, setPlace] = useState('');
   const input = useRef<HTMLInputElement>(null);
   const list = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -47,30 +46,7 @@ export function Combo({
     setTyped(false);
   };
 
-  useLayoutEffect(() => {
-    if (!listed) return;
-    list.current?.showPopover();
-    const position = () => {
-      const box = input.current?.getBoundingClientRect();
-      const menu = list.current;
-      if (!box || !menu) return;
-      const below = innerHeight - box.bottom - 12;
-      const up = below < Math.min(menu.scrollHeight, 240) && box.top > below;
-      setPlace(
-        `left:${Math.round(Math.min(box.left, innerWidth - menu.offsetWidth - 8))}px;min-width:${Math.round(box.width)}px;` +
-          (up
-            ? `bottom:${Math.round(innerHeight - box.top + 4)}px;max-height:${Math.round(Math.min(360, box.top - 12))}px`
-            : `top:${Math.round(box.bottom + 4)}px;max-height:${Math.round(Math.min(360, below))}px`),
-      );
-    };
-    position();
-    addEventListener('resize', position);
-    addEventListener('scroll', position, true);
-    return () => {
-      removeEventListener('resize', position);
-      removeEventListener('scroll', position, true);
-    };
-  }, [listed, shown.length]);
+  const place = usePlace(input, list, listed, 360, [shown.length]);
 
   useLayoutEffect(() => {
     if (listed)

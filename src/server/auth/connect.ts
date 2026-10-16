@@ -3,7 +3,7 @@ import { type AgentApp } from '../../agent/types';
 import { consumeBoundNonce, inspectNonce, issueNonce, nonceOrganization } from './nonce';
 import { scoped, type ServerContext, type SessionInfo } from '../context';
 import { decryptSecret, encryptSecret } from '../store/secrets';
-import { serveDash } from '../dash/serve';
+import { notBuilt, serveDash } from '../dash/serve';
 import { json, redirect } from '../routes/http';
 import { outcome } from '../agents/platform';
 import { IntegrationError } from '../../integrations/types';
@@ -46,23 +46,12 @@ export async function startTokenLink(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const signed = (ctx as ServerContext & { linkContext: ServerContext }).linkContext;
+  const signed = ctx;
   const session = signed.session!;
-  // The token resolves in the workspace it was issued for, when the user belongs to it.
-  const issuedIn = (token: string) => {
-    const organization = nonceOrganization(signed, token);
-
-    return organization && session.organizations.some(o => o.id === organization)
-      ? { ...scoped(signed, organization), session }
-      : signed;
-  };
   const token = url.searchParams.get('token') ?? '';
-  const member = issuedIn(token);
+  const member = memberOf(ctx, session, nonceOrganization(ctx, token)) ?? ctx;
   if (await inspectNonce(member, token, 'link', session.user.id))
-    return (
-      (await serveDash(req, undefined, ctx.dashboardHosts)) ??
-      new Response('UI is not built', { status: 503 })
-    );
+    return (await serveDash(req, ctx.dashboardHosts)) ?? notBuilt();
 
   const target = await consumeBoundNonce(member, token, 'link-start', session.user.id);
   if (!target)
@@ -81,22 +70,19 @@ export async function confirmTokenLink(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const signed = (ctx as ServerContext & { linkContext: ServerContext }).linkContext;
+  const signed = ctx;
   const session = signed.session!;
-  // The token resolves in the workspace it was issued for, when the user belongs to it.
-  const issuedIn = (token: string) => {
-    const organization = nonceOrganization(signed, token);
-
-    return organization && session.organizations.some(o => o.id === organization)
-      ? { ...scoped(signed, organization), session }
-      : signed;
-  };
   const body = (await req.json().catch(() => ({}))) as {
     token?: unknown;
   };
   const target =
     typeof body.token === 'string'
-      ? await consumeBoundNonce(issuedIn(body.token), body.token, 'link', session.user.id)
+      ? await consumeBoundNonce(
+          memberOf(ctx, session, nonceOrganization(ctx, body.token)) ?? ctx,
+          body.token,
+          'link',
+          session.user.id,
+        )
       : undefined;
   if (!target) return json({ error: 'This link is invalid or has expired.' }, 400);
 
@@ -122,7 +108,7 @@ export async function startOAuth(
   const integration = ctx.integrations[params.integration!]!;
   const userAuth = integration.auth.user!;
   const publicUrl = ctx.config.publicUrl!;
-  const session = (ctx as ServerContext & { linkContext: ServerContext }).linkContext.session!;
+  const session = ctx.session!;
   const connectionId = url.searchParams.get('connection');
   if (connectionId) {
     const member = memberOf(
@@ -160,7 +146,7 @@ export async function startOAuth(
       userAuth.authorizeUrl(decryptSecret(ctx.config, app.credentials), {
         publicUrl,
         state,
-        access: connection.access,
+        access: connection.access ?? 'write',
       }),
     );
   }
@@ -197,7 +183,7 @@ export async function completeOAuth(
   const integration = ctx.integrations[params.integration!]!;
   const userAuth = integration.auth.user!;
   const publicUrl = ctx.config.publicUrl!;
-  const session = (ctx as ServerContext & { linkContext: ServerContext }).linkContext.session!;
+  const session = ctx.session!;
   const state = url.searchParams.get('state') ?? '';
   const member = memberOf(ctx, session, nonceOrganization(ctx, state));
   const landing = member ?? { ...ctx, session };
@@ -226,7 +212,7 @@ export async function completeOAuth(
       const user = await userAuth
         .exchange(req, decryptSecret(ctx.config, app.credentials), {
           publicUrl,
-          access: current.access,
+          access: current.access ?? 'write',
           fetch: ((input, init) =>
             (ctx.fetch ?? fetch)(input, {
               ...init,

@@ -3,6 +3,7 @@ import { OrgBack } from '@/comps/nav/org';
 import { Loading } from '@/comps/ui/card';
 import { LoadingTabs } from '@/comps/ui/tabs';
 import { BLANK } from '@/comps/frame/loading-card';
+import { TASK_TABS } from '@/app/dash/[org]/tasks/list/task';
 
 export default function TaskLoading() {
   return (
@@ -25,7 +26,7 @@ function LoadingTask() {
           <p class="lead">{BLANK}</p>
         </div>
       </header>
-      <LoadingTabs labels={['Conversation', 'Activity', 'Diff']} />
+      <LoadingTabs labels={TASK_TABS} />
       <Loading label="Loading task" />
     </>
   );

@@ -1,7 +1,9 @@
 import type { TaskStatus } from '../store/types';
 import { SERVER_LIMITS } from '../limits';
 import { scoped, type ServerContext } from '../context';
-import { taskCredential, taskHosts } from './context';
+import { loadedStore } from '../store/primed';
+import { brokeredKeys, taskCredential, taskEngineCredentials, taskHosts } from './context';
+import { taskConfig } from '../settings/config';
 import type { ClaimedTask, TaskFence } from './queue';
 import { taskRunner, type Runner } from '../runners';
 import { startQueuedLocalTask, inspectLocalTask, localTasks, sweepLocalQueue } from './local';
@@ -229,9 +231,13 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
     const claimed = await ctx.queue.claim(now(), available, knownWork, concurrentTasks);
     knownWork = false;
     if (!claimed) break;
-    const taskCtx = scoped(ctx, claimed.organizationId);
     const status = claimed.status;
-    if (await startQueuedLocalTask(taskCtx, status)) {
+    const orgCtx = scoped(ctx, claimed.organizationId);
+    const taskCtx =
+      claimed.loaded && orgCtx.store
+        ? { ...orgCtx, store: loadedStore(orgCtx.store, status, claimed.loaded) }
+        : orgCtx;
+    if (await startQueuedLocalTask(taskCtx, status, claimed.token)) {
       knownWork = claimed.more;
       if (!claimed.more) break;
       continue;
@@ -252,6 +258,15 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
     try {
       const credential =
         runner.kind === 'vercel-sandbox' ? await taskCredential(taskCtx, status.task) : undefined;
+      const credentials = credential
+        ? [
+            credential,
+            ...(await taskEngineCredentials(taskCtx, status.task)).map(row => row.credential),
+          ]
+        : [];
+      const hosts = await Promise.all(
+        credentials.map(value => taskHosts(taskCtx, status.task, value)),
+      );
       const start = runner.start(
         status.task,
         {
@@ -262,11 +277,22 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
           CODER_TASK_TOKEN: claimed.token,
           CODER_INBOX_MODE: runner.push ? 'push' : 'poll',
         },
-        credential?.env,
+        credential
+          ? Object.assign({}, ...credentials.map(value => value.env).reverse())
+          : undefined,
         {
           timeoutMs: taskCtx.config.taskTimeoutMs + 60_000,
           waitUntil: taskCtx.waitUntil,
-          ...(credential ? { hosts: await taskHosts(taskCtx, status.task, credential) } : {}),
+          ...(credential
+            ? {
+                hosts: hosts.some(value => value === undefined)
+                  ? undefined
+                  : [...new Set(hosts.flatMap(value => value ?? []))],
+                brokered: await taskConfig(taskCtx.store).then(config =>
+                  credentials.flatMap(value => brokeredKeys(config, status.task, value)),
+                ),
+              }
+            : {}),
         },
       );
       handle = await deadline(start, taskCtx.runnerTimeoutMs ?? 30_000, 'runner start').catch(error => {

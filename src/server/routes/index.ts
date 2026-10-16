@@ -1,11 +1,8 @@
 import { localHostAllowed } from './guards';
 import { dispatch } from './match';
-import { pagesFallback } from '../dash/serve';
 import { bodyLimit, limitBody, notFound } from './http';
-import { heartbeat } from '../tasks/callbacks';
-import { review } from '../tasks/flows';
 import { chosenOrganization, type ServerContext, type SessionInfo } from '../context';
-import { DashboardHosts } from '../dash/serve';
+import { dashboard, DashboardHosts } from '../dash/serve';
 import { randomUUID } from 'node:crypto';
 import { ServerLimits, admit, type Admitted } from '../limits';
 import { scheduleKick } from '../tasks/kick';
@@ -22,7 +19,7 @@ export async function serve(
   const url = new URL(req.url);
   if (admitted.scope instanceof Response) return admitted.scope;
   ctx = admitted.scope ?? ctx;
-  return (await dispatch(routes, req, ctx, url)) ?? pagesFallback(req, ctx, url);
+  return (await dispatch(routes, req, ctx, url)) ?? dashboard(req, ctx);
 }
 
 export const REQUEST_SCOPE_HEADER = 'x-coder-request-scope';

@@ -10,7 +10,7 @@ import type { TaskLogLine, TaskStatus } from '../../server/store/types';
 import { outStyle } from '../../tui/output';
 import { termCols } from '../../tui/live';
 import { shortPath } from '../../utils/fsx';
-import { baseOptions, flag, optStr, str, tailOption } from '../../utils/args';
+import { baseOptions, tailOption, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
 import {
   finalMessageLine,
@@ -22,8 +22,6 @@ import {
   taskSummaryLines,
   trimStep,
 } from './result';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 export function printLine(line: TaskLogLine, s: Style): void {
   const text =

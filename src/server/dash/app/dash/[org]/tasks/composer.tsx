@@ -28,8 +28,10 @@ import {
 } from '@/comps/ui/menu-items';
 import { connectRepositories } from '@/app/dash/[org]/agents/editor/connect-repositories';
 import {
+  EFFORTS,
   ENGINES,
   ENGINE_NAMES,
+  PERMISSIONS,
   defaultLabel,
   modelValue,
   splitModel,
@@ -75,18 +77,6 @@ export type Lists = {
   folders?: LocalFolders;
 };
 
-const EFFORTS: Option[] = [
-  ['', 'Default'],
-  ['low', 'Low'],
-  ['medium', 'Medium'],
-  ['high', 'High'],
-];
-const PERMISSIONS: Option[] = [
-  ['', 'Default'],
-  ['read-only', 'Read-only'],
-  ['workspace-write', 'Write'],
-  ['auto', 'Auto'],
-];
 const DRAFT = 'coder:draft';
 const CONNECT = '+connect';
 const REFRESH = '+refresh';
@@ -115,7 +105,6 @@ const folderOptions = (folders: LocalFolders, added: LocalFolder[], value: strin
   ];
 };
 
-/** Segments whose unset first one names the value it resolves to. */
 /** The chain.s default first, then one section per engine: its own default and its models. */
 function modelSections(
   groups: Record<string, string[]>,
@@ -146,8 +135,8 @@ function modelSections(
 }
 
 const resolved = (options: Option[], value?: string): Option[] => {
-  const label = options.find(([key]) => key && key === value)?.[1];
-  return [['', defaultLabel(label?.toLowerCase())], ...options.slice(1)];
+  const label = options.find(([key]) => key === value)?.[1];
+  return [['', defaultLabel(label?.toLowerCase())], ...options];
 };
 
 /** Places an opening popover under its button, right-aligned to it. */
@@ -297,16 +286,16 @@ export function Composer({
     const draft = localStorage.getItem(DRAFT);
     if (draft && box.current && !box.current.value) box.current.value = draft;
     setText(box.current?.value ?? '');
+    prefetch(box.current?.value ?? '');
     box.current?.focus();
     // A restored draft waits for typing before its slash menu opens.
     setDismissed(true);
   }, []);
 
-  // The repository's open pull requests and its own flows, once a command is being typed.
-  const commanding = text.startsWith('/');
-  useEffect(() => {
-    const repo = choice.repo;
-    if (!commanding || !repo || pulls?.repo === repo) return;
+  // Once a command is typed: the repository's open pull requests and its own flows, or the repositories to pick.
+  const prefetch = (value: string, repo = choice.repo) => {
+    if (!repo && /^\/review\s/.test(value)) readRepos();
+    if (!value.startsWith('/') || !repo || pulls?.repo === repo) return;
     setPulls({ repo });
     void client.pulls
       .list(repo)
@@ -318,8 +307,8 @@ export function Composer({
     void client.flows
       .list(repo)
       .then(flows => setLists(current => ({ ...current, flows: flows.map(flow => flow.name) })))
-      .catch(() => {});
-  }, [commanding, choice.repo]);
+      .catch(reason => console.error('coder dashboard: flows', reason));
+  };
 
   const reposRead = useRef(Boolean(data.repos));
   const readRepos = () => {
@@ -343,8 +332,6 @@ export function Composer({
       setLists(current => ({ ...current, repos: rows.map(row => row.repo) }));
     });
   };
-  const choosingRepo = !choice.repo && /^\/review\s/.test(text);
-  useEffect(() => void (choosingRepo && readRepos()), [choosingRepo]);
 
   const pick = (key: keyof Choice, value: string) => {
     if (value === OTHER) return setTyping('path');
@@ -359,6 +346,7 @@ export function Composer({
   const apply = (change: Partial<Choice>) => {
     const next = { ...choice, ...change };
     setChoice(next);
+    prefetch(text, next.repo);
     document.cookie = `compose=${encodeURIComponent(JSON.stringify(next))}; path=/; max-age=31536000; samesite=lax`;
   };
 
@@ -405,6 +393,7 @@ export function Composer({
     field.value = value;
     localStorage.setItem(DRAFT, value);
     setText(value);
+    prefetch(value);
     setAt(0);
     setDismissed(false);
     field.focus();
@@ -594,6 +583,7 @@ export function Composer({
             const value = event.currentTarget.value;
             localStorage.setItem(DRAFT, value);
             setText(value);
+            prefetch(value);
             setAt(0);
             setDismissed(false);
           }}

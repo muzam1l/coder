@@ -6,7 +6,7 @@ import type { IntegrationInfo } from '@coder/client/types';
 import { Page } from '@/comps/frame/page-head';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
 import { Settle } from '@/comps/frame/stream';
-import { localServer } from '@/api/types';
+import { credentialMissing } from '@/app/dash/[org]/tasks/composer-data';
 import { HEADS } from '@/comps/frame/heads';
 
 /** Agent cards per page: whole rows of two or three. */
@@ -48,38 +48,32 @@ export default function AgentsPage({ request }: { request?: Request }) {
     connect: true,
     ...filters,
   });
-  const credentials = load(request).credentials.list({ cursor: '', limit: 1, fields: 'id' });
-  const me = load(request).me();
+  const missing = credentialMissing(load(request));
   const catalog = load(request).integrations.list();
 
   return (
     <Page>
       <Settle
         load={() =>
-          Promise.all([
-            agents,
-            Promise.all([credentials, me]).then(
-              ([page, who]) => (localServer(who) ? undefined : page.items.length),
-              () => undefined,
-            ),
-            catalog.catch(() => []),
-          ]).then(([first, count, integrations]) => {
-            const connect = connectable(first.connectable ?? [], integrations);
-            return (
-              <AgentsGrid
-                limit={AGENT_PAGE}
-                first={first}
-                filters={filters}
-                catalog={integrations}
-                head={HEADS.agents}
-              >
-                {connect.length ? <ConnectApps apps={connect} /> : null}
-                {count === 0 ? (
-                  <NeedsCredential reason="Agents need a model credential to run." />
-                ) : null}
-              </AgentsGrid>
-            );
-          })
+          Promise.all([agents, missing, catalog.catch(() => [])]).then(
+            ([first, needsCredential, integrations]) => {
+              const connect = connectable(first.connectable ?? [], integrations);
+              return (
+                <AgentsGrid
+                  limit={AGENT_PAGE}
+                  first={first}
+                  filters={filters}
+                  catalog={integrations}
+                  head={HEADS.agents}
+                >
+                  {connect.length ? <ConnectApps apps={connect} /> : null}
+                  {needsCredential ? (
+                    <NeedsCredential reason="Agents need a model credential to run." />
+                  ) : null}
+                </AgentsGrid>
+              );
+            },
+          )
         }
       />
     </Page>

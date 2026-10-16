@@ -5,11 +5,9 @@ import { CoderError } from '../../core/dispatch';
 import type { SteerOutcome } from '../../core/task/actions';
 import type { TaskStatus } from '../../server/store/types';
 import { errStyle, formatHints, outStyle } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
+import { baseOptions, flag, str, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
 import { finishedHints, printOutcome } from './result';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 type Steered = {
   taskId: string;

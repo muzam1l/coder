@@ -16,7 +16,9 @@ import { Icon } from '@/comps/ui/icon';
 import { Menu } from '@/comps/ui/menu';
 import { MenuItem, MenuRadio } from '@/comps/ui/menu-items';
 import { Select } from '@/comps/ui/select';
-import { formatDuration } from '@/utils/format';
+import { ago, formatDuration } from '@/utils/format';
+import { isAdmin } from '@/api/types';
+import { SCOPES } from '@/app/dash/[org]/settings/model-options';
 import { sortedRunners } from '@/app/dash/[org]/tasks/composer-data';
 import { useRunnerEvents } from '@/comps/frame/task-toasts';
 import { useRemove } from './list';
@@ -33,16 +35,6 @@ const KIND_ICONS: Record<RunnerKind, string> = {
   http: iPlug,
 };
 const BUILT_IN = new Set(['default', 'local']);
-const SCOPES: Array<[string, string]> = [
-  ['personal', 'Just me'],
-  ['workspace', 'Workspace'],
-];
-const ADMIN_ROLES = new Set(['owner', 'admin']);
-
-const ago = (at: number) =>
-  Date.now() - at < 60_000
-    ? 'just now'
-    : `${formatDuration(Date.now() - at).replace(/\.\d/, '')} ago`;
 
 function Status({ runner, tested }: { runner: RunnerRow; tested?: Tested }) {
   if (tested === 'testing')
@@ -359,7 +351,7 @@ function AddRunner({
 export function RunnersList({ first, me }: { first: Runners; me: Me }) {
   const [rows, setRows] = useState(first);
   const action = useAction();
-  const admin = !me.user || ADMIN_ROLES.has(me.organization?.role ?? '');
+  const admin = isAdmin(me);
   const items = sortedRunners(rows.items);
 
   useRunnerEvents(({ items }) => setRows(current => ({ ...current, items })));

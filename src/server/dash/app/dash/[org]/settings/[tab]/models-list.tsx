@@ -13,14 +13,15 @@ import { Select } from '@/comps/ui/select';
 import { Combo } from '@/comps/ui/combo';
 import {
   CUSTOM_PROVIDERS,
+  EFFORTS,
   ENGINES,
   ENGINE_NAMES,
+  SCOPES,
   defaultLabel,
-  type CustomProvider,
 } from '@/app/dash/[org]/settings/model-options';
 import { reasonText } from '@/utils/format';
 import { useAction } from '@/utils/action';
-import { List, Row, useConfig } from './list';
+import { List, Row, replaceTitle, useConfig, useReplace } from './list';
 import type {
   Config,
   ConfigShape,
@@ -30,30 +31,18 @@ import type {
   ProbeResult,
 } from '@coder/client/types';
 
-const PROVIDERS: Array<[string, string]> = [
-  ['custom', 'Custom endpoint'],
+const KINDS: Array<[string, string]> = [
+  ['endpoint', 'Endpoint'],
+  ['alias', 'Engine alias'],
+];
+const ALIAS_ENGINES: Array<[string, string]> = [
   ['claude', 'Claude'],
   ['codex', 'Codex'],
 ];
 /** The built-in model each engine's id field shows as its example. */
 const EXAMPLES: Record<string, string> = { claude: 'sonnet', codex: 'sol' };
-const EFFORTS: Array<[string, string]> = [
-  ['low', 'Low'],
-  ['medium', 'Medium'],
-  ['high', 'High'],
-];
-const SCOPES: Array<[string, string]> = [
-  ['personal', 'Just me'],
-  ['workspace', 'Workspace'],
-];
 const providers = CUSTOM_PROVIDERS;
-const OTHER: CustomProvider = {
-  id: 'other',
-  name: 'Other',
-  baseUrl: '',
-  envKey: '',
-  needsKey: true,
-};
+const OTHER = providers.at(-1)!;
 
 /** A model name from an id: its last path part, lowercase kebab, like `kimi-k2` from `moonshotai/kimi-k2`. */
 const slug = (id: string) =>
@@ -68,7 +57,7 @@ const slug = (id: string) =>
 const unused = (names: string[], taken: Record<string, unknown>) =>
   names.find(name => !(name in taken));
 
-/** A short name for a Claude or Codex model id, or a custom OpenAI-compatible endpoint. Enter adds. */
+/** A short name for a Claude or Codex model id, or an OpenAI-compatible endpoint. Enter adds. */
 function AddModel({
   builtin,
   credentials,
@@ -86,18 +75,51 @@ function AddModel({
   taken: Record<string, unknown>;
   onAdd: (act: () => Promise<Config>) => Promise<boolean>;
 }) {
-  const [provider, setProvider] = useState('custom');
-  const kind = provider === 'custom' ? 'custom' : 'alias';
-  const engine = (
-    <Field label="Engine" group>
-      <Select label="Engine" options={PROVIDERS} value={provider} onChange={setProvider} />
+  const [kind, setKind] = useState('endpoint');
+  const kindField = (
+    <Field label="Kind" group>
+      <Select label="Kind" options={KINDS} value={kind} onChange={setKind} />
     </Field>
   );
+  const [engine, setEngine] = useState('claude');
   const [effort, setEffort] = useState('');
   const [busy, setBusy] = useState(false);
   const [round, setRound] = useState(0);
-  const known = builtin[provider] ?? {};
-  const example = known[EXAMPLES[provider]!] ?? Object.values(known)[0];
+  const replace = useReplace();
+  const known = builtin[engine] ?? {};
+  const example = known[EXAMPLES[engine]!] ?? Object.values(known)[0];
+
+  const add = async (form: HTMLFormElement, values: Record<string, string>) => {
+    setBusy(true);
+    const added =
+      kind === 'alias'
+        ? await onAdd(() =>
+            client.models.alias(
+              values.name!,
+              [engine, values.model, effort].filter(Boolean).join(':'),
+            ),
+          )
+        : await onAdd(async () => {
+            const envKey = values.envKey || 'OPENAI_API_KEY';
+            if (values.key)
+              await client.credentials.add({
+                env: { [envKey]: values.key },
+                workspace: values.scope === 'workspace',
+              });
+            return client.models.add({
+              name: values.name!,
+              baseUrl: values.baseUrl!,
+              model: values.model!,
+              envKey,
+            });
+          });
+    setBusy(false);
+    if (!added) return;
+
+    form.reset();
+    setRound(round + 1);
+  };
+
   return (
     <FoldCard
       title="Add a model"
@@ -106,50 +128,35 @@ function AddModel({
       <form
         class="add-form"
         method="post"
-        onSubmit={async event => {
+        onSubmit={event => {
           event.preventDefault();
           const form = event.currentTarget;
           const values = Object.fromEntries(
             [...new FormData(form)].map(([key, value]) => [key, String(value).trim()]),
           );
-          if (kind === 'custom' && !values.name) values.name = slug(values.model ?? '');
-          if (!values.name || !values.model || (kind === 'custom' && !values.baseUrl)) return;
-          setBusy(true);
-          const added =
-            kind === 'alias'
-              ? await onAdd(() =>
-                  client.models.alias(
-                    values.name!,
-                    [provider, values.model, effort].filter(Boolean).join(':'),
-                  ),
-                )
-              : await onAdd(async () => {
-                  const envKey = values.envKey || 'OPENAI_API_KEY';
-                  if (values.key)
-                    await client.credentials.add({
-                      env: { [envKey]: values.key },
-                      engine: 'custom',
-                      label: providers.find(item => item.id === values.provider)?.name,
-                      workspace: values.scope === 'workspace',
-                    });
-                  return client.models.add({
-                    name: values.name!,
-                    baseUrl: values.baseUrl!,
-                    model: values.model!,
-                    envKey,
-                  });
-                });
-          setBusy(false);
-          if (!added) return;
-
-          form.reset();
-          setRound(round + 1);
+          if (kind === 'endpoint' && !values.name) values.name = slug(values.model ?? '');
+          if (!values.name || !values.model || (kind === 'endpoint' && !values.baseUrl)) return;
+          const envKey = values.envKey || 'OPENAI_API_KEY';
+          const scope = values.scope || 'personal';
+          if (
+            kind === 'endpoint' &&
+            values.key &&
+            credentials?.some(row => row.name === envKey && row.scope === scope)
+          )
+            return replace.ask(replaceTitle(envKey, scope), () => void add(form, values));
+          void add(form, values);
         }}
       >
         {kind === 'alias' ? (
           <div class="add-grid">
-            {engine}
-            <Field label="Name">
+            {kindField}
+            <Field label="Engine" group>
+              <Select label="Engine" options={ALIAS_ENGINES} value={engine} onChange={setEngine} />
+            </Field>
+            <Field label="Model id">
+              <input name="model" placeholder={example ?? 'model id'} autocomplete="off" />
+            </Field>
+            <Field label="Short name" hint="used as --model">
               <input
                 name="name"
                 placeholder={unused(['fast', 'deep', 'quick'], taken)}
@@ -157,13 +164,10 @@ function AddModel({
                 pattern="[a-z0-9][a-z0-9\-]*"
               />
             </Field>
-            <Field label="Model id">
-              <input name="model" placeholder={example ?? 'model id'} autocomplete="off" />
-            </Field>
             <Field label="Effort" hint="optional" group>
               <Select
                 label="Effort"
-                options={[['', defaultLabel(efforts[provider])], ...EFFORTS]}
+                options={[['', defaultLabel(efforts[engine])], ...EFFORTS]}
                 value={effort}
                 onChange={setEffort}
               />
@@ -175,43 +179,46 @@ function AddModel({
         ) : (
           <CustomFields
             key={round}
-            engine={engine}
+            kind={kindField}
             credentials={credentials}
             admin={admin}
-            taken={taken}
             busy={busy}
           />
         )}
       </form>
+      {replace.dialog}
     </FoldCard>
   );
 }
 
-/** A custom endpoint's fields; a provider fills its URL and key variable, and a probe lists its models. */
+/** A custom endpoint's fields: the model in one row, its key in the next; a provider fills its URL and key variable, and a probe lists its models. */
 function CustomFields({
-  engine,
+  kind,
   credentials,
   admin,
-  taken,
   busy,
 }: {
-  engine: ComponentChildren;
+  kind: ComponentChildren;
   /** Null on the local server, where keys come from this machine's environment. */
   credentials: CredentialRow[] | null;
   admin: boolean;
-  taken: Record<string, unknown>;
   busy: boolean;
 }) {
   const [preset, setPreset] = useState(providers[0] ?? OTHER);
   const [baseUrl, setBaseUrl] = useState(preset.baseUrl);
   const [envKey, setEnvKey] = useState(preset.envKey);
   const [key, setKey] = useState('');
-  const [scope, setScope] = useState('personal');
+  const [scope, setScope] = useState(admin ? 'workspace' : 'personal');
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const latest = useRef(0);
   const [model, setModel] = useState('');
-  const saved = (name: string) =>
-    Boolean(name) && Boolean(credentials?.some(row => row.env.includes(name)));
+  const has = (name: string, where: string) =>
+    Boolean(name) && Boolean(credentials?.some(row => row.name === name && row.scope === where));
+  // The scope whose saved key a model would use; a member's tasks fall back to the workspace's.
+  const saved = (name: string, where = scope) =>
+    has(name, where) ? where : !admin && has(name, 'workspace') ? 'workspace' : undefined;
+  const collapsed = saved(envKey, admin ? 'workspace' : 'personal');
+  const whose = (where?: string) => (where === 'workspace' ? "the workspace's" : 'your');
 
   const [checking, setChecking] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>();
@@ -251,11 +258,51 @@ function CustomFields({
       : probe.models
         ? `${probe.models.length} listed`
         : 'reachable, no model list';
+  const keyRow =
+    preset.needsKey && credentials ? (
+      <div class="add-grid">
+        <Field
+          label="API key"
+          hint={
+            <>
+              {saved(envKey)
+                ? `uses ${whose(saved(envKey))} saved ${envKey}; enter one to replace it`
+                : `a new key, stored as ${envKey}`}
+              {preset.keyUrl ? (
+                <>
+                  {', '}
+                  <a class="link" href={preset.keyUrl} target="_blank" rel="noopener noreferrer">
+                    get a key
+                  </a>
+                </>
+              ) : null}
+            </>
+          }
+        >
+          <input
+            name="key"
+            type="password"
+            autocomplete="off"
+            placeholder={saved(envKey) ? 'Leave empty to use the saved key' : `${preset.name} API key`}
+            value={key}
+            onInput={event => {
+              setKey(event.currentTarget.value);
+              checkSoon(baseUrl, envKey, event.currentTarget.value);
+            }}
+          />
+        </Field>
+        {admin ? (
+          <Field label="Scope" group>
+            <Select label="Scope" name="scope" options={SCOPES} value={scope} onChange={setScope} />
+          </Field>
+        ) : null}
+      </div>
+    ) : null;
 
   return (
     <>
       <div class="add-grid">
-        {engine}
+        {kind}
         <Field label="Provider" group>
           <Select
             label="Provider"
@@ -273,46 +320,6 @@ function CustomFields({
             }}
           />
         </Field>
-        <Field label="Model name" hint="optional">
-          <input
-            name="name"
-            placeholder={slug(model) || 'short name like kimi'}
-            autocomplete="off"
-            pattern="[a-z0-9][a-z0-9\-]*"
-          />
-        </Field>
-      </div>
-      <div class="add-grid">
-        {preset.needsKey && credentials ? (
-          <Field
-            label="API key"
-            hint={
-              <>
-                {saved(envKey) ? `optional, your saved ${envKey}` : `saved as ${envKey}`}
-                {preset.keyUrl ? (
-                  <>
-                    {', '}
-                    <a class="link" href={preset.keyUrl} target="_blank" rel="noopener noreferrer">
-                      get a key
-                    </a>
-                  </>
-                ) : null}
-              </>
-            }
-          >
-            <input
-              name="key"
-              type="password"
-              autocomplete="off"
-              placeholder={saved(envKey) ? 'Optional' : `${preset.name} API key`}
-              value={key}
-              onInput={event => {
-                setKey(event.currentTarget.value);
-                checkSoon(baseUrl, envKey, event.currentTarget.value);
-              }}
-            />
-          </Field>
-        ) : null}
         <Field
           label="Model id"
           group
@@ -330,12 +337,25 @@ function CustomFields({
             onChange={setModel}
           />
         </Field>
-        {preset.needsKey && credentials && admin ? (
-          <Field label="Scope" group>
-            <Select label="Scope" name="scope" options={SCOPES} value={scope} onChange={setScope} />
-          </Field>
-        ) : null}
+        <Field label="Short name" hint="used as --model; defaults to the model id">
+          <input
+            name="name"
+            placeholder={slug(model) || 'kimi'}
+            autocomplete="off"
+            pattern="[a-z0-9][a-z0-9\-]*"
+          />
+        </Field>
       </div>
+      {keyRow && collapsed ? (
+        <details key={envKey} class="add-more">
+          <summary>
+            API key · uses {whose(collapsed)} saved {envKey}
+          </summary>
+          {keyRow}
+        </details>
+      ) : (
+        keyRow
+      )}
       <div class="add-foot">
         <details class="add-more" open={preset.id === 'other' || undefined}>
           <summary>Advanced</summary>
@@ -389,11 +409,15 @@ export function ModelsList({
   const [models, setModels] = useState(first);
   const action = useAction();
   const settings = useConfig(config.config);
-  const send = (act: () => Promise<Config>) =>
-    action.run('send', async () => {
-      const answer = await act();
-      setModels(now => ({ ...now, models: answer.models ?? {} }));
-    });
+  const send = (act: () => Promise<Config>, toast?: string) =>
+    action.run(
+      'send',
+      async () => {
+        const answer = await act();
+        setModels(now => ({ ...now, models: answer.models ?? {} }));
+      },
+      { toast },
+    );
   const defaultOf = (engine: string) =>
     settings.value.engines?.[engine]?.model ?? config.effective.engines?.[engine]?.model;
   const off = (name: string) => models.models[name]?.disabled === true;
@@ -448,7 +472,7 @@ export function ModelsList({
             settings.value.engines?.[engine]?.effort ?? config.effective.engines?.[engine]?.effort,
           ]),
         )}
-        onAdd={send}
+        onAdd={act => send(act, 'Not saved')}
       />
       {groups.map(([engine, list]) => (
         <List key={engine} title={ENGINE_NAMES[engine] ?? engine} count={list.length}>

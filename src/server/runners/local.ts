@@ -48,11 +48,18 @@ export class LocalRunner implements Runner {
     const dir = await fsp.mkdtemp(path.join(this.workDir, 'task-'));
     const cache = task.runner === 'local' ? checkoutCache(task) : undefined;
     const log = fs.openSync(path.join(dir, 'runner.log'), 'a');
+    // This server's own coder answers `coder` for the engine, whatever the machine has installed.
+    await fsp.mkdir(path.join(dir, 'bin'));
+    await fsp.writeFile(
+      path.join(dir, 'bin/coder'),
+      `#!/bin/sh\nexec "${process.execPath}" "${CLI_PATH}" "$@"\n`,
+      { mode: 0o755 },
+    );
     const child = spawn(process.execPath, [CLI_PATH, 'agent', 'run', '--task', task.id], {
       cwd: dir,
       detached: true,
       env: {
-        PATH: process.env.PATH ?? '',
+        PATH: [path.join(dir, 'bin'), process.env.PATH ?? ''].join(path.delimiter),
         HOME: process.env.HOME ?? '',
         TMPDIR: process.env.TMPDIR ?? '',
         ...(process.env.CODER_HOME ? { CODER_HOME: process.env.CODER_HOME } : {}),

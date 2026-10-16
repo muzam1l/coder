@@ -5,6 +5,6 @@
   "dependencies": {
     "@vercel/functions": "latest",
     "@vercel/sandbox": "latest",
-    "@wular/coder": "latest"
+    "@wular/coder": "0.4.10"
   }
 }

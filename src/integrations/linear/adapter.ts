@@ -1,26 +1,17 @@
 /** Linear agent sessions through Chat SDK: Coder verifies the webhook signature, then mints the workspace's app token. */
-import { createHmac } from 'node:crypto';
-
 import { LinearAdapter } from '@chat-adapter/linear';
-import { type Adapter, type AdapterPostableMessage, type ChatInstance, ConsoleLogger } from 'chat';
+import {
+  type Adapter,
+  type AdapterPostableMessage,
+  type ChatInstance,
+  ConsoleLogger,
+  defaultEmojiResolver,
+  type EmojiValue,
+} from 'chat';
 
-import { safeEqual } from '../../utils/crypto';
+import { verifyLinearWebhook } from './api';
 import type { AdapterContext } from '../types';
 import type { LinearAppCredentials } from './app';
-
-/** Linear's webhook check: an HMAC of the body under the app's secret, sent within the last minute. */
-export function verifyLinearWebhook(
-  raw: string,
-  signature: string | null,
-  secret: string | undefined,
-  now = Date.now(),
-): boolean {
-  if (!secret || !signature) return false;
-  const expected = createHmac('sha256', secret).update(raw).digest();
-  if (!safeEqual(Buffer.from(signature, 'hex'), expected)) return false;
-  const sent = (JSON.parse(raw) as { webhookTimestamp?: unknown }).webhookTimestamp;
-  return typeof sent === 'number' && Math.abs(now - sent) <= 60_000;
-}
 
 /** Mints nothing before a webhook is verified, and posts outside one (a task's reply) for the bound workspace. */
 class BoundLinearAdapter extends LinearAdapter {
@@ -61,8 +52,31 @@ class BoundLinearAdapter extends LinearAdapter {
     return this.bound(() => super.postMessage(threadId, message));
   }
 
+  override addReaction(threadId: string, messageId: string, emoji: EmojiValue | string) {
+    return this.bound(() =>
+      super.addReaction(threadId, messageId, defaultEmojiResolver.toGChat(emoji)),
+    );
+  }
+
   override startTyping(threadId: string, status?: string) {
     return this.bound(() => super.startTyping(threadId, status));
+  }
+
+  postProgress(threadId: string, text: string) {
+    const { agentSessionId } = this.decodeThreadId(threadId);
+    if (!agentSessionId) return this.postMessage(threadId, { markdown: text });
+
+    return this.bound(async () => {
+      await this.ensureValidToken();
+      const result = await this.getClient().createAgentActivity({
+        agentSessionId,
+        content: { type: 'thought' as never, body: text },
+      });
+      const activity = await result.agentActivity;
+      if (!result.success || !activity) throw new Error('Linear progress activity failed');
+
+      return { id: activity.id };
+    });
   }
 
   /** An error activity, so Linear shows the session as failed; outside a session, a comment. */

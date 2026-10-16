@@ -64,11 +64,11 @@ export const GET = (request: Request) => handler(request, waitUntil);
 export const POST = GET;
 ```
 
-Run `await handler.scheduled()` from an hourly scheduled job to sweep expired state across every workspace, renew platform subscriptions, and start queued tasks. Each call deletes bounded batches; run it more frequently when expiry traffic exceeds 1,000 entries per hour. Call `await handler.close()` when the host shuts down. Other active handlers retain their shared database pool until they close.
+Run `await handler.scheduled()` from a scheduled job to sweep expired state across every workspace, renew platform subscriptions, start queued tasks, and deliver pending messages. Call `await handler.close()` when the host shuts down.
 
 `DATABASE_POOL_MAX` sets the process pool limit, defaulting to 10 connections on a persistent host and 2 on Vercel. `DATABASE_IDLE_TIMEOUT` sets idle expiry in seconds, defaulting to 240 and 30 respectively. Set these before creating a handler; handlers sharing a database share the first pool's settings.
 
-Completed tasks, their logs and usage remain until a task is explicitly deleted. Sandbox snapshots remain until replaced or deleted. Expiring deliveries, notes, engine sign-ins and chat state are cleaned by the sweep.
+Completed tasks, their logs and usage remain until a task is explicitly deleted. Sandbox snapshots remain until replaced or deleted. Expiring deliveries, engine sign-ins and chat state are cleaned by the sweep.
 
 ### Database setup
 
@@ -98,17 +98,15 @@ Each task gets the narrowest platform token: on GitHub an installation token for
 
 ## Credentials
 
-An engine credential names an engine (`claude`, `codex`, or `custom`) and holds one or more encrypted environment variables. A personal credential belongs to one member, who alone sees and uses it. A workspace credential serves every member; only owners and admins add, remove, or change it. Each scope has one default per engine. A task runs on its requester's personal default for the engine, then on the workspace default. Tasks with no known requester, such as events from unlinked platform users, use the workspace default only. Without either, the agent replies with a link to the Credentials page, open at that engine.
+Credentials are subscriptions and API keys. A subscription is a member's own Claude or Codex sign-in, one per engine, offered when `CLAUDE_SUBSCRIPTIONS=1` or `CODEX_SUBSCRIPTIONS=1` is set; it runs the official `claude setup-token` or `codex login --device-auth` on the server's runner, or takes pasted `claude setup-token` output. An API key is saved as its environment variable, one per variable in each scope: personal for any member, workspace-wide for owners and admins.
 
-`CLAUDE_SUBSCRIPTIONS=1` and `CODEX_SUBSCRIPTIONS=1` turn on "Sign in with Claude" and "Sign in with Codex", for personal credentials only; both are off by default. Sign-in runs the official, unmodified `claude setup-token` or `codex login --device-auth` on the server's runner, and the dashboard stores the result. The page shows each credential masked, with the account email and plan where the CLI reports them.
-
-API keys are personal for any member and workspace-wide for owners and admins. Built-in engines are checked with one models request unless `--no-check` is set. Without subscription sign-in, a member may paste their own `claude setup-token` output as a personal credential.
+Each engine uses its subscription, else its key (`ANTHROPIC_API_KEY` for Claude, `OPENAI_API_KEY` for Codex), the requester's own before the workspace's; a custom model uses the variable it names. Tasks with no known requester use the workspace's only, and without a credential the agent replies with a link to the Credentials page.
 
 From a terminal, `coder credentials` adds, lists, removes and signs in credentials; it reads secrets from the environment or stdin and never prints them.
 
 ## Tasks
 
-A task starts from the dashboard, `coder task run --server`, or a platform event. Its credential is the requester's own, then the workspace's; without one it is refused with a link that connects it. The server holds up to `limits.concurrentTasks` runner slots per workspace, including tasks waiting for a reply or approval. Set `MAX_TASKS` for an additional cap across all instances. `TASK_STALL`, `TASK_TIMEOUT` and `TASK_ATTEMPTS` bound each task.
+A task starts from the dashboard, `coder task run --server`, or a platform event. Its credential is the requester's own, then the workspace's; a shared platform conversation, such as a channel thread or a pull request, uses only the workspace's. Without one it is refused with a link that connects it. The server holds up to `limits.concurrentTasks` runner slots per workspace, including tasks waiting for a reply or approval. Set `MAX_TASKS` for an additional cap across all instances. `TASK_STALL`, `TASK_TIMEOUT` and `TASK_ATTEMPTS` bound each task.
 
 A task is a conversation: steer it or ask it a question while it runs, and continue it once it has finished. Its output streams over Server-Sent Events, and a repo task's result includes the diff of its changes. The CLI's task commands take `--server` to do the same as the dashboard. A repo's own `.coder/config.json` can only narrow the workspace's config.
 
@@ -151,11 +149,11 @@ A platform user who addresses an agent must be linked to a member of the workspa
 
 `local-docker` and `github-actions` run in the runner image, which holds the engines and tools. A custom `image` needs `node`, `bun`, `git`, `curl`, `tar`, `claude`, `codex` and `github-mcp-server`.
 
-`local-docker`, `vercel-sandbox` and `github-actions` download this server's version of Coder from npm at start, with nothing to install. `tarballUrl` points them at another package, such as an unpublished build.
+`local-docker`, `vercel-sandbox` and `github-actions` download this server's built runner from its public, immutable `/runner/<hash>.tgz` URL. Repository snapshots are specific to that build.
 
 On `vercel-sandbox` each task uses the universal image's engines without their own sandbox, and its machine stops when the task ends. Repository snapshots hold the checkout and its installed dependencies. The default is 1 CPU and 2 GB memory; `vcpus` selects a larger machine.
 
-Access-token authentication needs a token, team ID and project ID. Settings → Runners accepts the IDs directly, or the adapter app can supply `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`. The firewall injects engine API keys into provider requests, and the task sees a placeholder. Below `auto`, a task's machine reaches only this server, npm, its engine, integrations, connections, MCP servers and `allowedNetworkHosts`.
+Access-token authentication needs a token, team ID and project ID. Settings → Runners accepts the IDs directly, or the adapter app can supply `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`. The firewall injects engine API keys into provider requests, and the task sees a placeholder. Below `auto`, a task's machine reaches only this server, its engine, integrations, connections, MCP servers and `allowedNetworkHosts`.
 
 For GitHub Actions, save the output of `coder server workflow` as `.github/workflows/coder-agent.yml` on the workflow repository's default branch. Save it again after each Coder upgrade. It accepts `task`, `server`, `token`, `mode` and `tarball`, names each run `Coder agent <task ID>`, and runs the task in the runner image with the callback URL and attempt token in the environment. The workflow token needs repository Actions read and write; a classic token for a private repository needs `repo`. A result returns through the authenticated task callback. No result artifact is required.
 

@@ -14,11 +14,9 @@ import {
   type Column,
   type TableGroup,
 } from '../../tui/output';
-import { flag, limitOption, optStr, str } from '../../utils/args';
+import { flag, limitOption, str, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-import { replyOf, statusStyle } from './result';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
+import { replyOf } from './result';
 
 // Below this, a running task's idle age isn't worth showing at all.
 const IDLE_SHOW_MS = 2 * 60_000;
@@ -33,7 +31,7 @@ function printServerTasks(rows: TaskStatus[]): void {
         {
           header: 'status',
           value: row => row.status,
-          paint: value => statusStyle(value as TaskStatus['status'], s),
+          paint: (cell, row) => paintStatus(row.status, cell.length),
         },
         { header: 'agent', value: row => row.task.agent },
         { header: 'source', value: row => row.task.source },

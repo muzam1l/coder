@@ -1,6 +1,5 @@
 import '@/comps/ui/segmented.css';
 import '@/app/dash/[org]/usage/range-bar.css';
-import './usage.css';
 import { formatCompact, formatCount, formatDuration, zoneOf } from '@/utils/format';
 import { daysIn, rangeFor } from '@/utils/range';
 import { load, orgOf } from '@/api/load';
@@ -41,7 +40,6 @@ export default function UsagePage({ request }: { request?: Request }) {
     limit: TOP_AGENTS,
     sort,
   });
-  const agents = load(request).agents.list({ fields: 'id' });
   const days = load(request).usage({
     by: 'day',
     since: range.since,
@@ -65,7 +63,7 @@ export default function UsagePage({ request }: { request?: Request }) {
       />
       <Settle
         load={() =>
-          Promise.all([first, days, agents]).then(([page, chart, known]) => {
+          Promise.all([first, days]).then(([page, chart]) => {
             const { summary, items } = page;
             const series = (chart.top ?? []).map((key, index): Series => ({
               key,
@@ -104,7 +102,6 @@ export default function UsagePage({ request }: { request?: Request }) {
                 <TopAgents
                   org={orgOf(request)}
                   rows={items}
-                  known={new Set(known.map(agent => agent.id))}
                   other={
                     summary.agents > items.length
                       ? {

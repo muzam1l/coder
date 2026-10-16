@@ -8,6 +8,7 @@ import { useRef, useState } from 'preact/hooks';
 import { client } from '@/utils/client';
 import { toastFailure } from '@/utils/action';
 import type { Config, ConfigPatch } from '@coder/client/types';
+import { mergePatch } from '@coder/core/defaults';
 
 import { iDots } from '@/comps/ui/icons';
 import { Button } from '@/comps/ui/button';
@@ -17,18 +18,6 @@ import { Menu } from '@/comps/ui/menu';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 
-/** RFC 7396: objects merge, null deletes, anything else replaces. */
-function merged<T>(target: T, patch: unknown): T {
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return patch as T;
-  const out: Record<string, unknown> =
-    target && typeof target === 'object' && !Array.isArray(target) ? { ...target } : {};
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null) delete out[key];
-    else out[key] = merged(out[key], value);
-  }
-  return out as T;
-}
-
 /** Config edits shown at once and sent as merge patches; the newest answer wins and a failure rolls back. */
 export function useConfig(first: Config) {
   const [value, setValue] = useState(first);
@@ -36,7 +25,7 @@ export function useConfig(first: Config) {
   const saved = useRef(first);
   const patch = (body: ConfigPatch) => {
     const seq = ++sent.current;
-    setValue(now => merged(now, body));
+    setValue(now => mergePatch(now, body));
     return client.config.patch(body).then(
       answer => {
         saved.current = answer;
@@ -54,10 +43,6 @@ export function useConfig(first: Config) {
   };
   return { value, patch };
 }
-
-export const EFFORTS = ['low', 'medium', 'high'];
-
-export const PERMISSIONS = ['read-only', 'workspace-write', 'auto'];
 
 /** The add row: its fields, and Enter in any of them adds. */
 export function AddRow({
@@ -130,6 +115,30 @@ export function useRemove(removal?: Removal) {
   };
 }
 
+export const replaceTitle = (name: string, scope: string) =>
+  scope === 'workspace' ? `Replace ${name} for the workspace?` : `Replace your ${name}?`;
+
+/** The dialog that asks before a save replaces the key saved for a variable in that scope. */
+export function useReplace() {
+  const [asking, setAsking] = useState<{ title: string; run: () => void }>();
+  return {
+    ask: (title: string, run: () => void) => setAsking({ title, run }),
+    dialog: asking ? (
+      <ConfirmDialog
+        open
+        title={asking.title}
+        body="Tasks use the new one from now on."
+        confirmLabel="Replace"
+        onClose={() => setAsking(undefined)}
+        onConfirm={() => {
+          setAsking(undefined);
+          asking.run();
+        }}
+      />
+    ) : null,
+  };
+}
+
 /** A settings row: its primary action as a button, the rest and Remove in the ⋯ menu. */
 export function Row({
   title,
@@ -137,6 +146,7 @@ export function Row({
   sub,
   actions,
   menu,
+  alignMenu,
   remove,
 }: {
   title: string;
@@ -144,6 +154,8 @@ export function Row({
   sub?: ComponentChildren;
   actions?: ComponentChildren;
   menu?: ComponentChildren;
+  /** Show the ⋯ menu even when empty, so rows in one list line up. */
+  alignMenu?: boolean;
   remove?: Removal;
 }) {
   const removing = useRemove(remove);
@@ -158,10 +170,11 @@ export function Row({
       </td>
       <td class="acts">
         {actions}
-        {menu || removing.item ? (
+        {menu || removing.item || alignMenu ? (
           <Menu button="icon" label="Actions" summary={<Icon d={iDots} />}>
             {menu}
             {removing.item}
+            {menu || removing.item ? null : <p class="menu-none">No options</p>}
           </Menu>
         ) : null}
         {removing.dialog}

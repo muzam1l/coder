@@ -1,10 +1,8 @@
 import './page.css';
-import { redirect } from '@wular/pnext/navigation';
 
 import { AuthPanel } from '@/comps/frame/auth-panel';
 import { Button } from '@/comps/ui/button';
 import { safeReturnPath } from '@coder/server/auth/sign-in';
-import { load } from '@/api/load';
 
 const WULAR_LOGO = (
   <svg class="logo" viewBox="6 12 52 36" aria-hidden="true">
@@ -46,12 +44,9 @@ function LoginPage({ signIn, error }: { signIn: string; error?: string | null })
   );
 }
 
-export default async function Page({ request }: { request?: Request }) {
+export default function Page({ request }: { request?: Request }) {
   if (!request) return null;
   const url = new URL(request.url);
-  const { wular } = await load(request).info();
-  // A memory server keeps no accounts: its dashboard asks for the admin token.
-  if (!wular) redirect('/dash');
   return (
     <LoginPage
       signIn={`/api/auth/sign-in?return=${encodeURIComponent(safeReturnPath(url.searchParams.get('return'), url.origin))}`}

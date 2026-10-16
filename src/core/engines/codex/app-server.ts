@@ -5,11 +5,13 @@
  */
 import net from 'node:net';
 import process from 'node:process';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import readline from 'node:readline';
+
 import { parseBrokerEndpoint } from '../../broker/endpoint';
 import { ensureBrokerSession, loadBrokerSession } from '../../broker/session';
-import { runCommand, terminateProcessTree } from '../../../utils/process';
+import { processTiming } from '../../../utils/process';
+import { readVersion } from '../../runtime';
 import { connectionEnvironmentKey, engineEnvironment } from '../../connections';
 
 export const BROKER_ENDPOINT_ENV = 'CODER_APP_SERVER_ENDPOINT';
@@ -20,15 +22,8 @@ export const BROKER_NOTICE_METHOD = 'coder/notice';
 export const BROKER_APP_SERVER_EXITED_METHOD = 'coder/appServerExited';
 export const BROKER_RECYCLE_METHOD = 'broker/recycle';
 
-const FALLBACK_CODEX_VERSION = '0.144.1';
-function detectCodexVersion() {
-  const result = runCommand('codex', ['--version'], { env: engineEnvironment() });
-  const match = /(\d+\.\d+\.\d+(?:-[\w.]+)?)/.exec(`${result.stdout} ${result.stderr}`);
-  return match ? match[1] : FALLBACK_CODEX_VERSION;
-}
-
 function defaultClientInfo() {
-  return { title: 'Coder', name: 'coder', version: detectCodexVersion() };
+  return { title: 'Coder', name: 'coder', version: readVersion() };
 }
 
 const DEFAULT_CAPABILITIES = {
@@ -279,6 +274,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
 
   async initialize() {
     const networkAccess = this.options.networkAccess ?? false;
+    processTiming('codex.spawn');
     this.proc = spawn('codex', codexAppServerArgs(networkAccess, this.options.nativeMcp), {
       cwd: this.cwd,
       env: engineEnvironment(this.options.env ?? process.env),
@@ -326,6 +322,7 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES,
     });
     this.notify('initialized', {});
+    processTiming('codex.initialized');
   }
 
   async close() {
@@ -346,7 +343,9 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
         if (this.proc && !this.proc.killed && this.proc.exitCode === null) {
           if (process.platform === 'win32') {
             try {
-              terminateProcessTree(this.proc.pid);
+              spawnSync('taskkill', ['/PID', String(this.proc.pid), '/T', '/F'], {
+                stdio: 'ignore',
+              });
             } catch {
               // Best-effort cleanup inside an unref'd timer.
             }
@@ -415,6 +414,7 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES,
     });
     this.notify('initialized', {});
+    processTiming('codex.initialized');
   }
 
   async close() {

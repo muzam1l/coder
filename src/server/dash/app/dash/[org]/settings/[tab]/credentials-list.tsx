@@ -6,25 +6,24 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { client, usePoll } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
-import { iCheck, iDots, iPlus } from '@/comps/ui/icons';
+import { iCheck } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import type { CredentialRow, EngineStatus, Me } from '@coder/client/types';
 import { Card, Loading } from '@/comps/ui/card';
 import { Modal } from '@/comps/ui/modal';
 import { reasonText } from '@/utils/format';
 import { Badge } from '@/comps/ui/badge';
-import { Button, IconButton } from '@/comps/ui/button';
+import { Button } from '@/comps/ui/button';
 import { CopyButton } from '@/comps/ui/copy';
 import { Icon } from '@/comps/ui/icon';
-import { Menu } from '@/comps/ui/menu';
 import { MenuItem } from '@/comps/ui/menu-items';
-import { Segmented } from '@/comps/ui/segmented';
 import { Select } from '@/comps/ui/select';
 import { Combo } from '@/comps/ui/combo';
-import { useRemove } from './list';
+import { Row, replaceTitle, useReplace } from './list';
 import { useOrg } from '@/comps/nav/org';
+import { isAdmin } from '@/api/types';
+import { CUSTOM_PROVIDERS, SCOPES } from '@/app/dash/[org]/settings/model-options';
 
-type Engine = CredentialRow['engine'];
 type Login = {
   id: string;
   engine: 'claude' | 'codex';
@@ -34,176 +33,85 @@ type Login = {
   error?: string;
 };
 
-const ENGINES: Array<{ id: Engine; name: string; key: string; hint: string; signIn?: string }> = [
-  {
-    id: 'claude',
-    name: 'Claude',
-    key: 'ANTHROPIC_API_KEY',
-    hint: 'Anthropic API key',
-    signIn: 'Claude',
-  },
-  { id: 'codex', name: 'Codex', key: 'OPENAI_API_KEY', hint: 'OpenAI API key', signIn: 'ChatGPT' },
-  { id: 'custom', name: 'Custom', key: 'OPENAI_API_KEY', hint: 'API key' },
+const ENGINES: Array<{ id: Login['engine']; name: string; key: string; signIn: string }> = [
+  { id: 'claude', name: 'Claude', key: 'ANTHROPIC_API_KEY', signIn: 'Claude' },
+  { id: 'codex', name: 'Codex', key: 'OPENAI_API_KEY', signIn: 'ChatGPT' },
 ];
-const CUSTOM_KEYS = [
-  'OPENAI_API_KEY',
-  'OPENROUTER_API_KEY',
-  'AI_GATEWAY_API_KEY',
-  'GROQ_API_KEY',
-  'TOGETHER_API_KEY',
-  'ANTHROPIC_API_KEY',
+const KEYS = [
+  ...ENGINES.map(engine => engine.key),
+  ...CUSTOM_PROVIDERS.flatMap(provider => provider.envKey || []),
 ];
-const SCOPES: Array<[string, string]> = [
-  ['personal', 'Just me'],
-  ['workspace', 'Workspace'],
-];
-const METHODS: Record<string, string> = { signin: 'Sign in', key: 'API key', token: 'Setup token' };
 
-const ADMIN_ROLES = new Set(['owner', 'admin']);
-function Row({
-  row,
-  busy,
-  onAct,
-  onSignIn,
-  canManage,
-}: {
-  row: CredentialRow;
-  busy: string;
-  onAct: (kind: 'default' | 'remove') => Promise<unknown>;
-  onSignIn?: () => void;
-  canManage: boolean;
-}) {
-  const subscription = row.label.endsWith('-subscription');
-  const account = [row.account?.email, row.account?.plan].filter(Boolean).join(' · ');
-  const signIn = subscription && onSignIn;
-  const removing = useRemove(
-    canManage
-      ? {
-          label: subscription ? 'Sign out' : 'Remove',
-          title: subscription ? `Sign out of ${row.label}?` : `Remove ${row.label}?`,
-          body: 'Tasks that use it stop running.',
-          onRemove: () => onAct('remove'),
-        }
-      : undefined,
-  );
-  return (
-    <tr>
-      <td>
-        <span class="row-title">
-          <b>{row.label}</b>
-          <Badge>{row.scope}</Badge>
-          {row.isDefault ? <Badge tone="acc">default</Badge> : null}
-        </span>
-        <span class="sub mono">{account ? `${account} · ${row.masked}` : row.masked}</span>
-      </td>
-      <td class="acts">
-        {row.isDefault || !canManage ? null : (
-          <Button
-            variant="ghost"
-            size="sm"
-            loading={busy === 'default'}
-            onClick={() => void onAct('default')}
-          >
-            Make default
-          </Button>
-        )}
-        {signIn || removing.item ? (
-          <Menu button="icon" label="Actions" summary={<Icon d={iDots} />}>
-            {signIn ? (
-              <>
-                <MenuItem title="Sign in again" onClick={signIn} />
-                <MenuItem title="Switch account" onClick={signIn} />
-              </>
-            ) : null}
-            {removing.item}
-          </Menu>
-        ) : null}
-        {removing.dialog}
-      </td>
-    </tr>
-  );
-}
-
-/** One key field for an engine; Enter saves it. A custom key also names its variable. */
-function KeyField({
-  engine,
-  token,
+/** One API key by its variable; a variable already saved in that scope asks before it is replaced. */
+function KeyForm({
+  keys,
   admin,
-  autoFocus,
-  onSaved,
+  focus,
+  ask,
 }: {
-  engine: (typeof ENGINES)[number];
-  /** Take a pasted `claude setup-token` instead of an API key. */
-  token?: boolean;
+  keys: CredentialRow[];
   admin: boolean;
-  autoFocus: boolean;
-  onSaved: () => void;
+  /** The engine whose key the page was opened for. */
+  focus: string;
+  ask: (title: string, run: () => void) => void;
 }) {
-  const [value, setValue] = useState('');
+  const [name, setName] = useState(ENGINES.find(engine => engine.id === focus)?.key ?? 'OPENAI_API_KEY');
+  const [scope, setScope] = useState(admin ? 'workspace' : 'personal');
   const input = useRef<HTMLInputElement>(null);
-  const [name, setName] = useState(engine.key);
-  const [scope, setScope] = useState('personal');
-  const action = useAction({ leaves: true });
-  const busy = Boolean(action.pending);
+  const action = useAction({ toast: 'Not saved', refresh: true });
   useEffect(() => {
-    if (autoFocus) input.current?.focus();
+    if (focus) input.current?.focus();
   }, []);
-  const save = () => {
-    if (busy || !value.trim() || !name.trim()) return;
-    void action.run('save', async () => {
-      await client.credentials.add({
-        engine: engine.id,
-        env: { [token ? 'CLAUDE_CODE_OAUTH_TOKEN' : name.trim()]: value.trim() },
-        ...(scope === 'workspace' && !token ? { workspace: true } : {}),
-      });
-      onSaved();
-    });
-  };
+
   return (
     <form
       class="cred-add"
       method="post"
       onSubmit={event => {
         event.preventDefault();
-        save();
+        const form = event.currentTarget;
+        const variable = name.trim();
+        const value = String(new FormData(form).get('key') ?? '').trim();
+        if (!variable || !value) return;
+        const save = () =>
+          void action.run('add', async () => {
+            await client.credentials.add({
+              env: { [variable]: value },
+              ...(scope === 'workspace' ? { workspace: true } : {}),
+            });
+            form.reset();
+            setName('OPENAI_API_KEY');
+          });
+        if (keys.some(row => row.name === variable && row.scope === scope))
+          ask(replaceTitle(variable, scope), save);
+        else save();
       }}
     >
-      {engine.id === 'custom' ? (
-        <>
-          <Combo
-            label="Environment variable"
-            name="custom-var"
-            class="mono cred-var"
-            options={CUSTOM_KEYS}
-            placeholder="OPENAI_API_KEY"
-            value={name}
-            onChange={setName}
-          />
-        </>
-      ) : null}
+      <Combo
+        label="Variable"
+        name="name"
+        class="mono cred-var"
+        options={KEYS}
+        placeholder="OPENAI_API_KEY"
+        value={name}
+        onChange={setName}
+      />
       <input
         type="password"
+        name="key"
         autocomplete="off"
-        name={`${engine.id}-${token ? 'token' : 'key'}`}
-        aria-label={token ? 'Your claude setup-token' : engine.hint}
-        placeholder={
-          token ? 'Paste a claude setup-token, then Enter' : `${engine.hint}, then Enter`
-        }
+        aria-label="API key"
+        placeholder="API key"
         ref={input}
-        aria-busy={busy}
-        value={value}
-        onInput={event => setValue(event.currentTarget.value)}
+        aria-busy={Boolean(action.pending)}
+        required
       />
       {admin ? (
-        <Select
-          label="Who can use this key"
-          options={SCOPES}
-          value={token ? 'personal' : scope}
-          onChange={setScope}
-          disabled={token}
-        />
+        <Select label="Who can use this key" options={SCOPES} value={scope} onChange={setScope} />
       ) : null}
-      <button hidden />
+      <Button type="submit" loading={Boolean(action.pending)}>
+        Add
+      </Button>
     </form>
   );
 }
@@ -389,8 +297,8 @@ export function EngineLogins({ status: initial }: { status: EngineStatus }) {
 
   return (
     <>
-      {ENGINES.filter(engine => engine.id !== 'custom').map(engine => {
-        const own = status[engine.id as 'claude' | 'codex'];
+      {ENGINES.map(engine => {
+        const own = status[engine.id];
         const signingIn = busy === `${engine.id}:login`;
         return (
           <Card key={engine.id} title={engine.name}>
@@ -455,16 +363,13 @@ export function CredentialsList({
 }) {
   const nav = useRouter();
   const org = useOrg();
-  const [adding, setAdding] = useState('');
   const [logins, setLogins] = useState<Partial<Record<Login['engine'], Login>>>({});
-  const [chosen, setChosen] = useState<Record<string, string>>({});
-  const token = !me.user;
-  const admin = token || ADMIN_ROLES.has(me.organization?.role ?? '');
-  const subscriptions = me.server?.subscriptions;
-  const action = useAction({ refresh: true, leaves: true });
-  // A row's action stays busy until the refreshed rows arrive.
-  const [acted, setActed] = useState(rows);
-  const pending = acted === rows ? (action.pending ?? '') : '';
+  const [pasting, setPasting] = useState(false);
+  const admin = isAdmin(me);
+  const signIns = ENGINES.filter(engine => me.user && me.server?.subscriptions?.[engine.id]);
+  const keys = rows.filter(row => !row.subscription);
+  const action = useAction({ refresh: true });
+  const replace = useReplace();
 
   // The tab remembers its sign-ins in progress, so a reload picks them back up.
   const saved = `coder-logins:${org}`;
@@ -505,9 +410,8 @@ export function CredentialsList({
     }
   }, []);
 
-  const done = (engine?: Login['engine']) => {
-    if (engine) setLogin(engine);
-    setAdding('');
+  const done = (engine: Login['engine']) => {
+    setLogin(engine);
     nav.refresh();
   };
 
@@ -523,136 +427,168 @@ export function CredentialsList({
       });
   };
 
-  const act = (row: CredentialRow, kind: 'default' | 'remove') => {
-    if (pending) return Promise.resolve();
-    setActed(rows);
-    return action.run(`${row.scope}/${row.label}/${kind}`, () =>
-      client.credentials[kind === 'default' ? 'setDefault' : 'remove'](row.label, {
-        workspace: row.scope === 'workspace',
-      }),
+  const subscription = (engine: Login['engine']) =>
+    rows.find(row => row.subscription && row.name === engine);
+  // One subscription per engine: a new one asks before it replaces the saved one.
+  const replacing = (engine: (typeof ENGINES)[number], run: () => void) =>
+    subscription(engine.id) ? replace.ask(`Replace your ${engine.name} subscription?`, run) : run();
+  const remove = (row: CredentialRow) =>
+    action.run(`remove:${row.scope}/${row.name}`, () =>
+      client.credentials.remove(row.name, { workspace: row.scope === 'workspace' }),
     );
-  };
 
   return (
     <>
-      {ENGINES.map(engine => {
-        const own = rows.filter(row => row.engine === engine.id);
-        const canSignIn = engine.id !== 'custom' && !token && Boolean(subscriptions?.[engine.id]);
-        const methods = [
-          ...(canSignIn ? ['signin'] : []),
-          'key',
-          ...(engine.id === 'claude' && !canSignIn ? ['token'] : []),
-        ];
-        const how = chosen[engine.id] ?? methods[0]!;
-        const open = !own.length || adding === engine.id;
-        const active = engine.id === 'custom' ? undefined : logins[engine.id];
-        const ready = own.length > 0 && engine.id !== 'custom';
-        const add = !active && own.length > 0 && adding !== engine.id;
-        return (
-          <Card
-            key={engine.id}
-            title={engine.name}
-            count={own.length || undefined}
-            actions={
-              ready || add ? (
-                <>
-                  {ready ? <Badge tone="ok">ready</Badge> : null}
-                  {add ? (
-                    <IconButton
-                      icon={iPlus}
-                      label={`Add a ${engine.name} credential`}
-                      onClick={() => setAdding(engine.id)}
+      {signIns.length ? (
+        <Card title="Subscriptions">
+          <div class="cred-engine">
+            <p class="muted cred-note">
+              Personal only: a subscription runs your own tasks and your 1:1 DMs with agents,
+              never the workspace's shared threads.
+            </p>
+            <table class="rows creds">
+              <tbody>
+                {signIns.map(engine => {
+                  const row = subscription(engine.id);
+                  const active = logins[engine.id];
+                  const account = [row?.account?.email, row?.account?.plan, row?.masked];
+                  return (
+                    <Row
+                      key={engine.id}
+                      title={engine.name}
+                      sub={row ? account.filter(Boolean).join(' · ') : undefined}
+                      actions={
+                        <>
+                          <Button
+                            {...(row ? { variant: 'ghost', size: 'sm' } : {})}
+                            autoFocus={focus === engine.id && !row}
+                            disabled={Boolean(active)}
+                            onClick={() => replacing(engine, () => signIn(engine.id))}
+                          >
+                            {row ? 'Sign in again' : `Sign in with ${engine.signIn}`}
+                          </Button>
+                          {active ? (
+                            <SignIn
+                              login={active}
+                              engine={engine}
+                              onChange={next => setLogin(active.engine, next)}
+                              onDone={() => done(active.engine)}
+                              onError={reason => {
+                                setLogin(active.engine);
+                                toastFailure(reason);
+                              }}
+                              onCancel={() => {
+                                setLogin(active.engine);
+                                if (active.id)
+                                  void client.credentials
+                                    .cancelLogin(active.id)
+                                    .catch(toastFailure);
+                              }}
+                            />
+                          ) : null}
+                        </>
+                      }
+                      alignMenu
+                      menu={
+                        engine.id === 'claude' ? (
+                          <MenuItem title="Paste a setup token" onClick={() => setPasting(true)} />
+                        ) : undefined
+                      }
+                      remove={
+                        row
+                          ? {
+                              label: 'Sign out',
+                              title: `Sign out of ${engine.name}?`,
+                              body: 'Tasks that use it stop running.',
+                              onRemove: () => remove(row),
+                            }
+                          : undefined
+                      }
                     />
-                  ) : null}
-                </>
-              ) : null
-            }
-          >
-            <div id={`engine-${engine.id}`} class="cred-engine">
-              {engine.id === 'custom' ? (
-                <p class="muted cred-note">
-                  Custom keys back <a href={`/dash/${org}/settings/models`}>custom models</a>. A
-                  model uses OPENAI_API_KEY unless it names another variable.
-                </p>
-              ) : null}
-              {own.length ? (
-                <table class="rows creds">
-                  <tbody>
-                    {own.map(row => {
-                      const key = `${row.scope}/${row.label}/`;
-                      return (
-                        <Row
-                          key={key}
-                          row={row}
-                          busy={pending.startsWith(key) ? pending.slice(key.length) : ''}
-                          canManage={row.scope === 'personal' || admin}
-                          onAct={kind => act(row, kind)}
-                          {...(canSignIn && row.scope === 'personal'
-                            ? { onSignIn: () => signIn(engine.id as 'claude' | 'codex') }
-                            : {})}
-                        />
-                      );
-                    })}
-                  </tbody>
-                </table>
-              ) : null}
-              {open || active ? (
-                <div class="cred-new">
-                  {methods.length > 1 ? (
-                    <Segmented
-                      label={`How to add ${engine.name}`}
-                      disabled={Boolean(active)}
-                      options={methods.map((method): [string, string] => [
-                        method,
-                        METHODS[method]!,
-                      ])}
-                      value={how}
-                      onChange={method => setChosen({ ...chosen, [engine.id]: method })}
-                    />
-                  ) : null}
-                  {active || how === 'signin' ? (
-                    <div class="cred-login grow end">
-                      <Button
-                        autoFocus={focus === engine.id}
-                        disabled={Boolean(active)}
-                        onClick={() => signIn(engine.id as 'claude' | 'codex')}
-                      >
-                        Sign in with {engine.signIn}
-                      </Button>
-                      {active ? (
-                        <SignIn
-                          login={active}
-                          engine={engine}
-                          onChange={next => setLogin(active.engine, next)}
-                          onDone={() => done(active.engine)}
-                          onError={reason => {
-                            setLogin(active.engine);
-                            toastFailure(reason);
-                          }}
-                          onCancel={() => {
-                            setLogin(active.engine);
-                            if (active.id)
-                              void client.credentials.cancelLogin(active.id).catch(toastFailure);
-                          }}
-                        />
-                      ) : null}
-                    </div>
-                  ) : (
-                    <KeyField
-                      key={how}
-                      engine={engine}
-                      token={how === 'token'}
-                      admin={admin}
-                      autoFocus={focus === engine.id || Boolean(chosen[engine.id])}
-                      onSaved={() => done()}
-                    />
-                  )}
-                </div>
-              ) : null}
-            </div>
-          </Card>
-        );
-      })}
+                  );
+                })}
+              </tbody>
+            </table>
+            {pasting ? (
+              <div class="cred-new">
+                <form
+                  class="cred-add"
+                  method="post"
+                  onSubmit={event => {
+                    event.preventDefault();
+                    const token = String(new FormData(event.currentTarget).get('token') ?? '');
+                    if (!token.trim()) return;
+                    replacing(
+                      ENGINES[0]!,
+                      () =>
+                        void action.run('token', async () => {
+                          await client.credentials.add({
+                            env: { CLAUDE_CODE_OAUTH_TOKEN: token.trim() },
+                          });
+                          setPasting(false);
+                        }),
+                    );
+                  }}
+                >
+                  <input
+                    type="password"
+                    name="token"
+                    autocomplete="off"
+                    aria-label="Your claude setup-token"
+                    placeholder="Paste a claude setup-token"
+                    ref={input => input?.focus()}
+                    required
+                  />
+                  <Button type="submit" loading={action.pending === 'token'}>
+                    Add
+                  </Button>
+                </form>
+              </div>
+            ) : null}
+          </div>
+        </Card>
+      ) : null}
+      <Card title="API keys" count={keys.length || undefined}>
+        <div class="cred-engine">
+          <p class="muted cred-note">
+            Tasks read each key as its variable. Claude uses ANTHROPIC_API_KEY, Codex uses
+            OPENAI_API_KEY, and a <a class="link" href={`/dash/${org}/settings/models`}>custom model</a> uses the
+            one it names.
+          </p>
+          {keys.length ? (
+            <table class="rows creds">
+              <tbody>
+                {keys.map(row => (
+                  <Row
+                    key={`${row.scope}/${row.name}`}
+                    title={row.name}
+                    badges={<Badge>{row.scope}</Badge>}
+                    sub={row.masked}
+                    remove={
+                      row.scope === 'personal' || admin
+                        ? {
+                            title: `Remove ${row.name}?`,
+                            body: 'Tasks that use it stop running.',
+                            onRemove: () => remove(row),
+                          }
+                        : undefined
+                    }
+                  />
+                ))}
+              </tbody>
+            </table>
+          ) : null}
+          <div class="cred-new">
+            <KeyForm
+              keys={keys}
+              admin={admin}
+              focus={signIns.some(engine => engine.id === focus) ? '' : focus}
+              ask={replace.ask}
+            />
+          </div>
+        </div>
+      </Card>
+      {replace.dialog}
     </>
   );
 }

@@ -1,6 +1,9 @@
 /** What every table adapter shares: the `Kind` shape, column conversions, and id and secret lookups. */
-import { and, eq, or, type SQL } from 'drizzle-orm';
-import type { PgColumn } from 'drizzle-orm/pg-core';
+import { and, eq, getTableColumns, type SQL } from 'drizzle-orm';
+import { CasingCache } from 'drizzle-orm/casing';
+import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
+
+import { CASING } from '../client';
 
 import type { AgentRecord, AgentVersionRecord, TaskStatus } from '../../types';
 import {
@@ -15,16 +18,22 @@ import { secretKeyVersion } from '../../secrets';
 import type { DrizzleStore } from '../store';
 
 export function storedTaskContext(value: TaskStatus['task']) {
-  return value.connections === undefined
+  return value.connections === undefined && !value.engineChain && !value.engineCredentials
     ? value.context
-    : { ...value.context, connections: value.connections };
+    : {
+        ...value.context,
+        connections: value.connections,
+        engineChain: value.engineChain,
+        engineCredentials: value.engineCredentials,
+      };
 }
 
 export function readTaskContext(value: TaskStatus['task']['context'] | null) {
-  const { connections, runnerLogs, ...context } = (value ?? {}) as NonNullable<
-    TaskStatus['task']['context']
-  > & {
+  const { connections, runnerLogs, engineChain, engineCredentials, ...context } = (value ??
+    {}) as NonNullable<TaskStatus['task']['context']> & {
     connections?: string[];
+    engineChain?: string[];
+    engineCredentials?: Record<string, string>;
     runnerLogs?: {
       at?: number;
       complete?: boolean;
@@ -34,7 +43,13 @@ export function readTaskContext(value: TaskStatus['task']['context'] | null) {
     };
   };
 
-  return { connections, runnerLogs, context: Object.keys(context).length ? context : undefined };
+  return {
+    connections,
+    runnerLogs,
+    engineChain,
+    engineCredentials,
+    context: Object.keys(context).length ? context : undefined,
+  };
 }
 
 /** Postgres requests acquire their organization from a session, app, or task. */
@@ -80,6 +95,7 @@ export const agentValue = (r: typeof agent.$inferSelect): AgentRecord =>
     id: r.slug,
     name: r.name,
     description: r.description,
+    problems: r.problems,
     source: r.source,
     repo: r.repo,
     path: r.path,
@@ -124,6 +140,21 @@ export const versionSummary = (
   return summary;
 };
 
+/** A row `to_jsonb` rendered, back in the shape drizzle's own select returns. */
+export function fromJson<T extends PgTable>(
+  table: T,
+  record: Record<string, unknown>,
+): T['$inferSelect'] {
+  const casing = new CasingCache(CASING);
+
+  return Object.fromEntries(
+    Object.entries(getTableColumns(table)).map(([key, column]) => {
+      const value = record[casing.getColumnCasing(column)];
+      return [key, value === null || value === undefined ? null : column.mapFromDriverValue(value)];
+    }),
+  ) as T['$inferSelect'];
+}
+
 /** A `task` row as the `TaskStatus` record the rest of the server reads. */
 export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
   const context = readTaskContext(r.context);
@@ -144,6 +175,8 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
       author: r.author,
       definition: r.definition,
       credential: r.credential,
+      engineChain: context.engineChain,
+      engineCredentials: context.engineCredentials,
       requester: r.requester,
       runnerId: r.runnerId,
       usage: r.usage,
@@ -166,7 +199,7 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
     logCursor: r.logCursor ?? undefined,
     logSeq: r.logSeq ?? undefined,
     logBytes: r.logBytes ?? undefined,
-    ...(context.runnerLogs?.handle === r.handle &&
+    ...((context.runnerLogs?.handle ?? null) === r.handle &&
     context.runnerLogs?.attempts === r.attempts &&
     context.runnerLogs?.generation === r.generation
       ? { logsComplete: context.runnerLogs?.complete }
@@ -182,46 +215,7 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
   });
 }
 
-export async function appRowId(s: DrizzleStore, key: string): Promise<number> {
-  const [row] = await s.db
-    .select({ id: app.id })
-    .from(app)
-    .where(
-      and(
-        or(s.mine(app.organizationId), eq(app.organizationId, UNSCOPED_ORGANIZATION)),
-        eq(app.key, key),
-      ),
-    );
-  if (!row) throw new Error(`Unknown app "${key}".`);
-  return row.id;
-}
 
-export async function agentRowId(s: DrizzleStore, slug: string): Promise<number> {
-  const [row] = await s.db
-    .select({ id: agent.id })
-    .from(agent)
-    .where(and(s.mine(agent.organizationId), eq(agent.slug, slug)));
-  if (!row) throw new Error(`Unknown agent "${slug}".`);
-  return row.id;
-}
-
-export async function installationRowId(s: DrizzleStore, key: string): Promise<number> {
-  const [row] = await s.db
-    .select({ id: install.id })
-    .from(install)
-    .where(and(s.mine(install.organizationId), eq(install.key, key)));
-  if (!row) throw new Error(`Unknown installation "${key}".`);
-  return row.id;
-}
-
-export async function taskRowId(s: DrizzleStore, publicId: string): Promise<number> {
-  const [row] = await s.db
-    .select({ id: task.id })
-    .from(task)
-    .where(and(s.mine(task.organizationId), eq(task.publicId, publicId)));
-  if (!row) throw new Error(`Unknown task "${publicId}".`);
-  return row.id;
-}
 
 function secretParts(s: DrizzleStore, value: string) {
   if (value.startsWith('plain.'))

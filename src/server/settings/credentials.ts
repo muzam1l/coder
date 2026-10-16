@@ -6,7 +6,7 @@ import { workspaceAdmin } from '../routes/guards';
 import { decodeCursor, json, page, pageLimit, paged } from '../routes/http';
 import { engineSignIn, engineSignOut, engineStatus } from '../tasks/local';
 import { type Installation } from '../../agent/types';
-import { type CredentialChange, type EngineCredential, type Store } from '../store/types';
+import { type EngineCredential, type Store } from '../store/types';
 import {
   decryptCredential,
   decryptSecret,
@@ -17,15 +17,19 @@ import {
   type EncryptedCredential,
 } from '../store/secrets';
 import { dashPath, organizationSlug } from '../auth/account';
+import { resolveTaskOptions } from '../../core/dispatch';
+import { isEndpointModel, type CoderConfig } from '../../core/config';
+import { effectiveConfig, shownConfig } from './config';
+import { machineSignedIn } from '../tasks/local';
+import { DEFAULT_ENGINE } from '../../core/defaults';
+import { type LoginEngine } from './logins';
 
-/** Engine credentials stored for a workspace or a member; every row change goes through `store.withCredential`. */
+/** Engine credentials for a workspace or a member, one per variable or subscription in each scope; every row change goes through `store.withCredential`. */
 
 export interface StoredCredential extends EncryptedCredential {
-  engine: EngineCredential['engine'];
   /** Wular user id of a personal credential; absent for a workspace one. */
   owner?: string;
   account?: CredentialAccount;
-  isDefault?: boolean;
   createdAt?: number;
 }
 
@@ -35,31 +39,44 @@ export interface CredentialAccount {
 }
 
 export interface CredentialSummary {
-  label: string;
-  engine: EngineCredential['engine'];
+  /** The variable of an API key, the engine of a subscription. */
+  name: string;
   scope: 'personal' | 'workspace';
-  isDefault: boolean;
+  subscription: boolean;
   createdAt: number;
-  env: string[];
   /** The secret with all but its ends hidden. */
   masked: string;
   account?: CredentialAccount;
 }
 
 type CredentialRow = { id: string; value: StoredCredential };
-type Change = CredentialChange<'credential'>;
 
-/** Store id: the label for a workspace credential, `<owner>/<label>` for a personal one. */
-export function credentialId(owner: string | undefined, label: string): string {
-  return owner ? `${owner}/${label}` : label;
+/** The API key variable each engine reads. */
+const ENGINE_KEYS = { claude: 'ANTHROPIC_API_KEY', codex: 'OPENAI_API_KEY' } as const;
+/** The variable a subscription is kept in. */
+const SUBSCRIPTION_KEYS = { claude: 'CLAUDE_CODE_OAUTH_TOKEN', codex: 'CODEX_AUTH_JSON' } as const;
+
+/** Store id: the name for a workspace credential, `<owner>/<name>` for a personal one. */
+export function credentialId(owner: string | undefined, name: string): string {
+  return owner ? `${owner}/${name}` : name;
 }
 
 export function parseCredentialId(id: string): {
   owner?: string;
-  label: string;
+  name: string;
 } {
   const at = id.lastIndexOf('/');
-  return at < 0 ? { label: id } : { owner: id.slice(0, at), label: id.slice(at + 1) };
+  return at < 0 ? { name: id } : { owner: id.slice(0, at), name: id.slice(at + 1) };
+}
+
+/** A credential's name: the engine of a subscription, else its one variable. */
+function credentialName(env: Record<string, string>): string {
+  const [name = ''] = Object.keys(env);
+  const engine = (Object.keys(SUBSCRIPTION_KEYS) as LoginEngine[]).find(
+    engine => SUBSCRIPTION_KEYS[engine] === name,
+  );
+
+  return engine ?? name;
 }
 
 export class CredentialCheckError extends Error {
@@ -119,22 +136,95 @@ export async function checkCredential(
   if (!response.ok) throw new CredentialCheckError(response.status, response.statusText);
 }
 
-/** The requester's own default for the engine, then the workspace's; tasks without a requester use the workspace's only. */
-export async function resolveCredential(
-  store: Store,
-  engine: string | undefined,
+/** The names an engine reads, best first: its subscription, then its API key; a custom model reads the variable it names. */
+function credentialNames(
+  engine: string,
+  config: CoderConfig,
+  settings: { engine?: string; model?: string },
+): string[] {
+  if (engine === 'claude' || engine === 'codex') return [engine, ENGINE_KEYS[engine]];
+  let model: string | null = null;
+  try {
+    model = resolveTaskOptions({ ...settings, engine }, config).model;
+  } catch {
+    return [];
+  }
+  const entry = model ? config.models?.[model] : undefined;
+
+  return [(entry && isEndpointModel(entry) && entry.envKey) || ENGINE_KEYS.codex];
+}
+
+/** The requester's own, then the workspace's, by name order; tasks without a requester use the workspace's only. */
+function pickCredential(
+  rows: CredentialRow[],
+  names: string[],
   requester?: string,
-): Promise<{ id: string; value: StoredCredential } | undefined> {
-  const rows = store.listCredentials
-    ? await store.listCredentials({ owner: requester, engine })
-    : await store.list('credential');
-  const pick = (owner: string | undefined) => {
-    const scoped = rows.filter(
-      row => row.value.owner === owner && (!engine || row.value.engine === engine),
-    );
-    return scoped.find(row => row.value.isDefault) ?? scoped[0];
-  };
-  return (requester ? pick(requester) : undefined) ?? pick(undefined);
+): CredentialRow | undefined {
+  for (const owner of requester ? [requester, undefined] : [undefined])
+    for (const name of names) {
+      const row = rows.find(row => row.id === credentialId(owner, name));
+      if (row) return row;
+    }
+}
+
+export async function resolveCredential(
+  ctx: ServerContext,
+  engine: string,
+  requester?: string,
+  settings: { model?: string } = {},
+): Promise<CredentialRow | undefined> {
+  const [shown, rows] = await Promise.all([
+    shownConfig(ctx),
+    ctx.store.listCredentials({ owner: requester }),
+  ]);
+
+  return pickCredential(
+    rows,
+    credentialNames(engine, effectiveConfig(ctx, shown), settings),
+    requester,
+  );
+}
+
+/** Pinned settings use one engine; Default uses the first usable engine in the workspace chain. */
+export async function resolveEngine(
+  ctx: ServerContext,
+  settings: { engine?: string; model?: string },
+  requester?: string,
+): Promise<{
+  engine: string;
+  credential?: string;
+  usable: boolean;
+  chain: string[];
+  credentials: Record<string, string>;
+}> {
+  const [shown, rows] = await Promise.all([
+    shownConfig(ctx),
+    ctx.store.listCredentials({ owner: requester }),
+  ]);
+  const config = effectiveConfig(ctx, shown);
+  const pinned =
+    settings.engine ?? (settings.model ? resolveTaskOptions(settings, config).engine : undefined);
+  const chain = pinned ? [pinned] : config.chain;
+  const credentials = Object.fromEntries(
+    chain.flatMap(engine => {
+      const names = credentialNames(engine, config, engine === pinned ? settings : {});
+      const row = pickCredential(rows, names, requester);
+      return row ? [[engine, row.id]] : [];
+    }),
+  );
+  for (const engine of chain) {
+    const credential = credentials[engine];
+    if (credential) return { engine, credential, usable: true, chain, credentials };
+    if (await machineSignedIn(ctx, engine, engine === pinned ? settings.model : undefined))
+      return { engine, usable: true, chain, credentials };
+  }
+
+  const custom = Object.values(config.models ?? {}).some(isEndpointModel) || rows.some(
+    row => ![...Object.keys(ENGINE_KEYS), ...Object.values(ENGINE_KEYS), ...Object.values(SUBSCRIPTION_KEYS)]
+      .includes(parseCredentialId(row.id).name),
+  );
+
+  return { engine: custom ? 'custom' : chain[0] ?? DEFAULT_ENGINE, usable: false, chain, credentials };
 }
 
 /** Workspace credentials plus the caller's own; nobody sees another member's. */
@@ -143,174 +233,73 @@ export async function visibleCredentials(
   user: string | undefined,
   limit?: number,
 ): Promise<Array<{ id: string; value: StoredCredential }>> {
-  return (
-    store.listCredentials
-      ? await store.listCredentials({ owner: user, limit })
-      : await store.list('credential')
-  ).filter(row => !row.value.owner || row.value.owner === user);
+  return (await store.listCredentials({ owner: user, limit })).filter(
+    row => !row.value.owner || row.value.owner === user,
+  );
 }
 
 /** The caller's saved value for an env variable, then the workspace's; the local server falls back to its environment. */
 export async function credentialEnv(ctx: ServerContext, name: string): Promise<string | undefined> {
   const user = ctx.session?.user.id;
-  const rows = await visibleCredentials(ctx.store, user);
-  const saved = (owner: string | undefined) =>
-    rows
-      .filter(row => row.value.owner === owner)
-      .sort((a, b) => Number(Boolean(b.value.isDefault)) - Number(Boolean(a.value.isDefault)))
-      .map(row => credentialValue(ctx.config, row.value).env[name])
-      .find(Boolean);
+  const row = pickCredential(await visibleCredentials(ctx.store, user), [name], user);
 
   return (
-    (user ? saved(user) : undefined) ??
-    saved(undefined) ??
+    (row ? decryptCredential(ctx.config, row.value).env[name] : undefined) ??
     (ctx.local ? process.env[name] : undefined)
   );
 }
 
-function availableLabel(rows: CredentialRow[], base: string): string {
-  const taken = new Set(rows.map(row => parseCredentialId(row.id).label));
-  let label = base;
-  for (let n = 2; taken.has(label); n++) label = `${base}-${n}`;
-
-  return label;
-}
-
-const peers = (rows: CredentialRow[], id: string, engine: string) =>
-  rows.filter(row => row.id !== id && row.value.engine === engine);
-const flag = (row: CredentialRow, isDefault: boolean): Change => ({
-  id: row.id,
-  value: { ...row.value, isDefault },
-});
-
-/** The flag changes that leave `id` as its engine's only default. */
-function makeDefault(rows: CredentialRow[], id: string, engine: string): Change[] {
-  return peers(rows, id, engine)
-    .filter(row => row.value.isDefault)
-    .map(row => flag(row, false));
-}
-
-/** The flag change that hands a departing default over to the engine's first remaining peer. */
-function handOver(rows: CredentialRow[], id: string, engine: string): Change[] {
-  const next = peers(rows, id, engine)[0];
-  return next ? [flag(next, true)] : [];
-}
-
-/** Insert or replace a credential; automatic labels are chosen under the lock. Returns the label. */
+/** Save a credential under its name in its scope, replacing the one saved there. */
 export async function addCredential(
   store: Store,
   config: Pick<ServerConfig, 'encryptionKey'>,
-  input: {
-    label?: string;
-    /** The automatic label's base when `label` is absent. */
-    base?: string;
-    owner?: string;
-    credential: EngineCredential;
-    account?: CredentialAccount;
-    makeDefault?: boolean;
-  },
+  input: { owner?: string; env: Record<string, string>; account?: CredentialAccount },
   now: () => number = Date.now,
-): Promise<string> {
+): Promise<{ id: string; replaced: boolean }> {
   const owner = input.owner || undefined;
-  const engine = input.credential.engine;
-  const chosen = input.label?.trim();
-  let label =
-    chosen ||
-    input.base ||
-    (input.credential.env.CLAUDE_CODE_OAUTH_TOKEN ? 'claude-token' : `${engine}-key`);
+  const id = credentialId(owner, credentialName(input.env));
+  let replaced = false;
 
-  await store.withCredential('credential', credentialId(owner, label), async (_, rows) => {
-    if (!chosen) label = availableLabel(rows, label);
-    const id = credentialId(owner, label);
-    const existing = rows.find(row => row.id === id)?.value;
-    const isDefault = Boolean(
-      input.makeDefault ||
-      (existing?.isDefault && existing.engine === engine) ||
-      !peers(rows, id, engine).some(row => row.value.isDefault),
-    );
+  await store.withCredential('credential', id, async current => {
+    replaced = Boolean(current);
     const value: StoredCredential = {
-      ...encryptCredential(config, { env: input.credential.env }),
-      engine,
+      ...encryptCredential(config, { env: input.env }),
       ...(owner ? { owner } : {}),
       ...(input.account ? { account: input.account } : {}),
-      isDefault,
-      createdAt: existing?.createdAt ?? now(),
+      createdAt: now(),
     };
 
-    return [
-      { id, value },
-      ...(isDefault ? makeDefault(rows, id, engine) : []),
-      ...(existing?.isDefault && existing.engine !== engine
-        ? handOver(rows, id, existing.engine)
-        : []),
-    ];
+    return [{ id, value }];
   });
 
-  return label;
+  return { id, replaced };
 }
 
-/** Remove one credential; a removed default hands over to the next in its scope. */
 export function removeCredential(store: Store, id: string): Promise<boolean> {
-  return store.withCredential(
-    'credential',
-    id,
-    async (current, rows) =>
-      current && [
-        { id, value: null },
-        ...(current.isDefault ? handOver(rows, id, current.engine) : []),
-      ],
-  );
+  return store.withCredential('credential', id, async current => current && [{ id, value: null }]);
 }
 
-/** Flag one credential as its owner's default for its engine; false when it does not exist. */
-export function setDefault(store: Store, id: string): Promise<boolean> {
-  return store.withCredential(
-    'credential',
-    id,
-    async (current, rows) =>
-      current && [flag({ id, value: current }, true), ...makeDefault(rows, id, current.engine)],
-  );
-}
-
-/** A finished sign-in's credential, saved as the owner's default while the login is marked done. */
+/** A finished sign-in's subscription, replacing the owner's one for that engine while the login is marked done. */
 export async function completeLogin(
   store: Store,
   id: string,
   tokenHash: string,
-  label: string,
   credential: StoredCredential,
 ): Promise<boolean> {
   const login = await store.get('login', id);
   if (!login) return false;
-  const target = credentialId(login.owner, label);
+  const target = credentialId(login.owner, login.engine);
 
-  return store.withCredential('credential', target, async (current, rows, locked) => {
+  return store.withCredential('credential', target, async (_, __, locked) => {
     const done = await locked.patchLogin(
       id,
-      { state: 'done', label },
+      { state: 'done' },
       { state: ['starting', 'open', 'verifying'], tokenHash, owner: login.owner },
     );
     if (!done) return;
-    const value: StoredCredential = {
-      ...credential,
-      owner: login.owner,
-      engine: login.engine,
-      isDefault: true,
-      createdAt: current?.createdAt ?? credential.createdAt,
-    };
 
-    return [{ id: target, value }, ...makeDefault(rows, target, login.engine)];
+    return [{ id: target, value: { ...credential, owner: login.owner } }];
   });
-}
-
-export function credentialValue(
-  config: Pick<ServerConfig, 'encryptionKey' | 'previousEncryptionKey'>,
-  stored: StoredCredential,
-): EngineCredential {
-  return {
-    ...decryptCredential(config, stored),
-    engine: stored.engine,
-  };
 }
 
 function mask(env: Record<string, string>): string {
@@ -324,15 +313,13 @@ export function credentialSummary(
   id: string,
   stored: StoredCredential,
 ): CredentialSummary {
-  const value = credentialValue(config, stored);
+  const { name } = parseCredentialId(id);
   return {
-    label: parseCredentialId(id).label,
-    engine: stored.engine,
+    name,
     scope: stored.owner ? 'personal' : 'workspace',
-    isDefault: Boolean(stored.isDefault),
+    subscription: Object.hasOwn(SUBSCRIPTION_KEYS, name),
     createdAt: stored.createdAt ?? 0,
-    env: Object.keys(value.env).sort(),
-    masked: mask(value.env),
+    masked: mask(decryptCredential(config, stored).env),
     ...(stored.account ? { account: stored.account } : {}),
   };
 }
@@ -354,7 +341,7 @@ export function writeBackCodexAuth(
 ): Promise<boolean> {
   return store.withCredential('credential', id, async current => {
     if (!current) return;
-    const { env } = credentialValue(config, current);
+    const { env } = decryptCredential(config, current);
     if (!env.CODEX_AUTH_JSON || !(lastRefresh(authJson) > (lastRefresh(env.CODEX_AUTH_JSON) || 0)))
       return;
 
@@ -430,7 +417,7 @@ export async function reseal(
   }
   for (const { id } of await store.list('snapshot')) {
     const taskId = id.startsWith('connection-secrets:')
-      ? id.slice('connection-secrets:'.length)
+      ? id.slice('connection-secrets:'.length).replace(/:[a-f0-9]{24}$/, '')
       : id.startsWith('connections:')
         ? id.slice('connections:'.length).replace(/:\d+:\d+:[a-f0-9]{12}$/, '')
         : undefined;
@@ -440,8 +427,8 @@ export async function reseal(
       const field =
         'resolvedConnections' in value
           ? 'resolvedConnections'
-          : 'connectionSecrets' in value
-            ? 'connectionSecrets'
+          : 'secret' in value
+            ? 'secret'
             : undefined;
       if (!field) return false;
       const status = taskId ? await locked.get('task', taskId) : undefined;
@@ -449,9 +436,7 @@ export async function reseal(
         await locked.delete('snapshot', id);
         return false;
       }
-      const sealed = (value as { resolvedConnections?: string; connectionSecrets?: string })[
-        field
-      ]!;
+      const sealed = (value as { resolvedConnections?: string; secret?: string })[field]!;
       if (!stale(sealed)) return false;
       await locked.put(
         'snapshot',
@@ -486,7 +471,7 @@ export async function reseal(
           id,
           value: {
             ...value,
-            ...encryptCredential(config, { env: credentialValue(config, value).env }),
+            ...encryptCredential(config, decryptCredential(config, value)),
           },
         },
       ];
@@ -498,28 +483,24 @@ export async function reseal(
 }
 
 /** The one-click fix for a missing credential: the Credentials page, open at that engine. */
-export async function credentialFix(ctx: ServerContext, engine: string): Promise<string> {
-  const page = dashPath(await organizationSlug(ctx), '/settings/credentials');
+export async function credentialFix(
+  ctx: ServerContext,
+  engine: string,
+  slug?: string,
+): Promise<string> {
+  const page = dashPath(slug ?? (await organizationSlug(ctx)),
+    engine === 'custom' ? '/settings/models' : '/settings/credentials');
 
-  return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${page}?engine=${encodeURIComponent(engine)}`;
+  return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${page}${engine === 'custom' ? '' : `?engine=${encodeURIComponent(engine)}`}`;
 }
 
 const credentialSchema = z.object({
-  label: z.optional(z.string().check(z.regex(/^[^/\s][^/]*$/))),
-  env: z.record(z.string(), z.string().check(z.minLength(1))),
-  engine: z.enum(['claude', 'codex', 'custom']),
+  env: z.record(z.string().check(z.regex(/^[A-Z_][A-Z0-9_]*$/)), z.string().check(z.minLength(1))),
   workspace: z.optional(z.boolean()),
-  default: z.optional(z.boolean()),
   noCheck: z.optional(z.boolean()),
 });
 
 const ADMINS_ONLY = 'Only an owner or admin of this workspace can change workspace credentials.';
-
-function scopedId(ctx: ServerContext, url: URL, label: string) {
-  const user = ctx.session?.user.id;
-  const workspace = url.searchParams.has('workspace') || !user;
-  return { workspace, id: credentialId(workspace ? undefined : user, label) };
-}
 
 export async function listCredentials(
   req: Request,
@@ -527,9 +508,8 @@ export async function listCredentials(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const label = params.label!;
   const user = ctx.session?.user.id;
-  const key = (row: CredentialSummary) => `${row.engine}/${row.scope}/${row.label}`;
+  const key = (row: CredentialSummary) => `${row.scope}/${row.name}`;
   const compare = (a: string, b: string) => a.localeCompare(b) || (a < b ? -1 : a > b ? 1 : 0);
   const fields = url.searchParams.get('fields');
   if (fields && fields !== 'id') return json({ error: 'Invalid fields' }, 400);
@@ -556,10 +536,7 @@ export async function listCredentials(
   const matching = rows
     .filter(
       row =>
-        !q ||
-        [row.label, row.engine, row.account?.email ?? '', ...row.env].some(value =>
-          value.toLowerCase().includes(q),
-        ),
+        !q || [row.name, row.account?.email ?? ''].some(value => value.toLowerCase().includes(q)),
     )
     .filter(row => !after || compare(key(row), after) > 0);
 
@@ -572,50 +549,47 @@ export async function createCredential(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const label = params.label!;
   const user = ctx.session?.user.id;
 
   const body = await req.json().catch(() => undefined);
   const parsed = credentialSchema.safeParse(body);
-  if (
-    !parsed.success ||
-    !Object.keys(parsed.data.env).length ||
-    Object.keys(parsed.data.env).some(name => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
-  )
+  if (!parsed.success || Object.keys(parsed.data.env).length !== 1)
     return json({ error: 'Invalid credential' }, 400);
 
-  const { env, engine } = parsed.data;
+  const { env } = parsed.data;
   const workspace = Boolean(parsed.data.workspace) || !user;
   if (workspace && !workspaceAdmin(ctx)) return json({ error: ADMINS_ONLY }, 403);
   if (env.CODEX_AUTH_JSON)
     return json({ error: 'Sign in with Codex on the Credentials page instead.' }, 400);
-  // A pasted setup-token is your own, and only where subscription sign-in is off.
-  if (env.CLAUDE_CODE_OAUTH_TOKEN && ((workspace && ctx.auth) || ctx.config.subscriptions?.claude))
-    return json({ error: 'Sign in with Claude on the Credentials page instead.' }, 400);
+  // A pasted setup-token is a subscription: your own, and only where subscription sign-in is on.
+  if (env.CLAUDE_CODE_OAUTH_TOKEN && !ctx.config.subscriptions?.claude)
+    return json({ error: 'Claude subscriptions are off on this server; add an API key.' }, 400);
+  if (env.CLAUDE_CODE_OAUTH_TOKEN && workspace && ctx.auth)
+    return json({ error: 'A Claude subscription is personal; add it without --workspace.' }, 400);
 
   const owner = workspace ? undefined : user;
+  const engine = env.CLAUDE_CODE_OAUTH_TOKEN
+    ? 'claude'
+    : ((Object.keys(ENGINE_KEYS) as LoginEngine[]).find(engine => ENGINE_KEYS[engine] in env) ??
+      'custom');
 
   try {
     if (!parsed.data.noCheck) await checkCredential({ engine, env }, ctx.fetch ?? fetch);
 
-    const label = await addCredential(
+    const { id, replaced } = await addCredential(
       ctx.store,
       ctx.config,
-      {
-        label: parsed.data.label?.trim() || undefined,
-        ...(owner ? { owner } : {}),
-        credential: { env, engine },
-        makeDefault: parsed.data.default,
-      },
+      { ...(owner ? { owner } : {}), env },
       ctx.now ?? Date.now,
     );
 
-    return json({ ok: true, label });
+    return json({ ok: true, name: parseCredentialId(id).name, replaced });
   } catch (error) {
-    return json(
-      { error: error instanceof Error ? error.message : String(error) },
-      error instanceof CredentialCheckError ? error.status : 400,
-    );
+    if (error instanceof CredentialCheckError)
+      return json({ error: error.message }, error.status);
+    console.error('coder server: could not save credential', error);
+
+    return json({ error: 'Could not save credential. Please try again.' }, 500);
   }
 }
 
@@ -625,28 +599,14 @@ export async function deleteCredential(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const label = params.label!;
   const user = ctx.session?.user.id;
-  const { workspace, id } = scopedId(ctx, url, label!);
-  const unknown = () => json({ error: 'Unknown credential' }, 404);
+  const workspace = url.searchParams.has('workspace') || !user;
   if (workspace && !workspaceAdmin(ctx)) return json({ error: ADMINS_ONLY }, 403);
+  const id = credentialId(workspace ? undefined : user, params.name!);
 
-  return (await removeCredential(ctx.store, id)) ? json({ ok: true }) : unknown();
-}
-
-export async function defaultCredential(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  const label = params.label!;
-  const user = ctx.session?.user.id;
-  const { workspace, id } = scopedId(ctx, url, label!);
-  const unknown = () => json({ error: 'Unknown credential' }, 404);
-  if (workspace && !workspaceAdmin(ctx)) return json({ error: ADMINS_ONLY }, 403);
-
-  return (await setDefault(ctx.store, id)) ? json({ ok: true }) : unknown();
+  return (await removeCredential(ctx.store, id))
+    ? json({ ok: true })
+    : json({ error: 'Unknown credential' }, 404);
 }
 
 const now = (ctx: ServerContext) => (ctx.now ?? Date.now)();
@@ -659,6 +619,7 @@ export async function signInEngine(
 ): Promise<Response> {
   const engine = params.engine as 'claude' | 'codex';
   engineSignIn(engine);
+  if (ctx.local) ctx.local.engineChecks = undefined;
 
   return json(await engineStatus());
 }
@@ -671,6 +632,7 @@ export async function signOutEngine(
 ): Promise<Response> {
   const engine = params.engine as 'claude' | 'codex';
   await engineSignOut(engine);
+  if (ctx.local) ctx.local.engineChecks = undefined;
 
   return json(await engineStatus());
 }

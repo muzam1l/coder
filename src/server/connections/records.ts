@@ -16,15 +16,10 @@ import type { ServerContext } from '../context';
 import type { Params } from '../routes/match';
 import { json } from '../routes/http';
 import { requireWorkspaceAdmin } from '../routes/guards';
-import { encryptSecret, decryptSecret, encryptCredential } from '../store/secrets';
+import { encryptSecret, decryptSecret, decryptCredential } from '../store/secrets';
 import { authorizeUrl, oauthResource } from './oauth';
 import { sharedApps } from '../agents/apps';
-import {
-  addCredential,
-  credentialValue,
-  removeCredential,
-  visibleCredentials,
-} from '../settings/credentials';
+import { addCredential, removeCredential, visibleCredentials } from '../settings/credentials';
 
 export type ConnectionContext = Pick<
   ServerContext,
@@ -53,7 +48,7 @@ const inputSchema = z.strictObject({
   id: z.optional(slug),
   provider: z.optional(slug),
   owner: z.optional(z.literal('me')),
-  access: z.optional(z.enum(['observe', 'write'])),
+  access: z.optional(z.enum(['read', 'write'])),
   endpoint: z.optional(mcpEntrySchema),
   auth: z.optional(z.enum(['none', 'key', 'oauth'])),
   key: z.optional(z.string().check(z.minLength(1))),
@@ -62,7 +57,7 @@ const inputSchema = z.strictObject({
 });
 const patchSchema = z.strictObject({
   name: z.optional(z.string().check(z.minLength(1))),
-  access: z.optional(z.enum(['observe', 'write'])),
+  access: z.optional(z.nullable(z.enum(['read', 'write']))),
   key: z.optional(z.string().check(z.minLength(1))),
 });
 
@@ -78,7 +73,7 @@ function endpointAllowed(ctx: ServerContext, connection: Connection): boolean {
       connectionEnvName(connection.keyIn.env)
     );
   if (connection.provider !== 'mcp') return !endpoint;
-  if (!endpoint || (endpoint.command && connection.access === 'observe' && !endpoint.tools?.length))
+  if (!endpoint || (endpoint.command && connection.access === 'read' && !endpoint.tools?.length))
     return false;
   if (endpoint.tools?.some(tool => !connectionToolName(tool))) return false;
   if (endpoint.url) {
@@ -113,7 +108,7 @@ export function connectionRow(
     name: connection.name,
     provider: connection.provider,
     auth: connection.auth,
-    access: connection.access,
+    ...(connection.access ? { access: connection.access } : {}),
     ...(connection.owner
       ? {
           owner: connection.owner,
@@ -160,7 +155,6 @@ export async function nativeConnections(
       name: ctx.integrations[account.platform]!.name ?? account.platform,
       provider: account.platform,
       owner,
-      access: 'observe',
       auth: 'oauth',
       secret: account.token,
       account: account.platformUserId,
@@ -369,55 +363,42 @@ export async function connectionRows(
     ? await ctx.store.get('delivery', `connection-authorized:${authorization}`)
     : undefined;
 
-  return Promise.all(
-    records.map(async record => {
-      const connection = record;
+  return records.map(connection => {
+    const row = connectionRow(connection, owner, ctx.config);
+    if (
+      authorization &&
+      connection.auth === 'oauth' &&
+      (!receipt ||
+        !('target' in receipt) ||
+        receipt.target !== `${connection.id}:${connection.createdAt}`)
+    )
+      row.status = 'authorize';
 
-      const row = connectionRow(connection, owner, ctx.config);
-      if (
-        authorization &&
-        connection.auth === 'oauth' &&
-        (!receipt ||
-          !('target' in receipt) ||
-          receipt.target !== `${connection.id}:${connection.createdAt}`)
-      )
-        row.status = 'authorize';
-
-      return row;
-    }),
-  );
+    return row;
+  });
 }
 
-const holds = (
-  ctx: ServerContext,
-  row: { value: Parameters<typeof credentialValue>[1] },
-  name: string,
-) => credentialValue(ctx.config, row.value).env[name] !== undefined;
-
-/** The credential an `env` connection reads: a new one holding `key`, the named one, else a visible one holding `name`. */
+/** The credential an `env` connection reads: `key` saved as `name` in its scope, the named one, else a visible one holding `name`. */
 async function envCredential(
   ctx: ServerContext,
   name: string,
   input: { key?: string; credential?: string },
-  base: string,
   owner?: string,
 ): Promise<{ id: string; created?: true }> {
   if (input.key && input.credential) throw refuse(400, 'Give a key or a credential, not both');
   if (input.key) {
-    const label = await addCredential(
+    const { id, replaced } = await addCredential(
       ctx.store,
       ctx.config,
-      {
-        base,
-        ...(owner ? { owner } : {}),
-        credential: { engine: 'custom', env: { [name]: input.key } },
-      },
+      { ...(owner ? { owner } : {}), env: { [name]: input.key } },
       ctx.now ?? Date.now,
     );
 
-    return { id: owner ? `${owner}/${label}` : label, created: true };
+    return replaced ? { id } : { id, created: true };
   }
-  const rows = (await visibleCredentials(ctx.store, owner)).filter(row => holds(ctx, row, name));
+  const rows = (await visibleCredentials(ctx.store, owner)).filter(
+    row => decryptCredential(ctx.config, row.value).env[name] !== undefined,
+  );
   const found = input.credential
     ? rows.find(row => row.id === input.credential)
     : (rows.find(row => owner && row.value.owner === owner) ?? rows.find(row => !row.value.owner));
@@ -432,39 +413,15 @@ async function envCredential(
   return { id: found.id };
 }
 
-/** Write `key` into an `env` connection's credential; a member's connection on a workspace credential gets its own. */
+/** Save `key` as an `env` connection's variable in the connection's scope. */
 async function rotateEnvCredential(
   ctx: ServerContext,
   connection: Connection,
   key: string,
 ): Promise<string> {
   const name = (connection.keyIn as { env: string }).env;
-  if (connection.credential) {
-    const changed = await ctx.store.withCredential(
-      'credential',
-      connection.credential,
-      async stored => {
-        if (!stored || stored.owner !== connection.owner) return;
 
-        return [
-          {
-            id: connection.credential!,
-            value: {
-              ...stored,
-              ...encryptCredential(ctx.config, {
-                env: { ...credentialValue(ctx.config, stored).env, [name]: key },
-              }),
-            },
-          },
-        ];
-      },
-    );
-    if (changed) return connection.credential;
-  }
-
-  return (
-    await envCredential(ctx, name, { key }, connection.id.split(':').pop()!, connection.owner)
-  ).id;
+  return (await envCredential(ctx, name, { key }, connection.owner)).id;
 }
 
 /** Create a connection from `body`; an OAuth one also returns where the browser goes next. */
@@ -503,7 +460,7 @@ export async function addConnection(
     name: input.name,
     provider,
     ...(owner ? { owner } : {}),
-    access: input.access ?? (provider === 'env' ? 'write' : 'observe'),
+    ...(input.access || provider === 'env' ? { access: input.access ?? 'write' } : {}),
     auth,
     ...(input.endpoint ? { endpoint: input.endpoint } : {}),
     ...(input.keyIn ? { keyIn: input.keyIn } : {}),
@@ -512,7 +469,7 @@ export async function addConnection(
       : {}),
     createdAt: (ctx.now ?? Date.now)(),
   };
-  if (!endpointAllowed(ctx, connection)) throw refuse(400, 'Invalid endpoint or observe tools');
+  if (!endpointAllowed(ctx, connection)) throw refuse(400, 'Invalid endpoint or read-only tools');
   if (await ctx.store.get('connection', connection.id))
     throw refuse(409, 'Connection already exists');
   let discovered: Awaited<ReturnType<typeof oauthResource>>;
@@ -536,6 +493,7 @@ export async function addConnection(
           `${new URL(input.endpoint.url).hostname} takes a key, not a sign-in.`,
           'key',
         );
+      console.error('coder server: connection discovery failed', error);
       throw refuse(502, 'Could not start authorization');
     }
     if (connection.auth === 'oauth' && ctx.local?.port === 0)
@@ -546,7 +504,7 @@ export async function addConnection(
   }
   const credential =
     provider === 'env'
-      ? await envCredential(ctx, (input.keyIn as { env: string }).env, input, id, owner)
+      ? await envCredential(ctx, (input.keyIn as { env: string }).env, input, owner)
       : undefined;
   if (credential) connection.credential = credential.id;
   const created = await ctx.store.withAppLock(`connection:${connection.id}`, store =>
@@ -565,6 +523,8 @@ export async function addConnection(
       ...(authorize ? { authorize } : {}),
     };
   } catch (error) {
+    if (!(error instanceof OAuthClientRequired))
+      console.error('coder server: connection authorization failed', error);
     await ctx.store.withAppLock(`connection:${connection.id}`, async store => {
       const current = await store.get('connection', connection.id);
       if (isDeepStrictEqual(current, connection)) await store.delete('connection', connection.id);
@@ -587,16 +547,18 @@ export async function changeConnection(
   return ctx.store.withAppLock(`connection:${id}`, async store => {
     const current = await findConnection({ ...ctx, store }, id, ctx.session?.user.id);
     if (!current) throw refuse(404, 'Unknown connection');
-    const { key, ...settings } = parsed.data;
+    const { key, access, ...settings } = parsed.data;
     if (key && current.auth !== 'key') throw refuse(400, 'This connection does not use a key');
+    const { access: _, ...kept } = current;
     const next = {
-      ...current,
+      ...(access === null ? kept : current),
       ...settings,
+      ...(access ? { access } : {}),
       ...(key && current.provider !== 'env' ? { secret: encryptSecret(ctx.config, { key }) } : {}),
       ...(key ? { broken: undefined } : {}),
       updatedAt: (ctx.now ?? Date.now)(),
     };
-    if (!endpointAllowed(ctx, next)) throw refuse(400, 'Invalid observe tools');
+    if (!endpointAllowed(ctx, next)) throw refuse(400, 'Invalid read-only tools');
     if (key && current.provider === 'env')
       next.credential = await rotateEnvCredential({ ...ctx, store }, current, key);
     await store.put('connection', next.id, next);
@@ -630,6 +592,8 @@ export async function connectionAuthorization(ctx: ServerContext, id: string): P
   try {
     return await authorization(ctx, connection);
   } catch (error) {
+    if (!(error instanceof OAuthClientRequired))
+      console.error('coder server: connection authorization failed', error);
     throw error instanceof OAuthClientRequired
       ? refuse(400, error.message)
       : refuse(502, 'Could not start authorization');
@@ -637,9 +601,23 @@ export async function connectionAuthorization(ctx: ServerContext, id: string): P
 }
 
 export async function listConnections(req: Request, ctx: ServerContext): Promise<Response> {
-  return json(
-    await connectionRows(ctx, new URL(req.url).searchParams.get('authorization') ?? undefined),
-  );
+  const url = new URL(req.url);
+  const authorization = url.searchParams.get('authorization') ?? undefined;
+  const waiting = url.searchParams.get('wait');
+  if (!authorization || !waiting) return json(await connectionRows(ctx, authorization));
+  const changes = await ctx.store.watch('delivery', `connection-authorized:${authorization}`);
+  const deadline = Date.now() + 25000;
+  try {
+    for (;;) {
+      const rows = await connectionRows(ctx, authorization);
+      const row = rows.find(row => row.id === waiting);
+      if (!row || row.status === 'ok' || Date.now() >= deadline || req.signal.aborted)
+        return json(rows);
+      await changes.wait(Math.min(10000, deadline - Date.now()), req.signal);
+    }
+  } finally {
+    changes.close();
+  }
 }
 
 export async function createConnection(req: Request, ctx: ServerContext): Promise<Response> {

@@ -21,15 +21,14 @@ import type {
 import type { TaskTurn } from '../../client/types';
 import type { AgentRecord, TaskStatus } from '../store/types';
 import { PERMISSION_MODES, type Permission } from '../../core/config';
-import { agentWithVersion, seedBuiltinAgent, toAgent } from '../agents/records';
+import { agentWithVersion, ensureBuiltinAgents, toAgent } from '../agents/records';
 import type { ServerContext } from '../context';
 import { syncLocalAgents } from '../store/local';
-import { machineSignedIn, runLocalTask } from './local';
-import { credentialFix, resolveCredential } from '../settings/credentials';
+import { runLocalTask } from './local';
+import { credentialFix, resolveEngine } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { installationToken } from './context';
 import { chooseRunner } from '../runners';
-import { DEFAULT_ENGINE } from '../../core/defaults';
 
 export interface NewTask {
   cwd?: string;
@@ -65,6 +64,7 @@ export class TaskInputError extends Error {
 
 /** Refuses tasks for an agent disabled in this workspace. */
 export function assertEnabled(ctx: ServerContext, slug: string, record?: AgentRecord): void {
+  if (record?.problems?.length) throw new TaskInputError(record.problems.join('\n'), 409);
   if (!record?.settings?.disabled) return;
   throw new TaskInputError(
     `Agent "${slug}" is disabled in this workspace. Enable it in its settings to start tasks.`,
@@ -81,7 +81,7 @@ export function taskCwd(ctx: ServerContext, input: { cwd?: string }): string | u
   return checked.folder.path;
 }
 
-const MAX_PROMPT_CHARS = 64 * 1024;
+export const MAX_PROMPT_CHARS = 64 * 1024;
 const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
 const ENGINES = new Set(['claude', 'codex', 'custom']);
 const EFFORTS = new Set(['low', 'medium', 'high']);
@@ -191,7 +191,7 @@ async function repoEvent(
     actor: { id: requester ?? '' },
     text: input.prompt ?? '',
     ...(input.pr ? { chat: { thread: integration.repos!.pullRequestThread(repo, input.pr) } } : {}),
-    repo: input.pr ? { ...found, ref: `refs/pull/${input.pr}/head` } : found,
+    repo: found,
   };
   return { event, author: integration.author?.(app.name) ?? app.name };
 }
@@ -208,15 +208,9 @@ export async function createTask(
   const requester = ctx.session?.user.id;
   const slug = input.agent || defaultAgent();
   if (!slug) throw new TaskInputError('Name an agent: this server has no default agent.');
+  if (slug === defaultAgent()) await ensureBuiltinAgents(ctx, now);
   if (ctx.local) await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
-  const inputs = () =>
-    ctx.store.taskInputs
-      ? ctx.store.taskInputs(slug, requester, input.engine)
-      : agentWithVersion(ctx.store, slug);
-  const initial = await inputs();
-  let loaded = initial;
-  if (await seedBuiltinAgent(ctx.store, now, slug, loaded)) loaded = await inputs();
-  const { record, version } = loaded;
+  const { record, version } = await agentWithVersion(ctx.store, slug);
   const chosen = await chooseRunner(ctx, {
     requester,
     runner: input.runner,
@@ -235,11 +229,12 @@ export async function createTask(
   const agent = toAgent(record, version, usage, ctx.integrations);
   const settings = effectiveSettings(agent);
 
-  const credential = ctx.store.taskInputs
-    ? (loaded as { credential?: string }).credential
-    : (await resolveCredential(ctx.store, settings.engine, requester))?.id;
-  const engine = settings.engine ?? DEFAULT_ENGINE;
-  if (!credential && chosen.runner !== 'http' && !(await machineSignedIn(ctx, settings.engine)))
+  const { engine, credential, usable, chain, credentials } = await resolveEngine(
+    ctx,
+    settings,
+    requester,
+  );
+  if (!usable && chosen.runner !== 'http')
     throw new TaskInputError(
       `No ${engine} credential is connected`,
       409,
@@ -261,10 +256,12 @@ export async function createTask(
     ...(input.args ? { args: input.args } : {}),
     ...(input.mcp?.length ? { mcp: input.mcp } : {}),
     definition: agent.definition,
+    engineChain: chain,
+    engineCredentials: credentials,
     ...(credential ? { credential } : {}),
     ...(requester ? { requester } : {}),
     ...(agent.files ? { files: agent.files } : {}),
-    ...(agent.usage ? { usage: agent.usage } : {}),
+    usage: { ...agent.usage, engine },
     tools: {},
     connections: await connectionGrants(
       ctx,
@@ -353,7 +350,7 @@ export async function continueTask(
     },
     { user: 'agent', text: status.result?.output ?? status.error ?? '', ts: at },
   ].slice(-20);
-  const { note: previousNote, ...context } = status.task.context ?? {};
+  const context = status.task.context ?? {};
   const turns = taskTurns(status);
   turns.at(-1)!.finishedAt ??= now;
   const next: TaskStatus = {

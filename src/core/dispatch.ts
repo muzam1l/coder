@@ -7,7 +7,9 @@ import { CoderError, type FallbackPayload } from './errors';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import process from 'node:process';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
+
+import { processTiming } from '../utils/process';
 
 import * as z from 'zod/mini';
 
@@ -17,14 +19,16 @@ import {
   appendTaskLog,
   readTaskLog,
   readTurnResults,
+  watchTask,
   resolveTaskDir,
   tailSteps,
   writeTask,
   type TaskLogEntry,
   type TurnResultEntry,
   reconcileTask,
+  processStarts,
 } from './state';
-import { readJsonFile } from '../utils/fsx';
+import { createJsonlTail, readJsonFile } from '../utils/fsx';
 import { getCodexAvailability } from './engines/codex';
 import { isUnsupportedModelError } from './engines/codex/errors';
 import { claudeVersionEnvironment, getClaudeAvailability } from './engines/claude';
@@ -43,10 +47,12 @@ import {
   parseEngineSpec,
   resolveCodexModel,
   type McpConfigEntry,
+  mcpEntrySchema,
 } from './config';
 import { CLI_PATH } from './runtime';
 import {
   type Engine,
+  type Availability,
   type CoderConfig,
   type Effort,
   type Task,
@@ -55,10 +61,17 @@ import {
   type ResolvedTaskOptions,
   type TurnResult,
   ACTIVE_STATUSES,
+  HISTORY_LOST,
   TERMINAL_STATUSES,
 } from './types';
 import { listPendingApprovals } from './approvals';
 import { mcpApproved, mcpWarnings } from './mcp';
+import {
+  FALLBACK_INSTRUCTIONS,
+  FALLBACK_NOTE,
+  taskSystemPrompt,
+  type AgentPromptParts,
+} from './prompts';
 
 const STARTUP_ERROR_PATTERN =
   /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|not available|ENOENT/i;
@@ -109,16 +122,18 @@ export function resolveTaskOptions(
     const entry = name ? config.models?.[name] : undefined;
     return entry && isEndpointModel(entry) ? entry : undefined;
   };
-  if (aliasEntry(modelInput)) {
-    let parsed: ReturnType<typeof parseEngineSpec>;
+  const expandAlias = (name: string) => {
     try {
-      parsed = parseEngineSpec(modelInput, config);
+      return parseEngineSpec(name, config);
     } catch (error) {
       throw new CoderError(
         'invalid-option',
         error instanceof Error ? error.message : String(error),
       );
     }
+  };
+  if (aliasEntry(modelInput)) {
+    const parsed = expandAlias(modelInput!);
     if (parsed) {
       if (!explicitEngine) {
         engine = parsed.engine;
@@ -153,15 +168,7 @@ export function resolveTaskOptions(
   let model = modelInput ?? engineDefaults.model ?? null;
   let effort = effortInput ?? engineDefaults.effort ?? null;
   if (aliasEntry(model)) {
-    let parsed: ReturnType<typeof parseEngineSpec>;
-    try {
-      parsed = parseEngineSpec(model, config);
-    } catch (error) {
-      throw new CoderError(
-        'invalid-option',
-        error instanceof Error ? error.message : String(error),
-      );
-    }
+    const parsed = expandAlias(model!);
     if (parsed) {
       if (!explicitEngine) {
         engine = parsed.engine;
@@ -229,17 +236,9 @@ export function resolveTaskOptions(
 // Extra MCP servers
 // ---------------------------------------------------------------------------
 
+const { connection: _connection, description: _description, ...mcpFields } = mcpEntrySchema.shape;
 const mcpServerSchema = z
-  .strictObject({
-    name: z.string().check(z.minLength(1)),
-    command: z.optional(z.string().check(z.minLength(1))),
-    args: z.optional(z.array(z.string())),
-    env: z.optional(z.record(z.string(), z.string())),
-    url: z.optional(z.string().check(z.minLength(1))),
-    type: z.optional(z.enum(['stdio', 'http', 'sse'])),
-    headers: z.optional(z.record(z.string(), z.string())),
-    tools: z.optional(z.array(z.string())),
-  })
+  .strictObject({ name: z.string().check(z.minLength(1)), ...mcpFields })
   .check(z.refine(entry => Boolean(entry.command) !== Boolean(entry.url), 'one of command or url'));
 const mcpServersSchema = z.array(mcpServerSchema);
 
@@ -266,7 +265,7 @@ export function parseMcpServers(
         throw new CoderError('invalid-option', `Unknown MCP server "${name}".`, {
           hint: `configured: ${Object.keys(configured).join(', ') || 'none'}; or pass a JSON array`,
         });
-      return { name, ...entry, ...(entry.repository ? { repository: true } : {}) };
+      return { name, ...entry };
     });
   }
   return parseMcpJson(text);
@@ -293,7 +292,6 @@ export function selectMcpServers(
         Object.entries(declared).map(([name, entry]) => ({
           name,
           ...entry,
-          ...(entry.repository ? { repository: true } : {}),
         })));
   const warnings: string[] = [];
   const mcpBindings = selected
@@ -504,11 +502,15 @@ export interface DispatchOptions {
   permissions?: string;
   name?: string | null;
   system?: string | null;
+  /** The agent's part of the engine's system prompt. */
+  agentPrompt?: AgentPromptParts;
   wait?: boolean;
   simulateApproval?: boolean;
   /** Tags the created task as belonging to a flow run (for `coder list` grouping). */
   flowRunId?: string;
   agentId?: string;
+  /** A conversation's task, whose history rolls over past the context budget. */
+  conversation?: boolean;
   source?: string;
   /** Handle an agent task posts as. */
   author?: string;
@@ -519,6 +521,8 @@ export interface DispatchOptions {
   mcpWarnings?: string[];
   nativeMcp?: boolean;
   connectionEnv?: Record<string, string>;
+  availability?: Partial<Record<Engine, Availability>>;
+  onWorker?: (taskId: string, worker: ChildProcess) => void;
   connections?: string[];
   mcpBindings?: Task['mcpBindings'];
   connectionSource?: Task['connectionSource'];
@@ -530,6 +534,11 @@ export interface DispatchOptions {
   onNote?: (note: string) => void;
   /** A durable local delivery retries the same task. */
   taskId?: string;
+  /** An engine conversation and its chain to continue, used only when the task runs on that engine. */
+  resume?: Pick<Task, 'previousThreadIds' | 'pendingRollover'> & {
+    engine: string;
+    threadId: string;
+  };
 }
 
 const PERMISSION_ORDER = ['read-only', 'workspace-write', 'auto'];
@@ -563,19 +572,30 @@ export function spawnWorker(
   cwd: string,
   taskId: string,
   connectionEnv: Record<string, string> = {},
-): void {
+  checked = false,
+): ChildProcess {
   const taskDir = resolveTaskDir(cwd, taskId);
   const logFd = fs.openSync(path.join(taskDir, 'worker.log'), 'a');
   const env = { ...process.env, ...connectionEnv };
+  processTiming('worker.spawn', { taskId });
   const child = spawn(process.execPath, [CLI_PATH, 'task', 'worker', taskId, '--cwd', cwd], {
     cwd,
     detached: true,
-    stdio: ['ignore', logFd, logFd],
-    env: { ...env, ...claudeVersionEnvironment(env, cwd), [WORKER_ENV]: '1' },
+    stdio: ['ignore', logFd, logFd, 'ipc'],
+    env: {
+      ...env,
+      ...claudeVersionEnvironment(env, cwd),
+      [WORKER_ENV]: '1',
+      CODER_ENGINE_CHECKED: checked ? '1' : undefined,
+    },
   });
+  child.on('error', () => {});
   child.unref();
+  child.channel?.unref?.();
   fs.closeSync(logFd);
   writeTask(cwd, taskId, { pid: child.pid ?? null });
+
+  return child;
 }
 
 // One attempt on one engine: availability gate, task create, spawn, startup wait.
@@ -593,9 +613,10 @@ async function attemptOnce(
 
   // Startup gate: cheap checks before creating a task.
   let availability =
-    resolved.engine !== 'claude'
+    opts.availability?.[resolved.engine === 'custom' ? 'codex' : resolved.engine] ??
+    (resolved.engine !== 'claude'
       ? getCodexAvailability(cwd)
-      : getClaudeAvailability('claude', { ...process.env, ...opts.connectionEnv }, cwd);
+      : getClaudeAvailability('claude', { ...process.env, ...opts.connectionEnv }, cwd));
   const resolvedEntry = resolved.model ? config.models?.[resolved.model] : undefined;
   if (!availability.available && resolvedEntry && isEndpointModel(resolvedEntry)) {
     const install = ensureCodexInstalled(availability);
@@ -615,24 +636,39 @@ async function attemptOnce(
   const addDirs = opts.addDirs ?? [];
 
   const taskId = opts.taskId ?? generateTaskId();
+  const resume = opts.resume?.engine === resolved.engine ? opts.resume : undefined;
   const task = writeTask(cwd, taskId, {
     status: 'queued',
     ...(opts.taskId ? { dispatchId: randomUUID() } : {}),
-    kind: 'task',
     name: taskExtras.name ?? null,
     system: opts.system ?? null,
+    systemPrompt: taskSystemPrompt({
+      cwd,
+      ...opts.agentPrompt,
+      instructions: opts.system ?? undefined,
+      conversation: opts.conversation,
+      agent: Boolean(opts.agentId),
+      local: process.env.CODER_MCP_MODE !== 'cloud',
+    }),
     engine: resolved.engine,
     prompt: opts.prompt,
     ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
     model: resolved.model,
     effort: resolved.effort,
     permissions: resolved.permissions,
-    resumeThreadId: null,
+    resumeThreadId: resume?.threadId ?? null,
+    ...(resume
+      ? {
+          threadId: resume.threadId,
+          ...(resume.previousThreadIds ? { previousThreadIds: resume.previousThreadIds } : {}),
+          ...(resume.pendingRollover ? { pendingRollover: resume.pendingRollover } : {}),
+        }
+      : {}),
     cwd,
-    background: !opts.wait,
     ...(taskExtras.simulateApproval ? { simulateApproval: true } : {}),
     ...(opts.flowRunId ? { flowRunId: opts.flowRunId } : {}),
     ...(opts.agentId ? { agentId: opts.agentId } : {}),
+    ...(opts.conversation ? { conversation: true } : {}),
     ...(opts.source ? { source: opts.source } : {}),
     ...(opts.author ? { author: opts.author } : {}),
     ...(opts.repo ? { repo: opts.repo } : {}),
@@ -648,7 +684,12 @@ async function attemptOnce(
   // kills the task.
   for (const message of new Set(opts.mcpWarnings ?? []))
     appendTaskLog(cwd, taskId, { kind: 'warning', message });
-  spawnWorker(cwd, taskId, opts.connectionEnv);
+  if (opts.resume && !resume)
+    appendTaskLog(cwd, taskId, { kind: 'warning', message: HISTORY_LOST });
+  const logFile = path.join(resolveTaskDir(cwd, taskId), 'log.jsonl');
+  const logStart = fs.existsSync(logFile) ? fs.statSync(logFile).size : 0;
+  const worker = spawnWorker(cwd, taskId, opts.connectionEnv, true);
+  opts.onWorker?.(taskId, worker);
 
   if (!waitForStartup)
     return {
@@ -658,42 +699,55 @@ async function attemptOnce(
       startupCheck: 'pending',
     };
 
-  // Wait for real output or failure; lifecycle greetings alone do not settle startup.
-  const ALL = Number.MAX_SAFE_INTEGER;
-  // Lifecycle greetings and token snapshots aren't work: an engine can say
-  // hello, report its context size, and still die before doing anything.
-  const LIFECYCLE = new Set(['status', 'usage']);
-  const substantive = () =>
-    readTaskLog(cwd, taskId, ALL).filter(entry => {
-      const { phase, kind } = entry as { phase?: string; kind?: string };
-      return phase !== 'starting' && !LIFECYCLE.has(String(kind ?? ''));
-    }).length;
+  const signal = watchTask(cwd, taskId, worker);
+  const startupLines = createJsonlTail(logFile, logStart);
+  let worked = false;
+  let toolUsed = false;
+  const working = () => {
+    const entries = startupLines().map(line => {
+      try {
+        return JSON.parse(line) as TaskLogEntry;
+      } catch {
+        return { kind: 'unknown' };
+      }
+    });
+    toolUsed ||= entries.some(entry => entry.kind === 'tool' || entry.kind === 'reply');
+
+    return entries.some(
+      entry => entry.phase !== 'starting' && !['status', 'usage'].includes(entry.kind ?? ''),
+    );
+  };
   const deadline = Date.now() + 15_000;
+  let readyAt: number | undefined;
   let current = task;
-  let baseline: number | null = null;
-  let settleDeadline: number | null = null;
-  while (Date.now() < (settleDeadline ?? deadline)) {
-    current = loadTask(cwd, taskId) ?? current;
-    if (current.status === 'failed' || current.status === 'completed') {
-      break;
-    }
-    if (current.threadId && baseline === null) {
-      baseline = substantive();
-      settleDeadline = Date.now() + 5_000;
-    }
-    if (baseline !== null && substantive() > baseline) {
+  try {
+    while (Date.now() < (readyAt === undefined ? deadline : readyAt + 5000)) {
       current = loadTask(cwd, taskId) ?? current;
-      break;
+      if (
+        TERMINAL_STATUSES.includes(current.status) ||
+        readTurnResults(cwd, taskId).at(-1)?.status === 0
+      )
+        break;
+      worked = working() || worked;
+      if (current.threadId) {
+        readyAt ??= Date.now();
+        if (worked) break;
+      }
+      await signal.wait(
+        Math.min(30000, (readyAt === undefined ? deadline : readyAt + 5000) - Date.now()),
+      );
     }
-    await new Promise(resolve => setTimeout(resolve, 150));
+  } finally {
+    signal.close();
   }
 
   if (current.status === 'failed') {
+    working();
     // Turn errors (sandbox init, usage/auth) land in result.json, not the
     // progress log, so prefer it and fall back to the log tail.
     const resultFile = path.join(resolveTaskDir(cwd, taskId), 'result.json');
-    const resultError =
-      readJsonFile<{ error?: { message?: string } }>(resultFile)?.error?.message ?? '';
+    const result = readJsonFile<TurnResult>(resultFile);
+    const resultError = result?.error?.message ?? '';
     const logTail = readTaskLog(cwd, taskId, 5)
       .map(entry => entry.message ?? '')
       .join('\n');
@@ -701,7 +755,7 @@ async function attemptOnce(
     if (isSandboxFailure(resolved.permissions, detail)) {
       throw new CoderError('read-only-unavailable', detail);
     }
-    if (isStartupError(detail)) {
+    if (isStartupError(detail) && !turnHasSideEffects(result, toolUsed)) {
       throw new FallbackSignal(resolved.engine, detail);
     }
     throw new CoderError('startup-failed', detail, { taskId: taskId });
@@ -728,9 +782,8 @@ export function buildFallbackPayload(
       action: 'run-native-subagent',
       reason: 'no-engine-available',
       permissions,
-      instructions:
-        'Mention the engine failure to the user, including any limit reset time. If your harness has a native subagent facility, spawn one subagent with fallback.task verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If fallback.permissions is "read-only", append: "Investigate and report without modifying anything." If it is "workspace-write", append: "Never touch anything outside the workspace." Relay its output when it completes. If your harness has no native subagent facility, report the failure and stop; do not implement the task yourself.',
-      note: 'Every coder engine failed to start. Spawn your own native subagent and forward the task verbatim; tell it to never run git write operations (commit, checkout, stash, reset, push, ...) and to honor the permissions.',
+      instructions: FALLBACK_INSTRUCTIONS,
+      note: FALLBACK_NOTE,
       ...(system ? { system } : {}),
       task,
     },
@@ -745,7 +798,7 @@ export function buildFallbackPayload(
 export async function dispatchTask(
   opts: DispatchOptions,
   // Worker-internal: a task an agent's flow asked for through its mailbox, already capped.
-  internal: { fromMailbox?: boolean; waitForStartup?: boolean } = {},
+  internal: { fromMailbox?: boolean; waitForStartup?: boolean; config?: CoderConfig } = {},
 ): Promise<DispatchResult> {
   if (process.env[WORKER_ENV] && !internal.fromMailbox) {
     throw new CoderError(
@@ -767,7 +820,7 @@ export async function dispatchTask(
   }
 
   opts = { ...opts, addDirs: resolveAddDirs(opts.cwd, opts.addDirs) };
-  const config = loadConfig(opts.cwd);
+  const config = internal.config ?? loadConfig(opts.cwd);
   const mcp = selectMcpServers(opts.mcp, config.mcp);
   const dispatchOpts = {
     ...opts,
@@ -805,7 +858,7 @@ export async function dispatchTask(
       if (!(error instanceof FallbackSignal)) {
         throw error;
       }
-      const next = config.chain[config.chain.indexOf(error.engine) + 1];
+      const next = nextFallbackEngine(error.engine, config);
       if (!next) {
         const payload = buildFallbackPayload(
           error.engine,
@@ -841,25 +894,41 @@ export interface TaskResult {
   task: Task;
 }
 
-/**
- * Chain engine to retry on after a mid-turn failure, or undefined. Startup
- * fallback (dispatchTask) can't cover an engine that dies moments after the
- * gate (usage limit, auth): dispatch has already returned. A waiting caller
- * may walk the chain instead of surfacing the failure, but only when the
- * error matches the startup pattern AND the turn provably did nothing, so a
- * retry can't double-apply work.
- */
-export function turnFallbackEngine(cwd: string, waited: TaskResult): Engine | undefined {
+function nextFallbackEngine(engine: Engine, config: CoderConfig): Engine | undefined {
+  return config.chain.slice(config.chain.indexOf(engine) + 1).find(next =>
+    next !== 'custom' || Object.values(config.models ?? {}).some(isEndpointModel),
+  );
+}
+
+function turnHasSideEffects(result: TurnResult | null, toolUsed = false): boolean {
+  return Boolean(
+    toolUsed ||
+    result?.touchedFiles?.length ||
+    (result?.fileChanges as unknown[] | undefined)?.length ||
+    (result?.commandExecutions as unknown[] | undefined)?.length,
+  );
+}
+
+/** The next engine for a failed turn that did no work; null means its chain is exhausted. */
+export function turnFallbackEngine(
+  cwd: string,
+  waited: TaskResult,
+  config?: CoderConfig,
+): Engine | null | undefined {
   if (waited.status !== 'failed') return undefined;
   const r = waited.result;
   if (!r || !isStartupError(r.error?.message ?? '')) return undefined;
-  const sideEffectFree =
-    !r.touchedFiles?.length &&
-    !(r as any).fileChanges?.length &&
-    !(r as any).commandExecutions?.length;
-  if (!sideEffectFree) return undefined;
-  const chain = loadConfig(cwd).chain;
-  return chain[chain.indexOf(waited.task.engine as Engine) + 1];
+  const since = Date.parse(
+    waited.turns.at(-2)?.at ?? waited.task.resumedAt ?? waited.task.createdAt,
+  );
+  const toolUsed = readTaskLog(cwd, waited.taskId, Number.MAX_SAFE_INTEGER).some(
+    entry =>
+      (entry.kind === 'tool' || entry.kind === 'reply') &&
+      (!entry.at || Date.parse(entry.at) >= since),
+  );
+  if (turnHasSideEffects(r, toolUsed)) return undefined;
+  if (waited.turns.at(-1)?.lastReply) return undefined;
+  return nextFallbackEngine(waited.task.engine as Engine, config ?? loadConfig(cwd)) ?? null;
 }
 
 export function readResultJson(cwd: string, taskId: string): TurnResult | null {
@@ -895,6 +964,13 @@ export function readTask(
   };
 }
 
+interface WaitOptions {
+  turn?: number;
+  worker?: ChildProcess;
+  rollover?: boolean;
+  signal?: AbortSignal;
+}
+
 /**
  * Block until a task reaches a terminal state, then return its TurnResult.
  * A pending approval surfaces as a CoderError (code approval-pending), not exit 4.
@@ -902,13 +978,13 @@ export function readTask(
 export async function waitTask(
   cwd: string,
   taskId: string,
-  opts: { tail?: number | 'all'; onSettle?: () => void } = {},
+  opts: WaitOptions & { tail?: number | 'all'; onSettle?: () => void } = {},
 ): Promise<TaskResult> {
   const task = loadTask(cwd, taskId);
   if (!task) {
     throw new Error(`No task found for "${taskId}".`);
   }
-  const outcome = await waitForTaskAttention(cwd, task);
+  const outcome = await waitForTaskAttention(cwd, task, 1000, opts);
   if (outcome.reason === 'approval') {
     const approval = outcome.approval!;
     throw new CoderError(
@@ -949,29 +1025,40 @@ export interface WaitOutcome {
 export async function waitForTaskAttention(
   cwd: string,
   task: Task,
-  pollMs = 400,
+  pollMs = 1000,
+  { turn, worker, rollover = false, signal: abort }: WaitOptions = {},
 ): Promise<WaitOutcome> {
   let current = task;
-  for (;;) {
-    if (TERMINAL_STATUSES.includes(current.status)) {
-      return { task: current, reason: 'terminal' };
+  const signal = watchTask(cwd, task.id, worker);
+  try {
+    const startMs = processStarts();
+    for (;;) {
+      abort?.throwIfAborted();
+      current = loadTask(cwd, current.id) ?? current;
+      const result = turn === undefined ? undefined : readTurnResults(cwd, current.id)[turn];
+      if (result) current = { ...current, status: result.status === 0 ? 'completed' : 'failed' };
+      else current = reconcileTask(cwd, current, startMs);
+      if (rollover ? !current.rollingOver : TERMINAL_STATUSES.includes(current.status)) {
+        return { task: current, reason: 'terminal' };
+      }
+      const pending = listPendingApprovals(resolveTaskDir(cwd, current.id)).find(a => !a.response);
+      if (pending) {
+        const params = pending.params as
+          { networkApprovalContext?: { host?: string | null } | null } | undefined;
+        return {
+          task: current,
+          reason: 'approval',
+          approval: {
+            id: pending.id,
+            summary: String(pending.summary ?? ''),
+            cwd: typeof pending.cwd === 'string' ? pending.cwd : null,
+            networkHost: params?.networkApprovalContext?.host ?? null,
+          },
+        };
+      }
+      await signal.wait(pollMs, abort);
     }
-    const pending = listPendingApprovals(resolveTaskDir(cwd, current.id)).filter(a => !a.response);
-    if (pending[0]) {
-      const params = pending[0].params as
-        { networkApprovalContext?: { host?: string | null } | null } | undefined;
-      return {
-        task: current,
-        reason: 'approval',
-        approval: {
-          id: pending[0].id,
-          summary: String(pending[0].summary ?? ''),
-          cwd: typeof pending[0].cwd === 'string' ? pending[0].cwd : null,
-          networkHost: params?.networkApprovalContext?.host ?? null,
-        },
-      };
-    }
-    await new Promise(resolve => setTimeout(resolve, pollMs));
-    current = reconcileTask(cwd, loadTask(cwd, current.id) ?? current);
+  } finally {
+    signal.close();
   }
 }

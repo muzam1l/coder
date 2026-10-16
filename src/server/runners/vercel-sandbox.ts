@@ -1,14 +1,13 @@
 import net from 'node:net';
 import { randomUUID } from 'node:crypto';
 
-import { readVersion } from '../../core/runtime';
 import { MACHINE_SANDBOX_ENV } from '../../core/config';
 import { decodeJson, encodeJson } from '../../utils/base64url';
 import { sha256 } from '../../utils/crypto';
 import type { AgentTask } from '../../agent/types';
 import type { Runner } from '.';
 import { toolInstalls } from './local';
-import { runnerTarball, startCommand, SETUP_FAILED } from '.';
+import { runnerHash, runnerTarball, startCommand, SETUP_FAILED } from '.';
 import { INTEGRATIONS } from '../../integrations';
 import { INBOX_COMMAND, INBOX_SOCKET } from '../../runner/task';
 import type { InboxEntry, InboxAck } from '../tasks/queue';
@@ -61,7 +60,6 @@ export interface SnapshotStore {
 }
 
 export interface VercelSandboxOptions {
-  tarballUrl?: string;
   token?: string;
   team?: string;
   projectId?: string;
@@ -118,11 +116,14 @@ export function nearestRegion(databaseUrl: string | undefined): string | undefin
   return Object.entries(REGIONS).find(([aws]) => host.includes(aws))?.[1];
 }
 
+/** Where the sandbox firewall injects a variable: at one host, in one header, with a value prefix. */
+export type BrokerRule = { name: string; host: string; header: string; prefix: string };
+
 /** API keys the sandbox firewall injects, so the key never enters the sandbox. */
-export const BROKERED: Record<string, { host: string; header: string; prefix: string }> = {
-  ANTHROPIC_API_KEY: { host: 'api.anthropic.com', header: 'x-api-key', prefix: '' },
-  OPENAI_API_KEY: { host: 'api.openai.com', header: 'authorization', prefix: 'Bearer ' },
-};
+export const BROKERED: BrokerRule[] = [
+  { name: 'ANTHROPIC_API_KEY', host: 'api.anthropic.com', header: 'x-api-key', prefix: '' },
+  { name: 'OPENAI_API_KEY', host: 'api.openai.com', header: 'authorization', prefix: 'Bearer ' },
+];
 export const BROKERED_PLACEHOLDER = 'brokered';
 
 /** Each engine's model API, and the account hosts a subscription uses and signs in with. */
@@ -146,16 +147,22 @@ export function engineHosts(engine: string, env: Record<string, string>): string
 }
 
 /** The machine firewall: brokered keys per host; with `hosts`, nothing else is reachable. */
-export function networkPolicy(credential: Record<string, string> = {}, hosts?: string[]) {
-  const rules = Object.entries(BROKERED)
-    .filter(([name]) => credential[name])
-    .map(([name, rule]) => [
-      rule.host,
-      [{ transform: [{ headers: { [rule.header]: `${rule.prefix}${credential[name]}` } }] }],
-    ]);
+export function networkPolicy(
+  credential: Record<string, string> = {},
+  hosts?: string[],
+  brokered: BrokerRule[] = BROKERED,
+) {
+  const headers: Record<string, Record<string, string>> = {};
+  for (const rule of brokered)
+    if (credential[rule.name])
+      (headers[rule.host] ??= {})[rule.header] = `${rule.prefix}${credential[rule.name]}`;
+  const rules = Object.entries(headers).map(([host, value]) => [
+    host,
+    [{ transform: [{ headers: value }] }],
+  ]);
   if (!hosts)
     return rules.length ? { allow: { ...Object.fromEntries(rules), '*': [] } } : undefined;
-  const ips = hosts.filter(host => net.isIP(host));
+  const ips = [...new Set(hosts.filter(host => net.isIP(host)))];
   const domains = hosts.filter(host => !net.isIP(host)).map(host => [host, []]);
 
   return {
@@ -167,9 +174,9 @@ export function networkPolicy(credential: Record<string, string> = {}, hosts?: s
 }
 
 /** Hosts every machine's start reaches: this server, the runner package and tool installs. */
-function startHosts(env: Record<string, string>, tarballUrl?: string): string[] {
+function startHosts(env: Record<string, string>): string[] {
   return [
-    ...[env.CODER_SERVER, tarballUrl ?? runnerTarball()]
+    ...[env.CODER_SERVER, env.CODER_RUNNER_TARBALL_URL]
       .filter(url => url && URL.canParse(url))
       .map(url => new URL(url!).hostname),
     ...Object.values(INTEGRATIONS).flatMap(integration => integration.tools.installHosts ?? []),
@@ -221,11 +228,19 @@ class SandboxExpired extends Error {
 /** Each task gets its own microVM, started from a per-repository snapshot built on first use. */
 export class VercelSandboxRunner implements Runner {
   readonly kind = 'vercel-sandbox' as const;
+  private readonly sandboxes = new Map<string, { sandbox: SandboxInstance; expiresAt: number }>();
 
   constructor(private readonly options: VercelSandboxOptions = {}) {}
 
   private api(): Promise<SandboxApi> {
     return this.options.sandbox ? Promise.resolve(this.options.sandbox) : loadSandbox();
+  }
+
+  private async sandbox(name: string) {
+    for (const [key, value] of this.sandboxes)
+      if (value.expiresAt <= this.now()) this.sandboxes.delete(key);
+    const owned = this.sandboxes.get(name);
+    return owned?.sandbox ?? (await this.api()).get({ ...this.auth(), name });
   }
 
   private now(): number {
@@ -258,14 +273,13 @@ export class VercelSandboxRunner implements Runner {
     };
   }
 
-  /** Snapshot key per repository, install, runner version and image. */
+  /** Snapshot key per repository, install, runner build and image. */
   snapshotKey(task: AgentTask): string | undefined {
     const repo = task.event?.repo;
     if (!repo) return undefined;
     const id = [
-      readVersion(),
+      runnerHash(),
       this.options.image ?? null,
-      this.options.tarballUrl ?? null,
       task.event!.appId,
       task.event!.installationId,
       repo.owner,
@@ -275,22 +289,29 @@ export class VercelSandboxRunner implements Runner {
     return `repo:${this.options.region ?? ''}:${sha256(JSON.stringify(id))}`;
   }
 
+  private async stopSandbox(sandbox: SandboxInstance) {
+    try {
+      await sandbox.stop();
+    } finally {
+      this.sandboxes.delete(sandbox.name);
+    }
+  }
+
   private async withSandbox<T>(
     value: string | SandboxInstance,
     run: (sandbox: SandboxInstance) => Promise<T>,
   ): Promise<T> {
     let sandbox: SandboxInstance | undefined;
     try {
-      sandbox =
-        typeof value === 'string'
-          ? await (await this.api()).get({ ...this.auth(), name: value })
-          : value;
+      sandbox = typeof value === 'string' ? await this.sandbox(value) : value;
       if (sandbox.status !== 'running' && sandbox.status !== 'pending')
         throw new SandboxExpired(`Vercel Sandbox ${sandbox.name} is ${sandbox.status}`);
 
       return await run(sandbox);
     } catch (error) {
       const status = responseStatus(error);
+      if ((status === 404 || status === 410) && typeof value === 'string')
+        this.sandboxes.delete(value);
       if (status === 410 || (!sandbox && typeof value === 'string' && status === 404))
         throw new SandboxExpired(
           error instanceof Error ? error.message : 'Vercel Sandbox expired',
@@ -336,14 +357,15 @@ export class VercelSandboxRunner implements Runner {
         if (command.exitCode === 0) {
           const sha = /^coder-snapshot (\S+)$/m.exec(await command.stdout())?.[1];
           if (sha && sha === state.sha) {
-            await sandbox.stop().catch(() => {});
+            await this.stopSandbox(sandbox).catch(() => {});
             return { ...rest, checkedAt: now };
           }
           const taken = await sandbox.snapshot({ expiration: SNAPSHOT_TTL_MS });
+          this.sandboxes.delete(sandbox.name);
 
           return { ...rest, snapshotId: taken.snapshotId, ...(sha ? { sha } : {}), checkedAt: now };
         }
-        await sandbox.stop().catch(() => {});
+        await this.stopSandbox(sandbox).catch(() => {});
 
         return { ...rest, failedAt: now };
       });
@@ -422,7 +444,9 @@ export class VercelSandboxRunner implements Runner {
         })().catch(() => {});
         waitUntil?.(work);
       } else {
-        await this.withSandbox(started.sandbox, sandbox => sandbox.stop()).catch(() => {});
+        await this.withSandbox(started.sandbox, sandbox => this.stopSandbox(sandbox)).catch(
+          () => {},
+        );
       }
     }
     if (failure) throw failure;
@@ -448,6 +472,15 @@ export class VercelSandboxRunner implements Runner {
           throw new SandboxExpired(error.message, source, { cause: error });
         throw error;
       });
+    if (!command.env?.CODER_PREPARE) {
+      for (const [key, value] of this.sandboxes)
+        if (value.expiresAt <= this.now()) this.sandboxes.delete(key);
+      if (this.sandboxes.size >= 1000) this.sandboxes.delete(this.sandboxes.keys().next().value!);
+      this.sandboxes.set(sandbox.name, {
+        sandbox,
+        expiresAt: this.now() + Number(extra.timeout ?? this.options.timeoutMs ?? BUILD_MS),
+      });
+    }
     try {
       const started = await this.withSandbox(sandbox, sandbox =>
         sandbox.runCommand({ ...command, detached: true }),
@@ -459,7 +492,8 @@ export class VercelSandboxRunner implements Runner {
         wait: () => started.wait({ signal: AbortSignal.timeout(BUILD_MS) }),
       };
     } catch (error) {
-      await sandbox.stop().catch(() => {});
+      this.sandboxes.delete(sandbox.name);
+      await this.stopSandbox(sandbox).catch(() => {});
       throw error;
     }
   }
@@ -472,23 +506,30 @@ export class VercelSandboxRunner implements Runner {
       timeoutMs?: number;
       waitUntil?: (work: Promise<unknown>) => void;
       hosts?: string[];
+      brokered?: BrokerRule[];
     } = {},
   ): Promise<string> {
+    env = {
+      ...env,
+      [MACHINE_SANDBOX_ENV]: '1',
+      CODER_RUNNER_TARBALL_URL: runnerTarball(env.CODER_SERVER!),
+      CODER_RUNNER_HASH: runnerHash(),
+    };
     const policy = networkPolicy(
       credential,
-      options.hosts && [...startHosts(env, this.options.tarballUrl), ...options.hosts],
+      options.hosts && [...startHosts(env), ...options.hosts],
+      options.brokered,
     );
-    env = { ...env, [MACHINE_SANDBOX_ENV]: '1' };
-    if (this.options.tarballUrl)
-      env = { ...env, CODER_RUNNER_TARBALL_URL: this.options.tarballUrl };
     const command = (env: Record<string, string>) => ({
       cmd: 'sh',
       args: [
         '-c',
         startCommand(
           toolInstalls()
-            .map(install => `sudo sh -c '${install}'`)
+            .map(install => `sudo sh -c '${install.replaceAll("'", "'\\''")}'`)
             .join(' && '),
+          '',
+          'setpriv --inh-caps=-all --ambient-caps=-all bun',
         ),
         'coder-task',
         task.id,
@@ -537,29 +578,43 @@ export class VercelSandboxRunner implements Runner {
 
   async status(handle: string) {
     const value = decode(handle);
-    const sandbox = await (await this.api()).get({ ...this.auth(), name: value.sandbox });
-    if (sandbox.status === 'pending') return { state: 'running' as const };
-    if (sandbox.status !== 'running') return { state: 'exited' as const, code: 1 };
-    const command = await sandbox.getCommand(value.command);
-    return command.exitCode === null
-      ? { state: 'running' as const }
-      : { state: 'exited' as const, code: command.exitCode };
+    try {
+      const sandbox = await this.sandbox(value.sandbox);
+      if (sandbox.status === 'pending') return { state: 'running' as const };
+      if (sandbox.status !== 'running') {
+        this.sandboxes.delete(value.sandbox);
+        return { state: 'exited' as const, code: 1 };
+      }
+      const command = await sandbox.getCommand(value.command);
+      return command.exitCode === null
+        ? { state: 'running' as const }
+        : { state: 'exited' as const, code: command.exitCode };
+    } catch (error) {
+      if ([404, 410].includes(responseStatus(error) ?? 0)) this.sandboxes.delete(value.sandbox);
+      throw error;
+    }
   }
 
   async push(handle: string, entries: InboxEntry[]): Promise<InboxAck> {
-    const sandbox = await (await this.api()).get({ ...this.auth(), name: decode(handle).sandbox });
-    const command = await sandbox.runCommand({
-      cmd: 'node',
-      args: ['-e', INBOX_COMMAND],
-      detached: false,
-      env: { CODER_INBOX_MESSAGES: JSON.stringify(entries) },
+    return this.withSandbox(decode(handle).sandbox, async sandbox => {
+      const command = await sandbox.runCommand({
+        cmd: 'node',
+        args: ['-e', INBOX_COMMAND],
+        detached: false,
+        env: { CODER_INBOX_MESSAGES: JSON.stringify(entries) },
+      });
+      const output = await command.stdout();
+      if (command.exitCode !== 0) throw new Error('Sandbox inbox delivery failed');
+      return JSON.parse(output);
     });
-    const output = await command.stdout();
-    if (command.exitCode !== 0) throw new Error('Sandbox inbox delivery failed');
-    return JSON.parse(output);
   }
 
   async stop(handle: string): Promise<void> {
-    await (await (await this.api()).get({ ...this.auth(), name: decode(handle).sandbox })).stop();
+    const name = decode(handle).sandbox;
+    try {
+      await (await this.sandbox(name)).stop();
+    } finally {
+      this.sandboxes.delete(name);
+    }
   }
 }

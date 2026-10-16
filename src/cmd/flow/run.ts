@@ -65,7 +65,7 @@ export const runOptions = (
   dryRun: options['dry-run'],
   concurrency: num(options.concurrency),
   maxTasks: num(options['max-tasks']),
-  argv: process.argv.slice(2),
+  detached: true,
   wait: options.wait,
 });
 
@@ -95,14 +95,10 @@ export const commandRun = command({
   },
   options: RUN_FLAGS,
   args: Number.POSITIVE_INFINITY,
+  required: ['<name|path>'],
   async run({ options, args: [ref, ...rest], cwd }) {
     const { startRun } = await import('../../flow/runs');
 
-    if (!ref) {
-      throw new CoderError('invalid-option', 'Missing flow name or path.', {
-        hint: ['Usage: coder flow run <name|path>', 'List: coder flow discover'],
-      });
-    }
     const started = await startRun(
       ref,
       { ...runOptions(options, cwd), args: parseRunArgs(options.args, rest) },
@@ -119,15 +115,7 @@ export const commandRun = command({
 function stepHooks(): FlowHooks {
   const renderer = new FlowStepRenderer();
   const line = (e: FlowEvent) => renderer.emit(e);
-  return {
-    onTaskStart: info => line({ kind: 'task-start', ...info }),
-    onTaskEnd: info => line({ kind: 'task-end', ...info }),
-    onGateStart: info => line({ kind: 'gate-start', ...info }),
-    onGate: info => line({ kind: 'gate', ...info }),
-    onLog: (message, depth) => line({ kind: 'log', message, depth }),
-    onFlowStart: info => line({ kind: 'flow-start', ...info }),
-    onReplay: count => line({ kind: 'replay', count }),
-  };
+  return { onEvent: event => renderer.emit(event) };
 }
 
 /** `flow run|resume`: a run handed to its detached orchestrator. */

@@ -1,15 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
 import { eventOptions } from '../../agent/definition';
-import { decryptSecret, encryptSecret } from '../store/secrets';
-import { BROKERED, BROKERED_PLACEHOLDER, engineHosts } from '../runners/vercel-sandbox';
+import { decryptCredential, decryptSecret, encryptSecret } from '../store/secrets';
+import {
+  BROKERED,
+  BROKERED_PLACEHOLDER,
+  engineHosts,
+  type BrokerRule,
+} from '../runners/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
 import type { AgentEvent, InstallationLink, Installation } from '../../agent/types';
 import type { EngineCredential, Store, TaskStatus } from '../store/types';
+import { dropKey, heldKey, type HeldToken } from '../store/tokens';
 import type { ServerContext } from '../context';
 import type { CoderConfig } from '../../core/config';
 import { taskConfig } from '../settings/config';
-import { credentialValue, resolveCredential } from '../settings/credentials';
+import { resolveCredential } from '../settings/credentials';
 import {
   resolvedTaskConnections,
   connectionSecretValues,
@@ -21,6 +27,7 @@ import { connectionWarnings } from './logs';
 import { LocalStore } from '../store/local';
 import { mcpSecretValue } from '../../core/mcp';
 import { findConnection, nativeCredential, nativeApp } from '../connections/records';
+import { updateMetadata } from '../store';
 
 /** Installation tokens are encrypted at rest; integrations see plaintext only in memory. */
 export function unsealed(ctx: ServerContext, installation: Installation): Installation {
@@ -35,34 +42,31 @@ export function unsealed(ctx: ServerContext, installation: Installation): Instal
 /** A held token is reused only while more than this remains. */
 const REUSE_MARGIN_MS = 5 * 60 * 1000;
 
-/** A minted token held for reuse, sealed. */
-export interface HeldToken {
-  token: string;
-  expiresAt: number;
-  mintedAt: number;
-}
-
-/** An installation's or app's latest token drop. */
-export interface TokenDrop {
-  drop: string;
-}
-
-const heldKey = (id: string, key = '') => `token:${id}:${key}`;
-const dropKey = (id: string) => `token-drop:${id}`;
+export {
+  dropKey,
+  heldKey,
+  type HeldToken,
+  type HeldWrite,
+  type TokenDrop,
+  type TokenState,
+} from '../store/tokens';
 /** Outlives any mint in flight when tokens are dropped. */
 const DROP_FENCE_TTL_MS = 60 * 60 * 1000;
-
-/** The installation's and its app's latest drops, so a mint that began before one is never held. */
-const drops = (store: Store, installation: Installation) =>
-  Promise.all(
-    [installation.id, installation.app].map(id => store.get<TokenDrop>('snapshot', dropKey(id))),
-  ).then(rows => rows.map(row => row?.drop).join());
 
 /** Forgets every token held for an installation, or given an app id, for all of its installations. */
 export async function dropTokens(store: Store, id: string): Promise<void> {
   await store.put('snapshot', dropKey(id), { drop: randomUUID() }, { ttlMs: DROP_FENCE_TTL_MS });
   for (const row of await store.list<HeldToken>('snapshot', { prefix: heldKey(id) }))
     await store.delete('snapshot', row.id);
+}
+
+export async function uninstall(store: Store, id: string, now: number): Promise<void> {
+  await store.withAppLock(`installation:${id}`, async locked => {
+    const current = await locked.get('installation', id);
+    if (!current || current.deletedAt) return;
+    await updateMetadata(locked, 'installation', id, { deletedAt: now, uninstalled: true });
+    await dropTokens(locked, id);
+  });
 }
 
 /** The installation's token through its integration, reused from the store per exact scope where it can be; a refreshed one is stored again, sealed. A task's token must outlive `taskMs`. */
@@ -80,7 +84,8 @@ export async function installationToken(
     fetch: ctx.fetch,
     async hold(reuse, mint) {
       const key = heldKey(installation.id, reuse);
-      const held = await ctx.store.get<HeldToken>('snapshot', key);
+      const state = await ctx.store.heldTokens([installation.id], [installation.app]);
+      const held = state.held.get(key);
       const now = (ctx.now ?? Date.now)();
       // A task's token covers its timeout, plus the margin when a fresh one would.
       const fresh = held ? held.expiresAt - held.mintedAt : 0;
@@ -93,20 +98,21 @@ export async function installationToken(
         }
       }
 
-      const drop = await drops(ctx.store, installation);
+      // Held only while the drops it was read under stand, so a mint that began before a drop is never kept.
       const minted = await mint();
-      if ((await drops(ctx.store, installation)) !== drop) return minted.token;
-      await ctx.store.put(
-        'snapshot',
+      await ctx.store.holdToken({
         key,
-        {
+        value: {
           token: encryptSecret(ctx.config, minted.token),
           expiresAt: minted.expiresAt,
           mintedAt: now,
         },
-        { ttlMs: Math.max(minted.expiresAt - now - REUSE_MARGIN_MS, 0) },
-      );
-      if ((await drops(ctx.store, installation)) !== drop) await ctx.store.delete('snapshot', key);
+        ttlMs: Math.max(minted.expiresAt - now - REUSE_MARGIN_MS, 0),
+        drops: [installation.id, installation.app].map(id => ({
+          key: dropKey(id),
+          drop: state.drops.get(dropKey(id)),
+        })),
+      });
 
       return minted.token;
     },
@@ -137,6 +143,7 @@ export async function installationToken(
 export interface PlatformAccess {
   /** The installation's store id. */
   installation: string;
+  record?: Installation;
   /** A token that can see `repo` (`owner/name`), by default the access's own repository. */
   token(repo?: string): Promise<string | undefined>;
   fetch: typeof fetch;
@@ -219,15 +226,15 @@ async function connection(
 ): Promise<
   | {
       installation: string;
+      record: Installation;
       repo: { owner: string; name: string };
       mint(repo?: { owner: string; name: string }): Promise<string>;
     }
   | undefined
 > {
-  const linked = await ctx.store.get('installation', link.id);
-  if (!linked || linked.deletedAt) return undefined;
-
-  const app = await ctx.store.get('app', linked.app);
+  const resolved = await ctx.store.installationApp(link.id);
+  if (!resolved) return undefined;
+  const { installation: linked, app } = resolved;
   const target = ctx.integrations[integration];
   if (!app || !target) return undefined;
 
@@ -236,6 +243,7 @@ async function connection(
 
   return {
     installation: linked.id,
+    record: linked,
     repo,
     mint: async (read = repo) =>
       installationToken(
@@ -243,7 +251,7 @@ async function connection(
         target,
         linked,
         decryptSecret(ctx.config, app.credentials),
-        tokenBound(read, task ? (task.tools[integration] ?? []) : target.tools.presets.observe),
+        tokenBound(read, task ? (task.tools[integration] ?? []) : target.tools.presets.read),
         task && ctx.config.taskTimeoutMs,
       ),
   };
@@ -291,6 +299,7 @@ export function dispatchTokens(
     if (id === event.integration)
       return {
         installation: installation.id,
+        record: installation,
         fetch: fetcher,
         token: scoped(event.repo, repo =>
           installationToken(
@@ -298,7 +307,7 @@ export function dispatchTokens(
             integration,
             installation,
             credentials,
-            tokenBound(repo, integration.tools.presets.observe),
+            tokenBound(repo, integration.tools.presets.read),
           ),
         ),
       };
@@ -307,6 +316,7 @@ export function dispatchTokens(
     return (
       linked && {
         installation: linked.installation,
+        record: linked.record,
         fetch: fetcher,
         token: scoped(linked.repo, repo => linked.mint(repo).catch(connectionFailed(id))),
       }
@@ -347,9 +357,9 @@ export async function eventTokens(
     decryptSecret(ctx.config, app.credentials),
     tokenBound(
       task.toolScopes?.[event.integration]?.repo ?? event.repo,
-      task.tools[event.integration] ?? (posts ? integration.tools.presets.comment : []),
+      task.tools[event.integration] ?? (posts ? integration.tools.presets.read : []),
     ),
-    eventOptions(task.definition.integrations[event.integration], event.type)?.actAs,
+    taskActAs(task),
   );
   const tokens: Record<string, string> = { [event.integration]: eventToken };
   await Promise.all(
@@ -364,6 +374,14 @@ export async function eventTokens(
   return tokens;
 }
 
+/** A personal token only in a 1:1 conversation; in a shared one anyone may steer, so the task acts as the app. */
+function taskActAs(task: TaskStatus['task']) {
+  const event = task.event!;
+  return event.chat && !event.chat.thread.isDM
+    ? undefined
+    : eventOptions(task.definition.integrations[event.integration], event.type)?.actAs;
+}
+
 export async function taskContext(
   ctx: ServerContext,
   status: TaskStatus,
@@ -371,7 +389,9 @@ export async function taskContext(
   task: TaskStatus['task'];
   tokens: Record<string, string>;
   nativeTokens: Record<string, string>;
+  postToken?: string;
   credential: EngineCredential;
+  engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
   config: Partial<CoderConfig>;
   connections: Record<string, McpServerSpec>;
   connectionEnv: Record<string, string>;
@@ -387,11 +407,49 @@ export async function taskContext(
     ctx.local ? {} : taskConfig(ctx.store),
     taskCredential(ctx, task),
   ]);
+
+  let postToken: string | undefined;
+  const event = task.event;
+  if (task.flow === 'default' && event?.chat && task.source === event.integration) {
+    const integration = ctx.integrations[event.integration]!;
+    const read = integration.tools.presets.read;
+    const tools = task.tools[event.integration] ?? [];
+    // The app's tool token posts too when its scopes are exactly the read scopes.
+    const shared =
+      !taskActAs(task) &&
+      tools.length === read.length &&
+      read.every(scope => tools.includes(scope));
+    if (shared) postToken = tokens[event.integration];
+    else {
+      const [app, installation] = await Promise.all([
+        ctx.store.get('app', event.appId),
+        ctx.store.get('installation', `${event.appId}:${event.installationId}`),
+      ]);
+      if (!app || !installation || installation.deletedAt)
+        throw new Error('Conversation installation is gone');
+      postToken = await installationToken(
+        ctx,
+        integration,
+        installation,
+        decryptSecret(ctx.config, app.credentials),
+        tokenBound(task.toolScopes?.[event.integration]?.repo ?? event.repo, read),
+        ctx.config.taskTimeoutMs,
+      );
+    }
+  }
+
   const resolved = await resolvedTaskConnections(ctx, status, tokens);
+  const engineCredentials = task.engineChain?.length
+    ? await taskEngineCredentials(ctx, task)
+    : undefined;
   const connectionEnv = { ...resolved.env };
   const warnings = [...resolved.warnings];
   for (const name of Object.keys(connectionEnv)) {
-    if (credential.env[name] === undefined) continue;
+    if (
+      credential.env[name] === undefined &&
+      !engineCredentials?.some(row => row.credential.env[name] !== undefined)
+    )
+      continue;
     delete connectionEnv[name];
     warnings.push(`${name} is temporarily unavailable; skipped for this task.`);
   }
@@ -402,27 +460,48 @@ export async function taskContext(
     ...currentSecrets,
     ...Object.values(resolved.tokens),
     ...Object.values(tokens),
+    ...(postToken ? [postToken] : []),
     ...credentialSecrets(credential.env),
+    ...(engineCredentials?.flatMap(row => credentialSecrets(row.credential.env)) ?? []),
   ]);
   await connectionWarnings(ctx, task.id, warnings);
   const common = {
     task: safeTask,
     tokens: { ...resolved.tokens, ...tokens },
     nativeTokens: resolved.nativeTokens,
+    ...(postToken ? { postToken } : {}),
     credential,
+    ...(engineCredentials ? { engineCredentials } : {}),
     config,
     connections: resolved.mcp,
     connectionEnv,
     connectionSecrets,
   };
   if (task.runner !== 'vercel-sandbox') return common;
-  const env = Object.fromEntries(
-    Object.entries(credential.env).map(([name, value]) => [
-      name,
-      name in BROKERED ? BROKERED_PLACEHOLDER : value,
-    ]),
-  );
-  return { ...common, credential: { ...credential, env } };
+  const brokered = (credential: EngineCredential) => {
+    const names = new Set(brokeredKeys(config, task, credential).map(rule => rule.name));
+    return {
+      ...credential,
+      env: Object.fromEntries(
+        Object.entries(credential.env).map(([name, value]) => [
+          name,
+          names.has(name) ? BROKERED_PLACEHOLDER : value,
+        ]),
+      ),
+    };
+  };
+  return {
+    ...common,
+    credential: brokered(credential),
+    ...(engineCredentials
+      ? {
+          engineCredentials: engineCredentials.map(row => ({
+            ...row,
+            credential: brokered(row.credential),
+          })),
+        }
+      : {}),
+  };
 }
 
 /** The task's engine credential; a member's own runner falls back to the machine's logins. */
@@ -430,28 +509,74 @@ export async function taskCredential(
   ctx: ServerContext,
   task: TaskStatus['task'],
 ): Promise<EngineCredential> {
+  const engine = (task.usage?.engine ??
+    task.definition.engine ??
+    'claude') as EngineCredential['engine'];
   const selected = task.credential
     ? await ctx.store.get('credential', task.credential)
-    : (
-        await resolveCredential(
-          ctx.store,
-          task.usage?.engine ?? task.definition.engine,
-          task.requester,
-        )
-      )?.value;
-  if (selected) return credentialValue(ctx.config, selected);
+    : (await resolveCredential(ctx, engine, task.requester, { model: task.usage?.model }))?.value;
+  if (selected) return { engine, ...decryptCredential(ctx.config, selected) };
   if (!task.runnerId && !ctx.local) throw new Error('no-credential');
 
-  return {
-    engine: (task.usage?.engine ??
-      task.definition.engine ??
-      'claude') as EngineCredential['engine'],
-    env: {},
-  };
+  return { engine, env: {} };
+}
+
+export async function taskEngineCredentials(ctx: ServerContext, task: TaskStatus['task']) {
+  const engine = task.usage?.engine ?? task.definition.engine;
+  const chain = task.engineChain ?? [];
+  const remaining = chain.slice(Math.max(0, chain.indexOf(engine ?? '')) + 1);
+  const rows = await Promise.all(
+    remaining.map(async engine => {
+      const id = task.engineCredentials?.[engine];
+      const value = id ? await ctx.store.get('credential', id) : undefined;
+      return value && (!value.owner || value.owner === task.requester)
+        ? {
+            id: id!,
+            credential: {
+              engine: engine as EngineCredential['engine'],
+              ...decryptCredential(ctx.config, value),
+            },
+          }
+        : undefined;
+    }),
+  );
+
+  return [
+    ...(task.credential
+      ? [{ id: task.credential, credential: await taskCredential(ctx, task) }]
+      : []),
+    ...rows.flatMap(row => (row ? [row] : [])),
+  ];
 }
 
 const hostOf = (url: string | undefined) =>
   url && URL.canParse(url) ? [new URL(url).hostname] : [];
+
+/** What a sandbox firewall injects for a credential: the engine API keys at their hosts, and for a custom model its key as a bearer at the endpoints the task may use. */
+export function brokeredKeys(
+  config: Partial<CoderConfig>,
+  task: Pick<TaskStatus['task'], 'usage'>,
+  credential: EngineCredential,
+): BrokerRule[] {
+  if (credential.engine !== 'custom') return BROKERED;
+  const models = config.models ?? {};
+  const selected = task.usage?.model ? models[task.usage.model] : undefined;
+  const entries = selected && 'baseUrl' in selected ? [selected] : Object.values(models);
+  const custom = entries.flatMap(entry =>
+    'baseUrl' in entry && entry.envKey && URL.canParse(entry.baseUrl)
+      ? [
+          {
+            name: entry.envKey,
+            host: new URL(entry.baseUrl).hostname,
+            header: 'authorization',
+            prefix: 'Bearer ',
+          },
+        ]
+      : [],
+  );
+
+  return [...BROKERED, ...custom];
+}
 
 /** Hosts a task below `auto` may reach from its machine: engine, integrations, connections, MCP. */
 export async function taskHosts(
@@ -547,7 +672,12 @@ export async function taskLogSecrets(ctx: ServerContext, status: TaskStatus): Pr
   const recovered =
     ctx.store instanceof LocalStore &&
     status.task.event &&
-    !ctx.store.connectionSecrets?.get(status.task.id)?.length
+    !(
+      await ctx.store.list('snapshot', {
+        prefix: `connection-secrets:${status.task.id}:`,
+        limit: 1,
+      })
+    ).length
       ? Object.values(await eventTokens(ctx, status.task))
       : [];
 

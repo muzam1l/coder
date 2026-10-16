@@ -86,6 +86,8 @@ export interface TurnCaptureState {
   commandExecutions: TurnItem[];
   // threadId -> latest cumulative token usage reported for that thread.
   tokenUsageByThread: Map<string, TokenUsage>;
+  tokenUsageBaselineByThread: Map<string, TokenUsage>;
+  contextTokens?: number;
   lastDiffSummary: string;
   loggedTokens: number;
   // Files already reported by a fileChange item, so the turn's aggregate diff
@@ -260,17 +262,18 @@ function normalizeTokenUsage(usage: any): TokenUsage | null {
   };
 }
 
-// Sum the per-thread cumulative usage into one turn total.
+// Sum this turn's usage across the main thread and its children.
 export function collectTokenUsage(state: TurnCaptureState): TokenUsage | null {
   if (state.tokenUsageByThread.size === 0) {
     return null;
   }
   const sum: TokenUsage = { input: 0, cachedInput: 0, output: 0, total: 0 };
-  for (const usage of state.tokenUsageByThread.values()) {
-    sum.input += usage.input;
-    sum.cachedInput += usage.cachedInput;
-    sum.output += usage.output;
-    sum.total += usage.total;
+  for (const [threadId, usage] of state.tokenUsageByThread) {
+    const baseline = state.tokenUsageBaselineByThread.get(threadId);
+    sum.input += Math.max(0, usage.input - (baseline?.input ?? 0));
+    sum.cachedInput += Math.max(0, usage.cachedInput - (baseline?.cachedInput ?? 0));
+    sum.output += Math.max(0, usage.output - (baseline?.output ?? 0));
+    sum.total += Math.max(0, usage.total - (baseline?.total ?? 0));
   }
   return sum;
 }
@@ -555,6 +558,7 @@ function createTurnCaptureState(
     fileChanges: [],
     commandExecutions: [],
     tokenUsageByThread: new Map(),
+    tokenUsageBaselineByThread: new Map(),
     lastDiffSummary: '',
     loggedTokens: 0,
     reportedChanges: new Set(),
@@ -741,13 +745,24 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
       break;
     }
     case 'thread/tokenUsage/updated': {
+      const last = normalizeTokenUsage(message.params?.tokenUsage?.last);
+      const usageThreadId = extractThreadId(message);
+      if (usageThreadId === state.threadId && message.params?.tokenUsage?.last)
+        state.contextTokens = last?.total;
       // Cumulative per-thread usage; keep the latest snapshot per thread and
       // sum across threads (subagents included) when the turn completes.
       const usage = normalizeTokenUsage(
         message.params?.tokenUsage?.total ?? message.params?.tokenUsage,
       );
-      const usageThreadId = extractThreadId(message);
       if (usage && usageThreadId) {
+        if (last && !state.tokenUsageByThread.has(usageThreadId)) {
+          state.tokenUsageBaselineByThread.set(usageThreadId, {
+            input: Math.max(0, usage.input - last.input),
+            cachedInput: Math.max(0, usage.cachedInput - last.cachedInput),
+            output: Math.max(0, usage.output - last.output),
+            total: Math.max(0, usage.total - last.total),
+          });
+        }
         state.tokenUsageByThread.set(usageThreadId, usage);
         const total = collectTokenUsage(state);
         if (total && (!state.loggedTokens || total.total - state.loggedTokens >= USAGE_LOG_STEP)) {

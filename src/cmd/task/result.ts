@@ -17,10 +17,8 @@ import {
 import type { LogView } from '../../core/task/log-view';
 import { termCols, visibleWidth, wrapAnsi } from '../../tui/live';
 import { shortPath } from '../../utils/fsx';
-import { baseOptions, flag, optStr, str, tailOption } from '../../utils/args';
+import { baseOptions, flag, tailOption, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 /**
  * The final-answer line for a finished task: the final message when there is
@@ -86,6 +84,12 @@ function taskOptionLines(
  * ran. The wall-clock answer to "is this worth waiting for", shown next to the
  * status by every view that has a task in hand.
  */
+function tookMs(task: { createdAt?: string; completedAt?: string }): number | null {
+  return task.createdAt && task.completedAt
+    ? Date.parse(task.completedAt) - Date.parse(task.createdAt)
+    : null;
+}
+
 function taskTimeNote(
   task: { createdAt?: string; completedAt?: string },
   running: boolean,
@@ -93,10 +97,7 @@ function taskTimeNote(
   if (running) {
     return task.createdAt ? `started ${formatAge(ageMs(task.createdAt))} ago` : '';
   }
-  const took =
-    task.createdAt && task.completedAt
-      ? Date.parse(task.completedAt) - Date.parse(task.createdAt)
-      : null;
+  const took = tookMs(task);
   return [
     task.completedAt ? `finished ${formatAge(ageMs(task.completedAt))} ago` : '',
     took !== null && took >= 0 ? `took ${formatAge(took)}` : '',
@@ -183,10 +184,7 @@ export function taskSummaryLines(
   },
 ): string[] {
   const label = (text: string) => style.dim(text.padEnd(8));
-  const took =
-    task.createdAt && task.completedAt
-      ? Date.parse(task.completedAt) - Date.parse(task.createdAt)
-      : null;
+  const took = tookMs(task);
   return [
     ...(statusChanged
       ? [
@@ -476,15 +474,6 @@ export class LogRenderer {
   }
 }
 
-export const statusStyle = (status: TaskStatus['status'], s: Style): string =>
-  status === 'completed'
-    ? s.green(status)
-    : status === 'failed'
-      ? s.red(status)
-      : status === 'running'
-        ? s.yellow(status)
-        : s.dim(status);
-
 function took(status: TaskStatus): string {
   if (status.startedAt === undefined) return '';
   return formatAge((status.finishedAt ?? Date.now()) - status.startedAt);
@@ -513,7 +502,7 @@ export function finishedHints(taskId: string, s: Style, server = false): string 
 
 export function printOutcome(status: TaskStatus, s: Style): void {
   process.stdout.write(
-    `${s.bold(status.task.id)}  ${statusStyle(status.status, s)}${status.error ? `  ${s.red(status.error)}` : ''}${took(status) ? `  ${s.dim(`took ${took(status)}`)}` : ''}\n`,
+    `${s.bold(status.task.id)}  ${paintStatus(status.status)}${status.error ? `  ${s.red(status.error)}` : ''}${took(status) ? `  ${s.dim(`took ${took(status)}`)}` : ''}\n`,
   );
   if (status.credential) process.stdout.write(`${s.dim('credential')}  ${status.credential}\n`);
   const reply = replyOf(status);

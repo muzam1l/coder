@@ -7,6 +7,7 @@ import type { AgentApp, AgentEvent, Installation, Integration, Pushed, TokenBoun
 import {
   canWriteGithub,
   githubCommit,
+  githubTree,
   githubRepository,
   githubRepositoryUrl,
   listGithubDir,
@@ -39,8 +40,7 @@ type Pull = {
   body?: string | null;
   draft?: boolean;
   user?: User;
-  head?: { sha?: string };
-  base?: { sha?: string };
+  head?: { repo?: { full_name?: string } | null };
 };
 type Issue = {
   number?: number;
@@ -48,6 +48,7 @@ type Issue = {
   body?: string | null;
   user?: User;
   pull_request?: unknown;
+  comments?: number;
 };
 type Payload = {
   action?: string;
@@ -112,11 +113,10 @@ function event(
     body?: string;
     number?: number;
     kind?: 'pull' | 'issue';
-    headSha?: string;
   },
 ): AgentEvent | undefined {
   const id = payload.installation?.id;
-  const repo = checkout(payload, input.headSha);
+  const repo = checkout(payload);
   const user = input.user ?? payload.sender;
   if (id === undefined || !repo || !input.number) return;
   const role = user?.author_association;
@@ -140,15 +140,14 @@ function event(
   };
 }
 
-/** The payload's repository as a task checks it out, at `ref` or its default branch. */
-function checkout(payload: Payload, ref?: string): NonNullable<AgentEvent['repo']> | undefined {
+/** The payload's repository as a task checks it out, at its default branch. */
+function checkout(payload: Payload): NonNullable<AgentEvent['repo']> | undefined {
   const repo = payload.repository;
   return repo?.owner?.login && repo.name && repo.clone_url && repo.default_branch
     ? {
         owner: repo.owner.login,
         name: repo.name,
         cloneUrl: repo.clone_url,
-        ref: ref ?? repo.default_branch,
         defaultBranch: repo.default_branch,
       }
     : undefined;
@@ -186,8 +185,8 @@ export function parseGithubEvent(
       pr.draft ||
       (action !== 'review_requested' && agent(pr.user)) ||
       !pr.number ||
-      !pr.head?.sha ||
-      !pr.base?.sha
+      // A fork's pull request starts nothing.
+      pr.head?.repo?.full_name !== payload.repository?.full_name
     )
       return [];
     const parsed = event(req, app, payload, 'pull_request', {
@@ -195,7 +194,6 @@ export function parseGithubEvent(
       body: text(pr.title, pr.body),
       number: pr.number,
       kind: 'pull',
-      headSha: pr.head.sha,
     });
     return parsed ? [parsed] : [];
   }
@@ -322,6 +320,7 @@ export function githubInstallation(
       : {}),
     installation: {
       integration: 'github',
+      ...(name === 'installation' && action === 'deleted' ? { uninstalled: true } : {}),
       id: `${app.id}:${id}`,
       app: app.id,
       account: {
@@ -415,7 +414,13 @@ export const github: Integration = {
   use: 'Mention @{handle} in an issue or pull request.',
   organizationApps: true,
   publicApps: true,
-  hint: 'Cite repository file paths when discussing code. After making changes, link the pull request.',
+  prompt: [
+    'A conversation is an issue or pull request with its comments, or one inline review comment thread.',
+    'issue_read reads an issue and its comments. pull_request_read reads a pull request: get, get_diff and get_files for the change, get_comments for its conversation, get_reviews and get_review_comments for reviews and inline comments.',
+    'Review findings are inline review comments marked coder-review:fp.',
+    "A task starts on the default branch; a pull request's changes are read with pull_request_read. Check out and push a pull request's branch only when it is in this repository and the request asks for changes; a fork pull request gets reads and comments only.",
+    'Replies are GitHub Markdown. Cite repository file paths when discussing code; link the pull request after making changes.',
+  ].join('\n'),
   sample: 'github:owner/repo:1',
   author: name => `${name}[bot]`,
   events: {
@@ -428,7 +433,7 @@ export const github: Integration = {
     pull_request: { description: 'Opened, updated, or ready non-draft pull request.' },
     issue: { description: 'Opened or edited issue.' },
     comment: {
-      description: 'New non-agent issue or pull-request comment.',
+      description: 'New non-agent issue, pull request, or inline review comment.',
       on: 'message',
       noisy: true,
     },
@@ -473,6 +478,7 @@ export const github: Integration = {
     readFile: readGithubFile,
     revalidate: revalidateGithubFile,
     listDir: listGithubDir,
+    tree: githubTree,
     commit: githubCommit,
     list: (_installation, token, request) => listGithubRepositories(token, request),
     get: githubRepository,
@@ -487,21 +493,30 @@ export const github: Integration = {
   target(req, raw) {
     const app = req.headers.get('x-github-hook-installation-target-id');
     if (!app) return undefined;
-    const payload = value(json(raw));
+    const payload = value(json(raw)) as Payload & { comment?: { in_reply_to_id?: number } };
     const repo = checkout(payload);
+    // A comment's position is the conversation's comment count; a review thread knows only that its finding is the root.
+    const index = payload.issue
+      ? payload.issue.comments
+      : payload.comment && payload.comment.in_reply_to_id === undefined
+        ? 0
+        : undefined;
     return {
       app,
       ...(payload.installation?.id !== undefined
         ? { installation: String(payload.installation.id) }
         : {}),
       ...(repo ? { repo } : {}),
+      ...(index !== undefined ? { index } : {}),
     };
   },
   adapter: async ctx => (await import('./adapter')).githubAdapter(ctx),
   link(event) {
-    const thread = /^github:([^:]+):(issue:)?(\d+)(?::|$)/.exec(event.chat?.thread.id ?? '');
+    const thread = /^github:([^:]+):(issue:)?(\d+)(?::rc:(\d+))?(?::|$)/.exec(
+      event.chat?.thread.id ?? '',
+    );
     return thread
-      ? `https://github.com/${thread[1]}/${thread[2] ? 'issues' : 'pull'}/${thread[3]}`
+      ? `https://github.com/${thread[1]}/${thread[2] ? 'issues' : 'pull'}/${thread[3]}${thread[4] ? `#discussion_r${thread[4]}` : ''}`
       : undefined;
   },
   ownEvents(req, raw, app, credentials) {

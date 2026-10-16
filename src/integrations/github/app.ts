@@ -311,26 +311,22 @@ function presetFor(tools: Preset | string[]): Preset {
   );
 }
 const APP_PERMISSIONS: Record<Preset, Record<string, string>> = {
-  observe: { metadata: 'read', contents: 'read', pull_requests: 'read', issues: 'read' },
-  comment: { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'write' },
+  read: { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'write' },
   write: { metadata: 'read', contents: 'write', pull_requests: 'write', issues: 'write' },
 };
 /** GitHub App manifest permissions for a tools preset or explicit tool list. */
-export function githubAppPermissions(tools: Preset | string[] = 'observe'): Record<string, string> {
+export function githubAppPermissions(tools: Preset | string[] = 'write'): Record<string, string> {
   return { ...APP_PERMISSIONS[presetFor(tools)] };
 }
-const APP_EVENTS: Record<string, string> = {
-  pull_request: 'pull_request',
-  issue: 'issues',
-  comment: 'issue_comment',
-  mention: 'issue_comment',
+const APP_EVENTS: Record<string, string[]> = {
+  pull_request: ['pull_request'],
+  issue: ['issues'],
+  comment: ['issue_comment', 'pull_request_review_comment'],
+  mention: ['issue_comment', 'pull_request_review_comment'],
 };
 /** GitHub App manifest webhook events for catalog event names; GitHub sends installation events to every app unasked. */
 export function githubAppEvents(events: string[]): string[] {
-  const names = events
-    .map(event => APP_EVENTS[event])
-    .filter((name): name is string => Boolean(name));
-  return [...new Set([...names, 'push'])];
+  return [...new Set([...events.flatMap(event => APP_EVENTS[event] ?? []), 'push'])];
 }
 
 /** The manifest a definition asks for, named `name` unless the definition names itself. */
@@ -346,7 +342,12 @@ function agentManifest(
   return buildGithubManifest(publicUrl, {
     name: definition.name ?? name,
     description: definition.description,
-    permissions: githubAppPermissions(wiring.tools),
+    permissions: {
+      ...githubAppPermissions(definition.access),
+      ...(events.some(event => Object.hasOwn(APP_EVENTS, event))
+        ? { issues: 'write', pull_requests: 'write' }
+        : {}),
+    },
     events: githubAppEvents(events),
     isPublic,
   });
@@ -393,8 +394,6 @@ async function githubDrift(
   const permissions = live.permissions ?? {};
   const lines: AppDrift['lines'] = [];
 
-  if (wanted.name !== live.name)
-    lines.push({ text: `Rename the app to **${wanted.name}**`, copy: wanted.name });
   const description = wanted.description ?? '';
   if (description !== (live.description ?? ''))
     lines.push(

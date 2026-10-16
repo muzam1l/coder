@@ -11,7 +11,7 @@ export const RESOURCE_PATH = '/.well-known/oauth-protected-resource' as const;
 export const SCOPE = 'openid profile email offline_access organizations:read';
 const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
 
-export function oauthClientMetadata(publicUrl: string, jwks: { keys: JWK[] }) {
+function oauthClientMetadata(publicUrl: string, jwks: { keys: JWK[] }) {
   return {
     client_id: `${publicUrl}${WEB_CLIENT_PATH}`,
     client_name: `Coder at ${new URL(publicUrl).host}`,
@@ -26,7 +26,7 @@ export function oauthClientMetadata(publicUrl: string, jwks: { keys: JWK[] }) {
   };
 }
 
-export function cliClientMetadata(publicUrl: string) {
+function cliClientMetadata(publicUrl: string) {
   return {
     client_id: `${publicUrl}${CLI_CLIENT_PATH}`,
     client_name: `Coder CLI for ${new URL(publicUrl).host}`,
@@ -38,7 +38,7 @@ export function cliClientMetadata(publicUrl: string) {
   };
 }
 
-export function protectedResourceMetadata(publicUrl: string, issuer: string) {
+function protectedResourceMetadata(publicUrl: string, issuer: string) {
   return {
     resource: new URL(publicUrl).origin,
     authorization_servers: [issuer],
@@ -55,19 +55,13 @@ function document(body: unknown) {
 }
 
 export function webDocument(req: Request, ctx: ServerContext, params: Params, url: URL) {
-  return ctx.config.publicUrl && ctx.auth
-    ? document(oauthClientMetadata(ctx.config.publicUrl, ctx.auth.jwks))
-    : undefined;
+  return document(oauthClientMetadata(ctx.config.publicUrl!, ctx.auth!.jwks));
 }
 
 export function cliDocument(req: Request, ctx: ServerContext, params: Params, url: URL) {
-  return ctx.config.publicUrl && ctx.auth
-    ? document(cliClientMetadata(ctx.config.publicUrl))
-    : undefined;
+  return document(cliClientMetadata(ctx.config.publicUrl!));
 }
 
 export function resourceDocument(req: Request, ctx: ServerContext, params: Params, url: URL) {
-  return ctx.config.publicUrl && ctx.auth
-    ? document(protectedResourceMetadata(ctx.config.publicUrl, ctx.auth.issuer))
-    : undefined;
+  return document(protectedResourceMetadata(ctx.config.publicUrl!, ctx.auth!.issuer));
 }

@@ -21,7 +21,6 @@ import {
 } from '@/comps/ui/icons';
 import { Link } from '@wular/pnext/link';
 import { load, orgOf, signedOut } from '@/api/load';
-import { localServer } from '@/api/types';
 import type { Me } from '@coder/client/types';
 import { initial } from '@/utils/format';
 import { Icon, Mark } from '@/comps/ui/icon';

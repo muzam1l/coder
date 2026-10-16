@@ -46,3 +46,12 @@
 .picks-list .badge {
   margin-left: 6px;
 }
+
+@media (max-width: 760px) {
+  .form-actions.end {
+    justify-content: flex-start;
+  }
+  .import {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

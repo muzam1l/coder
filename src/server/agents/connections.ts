@@ -1,3 +1,5 @@
+import { savedAppTokens } from './tokens';
+import { definitionEvents } from '../../agent/definition';
 import { decryptSecret } from '../store/secrets';
 import { type Params } from '../routes/match';
 import { encodeJson } from '../../utils/base64url';
@@ -5,7 +7,7 @@ import { issueNonce } from '../auth/nonce';
 import { type ServerContext } from '../context';
 import { sharedApps } from './apps';
 import { nativeApp } from '../connections/records';
-import { getAgent, getVersion } from './records';
+import { agentWithVersion, getVersion } from './records';
 import { checkApp, inSync, syncApps, syncKey, syncManifest, type SyncMarker } from './repo';
 import { json, pageLimit } from '../routes/http';
 import { LOOPBACK } from '../routes/guards';
@@ -86,7 +88,7 @@ async function changedApps(ctx: ServerContext, apps: AgentApp[]): Promise<Set<st
 
   const [markers, versions] = await Promise.all([
     ctx.store.list('delivery', { ids: own.map(app => syncKey(app.id)) }),
-    Promise.all([...new Set(own.map(app => app.agent))].map(agent => getVersion(ctx.store, agent))),
+    ctx.store.listAgentsWithVersions([...new Set(own.map(app => app.agent))]),
   ]);
   const marker = (id: string) =>
     markers.find(entry => entry.id === syncKey(id))?.value as SyncMarker | undefined;
@@ -95,7 +97,7 @@ async function changedApps(ctx: ServerContext, apps: AgentApp[]): Promise<Set<st
     own
       .filter(app => {
         const platform = ctx.integrations[app.integration]!.app;
-        const version = versions.find(entry => entry?.agent === app.agent);
+        const version = versions.find(entry => entry.record.id === app.agent)?.version;
         if (!version?.definition.integrations[app.integration]) return false;
         if (!platform.update) return marker(app.id)?.changed === true;
 
@@ -243,7 +245,7 @@ export async function listInstallations(
   const agent = url.searchParams.get('agent');
   const rows = await ctx.store.list('installation', {
     ...(agent ? { agent } : {}),
-    ...(url.searchParams.get('active') === '1' ? { active: true } : {}),
+    ...(url.searchParams.get('active') === '1' ? { active: true, includeUninstalled: true } : {}),
     limit: pageLimit(url, 200),
   });
 
@@ -265,60 +267,67 @@ export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<
   // Platforms cannot call a loopback address, so create steps never offer one to copy.
   const base = unreachable ? 'https://<public address>' : publicUrl;
   const agent = url.searchParams.get('agent');
-  const [record, apps, own] = await Promise.all([
-    agent ? getAgent(ctx.store, agent) : undefined,
-    sharedApps(ctx),
-    ctx.store.list('app'),
+  const ownRead = ctx.store.list('app');
+  const [loaded, apps, own] = await Promise.all([
+    agent ? agentWithVersion(ctx.store, agent) : undefined,
+    sharedApps(ctx, ownRead),
+    ownRead,
   ]);
+  const record = loaded?.record;
   const shared = new Set(apps.map(app => app.integration));
 
   return json(
     await Promise.all(
-      Object.values(ctx.integrations).map(async integration => ({
-        id: integration.id,
-        name: integration.name,
-        brand: integration.brand,
-        description: integration.description,
-        installLabel: integration.installLabel ?? `Connect ${integration.id}`,
-        ...(integration.use ? { use: integration.use } : {}),
-        ...(integration.covered ? { covered: integration.covered } : {}),
-        ...(integration.featured ? { featured: true } : {}),
-        builtinApp: integration.app.builtin,
-        ...(integration.auth.user ? { personal: true } : {}),
-        ...((await nativeApp(ctx, integration.id, undefined, [
-          ...apps,
-          ...own.map(row => row.value),
-        ]))
-          ? { connectable: true }
-          : {}),
-        organizationApps: integration.organizationApps === true,
-        publicApps: integration.publicApps === true,
-        events: Object.fromEntries(
-          Object.entries(integration.events).map(([name, { description, noisy, addressed }]) => [
-            name,
-            { description, ...(noisy ? { noisy } : {}), ...(addressed ? { addressed } : {}) },
-          ]),
-        ),
-        presets: integration.tools.presets,
-        repositories: Boolean(integration.repos),
-        ...(integration.app.createStep && base
-          ? {
-              create: integration.app.createStep(base, {
+      Object.values(ctx.integrations).map(async integration => {
+        const use = typeof integration.use === 'function'
+          ? integration.use(definitionEvents(loaded?.version?.definition.integrations[integration.id]))
+          : integration.use;
+        return {
+          id: integration.id,
+          name: integration.name,
+          brand: integration.brand,
+          description: integration.description,
+          installLabel: integration.installLabel ?? `Connect ${integration.id}`,
+          ...(use ? { use } : {}),
+          ...(integration.covered ? { covered: integration.covered } : {}),
+          ...(integration.featured ? { featured: true } : {}),
+          builtinApp: integration.app.builtin,
+          ...(integration.auth.user ? { personal: true } : {}),
+          ...((await nativeApp(ctx, integration.id, undefined, [
+            ...apps,
+            ...own.map(row => row.value),
+          ]))
+            ? { connectable: true }
+            : {}),
+          organizationApps: integration.organizationApps === true,
+          publicApps: integration.publicApps === true,
+          events: Object.fromEntries(
+            Object.entries(integration.events).map(([name, { description, noisy, addressed }]) => [
+              name,
+              { description, ...(noisy ? { noisy } : {}), ...(addressed ? { addressed } : {}) },
+            ]),
+          ),
+          repositories: Boolean(integration.repos),
+          ...(integration.app.createStep && base
+            ? {
+                create: integration.app.createStep(base, {
+                  saved: await savedAppTokens(ctx, integration.id),
                 name: record?.name,
-                shared: shared.has(integration.id),
-                public: integration.publicApps === true && url.searchParams.get('public') === '1',
-              }),
-            }
-          : {}),
-        ...(unreachable ? { unreachable: true } : {}),
-        ...(integration.app.update
-          ? { appUpdate: 'push' }
-          : integration.app.drift
-            ? { appUpdate: 'drift' }
-            : integration.app.values
-              ? { appUpdate: 'confirm' }
-              : {}),
-      })),
+                  shared: shared.has(integration.id),
+                  public: integration.publicApps === true && url.searchParams.get('public') === '1',
+                }),
+              }
+            : {}),
+          ...(unreachable ? { unreachable: true } : {}),
+          ...(integration.app.update
+            ? { appUpdate: 'push' }
+            : integration.app.drift
+              ? { appUpdate: 'drift' }
+              : integration.app.values
+                ? { appUpdate: 'confirm' }
+                : {}),
+        };
+      }),
     ),
   );
 }
@@ -329,8 +338,8 @@ export async function repositorySnapshot(
   refresh = false,
   access?: { app: AgentApp; token: string; repo: string },
 ): Promise<Installation | undefined> {
-  const current = await ctx.store.get('installation', installation.id);
-  if (!current || current.deletedAt) return;
+  const current = installation;
+  if (current.deletedAt) return;
   if (!refresh && current.repos != null && (!access || current.repos.includes(access.repo)))
     return current;
 
@@ -377,15 +386,29 @@ async function listRepositories(
 
 export async function adminRepositories(ctx: ServerContext, refresh = false): Promise<Response> {
   const seen = new Map<string, { repo: string; integration: string }>();
-  for (const { value } of await ctx.store.list('installation', { active: true })) {
-    if (value.deletedAt || !ctx.integrations[value.integration]?.repos) continue;
-    const installation =
-      refresh || value.repos == null
-        ? await repositorySnapshot(ctx, value, refresh).catch(error => {
-            console.error(`coder server: repositories for installation ${value.id} failed`, error);
-            return value;
-          })
-        : value;
+  const rows = (await ctx.store.list('installation', { active: true })).filter(
+    ({ value }) => ctx.integrations[value.integration]?.repos,
+  );
+  const installations: Array<Installation | undefined> = new Array(rows.length);
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(4, rows.length) }, async () => {
+      for (let i = next++; i < rows.length; i = next++) {
+        const value = rows[i]!.value;
+        installations[i] =
+          refresh || value.repos == null
+            ? await repositorySnapshot(ctx, value, refresh).catch(error => {
+                console.error(
+                  `coder server: repositories for installation ${value.id} failed`,
+                  error,
+                );
+                return value;
+              })
+            : value;
+      }
+    }),
+  );
+  for (const installation of installations) {
     if (!installation || installation.deletedAt) continue;
     for (const repo of installation.repos ?? [])
       if (!seen.has(repo)) seen.set(repo, { repo, integration: installation.integration });
