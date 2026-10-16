@@ -51,6 +51,9 @@
   --s0: light-dark(#b9bdc5, #3d414a);
   --mono: 'Fira Code', ui-monospace, SFMono-Regular, Menlo, monospace;
 }
+html.font-fallback {
+  --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
 [data-theme='light'] {
   color-scheme: light;
 }
@@ -553,8 +556,7 @@ input[type='radio']:enabled {
   padding: 16px;
   color: var(--muted);
 }
-.guide code,
-.cmd {
+.guide code {
   padding: 1px 6px;
   background: var(--wash2);
   color: var(--fg);

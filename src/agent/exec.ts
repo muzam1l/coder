@@ -1,7 +1,8 @@
-import { readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import type { ChildProcess } from 'node:child_process';
 import { defaultEmojiResolver, type Message, type Thread } from 'chat';
 
 import { resolveFlow } from '../flow/discover';
@@ -20,6 +21,7 @@ import {
 } from '../core/dispatch';
 import { EMPTY_MESSAGE, EMPTY_MESSAGE_NOTICE, SKIPPED } from '../core/defaults';
 import {
+  watchTask,
   appendTaskLog,
   loadTask as loadTaskRecord,
   readTurnResults,
@@ -39,7 +41,7 @@ import {
 import { loadAgents } from './load';
 import { postReview, resolveReviewTarget, REVIEW_PLATFORM } from '../flow/builtin/review';
 import { INTEGRATIONS } from '../integrations';
-import { nativeToolEnvironment, tokenEnvName, toolServerToken } from './mcp';
+import { nativeToolEnvironment, tokenEnvName, toolServerToken, type ReplyEndpoint } from './mcp';
 import type { Agent, AgentEvent, AgentTask, TaskContext, TaskSource } from './types';
 import { serveMailbox, agentMailboxDir } from '../core/mailbox';
 import {
@@ -50,7 +52,8 @@ import {
   type AgentPromptParts,
 } from '../core/prompts';
 import { connectionEnvironment, localConnections, narrowConnections } from '../core/connections';
-import { eventJsons, replyRequired } from '../core/event-prompt';
+import { replyRequired } from '../core/event-prompt';
+import { readJsonFile, writeJsonFileAtomic } from '../utils/fsx';
 
 /** Names the local engine task an agent task runs on, so listings can tell them apart. */
 export const AGENT_TASK_PREFIX = 'agent:';
@@ -115,61 +118,6 @@ type ProblemAdapter = { postProblem?(threadId: string, text: string): ReturnType
 
 type ProgressAdapter = { postProgress?(threadId: string, text: string): Promise<{ id: string }> };
 
-/** The posting host owns the conversation; the tool supplies only text. */
-export function serveTaskReplies(
-  cwd: string,
-  id: string,
-  post: (text: string) => Promise<unknown>,
-  react?: (emoji: string, message?: string) => Promise<unknown>,
-): () => void {
-  let pending = Promise.resolve<unknown>(undefined);
-
-  return serveMailbox(path.join(resolveTaskDir(cwd, id), 'replies'), {
-    reply(payload) {
-      const work = pending.then(async () => {
-        const task = loadTaskRecord(cwd, id);
-        if (!task?.conversation || task.status !== 'running')
-          throw new Error('Only a running conversation task can reply');
-        if (typeof payload.text !== 'string' || !payload.text.trim())
-          throw new Error('Reply text is required');
-        const text = payload.text.trim();
-        await post(text);
-        appendTaskLog(cwd, id, { kind: 'reply', message: text });
-
-        return { ok: true };
-      });
-      pending = work.catch(() => {});
-
-      return work;
-    },
-    react(payload) {
-      const work = pending.then(async () => {
-        const task = loadTaskRecord(cwd, id);
-        if (!task?.conversation || task.status !== 'running')
-          throw new Error('Only a running conversation task can react');
-        if (typeof payload.emoji !== 'string' || !payload.emoji.trim())
-          throw new Error('Emoji is required');
-        if (
-          payload.message !== undefined &&
-          (typeof payload.message !== 'string' || !payload.message.trim())
-        )
-          throw new Error('Message id must be a non-empty string');
-        if (!react) throw new Error('The conversation cannot add reactions');
-        const event = eventJsons(task.currentPrompt ?? task.prompt ?? '', true)?.[0];
-        const message = payload.message ?? event?.message?.id ?? event?.messages?.[0]?.id;
-        if (event && !message)
-          throw new Error('This turn has no message to react to; give a message id');
-        await react(payload.emoji.trim(), message);
-
-        return { ok: true };
-      });
-      pending = work.catch(() => {});
-
-      return work;
-    },
-  });
-}
-
 /** Split replies at paragraph boundaries where the platform's limit allows. */
 export function replyParts(text: string, limit?: number): string[] {
   if (!limit || text.length <= limit) return [text];
@@ -228,8 +176,9 @@ export async function postReply(
   author = integration.id,
   problem = false,
   progress = false,
+  prepared?: Thread,
 ): Promise<string[]> {
-  const thread = await eventThread(integration, event, token, author);
+  const thread = prepared ?? (await eventThread(integration, event, token, author));
   const adapter = thread.adapter;
   const marks = (adapter as ProblemAdapter).postProblem;
   if (problem && marks) {
@@ -248,6 +197,23 @@ export async function postReply(
   );
 
   return messages.flatMap(sent => (sent.id ? [sent.id] : []));
+}
+
+/** A durable send intent prevents replay of an ambiguous platform response after a crash. */
+export async function postTurnReply(
+  cwd: string,
+  taskId: string,
+  turn: number,
+  send: () => Promise<string[]>,
+): Promise<string[]> {
+  const file = path.join(resolveTaskDir(cwd, taskId), `post-${turn}.json`);
+  const receipt = readJsonFile<string[]>(file);
+  if (receipt) return receipt;
+  writeFileSync(file, 'null', { flag: 'wx' });
+  const ids = await send();
+  writeJsonFileAtomic(file, ids);
+
+  return ids;
 }
 
 async function eventThread(
@@ -333,13 +299,17 @@ export async function execAgent(options: {
   /** Post the default flow's reply to the platform (default true). */
   post?: boolean;
   resumeTaskId?: string;
+  resumeTurn?: number;
   /** An engine conversation saved by an earlier turn, continued instead of starting a new one. */
   resume?: DispatchOptions['resume'];
   onTask?: (taskId: string) => void | Promise<void>;
   onWorker?: DispatchOptions['onWorker'];
+  availability?: DispatchOptions['availability'];
   onStart?: import('../flow/runtime').FlowHooks['onStart'];
   /** Secrets passed only to task-core MCP children, never inherited by the engine. */
   toolEnvironment?: { tokens: Record<string, string> };
+  /** Where the conversation tools post, when the caller posts replies for the task. */
+  replyEndpoint?: ReplyEndpoint;
   connections?: Record<string, McpServerSpec>;
   connectionEnv?: Record<string, string>;
   postToken?: string;
@@ -377,9 +347,16 @@ export async function execAgent(options: {
   const native = nativeToolEnvironment(
     task,
     options.toolEnvironment?.tokens ?? localTokens(task, process.env),
+    options.replyEndpoint,
   );
 
   if (flow === 'default') {
+    const posting = options.post !== false && Boolean(integration);
+    const token = options.postToken ?? process.env.APP_TOKEN!;
+    const prepared = posting
+      ? eventThread(integration!, event!, token, task.author ?? integration!.id)
+      : undefined;
+    void prepared?.catch(() => {});
     const defaults = defaultTask(agent, task);
     const resolved = resolveTaskOptions(effectiveSettings(agent), config);
     const selectedMcp = selectMcpServers(
@@ -389,11 +366,18 @@ export async function execAgent(options: {
       connected.mcp,
     );
     const mcp = [...Object.values(native.mcp), ...selectedMcp.mcp];
-    const first = options.resumeTaskId ? readTurnResults(cwd, options.resumeTaskId).length : 0;
+    const first =
+      options.resumeTurn ??
+      (options.resumeTaskId ? readTurnResults(cwd, options.resumeTaskId).length : 0);
+    let worker: ChildProcess | undefined;
     const dispatched = options.resumeTaskId
       ? { taskId: options.resumeTaskId }
       : await dispatchTask({
-          onWorker: options.onWorker,
+          onWorker: (id, child) => {
+            worker = child;
+            options.onWorker?.(id, child);
+          },
+          availability: options.availability,
           taskId: options.taskId,
           ...(options.resume ? { resume: options.resume } : {}),
           mcp,
@@ -410,7 +394,7 @@ export async function execAgent(options: {
           ...(event?.repo ? { repo: `${event.repo.owner}/${event.repo.name}` } : {}),
           ...(options.source
             ? { source: options.source }
-            : { name: `${AGENT_TASK_PREFIX}${task.id}` }),
+            : { name: `${AGENT_TASK_PREFIX}${task.id}`, source: task.source }),
           engine: resolved.engine,
           model: resolved.model ?? undefined,
           effort: resolved.effort ?? undefined,
@@ -421,7 +405,12 @@ export async function execAgent(options: {
           wait: true,
         });
     await options.onTask?.(dispatched.taskId);
-    const completed = await waitForAgentTask(cwd, dispatched.taskId, options.onApproval);
+    const completed = await waitForAgentTask(
+      cwd,
+      dispatched.taskId,
+      options.onApproval,
+      (cwd, id) => waitTask(cwd, id, { turn: first, worker }),
+    );
     // This turn's own answer: later turns are posted by whoever waits for them.
     const turn = readTurnResults(cwd, dispatched.taskId)[first];
     const {
@@ -430,28 +419,23 @@ export async function execAgent(options: {
       skipped,
       duplicate,
     } = turn
-      ? threadReply(
-          task,
-          {
-            finalMessage: turn.finalMessage,
-            error: turn.error,
-          },
-          false,
-          turn,
-        )
+      ? threadReply(task, turn, false, turn)
       : threadReply(task, completed.result, completed.status === 'cancelled');
-    const posting = options.post !== false && Boolean(integration);
     if (skipped && posting)
       appendTaskLog(cwd, dispatched.taskId, { kind: 'status', message: SKIPPED });
     const posted = posting && Boolean(reply) && !duplicate;
     const postedMessages = posted
-      ? await postReply(
-          integration!,
-          event!,
-          reply,
-          options.postToken ?? process.env.APP_TOKEN!,
-          task.author,
-          problem,
+      ? await postTurnReply(cwd, dispatched.taskId, first, async () =>
+          postReply(
+            integration!,
+            event!,
+            reply,
+            token,
+            task.author,
+            problem,
+            false,
+            await prepared,
+          ),
         )
       : [];
 
@@ -495,7 +479,11 @@ export async function execAgent(options: {
     },
     {
       ...(options.onTask
-        ? { onTaskStart: (started: { taskId: string }) => options.onTask!(started.taskId) }
+        ? {
+            onEvent: (event: import('../flow/types').FlowEvent) => {
+              if (event.kind === 'task-start') options.onTask!(event.taskId);
+            },
+          }
         : {}),
       ...(options.onStart ? { onStart: options.onStart } : {}),
     },
@@ -514,21 +502,27 @@ export async function waitForAgentTask(
   taskId: string,
   onApproval?: (approval: unknown) => void | Promise<void>,
   wait: typeof waitTask = waitTask,
-  pause: () => Promise<void> = () => new Promise(resolve => setTimeout(resolve, 100)),
+  pause?: () => Promise<void>,
 ) {
   let reportedId: string | undefined;
-  for (;;) {
-    try {
-      return await wait(cwd, taskId);
-    } catch (error) {
-      if (!(error instanceof CoderError) || error.code !== 'approval-pending' || !onApproval)
-        throw error;
-      if (error.approval?.id !== reportedId) {
-        reportedId = error.approval?.id;
-        await onApproval(error.approval);
+  const changes = watchTask(cwd, taskId);
+  try {
+    for (;;) {
+      try {
+        return await wait(cwd, taskId);
+      } catch (error) {
+        if (!(error instanceof CoderError) || error.code !== 'approval-pending' || !onApproval)
+          throw error;
+        if (error.approval?.id !== reportedId) {
+          reportedId = error.approval?.id;
+          await onApproval(error.approval);
+          continue;
+        }
+        await (pause ? pause() : changes.wait(30000));
       }
-      await pause();
     }
+  } finally {
+    changes.close();
   }
 }
 

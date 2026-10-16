@@ -1,7 +1,7 @@
 /** `coder model alias`: a named spec for any model name. */
 import process from 'node:process';
 
-import { modelAliasCore } from '../../core/models';
+import { models } from '../../core/models';
 import { outStyle } from '../../tui/output';
 import { command } from '../../cli';
 import { modelOptions } from './add';
@@ -16,7 +16,7 @@ export const commandModelAlias = command({
   },
   options: modelOptions,
   args: 2,
-  run: ({ options, args: [name, spec], cwd }) => modelAliasCore(cwd, name, spec, options),
+  run: ({ options, args: [name, spec], cwd }) => models.alias(name, spec, { ...options, cwd }),
   print: printModelAlias,
 });
 

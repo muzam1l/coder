@@ -2,12 +2,14 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
-import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 
 import {
   appendTaskLog,
+  watchTask,
   enqueueSteer,
+  withTaskAdmission,
   loadTask,
   unarchiveTask,
   writeTask,
@@ -16,15 +18,15 @@ import {
   listTasks,
   archiveDue,
   listArchivedTasks,
-  markTaskArchived,
   queueOwnedTasks,
   resolveWorkspaceRoot,
   reconcileTask,
   processStartMs,
+  isPidAlive,
+  processStarts,
   tailSteps,
   type TaskLogEntry,
   archiveTask,
-  findTask,
   removeTaskDir,
 } from '../state';
 import { steerTurn, runTurn, interruptTurn } from '../engines/codex';
@@ -46,7 +48,6 @@ import { listPendingApprovals } from '../approvals';
 import { createJsonlTail } from '../../utils/fsx';
 import { removeCodexControlEndpoint } from '../engines/codex/control';
 import { mailboxId, type MailboxKey } from '../mailbox';
-import { CLI_PATH } from '../runtime';
 import { deleteCodexSession } from '../engines/codex/sessions';
 import { deleteClaudeSession } from '../engines/claude/sessions';
 import { conversationIds } from '../engines/history';
@@ -119,14 +120,7 @@ async function trySteerRunning(
     });
     throw new Error(`Could not steer running task ${task.id}: ${result.detail}`);
   }
-  // Not injectable live during a genuine startup/completion race. Re-read: if the turn just
-  // finished, fall back to the resume path; otherwise queue the follow-up
-  // for the worker to run when the current turn ends.
-  const fresh = loadTask(cwd, task.id) ?? task;
-  if (ACTIVE_STATUSES.includes(fresh.status)) {
-    queueSteer(cwd, fresh.id, text);
-    return { taskId: fresh.id, steered: 'queued' };
-  }
+
   return null;
 }
 
@@ -146,6 +140,7 @@ export async function steerTask(
     permissions?: string;
     outputSchema?: object;
     command?: MailboxKey;
+    onWorker?: (worker: ChildProcess) => void;
     resolveConnections?: ConnectionResolver;
   } = {},
   adapters: {
@@ -154,10 +149,7 @@ export async function steerTask(
   } = {},
 ): Promise<{ taskId: string; steered: SteerOutcome }> {
   const current = loadTask(cwd, task.id) ?? task;
-  if (current.rollingOver && reconcileTask(cwd, current).rollingOver) {
-    queueSteer(cwd, task.id, text);
-    return { taskId: task.id, steered: 'queued' };
-  }
+  task = current.rollingOver ? reconcileTask(cwd, current) : current;
   if (!task.threadId) {
     throw new CoderError(
       'invalid-option',
@@ -233,24 +225,31 @@ async function resumeInPlace(
   cwd: string,
   task: Task,
   text: string,
-  opts: {
-    model?: string;
-    effort?: string;
-    permissions?: string;
-    outputSchema?: object;
-    resolveConnections?: ConnectionResolver;
-  },
+  opts: NonNullable<Parameters<typeof steerTask>[3]>,
 ): Promise<'resumed' | 'queued'> {
   if (task.connectionSource === 'server' && !opts.resolveConnections)
     throw new Error('Server connection resolver is required to resume this task');
   // One resume per finished turn: a steer racing it, or reaching it before it runs, waits for the next turn.
-  const fresh = loadTask(cwd, task.id);
-  const turn = [fresh?.completedAt, fresh?.resumedAt].map(at => Date.parse(at ?? '') || 0);
-  const claim = path.join(resolveTaskDir(cwd, task.id), `resume-${turn.join('-')}`);
-  if ((fresh && ACTIVE_STATUSES.includes(fresh.status)) || !claimResume(claim)) {
-    queueSteer(cwd, task.id, text);
-    return 'queued';
-  }
+  const admission = await withTaskAdmission(cwd, task.id, () => {
+    const fresh = loadTask(cwd, task.id) ?? task;
+    const turn = [fresh?.completedAt, fresh?.resumedAt].map(at => Date.parse(at ?? '') || 0);
+    const claim = path.join(resolveTaskDir(cwd, task.id), `resume-${turn.join('-')}`);
+    const owning =
+      fresh &&
+      !fresh.steerClosed &&
+      (ACTIVE_STATUSES.includes(fresh.status) ||
+        (fresh.rollingOver && reconcileTask(cwd, fresh).rollingOver) ||
+        (fresh.status === 'completed' && fresh.steerClosed === false && isPidAlive(fresh.pid)));
+    if (owning || !claimResume(claim)) {
+      if (fresh.archived) unarchiveTask(cwd, fresh);
+      queueSteer(cwd, task.id, text);
+      return undefined;
+    }
+    return { fresh, claim };
+  });
+  if (!admission) return 'queued';
+  const { fresh, claim } = admission;
+  task = fresh ?? task;
   let published = false;
   try {
     for (const name of fs.readdirSync(resolveTaskDir(cwd, task.id)))
@@ -283,6 +282,8 @@ async function resumeInPlace(
       mcp: selected.mcp,
       mcpBindings: bindings,
       status: 'queued',
+      pid: null,
+      steerClosed: false,
       resumedAt: new Date().toISOString(),
       currentPrompt: text,
       ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
@@ -300,7 +301,8 @@ async function resumeInPlace(
     });
     for (const warning of [...connected.warnings, ...(selected.warnings ?? [])])
       appendTaskLog(cwd, task.id, { kind: 'status', message: warning });
-    spawnWorker(task.cwd ?? cwd, task.id, connected.env);
+    const worker = spawnWorker(task.cwd ?? cwd, task.id, connected.env);
+    opts.onWorker?.(worker);
   } catch (error) {
     if (published)
       writeTask(cwd, task.id, {
@@ -439,18 +441,15 @@ export interface ListOptions {
   limit?: number | 'all';
 }
 
-// Active tasks after the auto-archive sweep; the swept tasks' dir moves run detached.
+// Archive stopped tasks before collecting the recent view.
 export function recentTasks(cwd: string): Task[] {
-  const toArchive: string[] = [];
   const tasks = listTasks(cwd).filter(task => {
     if (!TERMINAL_STATUSES.includes(task.status)) return true;
     if (!archiveDue(Date.parse(task.completedAt ?? task.updatedAt ?? task.createdAt ?? '')))
       return true;
-    markTaskArchived(cwd, task, { auto: true });
-    toArchive.push(task.id);
+    archiveTask(cwd, task, { auto: true });
     return false;
   });
-  spawnArchiveSweep(cwd, toArchive);
 
   return tasks;
 }
@@ -515,36 +514,42 @@ export async function* streamTask(
   taskId: string,
   opts: { tail?: number | 'all' } = {},
 ): AsyncGenerator<TaskLogEntry> {
-  const terminal = new Set(['completed', 'failed', 'cancelled']);
-  let current = loadTask(cwd, taskId);
-  if (!current) {
-    throw new Error(`No task found for "${taskId}".`);
-  }
-  // Skip everything older than the last `tail` steps, then follow the file
-  // incrementally. Each tick reads only appended bytes instead of
-  // re-parsing the whole (unbounded) log.
-  const tail = opts.tail ?? 1;
-  const tailLines = createJsonlTail(path.join(resolveTaskDir(cwd, taskId), 'log.jsonl'));
-  let first = true;
-  const drain = (): TaskLogEntry[] => {
-    const entries = tailLines().map((line): TaskLogEntry => {
-      try {
-        return JSON.parse(line) as TaskLogEntry;
-      } catch {
-        return { message: line };
-      }
-    });
-    if (!first) return entries;
-    first = false;
-    return tail === 'all' ? entries : tailSteps(entries, tail);
-  };
-  yield* drain();
-  while (!terminal.has(current.status)) {
-    await new Promise(resolve => setTimeout(resolve, 400));
-    current = reconcileTask(cwd, loadTask(cwd, taskId) ?? current);
+  const changes = watchTask(cwd, taskId);
+  try {
+    const startMs = processStarts();
+    let current = loadTask(cwd, taskId);
+    if (!current) {
+      throw new Error(`No task found for "${taskId}".`);
+    }
+    // Skip everything older than the last `tail` steps, then follow the file
+    // incrementally. Each tick reads only appended bytes instead of
+    // re-parsing the whole (unbounded) log.
+    const tail = opts.tail ?? 1;
+    const tailLines = createJsonlTail(path.join(resolveTaskDir(cwd, taskId), 'log.jsonl'));
+    let first = true;
+    const drain = (): TaskLogEntry[] => {
+      const entries = tailLines().map((line): TaskLogEntry => {
+        try {
+          return JSON.parse(line) as TaskLogEntry;
+        } catch {
+          return { message: line };
+        }
+      });
+      if (!first) return entries;
+      first = false;
+      return tail === 'all' ? entries : tailSteps(entries, tail);
+    };
     yield* drain();
+    for (;;) {
+      current = reconcileTask(cwd, loadTask(cwd, taskId) ?? current, startMs);
+      if (TERMINAL_STATUSES.includes(current.status)) break;
+      await changes.wait(1000);
+      yield* drain();
+    }
+    yield* drain();
+  } finally {
+    changes.close();
   }
-  yield* drain();
 }
 
 // Print-free core: interrupt the live turn (if any), kill the worker, mark the
@@ -582,27 +587,6 @@ export async function stopTask(
   return { taskId: task.id, status: 'cancelled', interrupt: interrupt.detail };
 }
 
-// Finish archiving flagged tasks, including the directory move and Codex session.
-// Archive flow runs in a detached child so a `list` sweep never blocks on the
-// fs moves. Best-effort: if it never runs, the migration in listTasks/
-// listArchivedTasks (listRuns/listArchivedRuns) completes the move later.
-export function spawnArchiveSweep(cwd: string, ids: string[], opts: { flows?: boolean } = {}) {
-  if (!ids.length) return;
-  try {
-    const child = spawn(
-      process.execPath,
-      [CLI_PATH, 'task', 'archive-sweep', '--cwd', cwd, ...(opts.flows ? ['--flows'] : []), ...ids],
-      {
-        detached: true,
-        stdio: 'ignore',
-      },
-    );
-    child.unref();
-  } catch {
-    /* best-effort */
-  }
-}
-
 /** Delete a task: the engine session behind it (best-effort, so it leaves codex and claude too), then its state dir. */
 export function deleteTask(cwd: string, task: Task): boolean {
   for (const threadId of conversationIds(task)) {
@@ -610,13 +594,4 @@ export function deleteTask(cwd: string, task: Task): boolean {
     else deleteClaudeSession(threadId);
   }
   return removeTaskDir(cwd, task.id);
-}
-
-/** The detached half of an archive sweep: archive each flagged task that is still stopped. */
-export function archiveFlagged(cwd: string, ids: string[]): void {
-  for (const id of ids) {
-    const task = findTask(cwd, id);
-    // Skip a task steered back to life since the list flagged it.
-    if (task && TERMINAL_STATUSES.includes(task.status)) archiveTask(cwd, task, { auto: true });
-  }
 }

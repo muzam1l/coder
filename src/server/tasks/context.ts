@@ -6,6 +6,7 @@ import { BROKERED, BROKERED_PLACEHOLDER, engineHosts } from '../runners/vercel-s
 import type { Integration, TokenBound } from '../../integrations/types';
 import type { AgentEvent, InstallationLink, Installation } from '../../agent/types';
 import type { EngineCredential, Store, TaskStatus } from '../store/types';
+import { dropKey, heldKey, type HeldToken } from '../store/tokens';
 import type { ServerContext } from '../context';
 import type { CoderConfig } from '../../core/config';
 import { taskConfig } from '../settings/config';
@@ -35,28 +36,16 @@ export function unsealed(ctx: ServerContext, installation: Installation): Instal
 /** A held token is reused only while more than this remains. */
 const REUSE_MARGIN_MS = 5 * 60 * 1000;
 
-/** A minted token held for reuse, sealed. */
-export interface HeldToken {
-  token: string;
-  expiresAt: number;
-  mintedAt: number;
-}
-
-/** An installation's or app's latest token drop. */
-export interface TokenDrop {
-  drop: string;
-}
-
-const heldKey = (id: string, key = '') => `token:${id}:${key}`;
-const dropKey = (id: string) => `token-drop:${id}`;
+export {
+  dropKey,
+  heldKey,
+  type HeldToken,
+  type HeldWrite,
+  type TokenDrop,
+  type TokenState,
+} from '../store/tokens';
 /** Outlives any mint in flight when tokens are dropped. */
 const DROP_FENCE_TTL_MS = 60 * 60 * 1000;
-
-/** The installation's and its app's latest drops, so a mint that began before one is never held. */
-const drops = (store: Store, installation: Installation) =>
-  Promise.all(
-    [installation.id, installation.app].map(id => store.get<TokenDrop>('snapshot', dropKey(id))),
-  ).then(rows => rows.map(row => row?.drop).join());
 
 /** Forgets every token held for an installation, or given an app id, for all of its installations. */
 export async function dropTokens(store: Store, id: string): Promise<void> {
@@ -80,7 +69,8 @@ export async function installationToken(
     fetch: ctx.fetch,
     async hold(reuse, mint) {
       const key = heldKey(installation.id, reuse);
-      const held = await ctx.store.get<HeldToken>('snapshot', key);
+      const state = await ctx.store.heldTokens([installation.id], [installation.app]);
+      const held = state.held.get(key);
       const now = (ctx.now ?? Date.now)();
       // A task's token covers its timeout, plus the margin when a fresh one would.
       const fresh = held ? held.expiresAt - held.mintedAt : 0;
@@ -93,20 +83,21 @@ export async function installationToken(
         }
       }
 
-      const drop = await drops(ctx.store, installation);
+      // Held only while the drops it was read under stand, so a mint that began before a drop is never kept.
       const minted = await mint();
-      if ((await drops(ctx.store, installation)) !== drop) return minted.token;
-      await ctx.store.put(
-        'snapshot',
+      await ctx.store.holdToken({
         key,
-        {
+        value: {
           token: encryptSecret(ctx.config, minted.token),
           expiresAt: minted.expiresAt,
           mintedAt: now,
         },
-        { ttlMs: Math.max(minted.expiresAt - now - REUSE_MARGIN_MS, 0) },
-      );
-      if ((await drops(ctx.store, installation)) !== drop) await ctx.store.delete('snapshot', key);
+        ttlMs: Math.max(minted.expiresAt - now - REUSE_MARGIN_MS, 0),
+        drops: [installation.id, installation.app].map(id => ({
+          key: dropKey(id),
+          drop: state.drops.get(dropKey(id)),
+        })),
+      });
 
       return minted.token;
     },
@@ -226,13 +217,9 @@ async function connection(
     }
   | undefined
 > {
-  const resolved = ctx.store.installationApp ? await ctx.store.installationApp(link.id) : undefined;
-  const linked = ctx.store.installationApp
-    ? resolved?.installation
-    : await ctx.store.get('installation', link.id);
-  if (!linked || linked.deletedAt) return undefined;
-
-  const app = ctx.store.installationApp ? resolved?.app : await ctx.store.get('app', linked.app);
+  const resolved = await ctx.store.installationApp(link.id);
+  if (!resolved) return undefined;
+  const { installation: linked, app } = resolved;
   const target = ctx.integrations[integration];
   if (!app || !target) return undefined;
 
@@ -597,7 +584,12 @@ export async function taskLogSecrets(ctx: ServerContext, status: TaskStatus): Pr
   const recovered =
     ctx.store instanceof LocalStore &&
     status.task.event &&
-    !ctx.store.connectionSecrets?.get(status.task.id)?.length
+    !(
+      await ctx.store.list('snapshot', {
+        prefix: `connection-secrets:${status.task.id}:`,
+        limit: 1,
+      })
+    ).length
       ? Object.values(await eventTokens(ctx, status.task))
       : [];
 

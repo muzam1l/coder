@@ -4,13 +4,14 @@ import { randomUUID } from 'node:crypto';
 import { createTaskToken } from './token';
 import type { AgentTask, TaskContext, TaskSource } from '../../agent/types';
 import type { TaskLogLine, TaskStatus, Store, UsageRecord } from '../store/types';
+import type { Loaded } from '../store/primed';
 import { scoped, type ServerContext } from '../context';
 import { taskRunner } from '../runners';
 import { pushLocalInbox } from './local';
 import { byId, byListKey, listRank, type ListKey } from '../../core/defaults';
 import { archiveDue } from '../../core/state';
 import { INTEGRATIONS } from '../../integrations';
-import type { Batch } from './conversation';
+import type { Batch, Conversation } from './conversation';
 
 export interface ClaimedTask {
   organizationId: string;
@@ -164,14 +165,34 @@ export interface Completion {
   usage: UsageRecord;
   attempts: number;
   tokenHash: string;
+  /** Messages the task posted, remembered so reactions on them are recognized. */
+  known?: Array<{ id: string; ttlMs: number }>;
+  /** No more output follows: the machine needs no stop. */
+  logsComplete?: boolean;
 }
 
 export interface Delivery {
   key: string;
   ttlMs: number;
+  /** The claim this request holds on the delivery; the receipt lands over it. */
+  owner?: string;
 }
-interface PendingDelivery {
+export interface PendingDelivery {
   pending?: { task?: AgentTask; inbox?: { taskId: string; id: string; entry: InboxEntry } };
+}
+
+/** What a new task's admission writes with it: its conversation, the unseen messages it carries and its sealed redaction secrets. */
+export interface Admission {
+  conversation?: { key: string; record: Conversation; root: string; ttlMs: number };
+  unseen?: { key: string; version: number; epoch?: string };
+  secrets?: Array<{ id: string; value: string; expiresAt: number }>;
+}
+
+/** The task behind a runner's bearer, with the rows its authorization read alongside where the store could. */
+export interface CallbackState {
+  organizationId: string;
+  status: TaskStatus;
+  loaded?: Loaded;
 }
 
 /** The conversation a task belongs to: app, installation, Chat SDK thread and agent; who wrote or asked is no part of it. */
@@ -204,10 +225,11 @@ export function reviewKey(task: Pick<AgentTask, 'flow' | 'event'>): string | und
 }
 
 export interface TaskQueue {
-  metrics?(organizationId: string, since: number): Promise<TaskMetrics>;
+  deleteTask(organizationId: string, id: string, fence: TaskFence): Promise<boolean>;
+  metrics(organizationId: string, since: number): Promise<TaskMetrics>;
   scheduler?: { running?: Promise<void>; waiting?: Promise<void> };
   inboxDelivery?: Map<string, { work?: Promise<void>; again?: boolean }>;
-  /** Inserts the task, or with `steer` appends that text to the conversation's active task instead. */
+  /** Inserts the task with what its admission records, or with `steer` appends that text to the conversation's active task instead. */
   deliver(
     organizationId: string,
     task: AgentTask,
@@ -216,7 +238,17 @@ export interface TaskQueue {
     steer: string | undefined,
     maxQueued?: number,
     create?: boolean,
+    admission?: Admission,
   ): Promise<{ taskId?: string; steered?: boolean }>;
+  /** The task behind a runner's bearer token, touched, with what the callback needs loaded alongside. */
+  authorize(
+    id: string,
+    tokenHash: string,
+    attempts: number,
+    organizationId: string,
+    now: number,
+    options?: { allowCompleted?: boolean; include?: 'secrets' | 'context' },
+  ): Promise<CallbackState | undefined>;
   enqueue(
     organizationId: string,
     task: AgentTask,
@@ -224,13 +256,13 @@ export interface TaskQueue {
     delivery?: { key: string; ttlMs: number },
     maxQueued?: number,
   ): Promise<boolean>;
-  /** The oldest queued task of any organization, now running; `undefined` when the queue is empty. */
+  /** The oldest queued task of any organization, now running, with what its start needs; `undefined` when the queue is empty. */
   claim(
     now: number,
     maxTasks?: number,
     knownWork?: boolean,
     concurrentTasks?: number,
-  ): Promise<(ClaimedTask & { token: string; more: boolean }) | undefined>;
+  ): Promise<(ClaimedTask & { token: string; more: boolean; loaded?: Loaded }) | undefined>;
   touch(
     organizationId: string,
     id: string,
@@ -293,7 +325,13 @@ export interface TaskQueue {
     attempts: number,
     after: number,
   ): Promise<InboxEntry[] | undefined>;
-  ackInbox(organizationId: string, id: string, ack: InboxAck, fence: TaskFence): Promise<boolean>;
+  /** The task's status once the acknowledgement applied; nothing when it was refused. */
+  ackInbox(
+    organizationId: string,
+    id: string,
+    ack: InboxAck,
+    fence: TaskFence,
+  ): Promise<TaskStatus['status'] | undefined>;
   pendingInbox(organizationId?: string): Promise<ClaimedTask[]>;
   cancelRequested(organizationId: string, id: string): Promise<boolean>;
   /** Newest first. */
@@ -338,43 +376,7 @@ export async function deleteTask(ctx: ServerContext, status: TaskStatus): Promis
     tokenHash: status.tokenHash ?? null,
     handle: status.handle ?? null,
   };
-  if (ctx.queue instanceof StoreQueue) return ctx.queue.deleteTask(ctx.organizationId, id, fence);
-
-  const [{ DrizzleStore }, { task, taskTombstone }, { and, eq, isNull, sql }, { rows }] =
-    await Promise.all([
-      import('../store/pg/store'),
-      import('../store/pg/schema'),
-      import('drizzle-orm'),
-      import('../store/pg/tables/shared'),
-    ]);
-  if (!(ctx.store instanceof DrizzleStore))
-    throw new Error('Task store does not support fenced deletion');
-  const now = (ctx.now ?? Date.now)();
-  // The delete and its tombstone commit together, so every server's streams see it.
-  const [row] = await rows<{ deleted: number }>(
-    ctx.store.db,
-    sql`with gone as (
-      delete from ${task}
-      where ${and(
-        eq(task.organizationId, ctx.organizationId),
-        eq(task.publicId, id),
-        eq(task.generation, generation),
-        eq(task.attempts, fence.attempts),
-        fence.tokenHash === null ? isNull(task.tokenHash) : eq(task.tokenHash, fence.tokenHash),
-        fence.handle === null ? isNull(task.handle) : eq(task.handle, fence.handle),
-      )}
-      returning organization_id, public_id
-    ), marked as (
-      insert into ${taskTombstone} (organization_id, public_id, deleted_at)
-      select organization_id, public_id, ${new Date(now).toISOString()}::timestamptz from gone
-    ), pruned as (
-      delete from ${taskTombstone}
-      where deleted_at < ${new Date(now - TOMBSTONE_MS).toISOString()}::timestamptz
-    )
-    select count(*)::int as deleted from gone`,
-  );
-
-  return Boolean(row?.deleted);
+  return ctx.queue.deleteTask(ctx.organizationId, id, fence);
 }
 
 /** The task with these admissions recorded in its context, a steer's or a consumed entry's. */
@@ -386,27 +388,25 @@ const withAdmissions = (
   context: { ...task.context, admissions: { ...task.context?.admissions, ...admissions } },
 });
 
+/** Appends to the task's inbox under its generation and pushes it to the runner, which starts from the task as the caller read it. */
 export async function addInbox(
   ctx: ServerContext,
-  id: string,
+  status: TaskStatus,
   kind: InboxEntry['kind'],
   value: unknown,
-  generation: number,
-  task?: AgentTask,
   batch?: BatchAdmission,
 ): Promise<InboxEntry | undefined> {
+  const id = status.task.id;
   const entry = await ctx.queue.appendInbox(
     ctx.organizationId,
     id,
     kind,
     value,
     (ctx.now ?? Date.now)(),
-    generation,
+    status.generation ?? 0,
     batch,
   );
-  if (entry && batch)
-    ctx.store.batchEvents?.dispatchEvent(new Event(`${ctx.organizationId}:${batch.key}`));
-  if (entry) await pushInbox(ctx, id, task);
+  if (entry) await pushInbox(ctx, id, status.task, status);
   return entry;
 }
 
@@ -430,6 +430,21 @@ export class StoreQueue implements TaskQueue {
   private tombstones = new Map<string, number>();
 
   constructor(private readonly store: Store) {}
+
+  async metrics(organizationId: string, since: number): Promise<TaskMetrics> {
+    const rows = await this.list(organizationId);
+    const tasks: Record<TaskStatus['status'], number> = {
+      queued: 0,
+      running: 0,
+      waiting: 0,
+      completed: 0,
+      failed: 0,
+      cancelled: 0,
+    };
+    for (const row of rows) if (row.createdAt >= since) tasks[row.status]++;
+
+    return { tasks, queueDepth: rows.filter(row => row.status === 'queued').length };
+  }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
     const next = this.lock.then(work, work);
@@ -469,8 +484,13 @@ export class StoreQueue implements TaskQueue {
       ).length;
       if (queued >= maxQueued) throw new Error('Organization task queue is full');
     }
-    if (delivery && !receipt)
-      await this.store.put('delivery', delivery.key, { at: now, pending: { task } });
+    // The pending task survives a crash before the row lands; the claim's owner keeps the delivery leased meanwhile.
+    if (delivery && !receipt?.pending?.task)
+      await this.store.put('delivery', delivery.key, {
+        at: now,
+        ...(delivery.owner ? { owner: delivery.owner } : {}),
+        pending: { task },
+      });
     if (!existing)
       await this.store.put('task', task.id, {
         task,
@@ -501,6 +521,29 @@ export class StoreQueue implements TaskQueue {
     );
   }
 
+  /** What a new task's admission records beside it. */
+  private async admit(task: AgentTask, admission: Admission | undefined, now: number) {
+    if (!admission) return;
+    const { conversation, unseen } = admission;
+    if (conversation)
+      await this.store.putMany(
+        'delivery',
+        [
+          { id: conversation.key, value: conversation.record },
+          { id: conversation.root, value: { at: conversation.record.at } },
+        ],
+        { ttlMs: conversation.ttlMs },
+      );
+    if (unseen) await this.store.acknowledgeUnseen(unseen.key, unseen.version, unseen.epoch);
+    for (const row of admission.secrets ?? [])
+      await this.store.put(
+        'snapshot',
+        row.id,
+        { secret: row.value, expiresAt: row.expiresAt },
+        { ttlMs: Math.max(1, row.expiresAt - now) },
+      );
+  }
+
   deliver(
     organizationId: string,
     task: AgentTask,
@@ -509,6 +552,7 @@ export class StoreQueue implements TaskQueue {
     steer: string | undefined,
     maxQueued?: number,
     create = true,
+    admission?: Admission,
   ): Promise<{ taskId?: string; steered?: boolean }> {
     const work = async () => {
       let receipt = await this.store.get<PendingDelivery>('delivery', delivery.key);
@@ -544,10 +588,12 @@ export class StoreQueue implements TaskQueue {
               })
             ).find(row => sameSession(row.task, task))
           : undefined;
-      if (!active)
-        return create && (await this.insert(task, now, delivery, maxQueued))
-          ? { taskId: task.id }
-          : {};
+      if (!active) {
+        if (!create || !(await this.insert(task, now, delivery, maxQueued))) return {};
+        await this.admit(task, admission, now);
+
+        return { taskId: task.id };
+      }
       const seq = await this.nextSeq(active.task.id);
       const entry: InboxEntry = {
         seq,
@@ -661,6 +707,26 @@ export class StoreQueue implements TaskQueue {
     });
   }
 
+  async authorize(
+    id: string,
+    tokenHash: string,
+    attempts: number,
+    organizationId: string,
+    now: number,
+    options: { allowCompleted?: boolean } = {},
+  ): Promise<CallbackState | undefined> {
+    const status = await this.touch(
+      organizationId,
+      id,
+      tokenHash,
+      attempts,
+      now,
+      options.allowCompleted,
+    );
+
+    return status && { organizationId: 'default', status };
+  }
+
   async archiveStopped(
     _organizationId: string | undefined,
     now: number,
@@ -718,6 +784,7 @@ export class StoreQueue implements TaskQueue {
       if (!current || !this.allowed(current, fence)) return false;
       await this.store.delete('task', id);
       this.tombstone(id);
+      await deleteTaskConnections(this.store, id);
 
       return true;
     });
@@ -781,10 +848,13 @@ export class StoreQueue implements TaskQueue {
       await this.store.put('task', id, {
         ...current,
         ...completion.outcome,
+        ...(completion.logsComplete ? { logsComplete: true } : {}),
         lastSeenAt: now,
         finishedAt: now,
         updatedAt: now,
       });
+      for (const known of completion.known ?? [])
+        await this.store.put('delivery', known.id, { at: now }, { ttlMs: known.ttlMs });
       await deleteTaskConnections(this.store, id);
 
       return true;
@@ -1009,9 +1079,14 @@ export class StoreQueue implements TaskQueue {
     });
   }
 
-  ackInbox(_organizationId: string, id: string, ack: InboxAck, fence: TaskFence): Promise<boolean> {
+  ackInbox(
+    _organizationId: string,
+    id: string,
+    ack: InboxAck,
+    fence: TaskFence,
+  ): Promise<TaskStatus['status'] | undefined> {
     return this.serial(async () => {
-      if (fence.generation !== undefined && fence.generation !== ack.generation) return false;
+      if (fence.generation !== undefined && fence.generation !== ack.generation) return undefined;
 
       const current = await this.read(id);
       if (
@@ -1019,11 +1094,11 @@ export class StoreQueue implements TaskQueue {
         !this.allowed(current, { ...fence, generation: ack.generation, statuses: undefined }) ||
         ack.seq > (current.inboxSeq ?? -1)
       )
-        return false;
+        return undefined;
 
       const after = current.inboxAck?.generation === ack.generation ? current.inboxAck.seq : -1;
-      if (DONE.has(current.status)) return ack.seq <= after;
-      if (!['running', 'waiting'].includes(current.status)) return false;
+      if (DONE.has(current.status)) return ack.seq <= after ? current.status : undefined;
+      if (!['running', 'waiting'].includes(current.status)) return undefined;
 
       const applied = (await this.store.list('inbox', { prefix: `${id}:` })).filter(
         row => row.value.generation === ack.generation && row.value.seq <= ack.seq,
@@ -1050,7 +1125,7 @@ export class StoreQueue implements TaskQueue {
         ...applied.map(row => (row.value.value as { admissions?: object } | null)?.admissions),
       ) as NonNullable<TaskContext['admissions']>;
 
-      await this.store.put('task', id, {
+      const next: TaskStatus = {
         ...current,
         ...(Object.keys(admissions).length
           ? { task: withAdmissions(current.task, admissions) }
@@ -1060,11 +1135,12 @@ export class StoreQueue implements TaskQueue {
         ...(approved ? { status: 'running', approval: undefined } : {}),
         ...(cancelled ? { status: 'cancelled', finishedAt: Date.now() } : {}),
         updatedAt: Date.now(),
-      });
+      };
+      await this.store.put('task', id, next);
       for (const row of applied) await this.store.delete('inbox', row.id);
       if (cancelled) await deleteTaskConnections(this.store, id);
 
-      return true;
+      return next.status;
     });
   }
 
@@ -1127,7 +1203,13 @@ export class StoreQueue implements TaskQueue {
 
 const INBOX_LEASE_MS = 30_000;
 
-export function pushInbox(ctx: ServerContext, id: string, task?: AgentTask): Promise<void> {
+/** Delivers a task's inbox to its runner; `known` is the task as the caller just read it, so the first round skips that read. */
+export function pushInbox(
+  ctx: ServerContext,
+  id: string,
+  task?: AgentTask,
+  known?: TaskStatus,
+): Promise<void> {
   if (task && !ctx.local && !task.runnerId && !ctx.runners[task.runner]?.push)
     return Promise.resolve();
   const queue = (ctx.queue.inboxDelivery ??= new Map());
@@ -1145,11 +1227,13 @@ export function pushInbox(ctx: ServerContext, id: string, task?: AgentTask): Pro
     let failures = 0;
     let generation = 0;
     let releasedGeneration: number | undefined;
+    let fresh = known;
     const deliver = async () => {
       for (;;) {
         current.again = false;
 
-        const status = await ctx.store.get('task', id);
+        const status = fresh ?? (await ctx.store.get('task', id));
+        fresh = undefined;
         if (!status?.handle || !['running', 'waiting'].includes(status.status)) return;
 
         const runner = await taskRunner(ctx, status.task);
@@ -1206,7 +1290,8 @@ export function pushInbox(ctx: ServerContext, id: string, task?: AgentTask): Pro
     };
     try {
       await deliver();
-    } catch {
+    } catch (error) {
+      console.error(`coder server: inbox delivery failed for ${id}`, error);
       if (lease) {
         const retryMs = Math.min(30_000, 1000 * 2 ** Math.min(failures, 5));
         const value = { owner, failures: failures + 1, next: (ctx.now ?? Date.now)() + retryMs };

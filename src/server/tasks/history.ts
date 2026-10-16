@@ -8,7 +8,7 @@ import { json } from '../routes/http';
 import { type TaskHistory } from '../store/types';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import { type CallbackContext } from './callbacks';
-import { taskLogSecrets } from './context';
+import { taskRedactor } from './logs';
 
 const MAX_HISTORY_BYTES = 64 * 1024 * 1024;
 const unzip = promisify(gunzip);
@@ -20,14 +20,7 @@ export async function listHistory(
   ctx: CallbackContext,
   params: Params,
 ): Promise<Response> {
-  if (ctx.store.listHistory) return json(await ctx.store.listHistory(params.id!));
-  const rows = await ctx.store.list('history', { prefix: `${params.id}:` });
-
-  return json(
-    rows
-      .map(({ value: { engine, conversation, savedAt } }) => ({ engine, conversation, savedAt }))
-      .sort((left, right) => left.savedAt - right.savedAt),
-  );
+  return json(await ctx.store.listHistory(params.id!));
 }
 
 /** One conversation's file, gzipped and base64-encoded, with the chain saved beside it. */
@@ -82,11 +75,7 @@ export async function saveHistory(
     return json({ error: 'Invalid history' }, 400);
   }
 
-  const secrets = (await taskLogSecrets(ctx, ctx.callbackTask!)).sort(
-    (left, right) => right.length - left.length,
-  );
-  const redact = (value: string) =>
-    secrets.reduce((redacted, secret) => redacted.replaceAll(secret, '[REDACTED]'), value);
+  const redact = await taskRedactor(ctx, ctx.callbackTask!, true);
   await ctx.store.put('history', `${params.id}:${body.conversation}`, {
     engine: body.engine,
     conversation: body.conversation,

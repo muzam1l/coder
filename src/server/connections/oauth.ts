@@ -5,13 +5,14 @@ export { oauthAccessToken, OAuthRevoked, type OAuthSecret } from '../../core/oau
 import type { Connection } from '../../agent/types';
 import { createHash, randomBytes } from 'node:crypto';
 import * as z from 'zod/mini';
-import { scoped, type ServerContext } from '../context';
+import { type ServerContext } from '../context';
 import { consumeBoundNonce, issueNonce, nonceOrganization } from '../auth/nonce';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import type { Store } from '../store/types';
 import { json, notFound, redirect } from '../routes/http';
 import { workspaceAdmin } from '../routes/guards';
 import { dashPath, sessionSlug } from '../auth/account';
+import { memberOf } from '../auth/connect';
 
 export const MCP_CLIENT_PATH = '/connections/oauth/client.json';
 const CALLBACK_PATH = '/connections/oauth/callback';
@@ -345,17 +346,7 @@ export async function oauthCallback(req: Request, ctx: ServerContext, url: URL):
       (!organization || !ctx.session?.organizations.some(entry => entry.id === organization))
     )
       return outcome('invalid-state');
-    const membership = ctx.session?.organizations.find(entry => entry.id === organization);
-    const member = organization
-      ? {
-          ...scoped(ctx, organization),
-          session: ctx.session && {
-            ...ctx.session,
-            organizationId: organization,
-            role: organization === ctx.session.organizationId ? ctx.session.role : membership!.role,
-          },
-        }
-      : ctx;
+    const member = ctx.session ? (memberOf(ctx, ctx.session, organization) ?? ctx) : ctx;
     landing = member;
     const target = await consumeBoundNonce(member, state, 'connection-oauth', userOf(member));
     if (!target) return outcome('invalid-state');
@@ -407,7 +398,9 @@ export async function oauthCallback(req: Request, ctx: ServerContext, url: URL):
           const info = accountSchema.parse(await response.json());
           account = info.preferred_username ?? info.email ?? info.name;
         }
-      } catch {}
+      } catch (error) {
+        console.error('coder server: OAuth userinfo failed', error);
+      }
     }
     await member.store.withAppLock(`connection:${claim.id}`, async store => {
       const latest = await store.get('connection', claim.id);
@@ -425,7 +418,8 @@ export async function oauthCallback(req: Request, ctx: ServerContext, url: URL):
     });
 
     return outcome('connected');
-  } catch {
+  } catch (error) {
+    console.error('coder server: connection OAuth callback failed', error);
     return outcome('failed');
   }
 }

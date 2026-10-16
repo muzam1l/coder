@@ -1,4 +1,5 @@
 import { connect, type ServerOptions } from '../core/remote';
+import { serveRunner } from './serve';
 import { CoderError } from '../core/errors';
 import type { RunnerInput, RunnerUpdate } from '../client/types';
 
@@ -48,3 +49,17 @@ export async function addRunnerFields(
   if (spec.connect === 'pair') return api.runners.pair({ name: options.name, scope });
   return api.runners.add({ kind: spec.kind, name: options.name ?? spec.name, scope, config });
 }
+
+export const runners = {
+  list: listRunners,
+  add: addRunner,
+  pair: pairRunner,
+  update: updateRunner,
+  default: (id: string, options: ServerOptions = {}) =>
+    updateRunner(id, { default: true }, options),
+  test: testRunner,
+  rename: (id: string, name: string, options: ServerOptions = {}) =>
+    updateRunner(id, { name }, options),
+  remove: removeRunner,
+  serve: serveRunner,
+};

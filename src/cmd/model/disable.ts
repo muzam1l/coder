@@ -1,6 +1,6 @@
 /** `coder model disable`: turn off any model name. */
 import type { CommandHelpSpec } from '../../core/types';
-import { modelToggleCore } from '../../core/models';
+import { models } from '../../core/models';
 import { command } from '../../cli';
 import { modelOptions } from './add';
 import { printModelChange } from './remove';
@@ -12,7 +12,8 @@ export const toggle = (disable: boolean, help: CommandHelpSpec) =>
     help,
     options: modelOptions,
     args: 1,
-    run: ({ options, args: [name], cwd }) => modelToggleCore(cwd, name, disable, options),
+    run: ({ options, args: [name], cwd }) =>
+      models[disable ? 'disable' : 'enable'](name, { ...options, cwd }),
     json: ({ name, file }) => ({ [disable ? 'disabled' : 'enabled']: name, file }),
     print: ({ name, file }) => printModelChange(disable ? 'disabled' : 'enabled', name, file),
   });

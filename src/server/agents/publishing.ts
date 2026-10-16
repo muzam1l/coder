@@ -55,9 +55,6 @@ export async function updateSettings(
   url: URL,
 ): Promise<Response> {
   const slug = params.slug!;
-  const versionNumber = params.version ? Number(params.version) : undefined;
-  if (params.version && !/^\d+$/.test(url.pathname.split('/').at(-1)!)) return notFound();
-
   const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
   const body = await req.json().catch(() => undefined);
 
@@ -101,9 +98,6 @@ export async function deleteAgent(
   url: URL,
 ): Promise<Response> {
   const slug = params.slug!;
-  const versionNumber = params.version ? Number(params.version) : undefined;
-  if (params.version && !/^\d+$/.test(url.pathname.split('/').at(-1)!)) return notFound();
-
   const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
   const { record } = await loadCurrent();
   if (!record) return json({ error: `No agent named "${slug}"` }, 404);
@@ -111,8 +105,6 @@ export async function deleteAgent(
     return json({ error: 'Built-in agents cannot be deleted.' }, 400);
   if (ctx.local && !(await deleteLocalAgent(ctx.local.cwd, ctx.integrations, slug)))
     return json({ error: `Delete .coder/agents/${slug} in the repo` }, 409);
-  for (const { id } of await ctx.store.list('agentversion', { prefix: `${slug}:` }))
-    await ctx.store.delete('agentversion', id);
   await ctx.store.delete('agent', slug);
 
   return json({ ok: true });
@@ -125,9 +117,6 @@ export async function publish(
   url: URL,
 ): Promise<Response> {
   const slug = params.slug!;
-  const versionNumber = params.version ? Number(params.version) : undefined;
-  if (params.version && !/^\d+$/.test(url.pathname.split('/').at(-1)!)) return notFound();
-
   const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
   const body = (await req.json().catch(() => undefined)) as
     | {

@@ -2,9 +2,8 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions } from '../../utils/args';
+import { baseOptions, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-import { serverOptions } from './add';
 
 export const commandConnectionRemove = command({
   name: 'connection remove',

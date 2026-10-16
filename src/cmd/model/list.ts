@@ -1,7 +1,7 @@
 /** `coder model list`: built-ins, aliases and custom models, with each endpoint probed. */
 import process from 'node:process';
 
-import { modelListData } from '../../core/models';
+import { models } from '../../core/models';
 import { formatHints, outStyle } from '../../tui/output';
 import { command, MODEL_HINT } from '../../cli';
 import { modelOptions } from './add';
@@ -13,11 +13,11 @@ export const commandModelList = command({
     summary: `List built-in aliases, configured custom models, and user aliases. Only custom\nmodels are probed.\n\n${MODEL_HINT}`,
   },
   options: modelOptions,
-  run: ({ cwd }) => modelListData(cwd),
+  run: ({ cwd }) => models.list({ cwd }),
   print: printModelList,
 });
 
-function printModelList(data: Awaited<ReturnType<typeof modelListData>>): void {
+function printModelList(data: Awaited<ReturnType<typeof models.list>>): void {
   const s = outStyle;
   const suffix = (disabled?: boolean) => (disabled ? ` ${s.dim('(disabled)')}` : '');
   const lines: string[] = [];

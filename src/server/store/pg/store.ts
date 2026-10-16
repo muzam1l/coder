@@ -1,5 +1,7 @@
 /** `Store` over the server tables: today's string ids live in key columns, the bodies in typed columns. */
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { watchChanges } from '../../../utils/fsx';
+import type postgres from 'postgres';
 
 import {
   and,
@@ -20,7 +22,6 @@ import {
 import { alias, type PgColumn } from 'drizzle-orm/pg-core';
 
 import {
-  BATCH_LEASE_MS,
   type Batch,
   type Conversation,
   type ConversationState,
@@ -38,19 +39,24 @@ import {
   parseCredentialId,
   type StoredCredential,
 } from '../../settings/credentials';
-import { readQuery, type Db } from './client';
+import { pipeline, readQuery, type Db } from './client';
 import {
   agent,
   agentVersion,
   chatItem,
   chatState,
   engineCredential,
+  platformLink,
   secret,
   runner,
   task,
+  taskTombstone,
   taskLog,
   usage,
 } from './schema';
+import type { Connection } from '../../../agent/types';
+import type { RepoFile } from '../../agents/repo';
+import type { HeldWrite, TokenState } from '../tokens';
 import {
   addUsage,
   timeZone,
@@ -72,26 +78,40 @@ import {
   lockInstallation,
   writeCredential,
 } from './tables/apps';
-import { state, runners } from './tables/resources';
+import {
+  heldTokensQuery,
+  runners,
+  sealedCredential,
+  sealedInstallation,
+  sealedRow,
+  sealedRunner,
+  state,
+  tokenState,
+  type Sealed,
+  unseenAcknowledged,
+} from './tables/resources';
 import { batchValue, writeCredentials } from '../memory';
 import {
   agentValue,
   app,
   date,
   escapeLike,
+  fromJson,
   install,
   splitKey,
   UNSCOPED_ORGANIZATION,
   versionValue,
   versionColumns,
   versionSummary,
+  statePrefix,
   stateKey,
   taskRecord,
-  rows,
+  rows as queryRows,
   type Kind,
   type Rows,
 } from './tables/shared';
 import { histories, historySummaries, inboxes, logs, tasks, usages } from './tables/tasks';
+import { BATCH_LEASE_MS } from '../types';
 import type {
   Store,
   StoreListOptions,
@@ -99,6 +119,8 @@ import type {
   AgentPageOptions,
   CredentialScope,
   CredentialWork,
+  DispatchInput,
+  DispatchState,
   StoreKind,
   StoreRecords,
   LoginPatch,
@@ -109,6 +131,36 @@ import type {
 } from '../types';
 
 export class DrizzleStore implements Store {
+  private recordChannel(kind: string, id: string) {
+    return `record_${createHash('sha256')
+      .update(JSON.stringify([this.organizationId, kind, id]))
+      .digest('hex')
+      .slice(0, 48)}`;
+  }
+
+  notification(kind: string, id: string) {
+    return this.notifications
+      ? { notified: sql`pg_notify(${this.recordChannel(kind, id)}, '')` }
+      : undefined;
+  }
+
+  async watch(kind: 'login' | 'delivery', id: string) {
+    const changes = watchChanges();
+    const client = (this.db as Db & { $client?: postgres.Sql }).$client;
+    const listening = client?.listen
+      ? await client
+          .listen(this.recordChannel(kind, id), changes.notify, changes.notify)
+          .catch(() => undefined)
+      : undefined;
+    return {
+      ...changes,
+      close() {
+        void listening?.unlisten().catch(() => {});
+        changes.close();
+      },
+    };
+  }
+
   publishAgent: NonNullable<Store['publishAgent']> = (record, version) =>
     publishAgent(this, record, version);
   private readonly kinds: { [K in StoreKind]: Kind<StoreRecords[K]> };
@@ -118,6 +170,10 @@ export class DrizzleStore implements Store {
     readonly organizationId: string,
     readonly now: () => number = Date.now,
     readonly encryption: Pick<ServerConfig, 'encryptionKey' | 'previousEncryptionKey'> = {},
+    private readonly inTransaction = false,
+    private readonly notifications = Boolean(
+      (db as Db & { $client?: postgres.Sql }).$client?.unsafe,
+    ),
   ) {
     this.kinds = {
       agent: agents(this),
@@ -394,27 +450,27 @@ export class DrizzleStore implements Store {
   }
 
   withConfigLock<T>(work: (store: Store) => Promise<T>): Promise<T> {
-    return this.db.transaction(async tx => {
-      const key = stateKey(this.organizationId, 'config', 'workspace');
-      await tx.insert(chatState).values({ key, value: {}, expiresAt: null }).onConflictDoNothing();
-      await tx
-        .select({ key: chatState.key })
-        .from(chatState)
-        .where(eq(chatState.key, key))
-        .for('update');
-
-      return work(
-        new DrizzleStore(tx as unknown as Db, this.organizationId, this.now, this.encryption),
-      );
-    });
+    return this.transaction(`config:${this.organizationId}`, work);
   }
 
-  transaction<T>(key: string, work: (store: DrizzleStore) => Promise<T>): Promise<T> {
+  async transaction<T>(key: string, work: (store: DrizzleStore) => Promise<T>): Promise<T> {
+    const lock = sql`select pg_advisory_xact_lock(3, hashtext(${key}))`;
+    if (this.inTransaction) {
+      await this.db.execute(lock);
+      return work(this);
+    }
     return this.db.transaction(async tx => {
-      await tx.execute(sql`select pg_advisory_xact_lock(3, hashtext(${key}))`);
+      await tx.execute(lock);
 
       return work(
-        new DrizzleStore(tx as unknown as Db, this.organizationId, this.now, this.encryption),
+        new DrizzleStore(
+          tx as unknown as Db,
+          this.organizationId,
+          this.now,
+          this.encryption,
+          true,
+          this.notifications,
+        ),
       );
     });
   }
@@ -486,6 +542,7 @@ export class DrizzleStore implements Store {
   get<T extends StoreRecords['snapshot']>(kind: 'snapshot', id: string): Promise<T | undefined>;
   get<T extends StoreRecords['delivery']>(kind: 'delivery', id: string): Promise<T | undefined>;
   async get(kind: StoreKind, id: string): Promise<StoreRecords[StoreKind] | undefined> {
+    if (kind === 'app') return (await this.getApps([id]))[0]?.value;
     const k = this.kinds[kind];
     const split = splitKey(id);
     const where = k.where
@@ -494,14 +551,7 @@ export class DrizzleStore implements Store {
         ? k.split(split[0], split[1], true)
         : sql`${k.key} = ${id}`;
 
-    const found = (await readQuery(this.db, async () => await k.rows(where, 1)))[0]?.value;
-    // Server-level apps are readable from every workspace.
-    if (found || kind !== 'app' || this.organizationId === UNSCOPED_ORGANIZATION) return found;
-
-    return new DrizzleStore(this.db, UNSCOPED_ORGANIZATION, this.now, this.encryption).get(
-      kind,
-      id,
-    );
+    return (await readQuery(this.db, async () => await k.rows(where, 1)))[0]?.value;
   }
 
   async patchLogin(
@@ -526,7 +576,10 @@ export class DrizzleStore implements Store {
           ),
         ),
       )
-      .returning({ value: sql<EngineLogin>`${chatState.value}` });
+      .returning({
+        value: sql<EngineLogin>`${chatState.value}`,
+        ...this.notification('login', id),
+      });
     return row?.value;
   }
 
@@ -587,7 +640,7 @@ export class DrizzleStore implements Store {
       : {};
   }
 
-  async listAgentsWithVersions(slug?: string) {
+  async listAgentsWithVersions(slug?: string | string[]) {
     const rows = await readQuery(this.db, () =>
       this.db
         .select({ record: agent, version: agentVersion })
@@ -599,7 +652,13 @@ export class DrizzleStore implements Store {
         .where(
           and(
             this.mine(agent.organizationId),
-            slug === undefined ? undefined : eq(agent.slug, slug),
+            slug === undefined
+              ? undefined
+              : Array.isArray(slug)
+                ? slug.length
+                  ? inArray(agent.slug, slug)
+                  : sql`false`
+                : eq(agent.slug, slug),
           ),
         )
         .orderBy(asc(agent.slug)),
@@ -827,6 +886,14 @@ export class DrizzleStore implements Store {
   }
 
   async delete(kind: StoreKind, id: string): Promise<void> {
+    const notification = kind === 'login' ? this.notification(kind, id) : undefined;
+    if (notification) {
+      await this.db
+        .delete(chatState)
+        .where(eq(chatState.key, stateKey(this.organizationId, kind, id)))
+        .returning(notification);
+      return;
+    }
     await this.kinds[kind].delete(id);
   }
 
@@ -938,7 +1005,13 @@ export class DrizzleStore implements Store {
       this.db
         .select({ installation: install, app, credentials: secret, token })
         .from(install)
-        .innerJoin(app, and(eq(app.id, install.appId), this.mine(app.organizationId)))
+        .innerJoin(
+          app,
+          and(
+            eq(app.id, install.appId),
+            inArray(app.organizationId, [this.organizationId, UNSCOPED_ORGANIZATION]),
+          ),
+        )
         .innerJoin(secret, eq(secret.id, app.credentialsSecretId))
         .leftJoin(token, and(eq(token.id, install.tokenSecretId), this.mine(token.organizationId)))
         .where(
@@ -1000,6 +1073,157 @@ export class DrizzleStore implements Store {
     };
   }
 
+  async heldTokens(installations: string[], apps: string[]): Promise<TokenState> {
+    const [row] = await readQuery(this.db, () =>
+      queryRows<{ tokens: Record<string, unknown> }>(
+        this.db,
+        sql`select ${heldTokensQuery(this.organizationId, installations, apps)} as tokens`,
+      ),
+    );
+
+    return tokenState(this.organizationId, row?.tokens ?? {});
+  }
+
+  async holdToken(write: HeldWrite): Promise<void> {
+    const t = chatState;
+    const snapshot = (id: string) => stateKey(this.organizationId, 'snapshot', id);
+    await this.db.execute(sql`insert into ${t} (key, value, expires_at)
+      select ${snapshot(write.key)}, ${JSON.stringify(write.value)}::jsonb, ${date(this.now() + write.ttlMs).toISOString()}::timestamptz
+      where ${sql.join(
+        write.drops.map(
+          drop =>
+            sql`coalesce((select ${t.value}->>'drop' from ${t} where ${t.key} = ${snapshot(drop.key)} and ${this.live(t.expiresAt)}), '') = ${drop.drop ?? ''}`,
+        ),
+        sql` and `,
+      )}
+      on conflict (key) do update set value = excluded.value, expires_at = excluded.expires_at`);
+  }
+
+  async saveTaskSecrets(
+    taskId: string,
+    rows: Array<{ id: string; value: string; expiresAt: number }>,
+  ): Promise<boolean> {
+    const [row] = await pipeline<{ active: boolean }>(
+      this.db,
+      [
+        sql`select pg_advisory_xact_lock(3, hashtext(${`app:${this.organizationId}:connections:${taskId}`}))`,
+      ],
+      sql`with active as (select 1 from ${task} where ${this.mine(task.organizationId)} and ${task.publicId} = ${taskId} and ${task.status} in ('queued', 'running', 'waiting')),
+        kept as (insert into ${chatState} (key, value, expires_at)
+          select key, value, expires_at from (values ${sql.join(
+            rows.map(
+              row =>
+                sql`(${stateKey(this.organizationId, 'snapshot', row.id)}, ${JSON.stringify({ secret: row.value, expiresAt: row.expiresAt })}::jsonb, ${date(row.expiresAt).toISOString()}::timestamptz)`,
+            ),
+            sql`, `,
+          )}) as row(key, value, expires_at) where exists (select 1 from active) on conflict (key) do nothing)
+        select exists (select 1 from active) as active`,
+    );
+
+    return Boolean(row?.active);
+  }
+
+  /** Claims the delivery and reads the dispatch's state in the same statement: the agent, the conversation, the workspace's records with the linked member's own, and the installation's held tokens. */
+  async dispatchState(input: DispatchInput): Promise<DispatchState> {
+    const t = chatState;
+    const key = (id: string) => stateKey(this.organizationId, 'delivery', id);
+    const conversation = input.conversation ?? '';
+    const live = (id: string) =>
+      sql`(select ${t.value} from ${t} where ${t.key} = ${key(id)} and ${this.live(t.expiresAt)})`;
+    const owned = (column: SQL) =>
+      sql`(${column} is null or ${column} = (select requester from member))`;
+    const mine = (column: SQL) => sql`${column} = ${this.organizationId}`;
+    const sealedRows = (query: SQL) =>
+      sql`(select coalesce(jsonb_agg(${sealedRow(sql`r`, sql`s`)}), '[]'::jsonb) from ${query})`;
+    const links = Object.values(input.installation.connections ?? {}).flatMap(link =>
+      link.kind === 'installation' ? [link.id] : [],
+    );
+    const snapshots = statePrefix(this.organizationId, 'snapshot');
+    const files = input.files.map(prefix => `${escapeLike(snapshots + prefix)}%`);
+    const [row] = await queryRows<{
+      claimed: boolean;
+      record: Record<string, unknown> | null;
+      version: Record<string, unknown> | null;
+      conversation: Conversation | null;
+      unseen: Unseen | null;
+      batch: Batch | null;
+      task: Record<string, unknown> | null;
+      requester: string | null;
+      credentials: Sealed[];
+      runners: Sealed[];
+      connections: Connection[];
+      workspace: { slug: string; name: string } | null;
+      linked: Array<Parameters<typeof sealedInstallation>[0]>;
+      files: Record<string, RepoFile>;
+      tokens: Record<string, unknown>;
+    }>(
+      this.db,
+      sql`
+      with claim as (
+        insert into ${t} (key, value, expires_at)
+        values (${key(input.delivery.key)}, ${JSON.stringify({ at: input.delivery.at, owner: input.delivery.owner, pending: true })}::jsonb, ${date(input.delivery.at + input.delivery.ttlMs).toISOString()}::timestamptz)
+        on conflict (key) do update set value = excluded.value, expires_at = excluded.expires_at
+          where ${t.expiresAt} <= ${this.at().toISOString()}::timestamptz
+        returning key
+      ), conversation as (select ${live(conversation)} as value),
+      member as (select ${platformLink.userId} as requester from ${platformLink}
+        where ${platformLink.platform} = ${input.actor?.platform ?? null}::text and ${platformLink.platformUserId} = ${input.actor?.id ?? null}::text
+          and ${platformLink.organizations} ? ${this.organizationId} limit 1),
+      linked as (select i.*, a.key as app_key, ${sealedRow(sql`i`, sql`s`)} || jsonb_build_object('app', to_jsonb(a), 'credentials', to_jsonb(c)) as row
+        from ${install} i join ${app} a on a.id = i.app_id and a.organization_id in (${this.organizationId}, ${UNSCOPED_ORGANIZATION})
+        join ${secret} c on c.id = a.credentials_secret_id left join ${secret} s on s.id = i.token_secret_id
+        where ${mine(sql`i.organization_id`)} and i.deleted_at is null and i.key = any(${sql.param(links)}::text[]))
+      select exists (select 1 from claim) as claimed,
+        (select to_jsonb(a) from ${agent} a where ${mine(sql`a.organization_id`)} and a.slug = ${input.agent}) as record,
+        (select to_jsonb(v) from ${agentVersion} v join ${agent} a on a.id = v.agent_id and v.version = a.current_version
+          where ${mine(sql`a.organization_id`)} and a.slug = ${input.agent}) as version,
+        (select value from conversation) as conversation,
+        ${live(`since:${conversation}`)} as unseen,
+        ${live(`batch:${conversation}`)} as batch,
+        (select to_jsonb(t) from ${task} t, conversation c where ${mine(sql`t.organization_id`)} and t.public_id = c.value->>'taskId' and t.flow = 'default') as task,
+        (select requester from member) as requester,
+        ${sealedRows(sql`${engineCredential} r join ${secret} s on s.id = r.secret_id where ${mine(sql`r.organization_id`)} and ${owned(sql`r.owner`)}`)} as credentials,
+        ${sealedRows(sql`${runner} r join ${secret} s on s.id = r.secret_id where ${mine(sql`r.organization_id`)} and r.is_default and ${owned(sql`r.owner`)}`)} as runners,
+        (select coalesce(jsonb_agg(${t.value}), '[]'::jsonb) from ${t}
+          where ${t.key} like ${`${escapeLike(statePrefix(this.organizationId, 'connection'))}%`} and ${this.live(t.expiresAt)} and ${owned(sql`${t.value}->>'owner'`)}) as connections,
+        ${live('workspace')} as workspace,
+        (select coalesce(jsonb_agg(row), '[]'::jsonb) from linked) as linked,
+        (select coalesce(jsonb_object_agg(${t.key}, ${t.value}), '{}'::jsonb) from ${t}
+          where ${this.live(t.expiresAt)} and ${t.key} like any(${sql.param(files)}::text[])) as files,
+        ${heldTokensQuery(this.organizationId, [input.installation.id, ...links], [input.installation.app], sql`select ${snapshots}::text || 'token-drop:' || app_key from linked`)} as tokens`,
+    );
+    if (!row?.claimed) return { claimed: false };
+    const record = row.record ? agentValue(fromJson(agent, row.record)) : undefined;
+    const version =
+      row.version && record
+        ? versionValue(fromJson(agentVersion, row.version), record.id)
+        : undefined;
+
+    return {
+      claimed: true,
+      loaded: {
+        ...(record ? { record } : {}),
+        ...(version ? { version } : {}),
+        conversation: {
+          ...(row.conversation ? { record: row.conversation } : {}),
+          ...(row.unseen ? { unseen: row.unseen } : {}),
+          ...(row.batch ? { batch: row.batch } : {}),
+          ...(row.task ? { status: taskRecord(fromJson(task, row.task)) } : {}),
+        },
+        ...(row.requester ? { requester: row.requester } : {}),
+        credentials: row.credentials.map(sealedCredential),
+        runners: row.runners.map(sealedRunner),
+        connections: row.connections,
+        ...(row.workspace ? { workspace: row.workspace } : {}),
+        linked: row.linked.map(sealedInstallation),
+        files: Object.fromEntries(
+          Object.entries(row.files).map(([key, value]) => [key.slice(snapshots.length), value]),
+        ),
+        tokens: tokenState(this.organizationId, row.tokens),
+      },
+    };
+  }
+
   async markConversation(
     key: string,
     taskId: string,
@@ -1044,16 +1268,9 @@ export class DrizzleStore implements Store {
   }
 
   async acknowledgeUnseen(key: string, through: number, epoch?: string): Promise<void> {
-    const version = sql`coalesce((${chatState.value}->>'version')::bigint, jsonb_array_length(${chatState.value}->'messages') + (${chatState.value}->>'more')::bigint)`;
-    const acknowledged = sql`greatest(coalesce((${chatState.value}->>'acknowledged')::bigint, 0), least(${through}, ${version}))`;
     await this.db
       .update(chatState)
-      .set({
-        value: sql`(select ${chatState.value} || jsonb_build_object('version', ${version}, 'acknowledged', ${acknowledged},
-        'messages', remaining, 'more', ${version} - ${acknowledged} - jsonb_array_length(remaining))
-        from (select coalesce(jsonb_agg(item order by n) filter (where coalesce((item->>'sequence')::bigint, n) > ${acknowledged}), '[]'::jsonb) as remaining
-          from jsonb_array_elements(${chatState.value}->'messages') with ordinality e(item,n)) as pending)`,
-      })
+      .set({ value: unseenAcknowledged(through) })
       .where(
         and(
           eq(chatState.key, stateKey(this.organizationId, 'delivery', `since:${key}`)),
@@ -1097,7 +1314,7 @@ export class DrizzleStore implements Store {
 
   async claimBatch(id: string, owner: string): Promise<Batch | null | undefined> {
     const key = stateKey(this.organizationId, 'delivery', id);
-    const result = await rows<{ value: Batch; claimed: boolean }>(
+    const result = await queryRows<{ value: Batch; claimed: boolean }>(
       this.db,
       sql`
       with held as materialized (
@@ -1169,34 +1386,46 @@ export class DrizzleStore implements Store {
         ),
       )
       .returning({ key: chatState.key });
-
     return result.length > 0;
   }
 
-  async take(kind: StoreKind, id: string): Promise<boolean> {
-    if (kind === 'delivery') {
-      const rows = await this.db
+  async take<K extends StoreKind>(
+    kind: K,
+    id: string,
+    expected?: Partial<StoreRecords[K]>,
+  ): Promise<StoreRecords[K] | undefined> {
+    if (kind === 'delivery' || kind === 'snapshot') {
+      const [row] = await this.db
         .delete(chatState)
         .where(
           and(
             eq(chatState.key, stateKey(this.organizationId, kind, id)),
             this.live(chatState.expiresAt),
+            expected ? sql`${chatState.value} @> ${JSON.stringify(expected)}::jsonb` : undefined,
           ),
         )
-        .returning({ key: chatState.key });
-      return rows.length > 0;
+        .returning({ value: chatState.value });
+      return row?.value as StoreRecords[K] | undefined;
     }
     const found = await this.get(kind, id);
-    if (found === undefined) return false;
+    if (
+      found === undefined ||
+      Object.entries(expected ?? {}).some(
+        ([key, value]) => (found as Record<string, unknown>)[key] !== value,
+      )
+    )
+      return;
     await this.delete(kind, id);
-    return true;
+    return found;
   }
 
   async usageSummary(since: number, by?: UsageGroup): Promise<UsageTotals['totals']> {
     const group = sql`case groups.kind when 'agent' then ${usage.agent} when 'engine' then coalesce(${usage.engine}, 'unknown') else coalesce(${install.key}, 'none') end`;
     const key = by ? group : sql`groups.kind || ':' || (${group})`;
     const result = await readQuery(this.db, () =>
-      this.db.execute(sql`
+      queryRows<Row>(
+        this.db,
+        sql`
       with recursive records as (
         select ${key} as key, ${usage.runnerMs} as runner_ms, ${usage.tokens} as tokens,
           row_number() over (partition by ${key} order by ${task.publicId}) as n
@@ -1240,7 +1469,8 @@ export class DrizzleStore implements Store {
       ) select key, count(*)::int as tasks, sum(runner_ms)::float8 as runner_ms,
         (select jsonb_agg(jsonb_build_object('path', path, 'value', value) order by path) from sums where sums.key = records.key) as tokens
         from records group by key order by key
-    `),
+    `,
+      ),
     );
     type Row = {
       key: string;
@@ -1248,10 +1478,7 @@ export class DrizzleStore implements Store {
       runner_ms: number;
       tokens: Array<{ path: string[]; value: number | Record<string, never> }> | null;
     };
-    const rows = (
-      Array.isArray(result) ? result : (result as unknown as { rows: Row[] }).rows
-    ) as Row[];
-    const totals = rows.map(row => {
+    const totals = result.map(row => {
       let tokens: unknown;
       for (const entry of row.tokens ?? []) {
         if (!entry.path.length) {
@@ -1341,20 +1568,21 @@ export class DrizzleStore implements Store {
       runner_ms: number;
       token_count: number;
     };
-    const result = (await readQuery(this.db, () =>
-      this.db.execute(sql`
+    const result = await readQuery(this.db, () =>
+      queryRows<Row>(
+        this.db,
+        sql`
       select ${key} as key, ${part} as part, ${measure.tasks}::int as tasks,
         ${measure.runnerMs}::float8 as runner_ms,
         ${measure.tokenCount}::float8 as token_count
       from ${u} ${joined}
       where ${range}
       group by 1, 2
-    `),
-    )) as unknown as Row[] | { rows: Row[] };
-    // postgres.js answers with the rows, PGlite with `{ rows }`.
-    const rows = Array.isArray(result) ? result : result.rows;
+    `,
+      ),
+    );
     const totals = new Map<string, UsageTotalRow>();
-    for (const row of rows) {
+    for (const row of result) {
       const amount: UsageAmount = {
         tasks: Number(row.tasks),
         runnerMs: Number(row.runner_ms),
@@ -1378,7 +1606,13 @@ export class DrizzleStore implements Store {
     if (!Number.isInteger(batch) || batch < 1) throw new Error('Sweep batch must be positive');
     const now = this.at().toISOString();
     await this.db.execute(sql`
-      with expired_state as (
+      with tombstones as (
+        delete from ${taskTombstone} where (organization_id, public_id) in (
+          select organization_id, public_id from ${taskTombstone}
+          where deleted_at < ${new Date(this.now() - 10 * 60_000).toISOString()}::timestamptz
+          order by deleted_at limit ${batch}
+        )
+      ), expired_state as (
         delete from ${chatState} where expires_at <= clock_timestamp() and key in (
           select key from ${chatState} where expires_at <= clock_timestamp() order by expires_at limit ${batch}
         )

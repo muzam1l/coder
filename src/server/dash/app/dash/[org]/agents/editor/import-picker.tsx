@@ -9,7 +9,6 @@ import { toastFailure, useAction } from '@/utils/action';
 import { iGit } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
-import { held } from '@/utils/paged';
 import { Button } from '@/comps/ui/button';
 import { Loading } from '@/comps/ui/card';
 import { Icon } from '@/comps/ui/icon';
@@ -39,7 +38,7 @@ function Agents({ preview, onDone }: { preview: Preview; onDone: (ids: string[])
   const [off, setOff] = useState<Set<string>>(new Set());
   const action = useAction({ leaves: true });
   if (preview.failed) return null;
-  if (!preview.agents) return <Loading label={`Reading ${preview.repo}`} h={180} />;
+  if (!preview.agents) return <Loading label={`Reading ${preview.repo}`} h={180} late />;
   if (!preview.agents.length)
     return (
       <p class="muted">
@@ -134,7 +133,6 @@ export function ImportPicker({
     if (!connected) return;
     void client.repositories
       .list()
-      .then(held(performance.now()))
       .then(rows => setRepos(rows.map(row => row.repo)))
       .catch(reason => {
         setRepos([]);
@@ -147,7 +145,6 @@ export function ImportPicker({
     setPreview({ repo });
     void client.agents
       .preview(repo)
-      .then(held(performance.now()))
       .then(({ agents }) => opened.current === repo && setPreview({ repo, agents }))
       .catch(reason => {
         if (opened.current !== repo) return;
@@ -209,7 +206,7 @@ export function ImportPicker({
         {connected ? (
           <div class="repo-list scroll-box" role="list">
             {!repos ? (
-              <Loading label="Loading repositories" h={240} />
+              <Loading label="Loading repositories" h={240} late />
             ) : (
               <>
                 {typed ? (

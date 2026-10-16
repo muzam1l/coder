@@ -23,6 +23,8 @@ import { Select } from '@/comps/ui/select';
 import { Combo } from '@/comps/ui/combo';
 import { useRemove } from './list';
 import { useOrg } from '@/comps/nav/org';
+import { isAdmin } from '@/api/types';
+import { CUSTOM_PROVIDERS, SCOPES } from '@/app/dash/[org]/settings/model-options';
 
 type Engine = CredentialRow['engine'];
 type Login = {
@@ -47,19 +49,10 @@ const ENGINES: Array<{ id: Engine; name: string; key: string; hint: string; sign
 ];
 const CUSTOM_KEYS = [
   'OPENAI_API_KEY',
-  'OPENROUTER_API_KEY',
-  'AI_GATEWAY_API_KEY',
-  'GROQ_API_KEY',
-  'TOGETHER_API_KEY',
+  ...CUSTOM_PROVIDERS.flatMap(provider => provider.envKey || []),
   'ANTHROPIC_API_KEY',
 ];
-const SCOPES: Array<[string, string]> = [
-  ['personal', 'Just me'],
-  ['workspace', 'Workspace'],
-];
 const METHODS: Record<string, string> = { signin: 'Sign in', key: 'API key', token: 'Setup token' };
-
-const ADMIN_ROLES = new Set(['owner', 'admin']);
 function Row({
   row,
   busy,
@@ -459,7 +452,7 @@ export function CredentialsList({
   const [logins, setLogins] = useState<Partial<Record<Login['engine'], Login>>>({});
   const [chosen, setChosen] = useState<Record<string, string>>({});
   const token = !me.user;
-  const admin = token || ADMIN_ROLES.has(me.organization?.role ?? '');
+  const admin = isAdmin(me);
   const subscriptions = me.server?.subscriptions;
   const action = useAction({ refresh: true, leaves: true });
   // A row's action stays busy until the refreshed rows arrive.

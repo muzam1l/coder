@@ -5,7 +5,7 @@ import * as z from 'zod/mini';
 
 import type { RunnerKind } from '../../agent/types';
 import { CoderError } from '../../core/dispatch';
-import { resolveCoderHome } from '../../core/state';
+import { coderHome } from '../../core/state';
 import type { ServeDetails } from '../../server/serve';
 import { formatHints, outStyle } from '../../tui/output';
 import { openUrl } from '../../tui/prompt';
@@ -18,7 +18,7 @@ function printServe(result: ServeDetails): void {
     ...(result.publicUrl !== result.address
       ? [['public', result.publicUrl] as [string, string]]
       : []),
-    ['store', result.database ?? (result.mode === 'local' ? resolveCoderHome() : result.store)],
+    ['store', result.database ?? (result.mode === 'local' ? coderHome() : result.store)],
     ['runner', result.runner],
     ...(result.signIn ? [['sign-in', result.signIn] as [string, string]] : []),
     ...(result.mintedToken ? [['token', result.mintedToken] as [string, string]] : []),

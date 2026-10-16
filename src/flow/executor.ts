@@ -5,13 +5,14 @@ import path from 'node:path';
 import process from 'node:process';
 
 import { CoderError } from '../core/dispatch';
-import { listTasks, processStartMs, loadTask } from '../core/state';
-import { createJsonlTail } from '../utils/fsx';
+import { processStartMs, processStarts, loadTask } from '../core/state';
+import { createJsonlTail, watchChanges } from '../utils/fsx';
 import { stopTask } from '../core/task/actions';
 import { TERMINAL_STATUSES, type TokenUsage } from '../core/types';
 import { Journal, readJournal } from './journal';
 import { resolveFlow } from './discover';
 import type { FlowEvent, FlowRecord } from './types';
+import type { ReviewArgs, ReviewResult } from './builtin/review';
 import {
   generateRunId,
   latestRun,
@@ -20,6 +21,7 @@ import {
   runDirFor,
   unarchiveRun,
   writeFlowRecord,
+  flowTaskIds,
 } from './runs';
 import {
   type FlowHooks,
@@ -28,6 +30,7 @@ import {
   scopeALS,
   Semaphore,
   loadAndRun,
+  emitFlowEvent,
 } from './runtime';
 
 // ---------------------------------------------------------------------------
@@ -58,17 +61,19 @@ export interface RunSummary {
 }
 
 interface StartedRun {
-  runId: string;
-  runDir: string;
+  record: FlowRecord;
   ctx: RunContext;
+  replayable: number;
   markStopped: () => void;
 }
 
-/**
- * Resolve the flow and write flow.json with running status. The run record is a
- * detached orchestrator (or beginRun below) attaches to.
- */
-export function prepareRun(ref: string, opts: RunOptions = {}, resumeRunId?: string): FlowRecord {
+/** Prepare a live run for this process or its detached orchestrator. */
+export function prepareRun(
+  ref: string,
+  opts: RunOptions = {},
+  resumeRunId?: string,
+  pid?: number,
+): FlowRecord {
   let name: string;
   let script: string;
   let args: unknown;
@@ -103,6 +108,8 @@ export function prepareRun(ref: string, opts: RunOptions = {}, resumeRunId?: str
     maxTasks: Math.max(1, opts.maxTasks ?? os.cpus().length * 10),
     taskCount: 0,
     ledger: {},
+    ...(pid ? { pid, pidStartedAt: new Date().toISOString() } : {}),
+    ...(opts.concurrency !== undefined ? { concurrencySet: true } : {}),
   };
   writeFlowRecord(runDir, record);
   return record;
@@ -130,24 +137,21 @@ export function markRunFailed(runId: string, error: string): void {
 // stopRun signals a running orchestrator and reconciles the CLI and SDK.
 // ---------------------------------------------------------------------------
 
-/** Written by `flow stop --keep-tasks` before signalling; the SIGINT handler skips task stops when present. */
-export const STOP_KEEP_TASKS_MARKER = 'stop-keep-tasks';
-
 export function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
   }
 }
 
 // Liveness with a recycled-pid guard: a live pid whose process started well
 // after the record stamped it is NOT our orchestrator (the real one died and
 // the OS reused the number). This mirrors pidIsOurWorker for task workers.
-export function orchestratorAlive(record: FlowRecord): boolean {
+export function orchestratorAlive(record: FlowRecord, startMs = processStartMs): boolean {
   if (!record.pid || !pidAlive(record.pid)) return false;
-  const started = processStartMs(record.pid);
+  const started = startMs(record.pid);
   const recorded = Date.parse(record.pidStartedAt ?? '');
   if (started === null || !Number.isFinite(recorded)) {
     return true; // Cannot verify the start time, so trust liveness.
@@ -155,17 +159,11 @@ export function orchestratorAlive(record: FlowRecord): boolean {
   return started <= recorded + 60_000;
 }
 
-// A run's non-terminal task ids: journal entries plus tasks tagged with the run id.
 function runningTaskIdsFor(runId: string): string[] {
-  const tasks = listTasks(process.cwd());
-  const byId = new Map(tasks.map(j => [j.id, j]));
-  const ids = new Set<string>(tasks.filter(j => j.flowRunId === runId).map(j => j.id));
-  for (const e of readJournal(path.join(runDirFor(runId), 'journal.jsonl'))) {
-    if (e.kind === 'task' && e.taskId) ids.add(e.taskId);
-  }
-  return [...ids].filter(id => {
-    const task = byId.get(id);
-    return !!task && !TERMINAL_STATUSES.includes(task.status);
+  return flowTaskIds(runId).filter(id => {
+    const task = loadTask(process.cwd(), id);
+
+    return task && !TERMINAL_STATUSES.includes(task.status);
   });
 }
 
@@ -193,11 +191,7 @@ export interface StopSummary {
   keptTasks: string[];
 }
 
-/**
- * Stop a running flow: verify the orchestrator pid is alive, SIGINT it, and
- * wait for the record to leave 'running'. A dead pid on a running record is
- * reconciled to failed (nothing chose to stop it) without signalling anything.
- */
+/** Stop the orchestrator, optionally leaving its tasks running. */
 export async function stopRun(
   runId?: string,
   opts: { keepTasks?: boolean } = {},
@@ -226,111 +220,103 @@ export async function stopRun(
   }
 
   const candidates = runningTaskIdsFor(record.runId);
-  const marker = path.join(runDir, STOP_KEEP_TASKS_MARKER);
-  if (opts.keepTasks) fs.writeFileSync(marker, '', 'utf8');
+  const changes = watchChanges(runDir);
   try {
-    process.kill(record.pid!, 'SIGINT');
-    // The handler stops tasks first, then stamps a terminal status; poll for it.
-    let current = readFlowRecord(record.runId);
-    for (let i = 0; i < 25 && current?.status === 'running'; i += 1) {
-      await new Promise(resolve => setTimeout(resolve, 200));
-      current = readFlowRecord(record.runId);
-    }
-    if (!current || current.status === 'running') {
-      throw new CoderError('flow-failed', `Run ${record.runId} did not stop within 5s.`, {
-        runId: record.runId,
-        hint: `Check it: coder flow result ${record.runId}`,
-      });
-    }
-    // Classify by what actually happened: cancelled means the handler stopped
-    // it; still-running means kept; finished on its own is neither.
-    const cwd = process.cwd();
-    const stoppedTasks: string[] = [];
-    const keptTasks: string[] = [];
-    for (const id of candidates) {
-      const task = loadTask(cwd, id);
-      if (!task) continue;
-      if (task.status === 'cancelled') stoppedTasks.push(id);
-      else if (!TERMINAL_STATUSES.includes(task.status)) keptTasks.push(id);
-    }
-    return { runId: record.runId, status: current.status, stoppedTasks, keptTasks };
-  } finally {
-    if (opts.keepTasks) {
-      try {
-        fs.unlinkSync(marker);
-      } catch {
-        // Already consumed.
-      }
-    }
+    process.kill(record.pid!, opts.keepTasks ? 'SIGTERM' : 'SIGINT');
+  } catch (error) {
+    changes.close();
+    throw error;
   }
+  const current = await changes.until(() => {
+    const value = readRawRecord(record.runId);
+    return value?.status === 'running' ? undefined : value;
+  }, 5000);
+  if (!current || current.status === 'running') {
+    throw new CoderError('flow-failed', `Run ${record.runId} did not stop within 5s.`, {
+      runId: record.runId,
+      hint: `Check it: coder flow result ${record.runId}`,
+    });
+  }
+  // Classify by what actually happened: cancelled means the handler stopped
+  // it; still-running means kept; finished on its own is neither.
+  const cwd = process.cwd();
+  const stoppedTasks: string[] = [];
+  const keptTasks: string[] = [];
+  for (const id of candidates) {
+    const task = loadTask(cwd, id);
+    if (!task) continue;
+    if (task.status === 'cancelled') stoppedTasks.push(id);
+    else if (!TERMINAL_STATUSES.includes(task.status)) keptTasks.push(id);
+  }
+  return { runId: record.runId, status: current.status, stoppedTasks, keptTasks };
 }
 
 // ---------------------------------------------------------------------------
 // streamFlowCore follows a run's event stream for the CLI and SDK.
 // ---------------------------------------------------------------------------
 
-/**
- * Print-free follower (SDK `flow.stream`): replay the run's events.jsonl from
- * the start, tail it at 400ms, and end once the run leaves 'running'. A dead
- * orchestrator pid on a still-running record is reconciled to failed; the
- * caller reads the record afterwards for the summary. `bootPid` is the spawned
- * child's pid, checked until the orchestrator records its own. `tail` replays
- * only the last n events already logged (default 'all').
- */
+/** Replay and follow events, using bootPid until the orchestrator records its own pid. */
 export async function* streamFlowCore(
   runId: string,
   bootPid?: number,
   opts: { tail?: number | 'all' } = {},
 ): AsyncGenerator<FlowEvent> {
-  const eventsFile = path.join(runDirFor(runId), 'events.jsonl');
-  // Skip everything older than the last `tail` events.
-  const tail = opts.tail ?? 'all';
-  let emitted = 0;
-  if (tail !== 'all') {
-    try {
-      emitted = Math.max(0, fs.readFileSync(eventsFile, 'utf8').split('\n').length - 1 - tail);
-    } catch {
-      // No stream yet.
-    }
-  }
-  // Incremental tail: each tick reads only the appended bytes (a follower on
-  // a chatty run would otherwise re-parse the whole stream every 400ms).
-  const tailLines = createJsonlTail(eventsFile);
-  const drain = (): FlowEvent[] => {
-    const fresh: FlowEvent[] = [];
-    for (const line of tailLines()) {
-      // `emitted` skips the pre-counted head when a numeric tail was asked for.
-      if (emitted > 0) {
-        emitted -= 1;
-        continue;
-      }
+  const changes = watchChanges(runDirFor(runId));
+  try {
+    const eventsFile = path.join(runDirFor(runId), 'events.jsonl');
+    // Skip everything older than the last `tail` events.
+    const tail = opts.tail ?? 'all';
+    let emitted = 0;
+    if (tail !== 'all') {
       try {
-        fresh.push(JSON.parse(line) as FlowEvent);
+        emitted = Math.max(0, fs.readFileSync(eventsFile, 'utf8').split('\n').length - 1 - tail);
       } catch {
-        // Skip a malformed line.
+        // No stream yet.
       }
     }
-    return fresh;
-  };
+    // Incremental tail: each tick reads only the appended bytes (a follower on
+    // a chatty run would otherwise re-parse the whole stream every 400ms).
+    const tailLines = createJsonlTail(eventsFile);
+    const drain = (): FlowEvent[] => {
+      const fresh: FlowEvent[] = [];
+      for (const line of tailLines()) {
+        // `emitted` skips the pre-counted head when a numeric tail was asked for.
+        if (emitted > 0) {
+          emitted -= 1;
+          continue;
+        }
+        try {
+          fresh.push(JSON.parse(line) as FlowEvent);
+        } catch {
+          // Skip a malformed line.
+        }
+      }
+      return fresh;
+    };
 
-  let record = readFlowRecord(runId);
-  while (!record || record.status === 'running') {
-    yield* drain();
-    // The run dying without a terminal write: pid dead (boot pid until the
-    // orchestrator records its own) on a still-running record.
-    // Prefer the record's own pid (with the recycled-pid guard); the boot pid
-    // only bridges the gap before the orchestrator records itself.
-    const dead = record?.pid
-      ? !orchestratorAlive(record)
-      : bootPid !== undefined && !pidAlive(bootPid);
-    if (record && (record.pid || bootPid !== undefined) && dead) {
-      markRunFailed(runId, 'orchestrator died');
-      break;
+    const startMs = processStarts();
+    let record = readRawRecord(runId);
+    while (!record || record.status === 'running') {
+      yield* drain();
+      record = readRawRecord(runId) ?? record;
+      if (record && record.status !== 'running') break;
+      // The run dying without a terminal write: pid dead (boot pid until the
+      // orchestrator records its own) on a still-running record.
+      // Prefer the record's own pid (with the recycled-pid guard); the boot pid
+      // only bridges the gap before the orchestrator records itself.
+      const dead = record?.pid
+        ? !orchestratorAlive(record, startMs)
+        : bootPid !== undefined && !pidAlive(bootPid);
+      if (record && (record.pid || bootPid !== undefined) && dead) {
+        markRunFailed(runId, 'orchestrator died');
+        break;
+      }
+      await changes.wait(1000);
     }
-    await new Promise(resolve => setTimeout(resolve, 400));
-    record = readFlowRecord(runId) ?? record;
+    yield* drain();
+  } finally {
+    changes.close();
   }
-  yield* drain();
 }
 
 // Build the context and flow.json for a fresh or resumed run.
@@ -339,21 +325,15 @@ function beginRun(
   opts: RunOptions,
   hooks: FlowHooks,
   resumeRunId?: string,
-): {
-  started: StartedRun;
-  args: unknown;
-  name: string;
-  replayable: number;
-} {
-  // This process is the one driving the run: record its pid for `flow stop`.
-  const record: FlowRecord = {
-    ...prepareRun(ref, opts, resumeRunId),
-    pid: process.pid,
-    pidStartedAt: new Date().toISOString(),
-  };
+  prepared?: FlowRecord,
+): StartedRun {
+  const record = prepared
+    ? { ...prepared, pid: process.pid, pidStartedAt: new Date().toISOString() }
+    : prepareRun(ref, opts, resumeRunId, process.pid);
   const { runId } = record;
   const runDir = runDirFor(runId);
-  writeFlowRecord(runDir, record);
+  if (prepared) writeFlowRecord(runDir, record);
+  fs.writeFileSync(path.join(runDir, 'events.jsonl'), '', 'utf8');
 
   const journalFile = path.join(runDir, 'journal.jsonl');
   const recorded = resumeRunId ? readJournal(journalFile) : [];
@@ -388,25 +368,16 @@ function beginRun(
     });
   };
 
-  return {
-    started: { runId, runDir, ctx, markStopped },
-    args: record.args,
-    name: record.name,
-    replayable: recorded.length,
-  };
+  return { record, ctx, markStopped, replayable: recorded.length };
 }
 
-async function drive(
-  started: StartedRun,
-  script: string,
-  name: string,
-  args: unknown,
-): Promise<RunSummary> {
-  const { ctx, runDir, runId } = started;
-  const base = readFlowRecord(runId)!;
+async function drive(started: StartedRun): Promise<RunSummary> {
+  const { ctx, record: base } = started;
+  const { runDir, runId } = ctx;
+  const { script, name, args } = base;
   try {
     const result = await ctxALS.run(ctx, () =>
-      scopeALS.run({ args: args ?? {}, depth: 0 }, () => loadAndRun(script, args)),
+      scopeALS.run({ args: args ?? {}, depth: 0 }, () => loadAndRun(script, args, base)),
     );
     endRecord(runDir, base, {
       status: 'completed',
@@ -444,38 +415,61 @@ async function drive(
   }
 }
 
-/**
- * The one run path every flow takes: resolve it by name (built-ins included) or
- * path, then run it in this process. `hooks.onStart` receives a stop handle so a
- * CLI can install a SIGINT handler; the event hooks feed live progress rendering.
- */
-export async function runFlowByName(
+async function execute(
+  ref: string,
+  opts: RunOptions,
+  hooks: FlowHooks,
+  resumeRunId?: string,
+  prepared?: FlowRecord,
+): Promise<RunSummary> {
+  const started = beginRun(ref, opts, hooks, resumeRunId, prepared);
+  hooks.onStart?.({
+    runId: started.ctx.runId,
+    requestStop: started.markStopped,
+    runningIds: () => [...started.ctx.running],
+  });
+  if (started.replayable) emitFlowEvent(started.ctx, { kind: 'replay', count: started.replayable });
+
+  return drive(started);
+}
+
+export function runFlowByName(
   ref: string,
   opts: RunOptions = {},
   hooks: FlowHooks = {},
 ): Promise<RunSummary> {
-  const { started } = beginRun(ref, opts, hooks);
-  const script = readFlowRecord(started.runId)!.script;
-  hooks.onStart?.({
-    runId: started.runId,
-    requestStop: started.markStopped,
-    runningIds: () => [...started.ctx.running],
-  });
-  return drive(started, script, readFlowRecord(started.runId)!.name, opts.args ?? {});
+  return execute(ref, opts, hooks);
 }
 
-export async function resumeFlow(
+export function resumeFlow(
   runId: string,
   opts: RunOptions = {},
   hooks: FlowHooks = {},
 ): Promise<RunSummary> {
-  const { started, args, name, replayable } = beginRun('', opts, hooks, runId);
-  const script = readFlowRecord(runId)!.script;
-  hooks.onStart?.({
-    runId,
-    requestStop: started.markStopped,
-    runningIds: () => [...started.ctx.running],
-  });
-  if (replayable) hooks.onReplay?.(replayable);
-  return drive(started, script, name, args);
+  return execute('', opts, hooks, runId);
 }
+
+export function drivePreparedRun(
+  record: FlowRecord,
+  cwd: string,
+  hooks: FlowHooks,
+): Promise<RunSummary> {
+  return execute(
+    '',
+    {
+      cwd,
+      concurrency: record.concurrencySet ? record.concurrency : undefined,
+      maxTasks: record.maxTasks,
+    },
+    hooks,
+    record.runId,
+    record,
+  );
+}
+
+export const review = {
+  async run(options: ReviewArgs = {}): Promise<ReviewResult & { runId: string }> {
+    const run = await runFlowByName('review', { cwd: options.cwd, args: options });
+    return { ...(run.result as ReviewResult), runId: run.runId };
+  },
+};

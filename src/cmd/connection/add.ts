@@ -3,10 +3,8 @@ import process from 'node:process';
 
 import type { ConnectionRow } from '../../client/types';
 import { errStyle, outStyle } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
+import { baseOptions, flag, str, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-
-export const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 /** Shows an OAuth sign-in page and opens it in the browser. */
 export async function openSignIn(url: string): Promise<void> {

@@ -26,6 +26,26 @@ export async function serveTools<C>(
 ): Promise<void> {
   const send = (message: unknown) => io.write(JSON.stringify(message));
   const rl = readline.createInterface({ input: io.input, terminal: false });
+  const pending = new Set<Promise<void>>();
+  let failure: unknown;
+  const call = async (id: unknown, params: any) => {
+    const tool = tools[String(params?.name ?? '')];
+    let text: string;
+    let isError = false;
+    try {
+      if (!tool) throw new Error(`unknown tool: ${params?.name}`);
+      const result = await tool.handler(params?.arguments ?? {}, ctx);
+      text = typeof result === 'string' ? result : JSON.stringify(result);
+    } catch (error) {
+      isError = true;
+      text = error instanceof Error ? error.message : String(error);
+    }
+    send({
+      jsonrpc: '2.0',
+      id,
+      result: { content: [{ type: 'text', text }], isError },
+    });
+  };
   for await (const line of rl) {
     if (!line.trim()) continue;
     let request: { id?: unknown; method?: string; params?: any };
@@ -59,26 +79,22 @@ export async function serveTools<C>(
         },
       });
     } else if (method === 'tools/call') {
-      const tool = tools[String(params?.name ?? '')];
-      let text: string;
-      let isError = false;
-      try {
-        if (!tool) throw new Error(`unknown tool: ${params?.name}`);
-        const result = await tool.handler(params?.arguments ?? {}, ctx);
-        text = typeof result === 'string' ? result : JSON.stringify(result);
-      } catch (error) {
-        isError = true;
-        text = error instanceof Error ? error.message : String(error);
-      }
-      send({
-        jsonrpc: '2.0',
-        id,
-        result: { content: [{ type: 'text', text }], isError },
-      });
+      const running = call(id, params);
+      pending.add(running);
+      void running.then(
+        () => pending.delete(running),
+        error => {
+          pending.delete(running);
+          failure = error;
+          rl.close();
+        },
+      );
     } else if (id !== undefined) {
       send({ jsonrpc: '2.0', id, result: {} });
     }
   }
+  await Promise.all(pending);
+  if (failure) throw failure;
 }
 
 /** JSON schema helper: an object with the given string/number properties. */

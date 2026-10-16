@@ -1,7 +1,7 @@
 import { type Params } from '../routes/match';
 import { appOwner, forInstallation, scoped, type ServerContext } from '../context';
 import { builtinFlowsDir, flowsIn } from '../../flow/discover';
-import { ConfigError, body } from '../settings/config';
+import { body } from '../settings/config';
 import { TaskInputError, createTask, repoAccess, type NewTask } from './create';
 import { redactTask, taskError } from './admin';
 import { json } from '../routes/http';
@@ -71,15 +71,7 @@ export async function listFlows(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  try {
-    {
-      return flowList(ctx, url.searchParams.get('repo'));
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+  return flowList(ctx, url.searchParams.get('repo')).catch(taskError);
 }
 
 export async function listPulls(
@@ -88,15 +80,7 @@ export async function listPulls(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  try {
-    {
-      return await pullList(ctx, url.searchParams.get('repo'));
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+  return pullList(ctx, url.searchParams.get('repo')).catch(taskError);
 }
 
 export async function runFlow(
@@ -105,19 +89,9 @@ export async function runFlow(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const named = params.name;
-
-  try {
-    {
-      const input = await body<NewTask>(req);
-
-      return run(ctx, { ...input, flow: named });
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+  return body<NewTask>(req)
+    .then(input => run(ctx, { ...input, flow: params.name }))
+    .catch(taskError);
 }
 
 export async function review(
@@ -126,22 +100,13 @@ export async function review(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  try {
-    {
-      const { post, ...input } = await body<
-        NewTask & {
-          post?: boolean;
-        }
-      >(req);
+  return body<NewTask & { post?: boolean }>(req)
+    .then(({ post, ...input }) => {
       if (!input.repo || !input.pr) throw new TaskInputError('repo and pr are required');
 
       return run(ctx, { ...input, flow: 'review', args: { post: post === true } });
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+    })
+    .catch(taskError);
 }
 
 export function start(

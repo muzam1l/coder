@@ -15,7 +15,7 @@ const TasksList = dynamic(() => import('./tasks-list').then(m => m.TasksList), {
 });
 
 /** A task list before it arrives; an agent's own tab has no head and no agent filter. */
-export function TasksLoading({ head, agent }: { head?: { title: string }; agent?: boolean }) {
+export function TasksLoading({ head }: { head?: { title: string } }) {
   return (
     <>
       <LoadingToolbar head={head} search="Search tasks" more />

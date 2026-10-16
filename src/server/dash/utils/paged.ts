@@ -14,15 +14,6 @@ const saveRows = (name: string, rows: Kept) =>
   );
 const FRESH_MS = 60_000;
 
-/** Passes `value` on once a loader shown since `since` has stayed its 300 ms; one that never showed holds nothing. */
-export const held =
-  (since: number) =>
-  <T>(value: T) =>
-    new Promise<T>(done => {
-      const waited = performance.now() - since;
-      setTimeout(done, waited > 150 ? 450 - waited : 0, value);
-    });
-
 const fromPage = (query: string, page: Paged<unknown>): Kept => ({
   query,
   rows: page.items,
@@ -72,12 +63,10 @@ export function usePaged<T>({
     loading.current = request;
     setError('');
     setBusy(true);
-    const since = performance.now();
     const at = entry(name);
     const cached = append ? undefined : firstPages.current.get(forQuery);
     if (cached && Date.now() - cached.at < FRESH_MS) setState(fromPage(forQuery, cached.page));
     void fetchPage(cursor)
-      .then(held(since))
       .then(page => {
         if (loading.current !== request) return;
         if (!append) firstPages.current.set(forQuery, { page, at: Date.now() });

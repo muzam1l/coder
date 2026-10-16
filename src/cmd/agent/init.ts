@@ -68,7 +68,7 @@ async function askPicks(id: string): Promise<AgentPicks> {
       hint: `What wakes the agent on ${integrationId}; each event runs the agent with that event as its prompt.`,
       multi: true,
       required: true,
-      selected: [names.includes('mention') ? 'mention' : names[0]!],
+      selected: names.filter(name => !catalog.events[name]!.noisy),
       options: Object.entries(catalog.events).map(([value, spec]) => ({
         value,
         hint: spec.description,

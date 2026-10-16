@@ -3,8 +3,8 @@ import {
   adminGuard,
   adminOnly,
   apiAllowed,
-  completedTaskGuard,
   connectionOAuthAllowed,
+  contextGuard,
   createAllowed,
   credentialAllowed,
   dashboardAllowed,
@@ -14,6 +14,7 @@ import {
   installAllowed,
   localOnly,
   loginAllowed,
+  logsGuard,
   loginGuard,
   metadataAllowed,
   oauthAllowed,
@@ -21,6 +22,7 @@ import {
   operatorPageAllowed,
   pageSession,
   requireWorkspaceAdmin,
+  secretsGuard,
   signInAllowed,
   taskGuard,
   tokenLinkAllowed,
@@ -38,6 +40,8 @@ import {
   refreshCredential,
   reportResult,
   reportLogs,
+  sendReaction,
+  sendReply,
 } from '../tasks/callbacks';
 import { listHistory, readHistory, saveHistory } from '../tasks/history';
 import {
@@ -108,7 +112,7 @@ import {
   taskLogs,
 } from '../tasks/admin';
 import { taskEvents, taskStream } from '../tasks/stream';
-import { patchConfiguration, readConfig, saveConfiguration } from '../settings/config';
+import { patchConfiguration, readConfig } from '../settings/config';
 import {
   aliasModel,
   createModel,
@@ -137,7 +141,10 @@ import {
   webDocument,
 } from '../auth/metadata';
 
+import { runnerPackage } from '../runners';
+
 const pagesRoutes = [
+  route('GET', '/runner/:file', runnerPackage),
   route('GET', MCP_CLIENT_PATH, oauthClientDocument),
   route('GET', WEB_CLIENT_PATH, webDocument, metadataAllowed),
   route('GET', CLI_CLIENT_PATH, cliDocument, metadataAllowed),
@@ -162,13 +169,15 @@ const callbacksRoutes = [
     route('GET', '/:id/messages', readMessages, inboxGuard),
     route('POST', '/:id/ack', ackMessages, inboxGuard),
     route('POST', '/:id/heartbeat', heartbeat, inboxGuard),
-    route('POST', '/:id/logs', reportLogs, completedTaskGuard),
-    route('POST', '/:id/result', reportResult, completedTaskGuard),
-    route('POST', '/:id/credential', refreshCredential, completedTaskGuard),
+    route('POST', '/:id/logs', reportLogs, logsGuard),
+    route('POST', '/:id/result', reportResult, secretsGuard),
+    route('POST', '/:id/credential', refreshCredential, secretsGuard),
+    route('POST', '/:id/reply', sendReply, taskGuard),
+    route('POST', '/:id/react', sendReaction, taskGuard),
     route('GET', '/:id/history', listHistory, taskGuard),
     route('GET', '/:id/history/:conversation', readHistory, taskGuard),
-    route('POST', '/:id/history', saveHistory, completedTaskGuard),
-    route('GET', '/:id', readContext, taskGuard),
+    route('POST', '/:id/history', saveHistory, secretsGuard),
+    route('GET', '/:id', readContext, contextGuard),
   ]),
   ...group('/logins', [
     route('GET', '/:id/input', takeLoginInput, loginGuard),
@@ -240,7 +249,7 @@ const foldersRoutes = group(
 const enginesRoutes = group(
   '',
   [
-    route('GET', '/engines/status', async (req, ctx) => json(await engineStatus())),
+    route('GET', '/engines/status', async (req, ctx) => json(await engineStatus(ctx))),
     route('POST', '/engines/:engine/login', signInEngine),
     route('POST', '/engines/:engine/logout', signOutEngine),
   ],
@@ -326,7 +335,6 @@ const tasksRoutes = [
 const configRoutes = [
   route('GET', '/config', readConfig),
   route('PATCH', '/config', patchConfiguration),
-  route('PUT', '/config', saveConfiguration),
 ];
 
 const modelsRoutes = [

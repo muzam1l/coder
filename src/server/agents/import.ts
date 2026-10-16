@@ -12,6 +12,7 @@ import {
 import { json } from '../routes/http';
 import { decryptSecret } from '../store/secrets';
 import { mcpWarnings } from '../../core/mcp';
+import { installationToken, unsealed } from '../tasks/context';
 
 async function access(ctx: ServerContext, repo: string): Promise<RepositoryAccess | undefined> {
   const installations = (await ctx.store.list('installation')).filter(
@@ -32,13 +33,21 @@ async function access(ctx: ServerContext, repo: string): Promise<RepositoryAcces
     const app = apps.get(installation.app);
     if (!app || app.integration !== integration.id) continue;
     try {
-      const plain = installation.token
-        ? { ...installation, token: decryptSecret<string>(ctx.config, installation.token) }
-        : installation;
-      const token = await integration.auth.token(plain, decryptSecret(ctx.config, app.credentials));
-      if ((await integration.repos.list(plain, token)).includes(repo))
+      const token = await installationToken(
+        ctx,
+        integration,
+        installation,
+        decryptSecret(ctx.config, app.credentials),
+        { repo: { owner: repo.split('/')[0]!, name: repo.split('/')[1]! } },
+      );
+      if (
+        installation.repos?.includes(repo) ||
+        (await integration.repos.list(unsealed(ctx, installation), token)).includes(repo)
+      )
         return { contents: integration as Contents, token, app, installation };
-    } catch {}
+    } catch (error) {
+      console.error(`coder server: repository access for ${installation.id} failed`, error);
+    }
   }
 
   return undefined;

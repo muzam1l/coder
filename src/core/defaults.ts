@@ -48,3 +48,23 @@ export const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 /** The task list order: `listRank` groups, newest start first, ties broken by id. */
 export const byListKey = (a: ListKey, b: ListKey) =>
   a.rank - b.rank || b.createdAt - a.createdAt || byId(b.id, a.id);
+
+/** RFC 7396 merge patch: objects merge, null deletes, anything else replaces; `__proto__` stays a plain key. */
+export function mergePatch<T>(target: T, patch: unknown): T {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return patch as T;
+  const result: Record<string, unknown> =
+    target && typeof target === 'object' && !Array.isArray(target)
+      ? Object.fromEntries(Object.entries(target))
+      : {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete result[key];
+    else
+      Object.defineProperty(result, key, {
+        value: mergePatch(Object.hasOwn(result, key) ? result[key] : undefined, value),
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+  }
+  return result as T;
+}

@@ -1,7 +1,13 @@
 import { spawn, spawnSync } from 'node:child_process';
 import process from 'node:process';
+import { channel } from 'node:diagnostics_channel';
 
 import type { Availability } from '../core/types';
+
+export function processTiming(stage: string, data?: Record<string, unknown>): void {
+  const timing = channel('coder.timing');
+  if (timing.hasSubscribers) timing.publish({ at: Date.now(), pid: process.pid, stage, ...data });
+}
 
 /** Options accepted by runCommand and friends. */
 export interface RunCommandOptions {
@@ -67,109 +73,6 @@ export function binaryAvailable(
     return { available: false, detail };
   }
   return { available: true, detail: result.stdout.trim() || result.stderr.trim() || 'ok' };
-}
-
-function looksLikeMissingProcessMessage(text: string) {
-  return /not found|no running instance|cannot find|does not exist|no such process/i.test(text);
-}
-
-export interface TerminateProcessOptions {
-  platform?: NodeJS.Platform;
-  runCommandImpl?: typeof runCommand;
-  killImpl?: (pid: number, signal?: NodeJS.Signals | number) => void;
-  cwd?: string;
-  env?: NodeJS.ProcessEnv;
-}
-
-export interface TerminateProcessResult {
-  attempted: boolean;
-  delivered: boolean;
-  method: string | null;
-  result?: CommandResult;
-}
-
-export function terminateProcessTree(
-  pid: number | null | undefined,
-  options: TerminateProcessOptions = {},
-): TerminateProcessResult {
-  if (!Number.isFinite(pid)) {
-    return { attempted: false, delivered: false, method: null };
-  }
-  const targetPid = pid as number;
-
-  const platform = options.platform ?? process.platform;
-  const runCommandImpl = options.runCommandImpl ?? runCommand;
-  const killImpl = options.killImpl ?? process.kill.bind(process);
-
-  if (platform === 'win32') {
-    const result = runCommandImpl('taskkill', ['/PID', String(targetPid), '/T', '/F'], {
-      cwd: options.cwd,
-      env: options.env,
-    });
-
-    if (!result.error && result.status === 0) {
-      return { attempted: true, delivered: true, method: 'taskkill', result };
-    }
-
-    const combinedOutput = `${result.stderr}\n${result.stdout}`.trim();
-    if (!result.error && looksLikeMissingProcessMessage(combinedOutput)) {
-      return { attempted: true, delivered: false, method: 'taskkill', result };
-    }
-
-    if (result.error?.code === 'ENOENT') {
-      try {
-        killImpl(targetPid);
-        return { attempted: true, delivered: true, method: 'kill' };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') {
-          return { attempted: true, delivered: false, method: 'kill' };
-        }
-        throw error;
-      }
-    }
-
-    if (result.error) {
-      throw result.error;
-    }
-
-    throw new Error(formatCommandFailure(result));
-  }
-
-  try {
-    killImpl(-targetPid, 'SIGTERM');
-    return { attempted: true, delivered: true, method: 'process-group' };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException)?.code !== 'ESRCH') {
-      try {
-        killImpl(targetPid, 'SIGTERM');
-        return { attempted: true, delivered: true, method: 'process' };
-      } catch (innerError) {
-        if ((innerError as NodeJS.ErrnoException)?.code === 'ESRCH') {
-          return { attempted: true, delivered: false, method: 'process' };
-        }
-        throw innerError;
-      }
-    }
-
-    return { attempted: true, delivered: false, method: 'process-group' };
-  }
-}
-
-export function formatCommandFailure(result: CommandResult) {
-  const parts = [`${result.command} ${result.args.join(' ')}`.trim()];
-  if (result.signal) {
-    parts.push(`signal=${result.signal}`);
-  } else {
-    parts.push(`exit=${result.status}`);
-  }
-  const stderr = (result.stderr || '').trim();
-  const stdout = (result.stdout || '').trim();
-  if (stderr) {
-    parts.push(stderr);
-  } else if (stdout) {
-    parts.push(stdout);
-  }
-  return parts.join(': ');
 }
 
 export interface RerunResult {

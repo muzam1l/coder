@@ -7,20 +7,15 @@ import { LocalConnections } from '../../core/connections';
 import { coderHome, resolveStateDir, resolveRunnerUsageFile } from '../../core/state';
 import {
   checkBinding,
-  batchValue,
-  availableBatch,
-  finishedBatch,
-  unseenValue,
   credentialLock,
   matchesStoreRow,
   MemoryStore,
   writeCredentials,
+  type Entry,
 } from './memory';
-import { BATCH_LEASE_MS, type Batch, type Unseen } from '../tasks/conversation';
 import type {
   CredentialScope,
   CredentialWork,
-  DeliveryLease,
   Store,
   StoreKind,
   StoreRecords,
@@ -28,7 +23,7 @@ import type {
 } from './types';
 import { loadAgents } from '../../agent/load';
 import type { AgentApp, Installation } from '../../agent/types';
-import type { Integration, SinceMessage } from '../../integrations/types';
+import type { Integration } from '../../integrations/types';
 import type { AgentRecord, AgentVersionRecord } from './types';
 import { agentWithVersion, diskFiles, listAgents, versionKey } from '../agents/records';
 
@@ -36,7 +31,6 @@ type Records = Partial<Record<'app' | 'installation' | 'runner', Record<string, 
 type Deliveries = Record<string, { value: unknown; expiresAt?: number }>;
 
 const APPS = new Set<StoreKind>(['app', 'installation', 'runner']);
-const QUEUED = new Set<StoreKind>(['task', 'history', 'tasklog', 'inbox', 'usage']);
 const KEYCHAIN = new Set<StoreKind>(['connection', 'credential']);
 // Rebuilt from agent folders and CLI tasks on each request, never the only copy.
 const DERIVED = new Set<StoreKind>(['agent', 'agentversion']);
@@ -61,25 +55,26 @@ function writeAtomic(file: string, content: string): void {
   }
 }
 
-export class LocalStore implements Store {
-  connectionContexts?: Store['connectionContexts'];
-  connectionSecrets?: Store['connectionSecrets'];
-  private readonly derived = new MemoryStore();
+export class LocalStore extends MemoryStore {
+  private readonly revisions = new Map<StoreKind, string>();
+  private readonly logBuckets = new Map<string, Map<string, Entry>>();
   private writes: Promise<unknown> = Promise.resolve();
 
   constructor(
-    private readonly now: () => number = Date.now,
+    now: () => number = Date.now,
     private readonly connections = () => new LocalConnections(),
-  ) {}
+  ) {
+    super(now);
+  }
 
   withAppLock<T>(id: string, work: (store: Store) => Promise<T>): Promise<T> {
     if (id.startsWith('connection:') || id.startsWith('connection-import:'))
       return this.connections().withLock(() => work(this), id.replace(/^connection:/, ''));
-    return this.derived.withAppLock(id, () => work(this));
+    return super.withAppLock(id, work);
   }
 
   withConfigLock<T>(work: (store: Store) => Promise<T>): Promise<T> {
-    return this.derived.withConfigLock(() => work(this));
+    return super.withConfigLock(work);
   }
 
   withCredential<K extends CredentialScope>(
@@ -91,7 +86,7 @@ export class LocalStore implements Store {
 
     return scope === 'credential'
       ? this.connections().withLock(write, credentialLock(scope, id))
-      : this.derived.withAppLock(credentialLock(scope, id), write);
+      : super.withAppLock(credentialLock(scope, id), write);
   }
 
   private get appsFile() {
@@ -122,13 +117,51 @@ export class LocalStore implements Store {
     return path.join(resolveStateDir(''), 'runner', `${kind}.json`);
   }
 
-  private deliveries(kind: StoreKind = 'delivery'): Deliveries {
-    const now = this.now();
-    return Object.fromEntries(
-      Object.entries(readJson<Deliveries>(this.recordsFile(kind), {})).filter(
-        ([, entry]) => entry.expiresAt === undefined || entry.expiresAt > now,
-      ),
-    );
+  protected bucket(kind: StoreKind): Map<string, Entry> {
+    const bucket = super.bucket(kind);
+    if (APPS.has(kind) || KEYCHAIN.has(kind) || DERIVED.has(kind) || kind === 'tasklog')
+      return bucket;
+    const file = this.recordsFile(kind);
+    const stat = fs.statSync(file, { throwIfNoEntry: false });
+    const revision = stat ? `${stat.ino}:${stat.mtimeMs}:${stat.size}` : '';
+    if (this.revisions.get(kind) !== revision) {
+      for (const id of bucket.keys())
+        if (kind !== 'snapshot' || !id.startsWith('connection')) bucket.delete(id);
+      for (const [id, entry] of Object.entries(readJson<Deliveries>(file, {})))
+        bucket.set(id, entry);
+      this.revisions.set(kind, revision);
+    }
+    return bucket;
+  }
+
+  protected changed(kind: StoreKind): void {
+    if (!APPS.has(kind) && !KEYCHAIN.has(kind) && !DERIVED.has(kind) && kind !== 'tasklog')
+      writeAtomic(
+        this.recordsFile(kind),
+        `${JSON.stringify(Object.fromEntries([...this.bucket(kind)].filter(([id]) => kind !== 'snapshot' || !id.startsWith('connection'))))}\n`,
+      );
+  }
+
+  private logFile(id: string): string {
+    return path.join(resolveStateDir(''), 'runner', 'logs', `${encodeURIComponent(id)}.jsonl`);
+  }
+
+  private loadLog(id: string): Map<string, Entry> {
+    let bucket = this.logBuckets.get(id);
+    if (bucket) return bucket;
+    bucket = new Map();
+    try {
+      const text = fs.readFileSync(this.logFile(id), 'utf8');
+      for (const line of text.split('\n').filter(Boolean)) {
+        const { id, ...entry } = JSON.parse(line) as Entry & { id: string };
+        bucket.set(id, entry);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+    this.logBuckets.set(id, bucket);
+
+    return bucket;
   }
 
   private entries(kind: StoreKind): Array<[string, unknown]> {
@@ -153,8 +186,6 @@ export class LocalStore implements Store {
         return [id, app.shared ? { ...app, credentials: shared?.credentials ?? '' } : app];
       });
     }
-    if (kind === 'delivery' || kind === 'snapshot' || QUEUED.has(kind))
-      return Object.entries(this.deliveries(kind)).map(([id, entry]) => [id, entry.value]);
     return [];
   }
 
@@ -167,7 +198,13 @@ export class LocalStore implements Store {
   get<T extends StoreRecords['delivery']>(kind: 'delivery', id: string): Promise<T | undefined>;
   async get(kind: StoreKind, id: string): Promise<StoreRecords[StoreKind] | undefined> {
     if (kind === 'connection') return this.connections().get(id);
-    if (DERIVED.has(kind)) return this.derived.get(kind, id);
+    if (kind === 'tasklog') {
+      const entry = this.loadLog(id.slice(0, id.lastIndexOf(':'))).get(id);
+      return entry && (entry.expiresAt === undefined || entry.expiresAt > this.now())
+        ? (entry.value as StoreRecords['tasklog'])
+        : undefined;
+    }
+    if (!APPS.has(kind) && !KEYCHAIN.has(kind)) return super.get(kind, id);
 
     return this.entries(kind).find(([key]) => key === id)?.[1] as
       StoreRecords[StoreKind] | undefined;
@@ -185,14 +222,15 @@ export class LocalStore implements Store {
     kind: K,
     id: string,
     value: StoreRecords[K],
-    options: { ttlMs?: number } = {},
+    options: { ttlMs?: number; unarchive?: boolean } = {},
   ): Promise<void> {
-    if (DERIVED.has(kind)) return this.derived.put(kind, id, value, options);
+    if (kind === 'tasklog') return this.putMany(kind, [{ id, value }], options);
+    if (!APPS.has(kind) && !KEYCHAIN.has(kind)) return super.put(kind, id, value, options);
 
-    await this.serial(() => this.write(kind, id, value, options.ttlMs), KEYCHAIN.has(kind));
+    await this.serial(() => this.write(kind, id, value), KEYCHAIN.has(kind));
   }
 
-  private write(kind: StoreKind, id: string, value: unknown, ttlMs?: number): void {
+  private write(kind: StoreKind, id: string, value: unknown): void {
     if (kind === 'connection') {
       this.connections().put(value as StoreRecords['connection']);
       return;
@@ -211,10 +249,6 @@ export class LocalStore implements Store {
         value = { ...(value as AgentApp), credentials: '' };
       records[kind as keyof Records] = { ...records[kind as keyof Records], [id]: value };
       writeAtomic(this.appsFile, `${JSON.stringify(records, null, 2)}\n`);
-    } else if (kind === 'delivery' || kind === 'snapshot' || QUEUED.has(kind)) {
-      const deliveries = this.deliveries(kind);
-      deliveries[id] = { value, ...(ttlMs === undefined ? {} : { expiresAt: this.now() + ttlMs }) };
-      writeAtomic(this.recordsFile(kind), `${JSON.stringify(deliveries)}\n`);
     } else this.refuse(kind);
   }
 
@@ -239,19 +273,6 @@ export class LocalStore implements Store {
       writeAtomic(this.appsFile, `${JSON.stringify(records, null, 2)}\n`);
       return true;
     }
-    if (kind === 'delivery' || kind === 'snapshot' || QUEUED.has(kind)) {
-      const deliveries = this.deliveries(kind);
-      if (!(id in deliveries)) return false;
-      delete deliveries[id];
-      writeAtomic(this.recordsFile(kind), `${JSON.stringify(deliveries)}\n`);
-      if (kind === 'task') {
-        const histories = this.deliveries('history');
-        for (const key of Object.keys(histories))
-          if (key.startsWith(`${id}:`)) delete histories[key];
-        writeAtomic(this.recordsFile('history'), `${JSON.stringify(histories)}\n`);
-      }
-      return true;
-    }
     return false;
   }
 
@@ -260,7 +281,32 @@ export class LocalStore implements Store {
     entries: Array<{ id: string; value: StoreRecords[K] }>,
     opts: { ttlMs?: number } = {},
   ): Promise<void> {
-    for (const entry of entries) await this.put(kind, entry.id, entry.value, opts);
+    if (kind === 'tasklog') {
+      const files = new Map<string, string[]>();
+      for (const { id, value } of entries) {
+        const task = id.slice(0, id.lastIndexOf(':'));
+        const lines = files.get(task) ?? [];
+        lines.push(
+          JSON.stringify({
+            id,
+            value,
+            ...(opts.ttlMs === undefined ? {} : { expiresAt: this.now() + opts.ttlMs }),
+          }),
+        );
+        files.set(task, lines);
+      }
+      for (const [task, lines] of files) {
+        const file = this.logFile(task);
+        fs.mkdirSync(path.dirname(file), { recursive: true });
+        fs.appendFileSync(file, `${lines.join('\n')}\n`, { mode: 0o600 });
+      }
+      for (const { id, value } of entries)
+        this.loadLog(id.slice(0, id.lastIndexOf(':'))).set(id, {
+          value,
+          ...(opts.ttlMs === undefined ? {} : { expiresAt: this.now() + opts.ttlMs }),
+        });
+    } else if (!APPS.has(kind) && !KEYCHAIN.has(kind)) await super.putMany(kind, entries, opts);
+    else for (const entry of entries) await this.put(kind, entry.id, entry.value, opts);
   }
 
   list<K extends StoreKind>(
@@ -279,7 +325,29 @@ export class LocalStore implements Store {
     kind: StoreKind,
     options: StoreListOptions = {},
   ): Promise<Array<{ id: string; value: StoreRecords[StoreKind] }>> {
-    if (DERIVED.has(kind)) return this.derived.list(kind, options);
+    if (kind === 'tasklog') {
+      const task = options.prefix?.endsWith(':') ? options.prefix.slice(0, -1) : undefined;
+      if (task !== undefined) this.loadLog(task);
+      else {
+        const dir = path.dirname(this.logFile(''));
+        if (fs.existsSync(dir))
+          for (const name of fs.readdirSync(dir))
+            if (name.endsWith('.jsonl')) this.loadLog(decodeURIComponent(name.slice(0, -6)));
+      }
+      const buckets = task !== undefined ? [this.loadLog(task)] : [...this.logBuckets.values()];
+      return buckets
+        .flatMap(bucket => [...bucket])
+        .filter(
+          ([id, entry]) =>
+            (!options.prefix || id.startsWith(options.prefix)) &&
+            (!options.after || id > options.after) &&
+            (entry.expiresAt === undefined || entry.expiresAt > this.now()),
+        )
+        .sort(([a], [b]) => a.localeCompare(b))
+        .slice(0, options.limit)
+        .map(([id, entry]) => ({ id, value: entry.value as StoreRecords['tasklog'] }));
+    }
+    if (!APPS.has(kind) && !KEYCHAIN.has(kind)) return super.list(kind, options);
 
     const apps = kind === 'installation' && options.agent ? this.apps().app : undefined;
 
@@ -313,7 +381,24 @@ export class LocalStore implements Store {
   }
 
   async delete(kind: StoreKind, id: string): Promise<void> {
-    if (DERIVED.has(kind)) return this.derived.delete(kind, id);
+    if (kind === 'tasklog') {
+      const task = id.slice(0, id.lastIndexOf(':'));
+      const bucket = this.loadLog(task);
+      bucket.delete(id);
+      writeAtomic(
+        this.logFile(task),
+        [...bucket].map(([id, entry]) => JSON.stringify({ id, ...entry })).join('\n') + '\n',
+      );
+      return;
+    }
+    if (!APPS.has(kind) && !KEYCHAIN.has(kind)) {
+      await super.delete(kind, id);
+      if (kind === 'task') {
+        fs.rmSync(this.logFile(id), { force: true });
+        this.logBuckets.delete(id);
+      }
+      return;
+    }
     await this.serial(() => this.remove(kind, id), KEYCHAIN.has(kind));
   }
 
@@ -323,170 +408,41 @@ export class LocalStore implements Store {
     value: StoreRecords[K],
     options: { ttlMs?: number } = {},
   ): Promise<boolean> {
-    if (DERIVED.has(kind)) return this.derived.create(kind, id, value, options);
+    if (kind === 'tasklog')
+      return this.serial(async () => {
+        if (await this.get(kind, id)) return false;
+        await this.put(kind, id, value, options);
+        return true;
+      });
+    if (!APPS.has(kind) && !KEYCHAIN.has(kind)) return super.create(kind, id, value, options);
 
     return this.serial(() => {
       if (this.entries(kind).some(([key]) => key === id)) return false;
-      this.write(kind, id, value, options.ttlMs);
+      this.write(kind, id, value);
       return true;
     }, KEYCHAIN.has(kind));
   }
 
-  claimDeliveryLease(id: string, owner: string, ttlMs: number): Promise<number | undefined> {
-    return this.serial(() => {
-      if (this.deliveries()[id]) return undefined;
-      const failures =
-        (this.deliveries('snapshot')[`delivery:${id}`]?.value as DeliveryLease | undefined)
-          ?.failures ?? 0;
-      this.write('delivery', id, { owner, failures }, ttlMs);
-      return failures;
-    });
-  }
-
-  updateDeliveryLease(
+  async take<K extends StoreKind>(
+    kind: K,
     id: string,
-    owner: string,
-    value?: DeliveryLease,
-    opts = { ttlMs: 30_000 },
-  ): Promise<boolean> {
-    return this.serial(() => {
-      if ((this.deliveries()[id]?.value as DeliveryLease | undefined)?.owner !== owner)
-        return false;
-      if (!value) {
-        this.remove('delivery', id);
-        this.remove('snapshot', `delivery:${id}`);
-      } else {
-        const next = value.next === undefined ? value : { ...value, next: this.now() + opts.ttlMs };
-        this.write('delivery', id, next, opts.ttlMs);
-        if (value.next !== undefined) this.write('snapshot', `delivery:${id}`, next, 86_400_000);
-      }
-      return true;
-    });
-  }
-
-  async updateDelivery<T>(
-    id: string,
-    owner: string,
-    value: T | undefined,
-    opts: { ttlMs?: number } = {},
-  ): Promise<boolean> {
-    return this.serial(() => {
-      const receipt = this.entries('delivery').find(([key]) => key === id)?.[1] as
-        { owner?: string } | undefined;
-      if (receipt?.owner !== owner) return false;
-      if (value === undefined) this.remove('delivery', id);
-      else this.write('delivery', id, value, opts.ttlMs);
-      return true;
-    });
-  }
-
-  async appendUnseen(key: string, message: SinceMessage, ttlMs: number): Promise<void> {
-    return this.serial(() => {
-      const entries = this.deliveries();
-      if (!entries[key]) return;
-      const id = `since:${key}`;
-      this.write(
-        'delivery',
-        id,
-        unseenValue(entries[id]?.value as Unseen | undefined, message),
-        ttlMs,
-      );
-    });
-  }
-
-  async acknowledgeUnseen(key: string, through: number, epoch?: string): Promise<void> {
-    return this.serial(() => {
-      const id = `since:${key}`;
-      const entry = this.deliveries()[id];
-      if (!entry) return;
-      this.write(
-        'delivery',
-        id,
-        unseenValue(entry.value as Unseen, undefined, through, epoch),
-        entry.expiresAt === undefined ? undefined : entry.expiresAt - this.now(),
-      );
-    });
-  }
-
-  async appendBatch(
-    id: string,
-    owner: string,
-    items: unknown[],
-    at: number,
-    ttlMs: number,
-  ): Promise<void> {
-    return this.serial(() => {
-      const entry = this.deliveries()[id];
-      const current = entry?.value as Batch | undefined;
-      const next = batchValue(current, owner, items, at);
-      const expiresAt = this.now() + ttlMs;
-      this.write(
-        'delivery',
-        id,
-        next,
-        expiresAt === undefined ? undefined : expiresAt - this.now(),
-      );
-    });
-  }
-
-  async claimBatch(id: string, owner: string): Promise<Batch | null | undefined> {
-    return this.withAppLock(`batch:${id}`, () =>
-      this.serial(() => {
-        const entry = this.deliveries()[id];
-        let current = entry?.value as Batch | undefined;
-        if (current?.owner !== owner || !current.items.length) return undefined;
-        if (current.sending && (current.sending.until ?? 0) > this.now()) return null;
-        if (current.sending) current = availableBatch(current);
-        const next = {
-          ...current,
-          more: 0,
-          mustReply: false,
-          sending: {
-            owner,
-            until: this.now() + BATCH_LEASE_MS,
-            count: current.items.length,
-            more: current.more,
-            mustReply: current.mustReply,
-          },
-        };
-        const expiresAt = entry!.expiresAt;
-        this.write(
-          'delivery',
-          id,
-          next,
-          expiresAt === undefined ? undefined : expiresAt - this.now(),
-        );
-        return current;
-      }),
-    );
-  }
-
-  async finishBatch(
-    id: string,
-    owner: string,
-    accepted: boolean,
-    through?: string,
-  ): Promise<boolean> {
-    return this.serial(() => {
-      const entry = this.deliveries()[id];
-      const current = entry?.value as Batch | undefined;
-      if (current?.sending?.owner !== owner) return false;
-      const next = finishedBatch(current, accepted, through, this.now());
-      const expiresAt = entry!.expiresAt;
-      this.write(
-        'delivery',
-        id,
-        next,
-        expiresAt === undefined ? undefined : expiresAt - this.now(),
-      );
-
-      return true;
-    });
-  }
-
-  async take(kind: StoreKind, id: string): Promise<boolean> {
-    if (DERIVED.has(kind)) return this.derived.take(kind, id);
-    return this.serial(() => this.remove(kind, id), KEYCHAIN.has(kind));
+    expected?: Partial<StoreRecords[K]>,
+  ): Promise<StoreRecords[K] | undefined> {
+    if (!APPS.has(kind) && !KEYCHAIN.has(kind) && kind !== 'tasklog')
+      return super.take(kind, id, expected);
+    return this.serial(async () => {
+      const value = await this.get(kind, id);
+      if (
+        value === undefined ||
+        Object.entries(expected ?? {}).some(
+          ([key, entry]) => (value as Record<string, unknown>)[key] !== entry,
+        )
+      )
+        return;
+      if (kind === 'tasklog') await this.delete(kind, id);
+      else this.remove(kind, id);
+      return value;
+    }, KEYCHAIN.has(kind));
   }
 }
 

@@ -10,7 +10,7 @@ import { CoderError } from '../core/dispatch';
 import { coderHome } from '../core/state';
 import { LocalRunner } from '../server/runners/local';
 import type { RunnerRow } from '../client/types';
-import { bodyLimit, nodeListener } from '../server/routes/http';
+import { bodyLimit, limitBody, nodeListener } from '../server/routes/http';
 import { safeEqual } from '../utils/crypto';
 import type { AgentTask } from '../agent/types';
 import type { Runner } from '../server/runners';
@@ -76,7 +76,12 @@ export async function serveRunner(options: RunnerServeOptions = {}): Promise<Run
   const mine = saved[target] ?? { secret: randomBytes(32).toString('base64url') };
   const runner = new LocalRunner(coderHome('runner'));
   const handler = runnerController({ secret: mine.secret, server: target, runner });
-  const listener = http.createServer(nodeListener(handler, { limit: bodyLimit }));
+  const listener = http.createServer(
+    nodeListener(async request => {
+      const limited = await limitBody(request, bodyLimit(new URL(request.url).pathname));
+      return limited instanceof Response ? limited : handler(limited);
+    }),
+  );
   await new Promise<void>((resolve, reject) => {
     listener.once('error', reject);
     listener.listen(port, '127.0.0.1', resolve);

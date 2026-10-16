@@ -1,10 +1,10 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { moveDirectory, readJsonFile } from '../utils/fsx';
+import { moveDirectory, readJsonFile, watchChanges, withFileLock } from '../utils/fsx';
 import { archiveCodexSession } from './engines/codex/sessions';
 import { type Task, type TurnResult, ACTIVE_STATUSES, TERMINAL_STATUSES } from './types';
 import type { TaskLogEntry } from './task/log-view';
@@ -52,10 +52,6 @@ export function coderCache(...parts: string[]): string {
   return path.join(path.resolve(root), ...parts);
 }
 
-export function resolveCoderHome(): string {
-  return coderHome();
-}
-
 export function resolveFlowsDir(mailbox?: string): string {
   return mailbox ? path.join(mailbox, 'flows') : coderHome('state', 'global', 'flows');
 }
@@ -88,28 +84,10 @@ export function resolveWorkspaceRoot(cwd: string): string {
   }
 }
 
-// Task state is global: a task's cwd is just where the engine works, not a
-// storage key. `cwd` params on the helpers below are kept only so legacy
-// per-workspace dirs (pre-global layouts) remain readable.
 const GLOBAL_STATE_SLUG = 'global';
 
 export function resolveStateDir(_cwd: string): string {
   return coderHome('state', GLOBAL_STATE_SLUG);
-}
-
-// Pre-global-state layout has one directory per workspace under state/. It is read-only now.
-// tasks found there are listed and updated in place, but new tasks never land there.
-function legacyStateDirs(): string[] {
-  const root = coderHome('state');
-  let entries: fs.Dirent[] = [];
-  try {
-    entries = fs.readdirSync(root, { withFileTypes: true });
-  } catch {
-    // No state yet.
-  }
-  return entries
-    .filter(entry => entry.isDirectory() && entry.name !== GLOBAL_STATE_SLUG)
-    .map(entry => path.join(root, entry.name));
 }
 
 export function resolveTasksDir(cwd: string): string {
@@ -140,24 +118,21 @@ export function resolveTaskDir(cwd: string, taskId: string): string {
   if (fs.existsSync(path.join(archivedDir, 'job.json'))) {
     return archivedDir;
   }
-  // Legacy per-workspace task: keep operating on it where it lives, so a worker
-  // started by an older build and this build see the same record.
-  for (const stateDir of legacyStateDirs()) {
-    const candidate = path.join(stateDir, 'jobs', taskId);
-    if (fs.existsSync(path.join(candidate, 'job.json'))) {
-      return candidate;
-    }
-  }
   return globalDir;
 }
 
-// Flag a task archived without moving its dir; the migration in listTasks/
-// listArchivedTasks tolerates the flag-without-move interim and finishes the move.
-// `auto` marks a sweep's archive, which keeps updatedAt; an explicit archive of a swept task clears the mark.
-export function markTaskArchived(cwd: string, task: Task, opts: { auto?: boolean } = {}): Task {
-  if (task.archived && (opts.auto || !task.autoArchived)) return task;
-  return task.archived
-    ? writeTask(cwd, task.id, { autoArchived: undefined })
+// Active workers keep their files in place until they stop.
+export function archiveTask(cwd: string, task: Task, opts: { auto?: boolean } = {}): Task {
+  const active = ACTIVE_STATUSES.includes(task.status);
+  if (!active) {
+    const from = resolveTaskDir(cwd, task.id);
+    const to = path.join(resolveArchiveDir(cwd), task.id);
+    if (from !== to) moveDirectory(from, to);
+  }
+  const next = task.archived
+    ? opts.auto || !task.autoArchived
+      ? task
+      : writeTask(cwd, task.id, { autoArchived: undefined })
     : writeTask(
         cwd,
         task.id,
@@ -168,18 +143,8 @@ export function markTaskArchived(cwd: string, task: Task, opts: { auto?: boolean
         },
         { touch: !opts.auto },
       );
-}
-
-// Active workers keep their files in place until they stop.
-export function archiveTask(cwd: string, task: Task, opts: { auto?: boolean } = {}): Task {
-  if (ACTIVE_STATUSES.includes(task.status)) return markTaskArchived(cwd, task, opts);
-  const from = resolveTaskDir(cwd, task.id);
-  const to = path.join(resolveArchiveDir(cwd), task.id);
-  if (from !== to) moveDirectory(from, to);
-  const next = markTaskArchived(cwd, task, opts);
-  if (task.engine !== 'claude' && task.threadId) {
+  if (!active && task.engine !== 'claude' && task.threadId)
     void archiveCodexSession(cwd, task.threadId);
-  }
 
   return next;
 }
@@ -225,19 +190,8 @@ export function writeTask(
     ...patch,
     updatedAt: opts.touch === false ? existing.updatedAt : new Date().toISOString(),
   };
-  fs.writeFileSync(
-    taskFile,
-    `${JSON.stringify(JSON.parse(redactConnectionSecrets(next)), null, 2)}\n`,
-    'utf8',
-  );
+  fs.writeFileSync(taskFile, `${redactConnectionSecrets(next)}\n`, 'utf8');
   return next;
-}
-
-// Older records kept the engine in `agent`.
-function normalizeTask(task: Task & { agent?: Task['engine'] }): Task {
-  if (task.agent) task.engine = task.agent;
-  delete task.agent;
-  return task;
 }
 
 export function loadTask(cwd: string, taskId: string): Task | null {
@@ -250,7 +204,7 @@ export function loadTask(cwd: string, taskId: string): Task | null {
     return null;
   }
   try {
-    return normalizeTask(JSON.parse(fs.readFileSync(taskFile, 'utf8')) as Task);
+    return JSON.parse(fs.readFileSync(taskFile, 'utf8')) as Task;
   } catch {
     return null;
   }
@@ -267,7 +221,7 @@ export function removeTaskDir(cwd: string, taskId: string): boolean {
 
 // Whether a process is still alive. Signal 0 tests existence without delivering
 // a signal; EPERM means it exists but we may not signal it (still alive).
-function isPidAlive(pid?: number | null): boolean {
+export function isPidAlive(pid?: number | null): boolean {
   if (!pid) {
     return false;
   }
@@ -345,48 +299,35 @@ export function reconcileTask(cwd: string, task: Task, startMs = processStartMs)
   return task;
 }
 
-function scanTasks(dirs: string[], seen: Set<string>): Task[] {
-  const tasks: Task[] = [];
-  for (const tasksDir of dirs) {
-    let ids: string[] = [];
-    try {
-      ids = fs.readdirSync(tasksDir);
-    } catch {
-      continue;
-    }
-    for (const id of ids) {
-      if (seen.has(id)) {
-        continue;
-      }
-      const taskFile = path.join(tasksDir, id, 'job.json');
-      try {
-        const task = normalizeTask(JSON.parse(fs.readFileSync(taskFile, 'utf8')) as Task);
-        seen.add(id);
-        tasks.push(task);
-      } catch {
-        // Skip a non-task or unreadable directory.
-      }
-    }
+function taskIds(dir: string): string[] {
+  try {
+    return fs.readdirSync(dir);
+  } catch {
+    return [];
   }
-  return tasks;
+}
+
+function scanTasks(dir: string, seen = new Set<string>()): Task[] {
+  return taskIds(dir).flatMap(id => {
+    if (seen.has(id)) return [];
+    try {
+      const task = JSON.parse(fs.readFileSync(path.join(dir, id, 'job.json'), 'utf8')) as Task;
+      seen.add(id);
+
+      return [task];
+    } catch {
+      return [];
+    }
+  });
 }
 
 /** Task folders for background readers, without loading every archived record. */
 export async function* taskDirectories(
   cwd: string,
 ): AsyncGenerator<{ id: string; dir: string; archived: boolean }> {
-  const states = await fs.promises
-    .readdir(path.dirname(resolveStateDir(cwd)), { withFileTypes: true })
-    .catch(() => []);
   const dirs = [
     { dir: resolveTasksDir(cwd), archived: false },
     { dir: resolveArchiveDir(cwd), archived: true },
-    ...states
-      .filter(entry => entry.isDirectory() && entry.name !== GLOBAL_STATE_SLUG)
-      .map(entry => ({
-        dir: path.join(path.dirname(resolveStateDir(cwd)), entry.name, 'jobs'),
-        archived: false,
-      })),
   ];
   for (const { dir, archived } of dirs) {
     const entries = await fs.promises.readdir(dir, { withFileTypes: true }).catch(() => []);
@@ -401,20 +342,22 @@ const byRecency = (left: Task, right: Task) =>
 
 export function processStarts(): typeof processStartMs {
   const starts = new Map<number, number | null>();
+  let expires = Date.now() + 30_000;
   return pid => {
+    if (Date.now() >= expires) {
+      starts.clear();
+      expires = Date.now() + 30_000;
+    }
     if (!starts.has(pid)) starts.set(pid, processStartMs(pid));
     return starts.get(pid)!;
   };
 }
 
-// Active tasks: the global tasks bin plus legacy per-workspace dirs, deduped by
-// id (global wins). Tasks flagged archived but still sitting in an active bin
-// (older builds archived in place) migrate to the archive bin as they're seen.
+// A running archived task stays beside its worker until it stops.
 export function listTasks(cwd: string): Task[] {
   const startMs = processStarts();
-  const tasksDirs = [resolveTasksDir(cwd), ...legacyStateDirs().map(dir => path.join(dir, 'jobs'))];
   const tasks: Task[] = [];
-  for (const stored of scanTasks(tasksDirs, new Set())) {
+  for (const stored of scanTasks(resolveTasksDir(cwd))) {
     const task = reconcileTask(cwd, stored, startMs);
     if (task.archived && !resumedAfterArchive(task)) {
       archiveTask(cwd, task, { auto: true });
@@ -497,24 +440,21 @@ export function queueOwnedTasks(cwd: string): Task[] {
     });
 }
 
-// Archived tasks. Scans the active bins too so in-place-archived legacy tasks
-// show up (and migrate); those bins stay small once migration has run.
-// migrate: false skips the directory moves for cheap counts on hot paths. The
-// detached sweep or a later migrating scan finishes the moves).
+// Archived workers finish in the live bin; resumed archived workers return there.
+// migrate: false leaves directories in place for callers that only need a count.
 export function listArchivedTasks(cwd: string, opts?: { migrate?: boolean }): Task[] {
   const startMs = processStarts();
   const migrate = opts?.migrate ?? true;
   const seen = new Set<string>();
   const archived: Task[] = [];
-  for (const task of scanTasks([resolveArchiveDir(cwd)], seen)) {
+  for (const task of scanTasks(resolveArchiveDir(cwd), seen)) {
     if (!resumedAfterArchive(task)) {
       archived.push(reconcileTask(cwd, task, startMs));
     } else if (migrate) {
       unarchiveTask(cwd, reconcileTask(cwd, task, startMs));
     }
   }
-  const tasksDirs = [resolveTasksDir(cwd), ...legacyStateDirs().map(dir => path.join(dir, 'jobs'))];
-  for (const task of scanTasks(tasksDirs, seen)) {
+  for (const task of scanTasks(resolveTasksDir(cwd), seen)) {
     if (task.archived && !resumedAfterArchive(task)) {
       const current = reconcileTask(cwd, task, startMs);
       archived.push(migrate ? archiveTask(cwd, current, { auto: true }) : current);
@@ -524,26 +464,33 @@ export function listArchivedTasks(cwd: string, opts?: { migrate?: boolean }): Ta
 }
 
 export function findTask(cwd: string, reference?: string): Task | null {
-  // Search active and archived alike (result/steer/delete accept archived
-  // ids), newest first across both bins.
-  // Archived first: it moves resumed tasks back to the active bin.
-  const archived = listArchivedTasks(cwd);
-  const tasks = [...listTasks(cwd), ...archived].sort(byRecency);
   if (!reference) {
-    return tasks[0] ?? null;
+    const archived = listArchivedTasks(cwd);
+
+    return [...listTasks(cwd), ...archived].sort(byRecency)[0] ?? null;
   }
-  const exact = tasks.find(task => task.id === reference);
-  if (exact) {
-    return exact;
-  }
-  const prefixed = tasks.filter(task => task.id.startsWith(reference));
-  if (prefixed.length === 1) {
-    return prefixed[0]!;
-  }
-  if (prefixed.length > 1) {
+  const current = (task: Task) => {
+    const reconciled = reconcileTask(cwd, task);
+
+    return resumedAfterArchive(reconciled) ? unarchiveTask(cwd, reconciled) : reconciled;
+  };
+  const exact = loadTask(cwd, reference);
+  if (exact) return current(exact);
+  if (!isValidId(reference)) return null;
+  const ids = new Set(
+    [resolveTasksDir(cwd), resolveArchiveDir(cwd)].flatMap(dir =>
+      taskIds(dir).filter(id => id.startsWith(reference)),
+    ),
+  );
+  const matches = [...ids].flatMap(id => {
+    const task = loadTask(cwd, id);
+
+    return task ? [task] : [];
+  });
+  if (matches.length > 1)
     throw new Error(`Task reference "${reference}" is ambiguous. Use a longer id.`);
-  }
-  return null;
+
+  return matches[0] ? current(matches[0]) : null;
 }
 
 // Cheap activity heartbeat: engines touch this file (throttled) on any server
@@ -574,22 +521,16 @@ export function lastActivityAt(cwd: string, task: Task): string | undefined {
   return best ? new Date(best).toISOString() : undefined;
 }
 
-// Block until a task reaches a terminal status, then return the final task.
-// Reconciles each poll so a dead worker (zombie) resolves instead of hanging.
-export async function waitForTerminalTask(cwd: string, task: Task, pollMs = 400): Promise<Task> {
-  let current = task;
-  while (!TERMINAL_STATUSES.includes(current.status)) {
-    await new Promise(resolve => setTimeout(resolve, pollMs));
-    current = reconcileTask(cwd, loadTask(cwd, current.id) ?? current);
-  }
-  return current;
-}
-
 // Follow-ups steered into a still-running task that could not be injected into
 // the live turn because it was starting or completing are queued in this file.
 // The worker that owns the task
 // drains it when its turn finishes, running each as a resumed turn.
 const STEER_QUEUE_FILE = 'steer-queue.jsonl';
+
+export function withTaskAdmission<T>(cwd: string, taskId: string, work: () => T) {
+  assertValidId(taskId, 'task id');
+  return withFileLock(path.join(resolveStateDir(cwd), 'steer', `${taskId}.lock`), work);
+}
 
 export function enqueueSteer(cwd: string, taskId: string, text: string): void {
   const taskDir = resolveTaskDir(cwd, taskId);
@@ -641,7 +582,10 @@ export function claimSteers(cwd: string, taskId: string): string[] {
 }
 
 export function appendTaskLog(cwd: string, taskId: string, entry: TaskLogEntry): void {
-  const taskDir = resolveTaskDir(cwd, taskId);
+  appendTaskDirLog(resolveTaskDir(cwd, taskId), entry);
+}
+
+export function appendTaskDirLog(taskDir: string, entry: TaskLogEntry): void {
   fs.mkdirSync(taskDir, { recursive: true });
   fs.appendFileSync(
     path.join(taskDir, 'log.jsonl'),
@@ -667,23 +611,33 @@ export interface TurnResultEntry {
   [key: string]: unknown;
 }
 
-export function readTurnResults(
-  cwd: string,
-  taskId: string,
-  includeInternal = false,
-): TurnResultEntry[] {
+export function watchTask(cwd: string, taskId: string, worker?: ChildProcess) {
+  const changes = watchChanges(resolveTaskDir(cwd, taskId));
+  worker?.on('message', changes.notify);
+  worker?.on('exit', changes.notify);
+  worker?.on('error', changes.notify);
+  return {
+    wait: changes.wait,
+    close() {
+      worker?.off('message', changes.notify);
+      worker?.off('exit', changes.notify);
+      worker?.off('error', changes.notify);
+      changes.close();
+    },
+  };
+}
+
+export function readTurnResults(cwd: string, taskId: string): TurnResultEntry[] {
   const file = path.join(resolveTaskDir(cwd, taskId), 'results.jsonl');
   if (!fs.existsSync(file)) {
     return [];
   }
   return fs
     .readFileSync(file, 'utf8')
-    .split(/\r?\n/)
-    .filter(Boolean)
+    .split('\n')
     .flatMap((line): TurnResultEntry[] => {
       try {
-        const entry = JSON.parse(line) as TurnResultEntry;
-        return includeInternal || !entry.internal ? [entry] : [];
+        return [JSON.parse(line) as TurnResultEntry];
       } catch {
         return [];
       }
@@ -703,18 +657,39 @@ export function tailSteps(entries: TaskLogEntry[], tail: number): TaskLogEntry[]
 }
 
 export function readTaskLog(cwd: string, taskId: string, maxLines = 40): TaskLogEntry[] {
+  if (maxLines <= 0) return [];
   const logFile = path.join(resolveTaskDir(cwd, taskId), 'log.jsonl');
-  if (!fs.existsSync(logFile)) {
-    return [];
+  let fd: number;
+  try {
+    fd = fs.openSync(logFile, 'r');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw error;
   }
-  const lines = fs.readFileSync(logFile, 'utf8').split(/\r?\n/).filter(Boolean);
-  return lines.slice(-maxLines).map((line): TaskLogEntry => {
-    try {
-      return JSON.parse(line) as TaskLogEntry;
-    } catch {
-      return { message: line };
+  try {
+    const size = fs.fstatSync(fd).size;
+    let bytes = Math.min(size, 64 * 1024);
+    for (;;) {
+      const start = size - bytes;
+      const buffer = Buffer.alloc(bytes);
+      const read = fs.readSync(fd, buffer, 0, bytes, start);
+      const text = buffer.toString('utf8', 0, read);
+      const lines = (start ? text.slice(text.indexOf('\n') + 1) : text)
+        .split(/\r?\n/)
+        .filter(Boolean);
+      if (start === 0 || (text.includes('\n') && lines.length >= maxLines))
+        return lines.slice(-maxLines).map((line): TaskLogEntry => {
+          try {
+            return JSON.parse(line) as TaskLogEntry;
+          } catch {
+            return { message: line };
+          }
+        });
+      bytes = Math.min(size, bytes * 2);
     }
-  });
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 // "engine/model/effort", dropping unset parts (e.g. "claude/opus/medium", "codex", "claude/opus").

@@ -12,7 +12,7 @@ import { load } from '@/api/load';
 import { Settle, Stream } from '@/comps/frame/stream';
 import { Loading } from '@/comps/ui/card';
 import { SETTINGS } from '@/app/dash/[org]/settings/settings-head';
-import { localServer } from '@/api/types';
+import { isAdmin, localServer } from '@/api/types';
 import {
   outcomeName,
   outcomeText,
@@ -69,7 +69,7 @@ export default async function SettingsTabPage({
               first={list}
               config={shape}
               credentials={local ? null : await credentials}
-              admin={!who.user || ADMIN_ROLES.has(who.organization?.role ?? '')}
+              admin={isAdmin(who)}
             />
           );
         }}
@@ -112,7 +112,7 @@ export default async function SettingsTabPage({
                 first={first}
                 catalog={integrations}
                 local={localServer(who)}
-                admin={!who.user || ADMIN_ROLES.has(who.organization?.role ?? '')}
+                admin={isAdmin(who)}
                 operator={who.operator === true}
               />
             </>

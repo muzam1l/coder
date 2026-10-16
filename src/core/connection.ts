@@ -131,9 +131,9 @@ async function signedIn(opts: ConnectionAddOptions, id: string, url: string) {
   if (!attempt) throw invalid('Sign-in did not start.');
   const authorization = createHash('sha256').update(attempt).digest('hex');
   opts.onAuthorize!(authorize.href);
-  for (let waited = 0; waited < 600; waited++) {
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    const row = (await client(opts).list(authorization)).find(row => row.id === id);
+  const deadline = Date.now() + 600000;
+  while (Date.now() < deadline) {
+    const row = (await client(opts).list(authorization, id)).find(row => row.id === id);
     if (!row) throw invalid('The connection was removed before sign-in finished.');
     if (row.status === 'ok') return row;
   }

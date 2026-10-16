@@ -1,6 +1,5 @@
 /** Agents that live in a repository: reading it through an installed app, importing its versions, and loading one app's agent. */
 import { randomUUID } from 'node:crypto';
-import process from 'node:process';
 import { isDeepStrictEqual } from 'node:util';
 
 import { agentsFromSources, assertNotReserved, loadAgents } from '../../agent/load';
@@ -19,7 +18,14 @@ import type { AgentVersionRecord, Store } from '../store/types';
 import type { ServerConfig, ServerContext } from '../context';
 import type { PlatformAccess, TokenSource } from '../tasks/context';
 import { decryptSecret, encryptSecret } from '../store/secrets';
-import { agentWithVersion, getVersion, publishVersion, seedBuiltinAgent, toAgent } from './records';
+import {
+  agentWithVersion,
+  getVersion,
+  publishVersion,
+  seedBuiltinAgent,
+  ensureBuiltinAgents,
+  toAgent,
+} from './records';
 
 export type Contents = Integration & Required<Pick<Integration, 'repos'>>;
 
@@ -52,6 +58,27 @@ export interface RepoPush {
 
 const fileKey = (installation: string, repo: string, ref: string) =>
   `repo-file:${installation}@${repo}@${ref}:`;
+
+/** The repository file snapshots an event's dispatch may read: the event's repository at its ref and the config repository, through the reader installation. */
+export function dispatchFilePrefixes(
+  integrations: Record<string, Integration>,
+  installation: Installation,
+  event: AgentEvent,
+): string[] {
+  const reader = repositoryReader(integrations);
+  const via =
+    event.integration === reader?.id
+      ? installation.id
+      : installation.connections?.[reader?.id ?? '']?.id;
+  const repo = eventRepo(event);
+  const configRepo = installation.settings?.configRepo;
+  if (!reader || !via) return [];
+
+  return [
+    ...(repo && event.integration === reader.id ? [fileKey(via, repo, event.repo?.ref ?? '')] : []),
+    ...(configRepo ? [fileKey(via, configRepo, '')] : []),
+  ];
+}
 const pushKey = (installation: string, repo: string, ref: string) =>
   `repo-push:${installation}@${repo}@${ref}`;
 
@@ -205,7 +232,8 @@ async function repositoryAccess(
         app,
         installation,
       };
-    } catch {
+    } catch (error) {
+      console.error(`coder server: repository access for ${installation.id} failed`, error);
       continue;
     }
   }
@@ -222,12 +250,15 @@ export function remoteAgentLoader(
     store: Store;
     fileReads?: ServerContext['fileReads'];
     now?: () => number;
+    settings?: ServerContext['settings'];
   },
 ): ServerContext['loadAgent'] {
-  const cwd = options.cwd ?? process.cwd();
+  type LoadedAgent = NonNullable<Parameters<ServerContext['loadAgent']>[4]>;
+  const cwd = options.cwd;
   const now = options.now ?? Date.now;
 
   async function usageFor(
+    files: Pick<ServerContext, 'store' | 'fileReads'>,
     installation: Installation,
     event: AgentEvent,
     tokens: TokenSource,
@@ -237,9 +268,9 @@ export function remoteAgentLoader(
     if (!reader || !access) return undefined;
     const repo = eventRepo(event);
     if (event.integration === reader.id && repo)
-      return readUsage(options, reader, access, repo, event.repo?.ref);
+      return readUsage(files, reader, access, repo, event.repo?.ref);
     const configRepo = installation.settings?.configRepo;
-    if (configRepo) return readUsage(options, reader, access, configRepo);
+    if (configRepo) return readUsage(files, reader, access, configRepo);
     return undefined;
   }
 
@@ -248,14 +279,18 @@ export function remoteAgentLoader(
     installation: Installation,
     event: AgentEvent,
     tokens: TokenSource,
+    known?: LoadedAgent,
   ): Promise<Agent | undefined> {
-    let loaded = await agentWithVersion(options.store, app.agent);
-    if (loaded.record && (await seedBuiltinAgent(options.store, now(), app.agent, loaded)))
+    const files = { store: known?.store ?? options.store, fileReads: options.fileReads };
+    let loaded = known ?? (await agentWithVersion(options.store, app.agent));
+    if (loaded.record?.source === 'builtin' && !options.settings?.builtinAgents) {
+      await ensureBuiltinAgents(options, now());
       loaded = await agentWithVersion(options.store, app.agent);
+    }
     const { record, version } = loaded;
     if (!record) return undefined;
     if (!version) throw new Error(`No version ${record.currentVersion} for agent "${record.id}".`);
-    const usage = await usageFor(installation, event, tokens);
+    const usage = await usageFor(files, installation, event, tokens);
     const entry =
       usage && typeof usage === 'object'
         ? (usage as Record<string, unknown>)[app.agent]
@@ -272,13 +307,15 @@ export function remoteAgentLoader(
     );
   }
 
-  return async (app, installation, event, tokens) => {
-    const onDisk = (await loadAgents(cwd, integrations)).find(
-      candidate => candidate.id === app.agent && !candidate.builtin,
-    );
+  return async (app, installation, event, tokens, known) => {
+    const onDisk = cwd
+      ? (await loadAgents(cwd, integrations)).find(
+          candidate => candidate.id === app.agent && !candidate.builtin,
+        )
+      : undefined;
     if (onDisk) return onDisk;
 
-    const existing = await stored(app, installation, event, tokens);
+    const existing = await stored(app, installation, event, tokens, known);
     if (existing) return existing;
 
     if (app.agentsRepo) {
@@ -308,37 +345,6 @@ export function remoteAgentLoader(
   };
 }
 
-async function remoteFiles(
-  contents: Contents,
-  repo: string,
-  root: string,
-  token: string,
-  ref: string,
-  relative = '',
-  entries?: string[],
-  depth = 0,
-): Promise<Record<string, string>> {
-  const result: Record<string, string> = {};
-  const current =
-    entries ??
-    (await contents.repos.listDir(repo, relative ? `${root}/${relative}` : root, token, ref));
-  for (const entry of current) {
-    const name = relative ? `${relative}/${entry}` : entry;
-    if (name === 'agent.json' || name === 'system.md') continue;
-    const value = await contents.repos.readFile(repo, `${root}/${name}`, token, ref);
-    if (value !== undefined) result[name] = value;
-    else if (depth < 20) {
-      const children = await contents.repos.listDir(repo, `${root}/${name}`, token, ref);
-      if (children.length && !isDeepStrictEqual(children, current))
-        Object.assign(
-          result,
-          await remoteFiles(contents, repo, root, token, ref, name, children, depth + 1),
-        );
-    }
-  }
-  return result;
-}
-
 export async function importRepoAgents(
   store: Store,
   contents: Contents,
@@ -354,24 +360,38 @@ export async function importRepoAgents(
     : ((await contents.repos.commit(repo, ref, token)) ?? ref);
   const source = { repo, ref: opts.branch ?? ref, commit };
   ref = commit;
-  const slugs = opts.slugs ?? (await contents.repos.listDir(repo, base, token, ref));
+  const tree = await contents.repos.tree(repo, base, token, ref);
+  const slugs = opts.slugs ?? [
+    ...new Set(
+      tree.filter(file => /^[^/]+\/agent\.json$/.test(file)).map(file => file.split('/')[0]!),
+    ),
+  ];
   assertNotReserved(slugs);
-  const imported: AgentVersionRecord[] = [];
-  for (const id of slugs) {
-    const root = `${base}/${id}`;
-    const raw = await contents.repos.readFile(repo, `${root}/agent.json`, token, ref);
-    if (raw === undefined) continue;
-    const definition = JSON.parse(raw) as unknown;
-    const [validated] = agentsFromSources(
-      {
-        definitions: { [id]: { json: definition, builtin: false } },
-        usage: undefined,
-      },
-      { ...INTEGRATIONS, [contents.id]: contents },
-    );
-    if (!validated) continue;
-    imported.push(
-      await publishVersion(
+  const imported = await Promise.all(
+    slugs.map(async id => {
+      const root = `${base}/${id}`;
+      const paths = tree.filter(file => file.startsWith(`${id}/`) && file.split('/').length <= 22);
+      const files = Object.fromEntries(
+        await Promise.all(
+          paths.map(
+            async file =>
+              [
+                file.slice(id.length + 1),
+                await contents.repos.readFile(repo, `${base}/${file}`, token, ref),
+              ] as const,
+          ),
+        ),
+      );
+      const raw = files['agent.json'];
+      if (raw === undefined) return;
+      const [validated] = agentsFromSources(
+        { definitions: { [id]: { json: JSON.parse(raw), builtin: false } }, usage: undefined },
+        { ...INTEGRATIONS, [contents.id]: contents },
+      );
+      if (!validated) return;
+      const { 'agent.json': _definition, 'system.md': systemPrompt, ...extra } = files;
+
+      return publishVersion(
         store,
         {
           id,
@@ -381,18 +401,22 @@ export async function importRepoAgents(
           repo,
           path: root,
           definition: validated.definition,
-          systemPrompt:
-            (await contents.repos.readFile(repo, `${root}/system.md`, token, ref)) ?? '',
-          files: await remoteFiles(contents, repo, root, token, ref),
+          systemPrompt: systemPrompt ?? '',
+          files: Object.fromEntries(
+            Object.entries(extra).filter(
+              (entry): entry is [string, string] => entry[1] !== undefined,
+            ),
+          ),
           commit,
           origin: source,
           importedFrom: `repo:${repo}@${source.ref}`,
         },
         now,
-      ),
-    );
-  }
-  return imported;
+      );
+    }),
+  );
+
+  return imported.filter((version): version is AgentVersionRecord => !!version);
 }
 
 /** What Coder last knew an app to have on its platform, stored as delivery `app-sync:<app id>`. */

@@ -66,12 +66,7 @@ function collectTopics(root: string): Topic[] {
       docTopics.push(topic(`${name}/${sub}`, path.join('docs', name, page)));
     }
   }
-  const specials: Topic[] = SPECIAL_TOPICS.map(s => ({
-    name: s.name,
-    file: s.file,
-    description: s.description,
-  }));
-  return [...docTopics, ...specials];
+  return [...docTopics, ...SPECIAL_TOPICS];
 }
 
 function hasIndex(dir: string): boolean {

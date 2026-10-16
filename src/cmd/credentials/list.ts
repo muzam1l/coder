@@ -53,8 +53,8 @@ export const commandCredentialsList = command({
   },
   options: { json: flag, server: serverOnly, yes: flag },
   run: async ({ options }) => {
-    const { connect } = await import('../../core/remote');
-    return connect(options).credentials.list();
+    const { credentials } = await import('../../core/remote');
+    return credentials.list(options);
   },
   print: printCredentials,
 });

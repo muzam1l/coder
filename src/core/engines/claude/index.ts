@@ -11,6 +11,8 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 
+import { processTiming } from '../../../utils/process';
+
 import {
   CLAUDE_PERMISSION_FLAGS,
   CLAUDE_SIDECAR_FLAGS,
@@ -19,6 +21,7 @@ import {
 } from '../../config';
 import { mailboxId, type MailboxKey } from '../../mailbox';
 import { shortPath } from '../../../utils/fsx';
+import { serveControl, requestControl } from '../control';
 import { CLI_PATH } from '../../runtime';
 import { engineEnvironment } from '../../connections';
 import { parseVersion } from '../../hosts';
@@ -324,6 +327,7 @@ export interface ClaudeTurnOptions {
   systemPrompt?: string;
   /** Moves per-machine sections out of the system prompt so conversations share its cache. */
   excludeDynamicSections?: boolean;
+  settingSources?: string;
   onProgress?: (update: Exclude<ProgressUpdate, string>) => void;
   onHeartbeat?: () => void;
   command?: MailboxKey;
@@ -358,18 +362,21 @@ export function buildClaudeMcpConfig(
     };
   }
   for (const server of extraServers) {
-    mcpServers[server.name] = server.url
-      ? {
-          type: server.type ?? 'http',
-          url: server.url,
-          ...(server.headers ? { headers: server.headers } : {}),
-        }
-      : {
-          type: 'stdio',
-          command: server.command,
-          args: server.args ?? [],
-          ...(server.env ? { env: server.env } : {}),
-        };
+    mcpServers[server.name] = {
+      ...(server.url
+        ? {
+            type: server.type ?? 'http',
+            url: server.url,
+            ...(server.headers ? { headers: server.headers } : {}),
+          }
+        : {
+            type: 'stdio',
+            command: server.command,
+            args: server.args ?? [],
+            ...(server.env ? { env: server.env } : {}),
+          }),
+      ...(server.alwaysLoad ? { alwaysLoad: true } : {}),
+    };
   }
   return mcpServers;
 }
@@ -407,6 +414,7 @@ export function buildClaudeTurnArgs(
       systemPromptPath ?? path.join(options.taskRoot ?? cwd, '.claude-system.md'),
     );
   if (options.excludeDynamicSections) args.push('--exclude-dynamic-system-prompt-sections');
+  if (options.settingSources) args.push('--setting-sources', options.settingSources);
   if (options.outputSchema) {
     // Claude Code's validator rejects the draft 2020-12 meta-schema reference that zod writes.
     const { $schema: _, ...schema } = options.outputSchema as Record<string, unknown>;
@@ -555,123 +563,17 @@ function createClaudeInputController(
   };
 }
 
-function atomicJsonWrite(file: string, value: unknown) {
-  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify(value)}\n`, 'utf8');
-  fs.renameSync(temp, file);
-}
-
 async function startClaudeSteerServer(
   sendSteer: (text: string, command?: MailboxKey) => Promise<void>,
 ) {
-  // A file mailbox works in restricted worker sandboxes that deny Unix socket
-  // binds. Atomic rename publishes complete requests/responses across detached
-  // processes. The worker responds after the complete JSONL frame has been
-  // accepted by Claude's stdin; Claude consumes it at its next model boundary.
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'coder-claude-steer-'));
-  const endpoint = `file:${directory}`;
-  const processing = new Set<Promise<void>>();
-  const accepting = new Set<string>();
-  let stopped = false;
-  let scanning = false;
-
-  const scan = (closing = false) => {
-    if ((stopped && !closing) || scanning) return;
-    scanning = true;
-    try {
-      for (const name of fs.readdirSync(directory).filter(name => name.endsWith('.request.json'))) {
-        const id = name.slice(0, -'.request.json'.length);
-        const requestFile = path.join(directory, name);
-        const responseFile = path.join(directory, `${id}.response.json`);
-        if (fs.existsSync(responseFile)) {
-          fs.unlinkSync(requestFile);
-          continue;
-        }
-        if (accepting.has(id)) continue;
-        const claimFile = `${requestFile}.${process.pid}.processing`;
-        try {
-          fs.renameSync(requestFile, claimFile);
-        } catch {
-          continue;
-        }
-        accepting.add(id);
-        const work = (async () => {
-          let response: any;
-          try {
-            const request = JSON.parse(fs.readFileSync(claimFile, 'utf8'));
-            const text =
-              typeof request?.params?.text === 'string' ? request.params.text.trim() : '';
-            if (request?.method !== 'turn/steer' || !text || request?.id !== id) {
-              response = {
-                id,
-                error: {
-                  message: 'Invalid Claude steer request.',
-                  retryable: false,
-                },
-              };
-            } else {
-              try {
-                await sendSteer(text, request.command);
-                response = { id, result: { accepted: true } };
-              } catch (error) {
-                const input = error as ClaudeInputError;
-                response = {
-                  id,
-                  error: {
-                    message: input.message,
-                    retryable: input.retryable === true,
-                  },
-                };
-              }
-            }
-          } catch (error) {
-            response = {
-              id,
-              error: {
-                message: `Invalid Claude steer JSON: ${error instanceof Error ? error.message : String(error)}`,
-                retryable: false,
-              },
-            };
-          }
-          try {
-            atomicJsonWrite(responseFile, response);
-          } finally {
-            accepting.delete(id);
-            try {
-              fs.unlinkSync(claimFile);
-            } catch {
-              /* best-effort */
-            }
-          }
-        })();
-        processing.add(work);
-        void work.then(
-          () => processing.delete(work),
-          () => processing.delete(work),
-        );
-      }
-    } catch {
-      // The directory is removed only after polling stops.
-    } finally {
-      scanning = false;
-    }
-  };
-  const timer = setInterval(scan, 10);
-
-  return {
-    endpoint,
-    async close() {
-      stopped = true;
-      clearInterval(timer);
-      // Claim requests that raced the result event. The input controller now
-      // answers them as retryable instead of losing them during teardown.
-      scan(true);
-      await Promise.allSettled([...processing]);
-      // Let a waiting steer process observe its final response before cleanup.
-      await new Promise(resolve => setTimeout(resolve, 50));
-      fs.rmSync(directory, { recursive: true, force: true });
-    },
-  };
+  return serveControl('coder-claude-steer-', async (request, closing) => {
+    if (closing) throw inputError('Claude turn is no longer accepting live input.', true);
+    const text = typeof request?.params?.text === 'string' ? request.params.text.trim() : '';
+    if (request.method !== 'turn/steer' || !text)
+      throw inputError('Invalid Claude steer request.', false);
+    await sendSteer(text, request.command);
+    return { accepted: true };
+  });
 }
 
 /** Inject one user message into a worker-owned Claude stream-json process. */
@@ -681,90 +583,17 @@ export async function steerClaudeTurn(
   timeoutMs = 3_000,
   command?: MailboxKey,
 ): Promise<{ steered: boolean; retryable: boolean; detail: string }> {
-  if (!endpoint) {
-    return {
-      steered: false,
-      retryable: true,
-      detail: 'Claude live steer endpoint is not ready.',
-    };
-  }
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return { steered: false, retryable: false, detail: 'empty follow-up' };
-  }
-  if (!endpoint.startsWith('file:') || endpoint.length === 'file:'.length) {
-    return {
-      steered: false,
-      retryable: false,
-      detail: `Unsupported Claude steer endpoint: ${endpoint}`,
-    };
-  }
-  const directory = endpoint.slice('file:'.length);
-  if (!fs.existsSync(directory)) {
-    return {
-      steered: false,
-      retryable: true,
-      detail: 'Claude live steer endpoint is no longer available.',
-    };
-  }
-  const id = mailboxId(command);
-  const requestFile = path.join(directory, `${id}.request.json`);
-  const responseFile = path.join(directory, `${id}.response.json`);
-  try {
-    if (!fs.existsSync(responseFile))
-      atomicJsonWrite(requestFile, {
-        id,
-        method: 'turn/steer',
-        params: { text: trimmed },
-        command,
-      });
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    return {
-      steered: false,
-      retryable: code === 'ENOENT',
-      detail: error instanceof Error ? error.message : String(error),
-    };
-  }
-
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    try {
-      const response = JSON.parse(fs.readFileSync(responseFile, 'utf8'));
-      try {
-        if (!command || response?.error?.retryable) fs.unlinkSync(responseFile);
-      } catch {
-        /* best-effort */
-      }
-      if (response?.result?.accepted === true) {
-        return {
-          steered: true,
-          retryable: false,
-          detail: 'Claude accepted the live follow-up.',
-        };
-      }
-      return {
-        steered: false,
-        retryable: response?.error?.retryable === true,
-        detail: String(response?.error?.message ?? 'Malformed Claude steer response.'),
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        return {
-          steered: false,
-          retryable: false,
-          detail: `Invalid Claude steer response: ${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-    }
-    await new Promise(resolve => setTimeout(resolve, 10));
-  }
-  // The request was published, so acceptance is unknown. Never queue a second
-  // copy; surface the protocol failure for the caller and task log.
+  if (!text.trim()) return { steered: false, retryable: false, detail: 'empty follow-up' };
+  const reply = await requestControl(
+    endpoint,
+    { id: mailboxId(command), method: 'turn/steer', params: { text: text.trim() }, command },
+    timeoutMs,
+    'Claude live steer',
+  );
   return {
-    steered: false,
-    retryable: false,
-    detail: 'Timed out waiting for Claude live steer acknowledgement.',
+    steered: reply.ok && reply.result?.accepted === true,
+    retryable: reply.retryable,
+    detail: reply.detail,
   };
 }
 
@@ -800,6 +629,7 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, content!, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   }
+  processTiming('claude.prepare', { resume: Boolean(options.resumeSessionId) });
   const env = engineEnvironment({ ...process.env, ...options.env });
   const version = claudeVersion(options.executable ?? 'claude', env, cwd);
   const args = buildClaudeTurnArgs(cwd, options, sessionId, configFile, version, systemFile);
@@ -822,6 +652,7 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
 
   return new Promise((resolve, reject) => {
     const startedAt = Date.now();
+    processTiming('claude.spawn');
     const child = spawn(options.executable ?? 'claude', args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -957,15 +788,19 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
           }
         }
       } else if (event.type === 'result') {
+        processTiming('claude.result');
         resultEvent = event;
         options.onResult?.({
-          status: event.is_error ? 1 : 0,
+          status: event.is_error || protocolErrors.length ? 1 : 0,
           threadId: event.session_id ?? streamSessionId,
           finalMessage:
             event.structured_output !== undefined
               ? JSON.stringify(event.structured_output)
               : String(event.result ?? '').trim(),
-          error: event.is_error ? { message: String(event.result ?? '') } : null,
+          error:
+            event.is_error || protocolErrors.length
+              ? { message: protocolErrors[0] || String(event.result ?? '') }
+              : null,
         });
         if (event.session_id) {
           streamSessionId = event.session_id;
@@ -1056,7 +891,9 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
       input.stopAccepting();
       process.removeListener('SIGTERM', onTerm);
       removeConfig();
+      processTiming('claude.exit');
       await steerServer?.close();
+      processTiming('claude.teardown.done');
       const tail = buffer.trim();
       if (tail) {
         try {
@@ -1080,6 +917,7 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
         resultEvent?.is_error === true ||
         resultEvent == null ||
         protocolErrors.length > 0;
+      processTiming('claude.usage.start');
       const tokens = normalizeClaudeUsage(resultEvent?.usage);
       if (!contextTokens && resultEvent) {
         // Result usage spans requests; prefer the last request's finalized transcript usage.
@@ -1091,6 +929,7 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
         const usage = last && last.input + last.cachedInput > 0 ? last : tokens;
         contextTokens = usage ? usage.input + usage.cachedInput : 0;
       }
+      processTiming('claude.usage.done');
       resolve({
         status: failed ? 1 : 0,
         threadId: resultEvent?.session_id ?? streamSessionId,

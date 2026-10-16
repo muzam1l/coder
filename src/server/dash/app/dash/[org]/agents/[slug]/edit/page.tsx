@@ -6,10 +6,8 @@ import { Card } from '@/comps/ui/card';
 import { Back, Page } from '@/comps/frame/page-head';
 import { Settle } from '@/comps/frame/stream';
 import { Hero } from '@/app/dash/[org]/agents/agent/hero';
-import { loadAgent } from '@/api/load';
+import { loadAgent, loadRunDefaults } from '@/api/load';
 import { editableAgent } from '@/api/types';
-import { NO_MODELS, modelsByEngine } from '@/app/dash/[org]/settings/model-options';
-import { DEFAULT_ENGINE } from '@coder/core/defaults';
 
 const AgentEditor = dynamic(() =>
   import('@/app/dash/[org]/agents/editor/editor').then(m => m.AgentEditor),
@@ -49,12 +47,7 @@ export default async function AgentEditPage({
   const { slug: raw } = await params;
   const slug = Array.isArray(raw) ? raw[0]! : raw!;
   const catalog = load(request).integrations.list();
-  const models = load(request)
-    .models.list()
-    .catch(() => NO_MODELS);
-  const config = load(request)
-    .config.get()
-    .catch(() => undefined);
+  const run = loadRunDefaults(request);
   const section = new URL(request.url).searchParams.get('section') ?? undefined;
   const agent = await loadAgent(request, slug);
 
@@ -62,18 +55,14 @@ export default async function AgentEditPage({
     <Page>
       <Settle
         load={() =>
-          Promise.all([catalog, models, config]).then(([integrations, shape, shown]) =>
+          Promise.all([catalog, run]).then(([integrations, { models, defaults }]) =>
             editableAgent(agent) ? (
               <AgentEditor
                 catalog={integrations}
                 agent={agent}
                 section={section}
-                models={modelsByEngine(shape)}
-                defaults={{
-                  engine: shown?.effective.chain?.[0] ?? DEFAULT_ENGINE,
-                  engines: shown?.effective.engines ?? {},
-                  builtin: shape.builtin,
-                }}
+                models={models}
+                defaults={defaults}
               />
             ) : (
               <>

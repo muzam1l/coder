@@ -13,10 +13,11 @@ import { Select } from '@/comps/ui/select';
 import { Combo } from '@/comps/ui/combo';
 import {
   CUSTOM_PROVIDERS,
+  EFFORTS,
   ENGINES,
   ENGINE_NAMES,
+  SCOPES,
   defaultLabel,
-  type CustomProvider,
 } from '@/app/dash/[org]/settings/model-options';
 import { reasonText } from '@/utils/format';
 import { useAction } from '@/utils/action';
@@ -37,23 +38,8 @@ const PROVIDERS: Array<[string, string]> = [
 ];
 /** The built-in model each engine's id field shows as its example. */
 const EXAMPLES: Record<string, string> = { claude: 'sonnet', codex: 'sol' };
-const EFFORTS: Array<[string, string]> = [
-  ['low', 'Low'],
-  ['medium', 'Medium'],
-  ['high', 'High'],
-];
-const SCOPES: Array<[string, string]> = [
-  ['personal', 'Just me'],
-  ['workspace', 'Workspace'],
-];
 const providers = CUSTOM_PROVIDERS;
-const OTHER: CustomProvider = {
-  id: 'other',
-  name: 'Other',
-  baseUrl: '',
-  envKey: '',
-  needsKey: true,
-};
+const OTHER = providers.at(-1)!;
 
 /** A model name from an id: its last path part, lowercase kebab, like `kimi-k2` from `moonshotai/kimi-k2`. */
 const slug = (id: string) =>

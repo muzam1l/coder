@@ -327,7 +327,6 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   };
 
   readonly tasks = {
-    run: (input: TaskInput): Promise<D['task']> => this.post('/admin/tasks', input),
     list: <Q extends TaskQuery = TaskQuery>(
       options?: Q,
     ): Promise<Q extends { cursor: string } ? TasksPage : D['task'][]> =>
@@ -444,8 +443,10 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     ): Promise<{ ok: true }> => this.post(credentialPath(label, '/default', workspace)),
     login: (engine: 'claude' | 'codex'): Promise<D['login']> =>
       this.post('/admin/logins', { engine }),
-    loginStatus: (id: string): Promise<D['login']> =>
-      this.request(`/admin/logins/${encodeURIComponent(id)}`),
+    loginStatus: (id: string, state?: string): Promise<D['login']> =>
+      this.request(
+        `/admin/logins/${encodeURIComponent(id)}${state ? `?state=${encodeURIComponent(state)}` : ''}`,
+      ),
     loginCode: (id: string, code: string): Promise<{ ok: true }> =>
       this.post(`/admin/logins/${encodeURIComponent(id)}`, { code }),
     cancelLogin: (id: string): Promise<{ ok: true }> =>
@@ -545,8 +546,8 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       ),
   };
   readonly connections = {
-    list: (authorization?: string): Promise<ConnectionRow[]> =>
-      this.request(queryPath('/admin/connections', { authorization })),
+    list: (authorization?: string, wait?: string): Promise<ConnectionRow[]> =>
+      this.request(queryPath('/admin/connections', { authorization, wait })),
     /** `authorize` is where the browser goes next for an OAuth connection. */
     add: (body: ConnectionInput): Promise<ConnectionRow & { authorize?: string }> =>
       this.post('/admin/connections', body),
@@ -566,11 +567,6 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   };
   readonly config = {
     get: (): Promise<ConfigShape> => this.request('/admin/config'),
-    put: (body: Config): Promise<Config> =>
-      this.request('/admin/config', {
-        method: 'PUT',
-        body: JSON.stringify(body),
-      }),
     patch: (body: import('./types').ConfigPatch): Promise<Config> =>
       this.request('/admin/config', {
         method: 'PATCH',

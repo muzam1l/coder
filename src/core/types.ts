@@ -41,9 +41,12 @@ export interface McpServerSpec {
   credentialFields?: { env?: string; header?: string };
   /** Tool allowlist; omit or empty for every tool the server offers. */
   tools?: string[];
+  /** Schemas load before the first prompt instead of behind tool search. */
+  alwaysLoad?: boolean;
+  /** Calls run without the engine's approval prompt in every permission mode. */
+  autoApprove?: boolean;
 }
 
-export type TaskKind = 'task';
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
 
 /** A persisted task record (task.json). Most fields accrete over the lifecycle. */
@@ -52,7 +55,6 @@ export interface Task {
   createdAt: string;
   updatedAt?: string;
   status: TaskStatus;
-  kind?: TaskKind;
   name?: string | null;
   // custom runs on the codex runtime.
   engine?: Engine;
@@ -71,19 +73,20 @@ export interface Task {
   permissions?: Permission;
   resumeThreadId?: string | null;
   cwd?: string;
-  background?: boolean;
   pid?: number | null;
   dispatchId?: string;
   threadId?: string | null;
   previousThreadIds?: string[];
   pendingRollover?: { summary: string; recent: string; exchanges: number };
   rollingOver?: boolean;
+  steerClosed?: boolean;
   // A conversation's task (an agent's default flow): its history rolls over past the context budget.
   conversation?: boolean;
   turnId?: string | null;
   // Ephemeral worker-owned endpoint used for live Codex controls or Claude
   // stream-json input. Cleared as soon as that turn stops accepting controls.
   steerEndpoint?: string | null;
+  turnUsage?: Array<Pick<TurnResult, 'tokens' | 'model'> & { at: string }>;
   completedAt?: string;
   resumedAt?: string;
   error?: string;

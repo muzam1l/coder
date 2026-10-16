@@ -67,4 +67,9 @@ marketplace.metadata = { ...marketplace.metadata, version: next };
 fs.writeFileSync(marketplaceFile, `${JSON.stringify(marketplace, null, 2)}\n`);
 console.log(`  ${marketplaceRel}  ${current} -> ${next}`);
 
+const deployFile = path.join(root, "src/server/deploy/vercel/package.json");
+const deploy = JSON.parse(fs.readFileSync(deployFile, "utf8"));
+deploy.dependencies["@wular/coder"] = next;
+fs.writeFileSync(deployFile, `${JSON.stringify(deploy, null, 2)}\n`);
+
 console.log(`\nBumped coder ${current} -> ${next} (${level}). Rebuild + republish to ship it.`);

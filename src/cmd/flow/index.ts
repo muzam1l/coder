@@ -25,6 +25,7 @@ const FLOW_MENU: { usage: string; blurb: string }[] = [
 export const commandFlow = group(
   'flow',
   {
+    drive: async () => (await import('./drive')).commandDrive,
     run: async () => (await import('./run')).commandRun,
     list: async () => (await import('./list')).commandList,
     ls: async () => (await import('./list')).commandList,

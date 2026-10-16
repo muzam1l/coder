@@ -2,25 +2,28 @@ import { type Params } from '../routes/match';
 import { type AgentTask } from '../../agent/types';
 import { type TaskStatus, type TaskLogLine, type UsageRecord } from '../store/types';
 import { type ServerContext } from '../context';
-import { taskContext, taskLogSecrets } from './context';
+import { taskContext } from './context';
 import { writeBackCodexAuth } from '../settings/credentials';
-import { storeLogs } from './logs';
+import { storeLogs, taskRedactor } from './logs';
 import { stopTaskMachine } from './kick';
 import { taskRunner } from '../runners';
-import { type InboxAck } from './queue';
+import { type CallbackState, type InboxAck } from './queue';
 import { taskClaims, taskTokenHash } from './token';
 import { bearerToken } from '../routes/guards';
 import { json } from '../routes/http';
 import { type EngineLogin } from '../settings/logins';
-import { decryptSecret } from '../store/secrets';
-import { rememberPost } from './conversation';
+import { CONVERSATION_TTL_MS, knownPosts, rememberPost } from './conversation';
+
+/** How long a reply or react call id is remembered, so a late retry still posts once. */
+const CALL_TTL_MS = 24 * 60 * 60 * 1000;
 
 export async function authorizeTask(
   req: Request,
   ctx: ServerContext,
   id: string,
   allowCompleted = false,
-): Promise<TaskStatus | Response> {
+  include?: 'secrets' | 'context',
+): Promise<CallbackState | Response> {
   const token = bearerToken(req);
   if (!token) return new Response('Unauthorized', { status: 401 });
   const bound = taskClaims(token);
@@ -31,13 +34,13 @@ export async function authorizeTask(
   )
     return new Response('Unauthorized', { status: 401 });
   return (
-    (await ctx.queue.touch(
-      ctx.organizationId,
+    (await ctx.queue.authorize(
       id,
       taskTokenHash(token),
       bound.attempt!,
+      ctx.organizationId,
       (ctx.now ?? Date.now)(),
-      allowCompleted,
+      { allowCompleted, include },
     )) ?? new Response('Unauthorized', { status: 401 })
   );
 }
@@ -111,9 +114,9 @@ export async function ackMessages(
 
   const fence = { tokenHash: hash, attempts: claims.attempt!, generation: ack.generation };
   const accepted = await ctx.queue.ackInbox(ctx.organizationId, id, ack, fence);
-  if (accepted) {
+  if (accepted === 'cancelled') {
     const current = await ctx.store.get('task', id);
-    if (current?.status === 'cancelled') await stopTaskMachine(ctx, current);
+    if (current) await stopTaskMachine(ctx, current);
   }
 
   return accepted ? json({ ok: true }) : new Response('Unauthorized', { status: 401 });
@@ -182,12 +185,12 @@ export async function reportResult(
   const id = params.id!;
   const token = bearerToken(req);
   const authorized = ctx.callbackTask!;
+  const runner = authorized.handle ? await taskRunner(ctx, authorized.task) : undefined;
   if (['completed', 'failed', 'cancelled'].includes(authorized.status)) {
-    await stopTaskMachine(ctx, authorized);
+    await stopTaskMachine(ctx, authorized, false, runner);
     return json({ ok: true });
   }
 
-  const runner = authorized.handle ? await taskRunner(ctx, authorized.task) : undefined;
   const body = (await req.json().catch(() => undefined)) as TaskCallback | undefined;
   if (
     !body?.status ||
@@ -198,25 +201,20 @@ export async function reportResult(
   )
     return json({ error: 'Invalid task result' }, 400);
 
-  const secrets = (await taskLogSecrets(ctx, authorized)).sort(
-    (left, right) => right.length - left.length,
-  );
+  const redact = await taskRedactor(ctx, authorized, true);
   Object.assign(
     body,
     JSON.parse(
-      JSON.stringify(body, (_key, value) =>
-        typeof value === 'string'
-          ? secrets.reduce((text, secret) => text.replaceAll(secret, '[REDACTED]'), value)
-          : value,
-      ),
+      JSON.stringify(body, (_key, value) => (typeof value === 'string' ? redact(value) : value)),
     ) as TaskCallback,
   );
 
   let now = (ctx.now ?? Date.now)();
-  if (authorized.task.event)
-    await rememberPost(ctx, authorized.task.event, body.postedMessages ?? [], now);
-
+  const posted = authorized.task.event
+    ? knownPosts(authorized.task.event, body.postedMessages ?? [])
+    : [];
   if (body.status === 'running' || body.status === 'waiting') {
+    if (posted.length) await rememberPost(ctx, authorized.task.event!, body.postedMessages!, now);
     await ctx.queue.patchTask(
       ctx.organizationId,
       id,
@@ -248,12 +246,16 @@ export async function reportResult(
     output,
     ...(typeof body.diff === 'string' ? { diff: body.diff } : {}),
   };
+  // Posts, usage and the log marker land with the outcome; a machine that must stop first marks its logs after.
+  const stops = !runner || runner.kind === 'vercel-sandbox' || runner.kind === 'local-docker';
   const completed = await ctx.queue.completeTask(
     ctx.organizationId,
     id,
     {
       attempts: authorized.attempts,
       tokenHash: authorized.tokenHash!,
+      known: posted.map(id => ({ id, ttlMs: CONVERSATION_TTL_MS })),
+      logsComplete: Boolean(authorized.handle) && !stops,
       outcome: {
         status: body.status,
         result,
@@ -288,9 +290,89 @@ export async function reportResult(
     now,
   );
 
-  if (completed) await stopTaskMachine(ctx, authorized, false, runner);
+  if (completed)
+    await stopTaskMachine(
+      ctx,
+      stops ? authorized : { ...authorized, logsComplete: true },
+      false,
+      runner,
+    );
 
   return json({ ok: true });
+}
+
+const CALL_ID = /^[a-f0-9-]{36}$/;
+
+/** The task's own conversation, for a tool call from its running attempt. */
+async function conversationReplies(ctx: CallbackContext, authorized: TaskStatus) {
+  const event = authorized.task.event;
+  if (!event || authorized.task.source !== event.integration)
+    throw new Error('The task has no conversation');
+  const app = await ctx.store.get('app', event.appId);
+  if (!app) throw new Error('The conversation app is gone');
+  const { eventReplies } = await import('../chat');
+
+  return { event, replies: await eventReplies(ctx, app, event) };
+}
+
+/** Runs `send` once per call id for this attempt; a retry of a sent call is answered without posting. */
+async function conversationCall(
+  ctx: CallbackContext,
+  kind: 'reply' | 'react',
+  id: string,
+  send: (conversation: Awaited<ReturnType<typeof conversationReplies>>) => Promise<void>,
+): Promise<Response> {
+  const authorized = ctx.callbackTask!;
+  const key = `${kind}:${authorized.task.id}:${authorized.generation ?? 0}:${id}`;
+  const now = (ctx.now ?? Date.now)();
+  if (!(await ctx.store.create('delivery', key, { at: now }, { ttlMs: CALL_TTL_MS })))
+    return json({ ok: true, duplicate: true });
+  try {
+    await send(await conversationReplies(ctx, authorized));
+  } catch (error) {
+    await ctx.store.delete('delivery', key);
+    return json({ error: error instanceof Error ? error.message : String(error) }, 409);
+  }
+
+  return json({ ok: true });
+}
+
+export async function sendReply(req: Request, ctx: CallbackContext): Promise<Response> {
+  const body = (await req.json().catch(() => undefined)) as
+    { id?: unknown; text?: unknown } | undefined;
+  if (typeof body?.id !== 'string' || !CALL_ID.test(body.id))
+    return json({ error: 'Invalid call id' }, 400);
+  if (typeof body.text !== 'string' || !body.text.trim())
+    return json({ error: 'Reply text is required' }, 400);
+  const text = body.text.trim();
+
+  return conversationCall(ctx, 'reply', body.id, async ({ event, replies }) => {
+    const sent = await replies.post(text, true);
+    if (sent)
+      await rememberPost(
+        ctx,
+        event,
+        sent.ids ?? (sent.id ? [sent.id] : []),
+        (ctx.now ?? Date.now)(),
+      );
+  });
+}
+
+export async function sendReaction(req: Request, ctx: CallbackContext): Promise<Response> {
+  const body = (await req.json().catch(() => undefined)) as
+    { id?: unknown; emoji?: unknown; message?: unknown } | undefined;
+  if (typeof body?.id !== 'string' || !CALL_ID.test(body.id))
+    return json({ error: 'Invalid call id' }, 400);
+  if (typeof body.emoji !== 'string' || !body.emoji.trim())
+    return json({ error: 'Emoji is required' }, 400);
+  if (body.message !== undefined && (typeof body.message !== 'string' || !body.message.trim()))
+    return json({ error: 'Message id must be a non-empty string' }, 400);
+  const { emoji, message } = body;
+
+  return conversationCall(ctx, 'react', body.id, async ({ replies }) => {
+    if (!replies.react) throw new Error('The conversation cannot add reactions');
+    await replies.react(emoji.trim(), message);
+  });
 }
 
 export async function refreshCredential(

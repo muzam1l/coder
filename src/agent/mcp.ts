@@ -1,4 +1,5 @@
 import process from 'node:process';
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -13,7 +14,8 @@ import { history } from '../core/engines/history';
 import { connectionEnvironment } from '../core/connections';
 import { claudeProjectsDir } from '../core/engines/claude/sessions';
 import { codexHome } from '../core/engines/codex/sessions';
-import { askWorker } from '../core/mailbox';
+import { eventJsons } from '../core/event-prompt';
+import { appendTaskDirLog } from '../core/state';
 
 /** Tool sets coder serves over stdio: one per integration plus task history. */
 export function agentTools(id: string, allowed?: string[]): ToolSet | undefined {
@@ -101,19 +103,56 @@ export function taskToolServers(
   });
 }
 
+/** Where a conversation task's reply and react tools post: the poster's task callback path and the attempt token. */
+export interface ReplyEndpoint {
+  url: string;
+  token: string;
+}
+
 /** Task tool servers with their tokens in the worker env, under names every turn of the task shares. */
 export function nativeToolEnvironment(
   task: Pick<AgentTask, 'tools' | 'event' | 'toolScopes'>,
   tokens: Record<string, string | undefined>,
+  reply?: ReplyEndpoint,
 ) {
   return connectionEnvironment(
-    Object.fromEntries(
-      taskToolServers(task, tokens).map(server => [
+    Object.fromEntries([
+      ...taskToolServers(task, tokens).map(server => [
         `native:${server.name}`,
         { ...server, resolved: true },
       ]),
-    ),
+      // The token travels like a tool credential: a placeholder in the task record, the value in the worker env.
+      ...(reply
+        ? [
+            [
+              'native:history',
+              {
+                name: 'history',
+                resolved: true,
+                env: { CODER_REPLY_URL: reply.url, CODER_REPLY_TOKEN: reply.token },
+                credentialFields: { env: 'CODER_REPLY_TOKEN' },
+              },
+            ],
+          ]
+        : []),
+    ]),
   );
+}
+
+/** The turn's MCP servers: the conversation tools bound to the poster's endpoint, then the rest. */
+export function turnToolServers(
+  task: Pick<Task, 'conversation'>,
+  taskDir: string,
+  servers: McpServerSpec[],
+): McpServerSpec[] {
+  const endpoint = servers.find(
+    server => server.name === 'history' && !server.command && !server.url,
+  );
+  const rest = servers.filter(server => server !== endpoint);
+
+  return task.conversation
+    ? [historyToolServer(path.join(taskDir, 'job.json'), endpoint?.env), ...rest]
+    : rest;
 }
 
 export async function gitToolEnvironment(
@@ -173,6 +212,38 @@ process.stdin.on('end', () => {
   }
 }
 
+/** One direct request to the poster; a retry after a network failure reuses the call id, so it posts once. */
+async function askPoster(
+  kind: 'reply' | 'react',
+  payload: Record<string, unknown>,
+  request: typeof fetch = fetch,
+): Promise<{ ok: true }> {
+  const url = process.env.CODER_REPLY_URL;
+  const token = process.env.CODER_REPLY_TOKEN;
+  if (!url || !token) throw new Error('This task has no conversation to post to');
+  const body = JSON.stringify({ id: randomUUID(), ...payload });
+  for (let attempt = 0; ; attempt++) {
+    let response: Response;
+    try {
+      response = await request(`${url}/${kind}`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body,
+        signal: AbortSignal.timeout(60_000),
+      });
+    } catch (error) {
+      if (attempt < 2) continue;
+      throw error;
+    }
+    const answer = (await response.json().catch(() => undefined)) as
+      { ok?: boolean; error?: string } | undefined;
+    if (!response.ok)
+      throw new Error(answer?.error ?? `The conversation ${kind} failed (${response.status})`);
+
+    return { ok: true };
+  }
+}
+
 const HISTORY_TOOLS: ToolSet = {
   reply: {
     description:
@@ -182,20 +253,19 @@ const HISTORY_TOOLS: ToolSet = {
       properties: { text: { type: 'string', description: 'Markdown to post.' } },
       required: ['text'],
     },
-    handler: async a => {
+    handler: async (a, ctx) => {
       const file = process.env.CODER_HISTORY_TASK;
       if (!file) throw new Error('CODER_HISTORY_TASK is not set');
       const task = JSON.parse(await fs.readFile(file, 'utf8')) as Task;
       if (!task.conversation) throw new Error('Only conversation tasks can reply');
+      if (typeof a.text !== 'string' || !a.text.trim()) throw new Error('Reply text is required');
+      const text = a.text.trim();
 
-      return askWorker(
-        'reply',
-        { text: a.text },
-        {
-          dir: path.join(path.dirname(file), 'replies'),
-          timeoutMs: 60_000,
-        },
-      );
+      const sent = await askPoster('reply', { text }, ctx?.fetch);
+      // The turn's last reply, so the same text as the final message is not posted twice.
+      appendTaskDirLog(path.dirname(file), { kind: 'reply', message: text });
+
+      return sent;
     },
   },
   react: {
@@ -212,19 +282,23 @@ const HISTORY_TOOLS: ToolSet = {
       },
       required: ['emoji'],
     },
-    handler: async a => {
+    handler: async (a, ctx) => {
       const file = process.env.CODER_HISTORY_TASK;
       if (!file) throw new Error('CODER_HISTORY_TASK is not set');
       const task = JSON.parse(await fs.readFile(file, 'utf8')) as Task;
       if (!task.conversation) throw new Error('Only conversation tasks can react');
+      if (typeof a.emoji !== 'string' || !a.emoji.trim()) throw new Error('Emoji is required');
+      if (a.message !== undefined && (typeof a.message !== 'string' || !a.message.trim()))
+        throw new Error('Message id must be a non-empty string');
+      const event = eventJsons(task.currentPrompt ?? task.prompt ?? '', true)?.[0];
+      const message = a.message ?? event?.message?.id ?? event?.messages?.[0]?.id;
+      if (event && !message)
+        throw new Error('This turn has no message to react to; give a message id');
 
-      return askWorker(
+      return askPoster(
         'react',
-        { emoji: a.emoji, message: a.message },
-        {
-          dir: path.join(path.dirname(file), 'replies'),
-          timeoutMs: 60_000,
-        },
+        { emoji: a.emoji.trim(), ...(message ? { message } : {}) },
+        ctx?.fetch,
       );
     },
   },
@@ -253,16 +327,19 @@ const HISTORY_TOOLS: ToolSet = {
   },
 };
 
-export function historyToolServer(file: string): McpServerSpec {
+export function historyToolServer(file: string, env: Record<string, string> = {}): McpServerSpec {
   return {
     name: 'history',
     command: process.execPath,
     args: [CLI_PATH, 'agent', 'tools', 'history'],
     env: {
+      ...env,
       CODER_HISTORY_TASK: file,
       CODEX_HOME: codexHome(),
       CLAUDE_CONFIG_DIR: path.dirname(claudeProjectsDir()),
     },
     tools: Object.keys(HISTORY_TOOLS),
+    alwaysLoad: true,
+    autoApprove: true,
   };
 }

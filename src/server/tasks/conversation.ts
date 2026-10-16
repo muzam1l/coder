@@ -20,8 +20,6 @@ export const CONVERSATION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const STEER_BATCH_MS = 5000;
 /** Reactions in a running task's conversation are gathered this long before they go in as one steer. */
 export const REACTION_BATCH_MS = 30_000;
-/** A crashed sender releases its reservation after this lease. */
-export const BATCH_LEASE_MS = 30_000;
 /** An unclaimed batch outlives any wait; the next message in its conversation takes it. */
 const BATCH_TTL_MS = 60 * 60 * 1000;
 
@@ -54,15 +52,7 @@ export async function conversationState(
 ): Promise<ConversationState> {
   if (!event.chat) return {};
   const key = keyOf(event);
-  if (ctx.store.conversationState) return ctx.store.conversationState(key);
-  const [record, unseen, batch] = await Promise.all([
-    conversation(ctx, event),
-    ctx.store.get<Unseen>('delivery', `since:${key}`),
-    ctx.store.get<Batch>('delivery', `batch:${key}`),
-  ]);
-  const status = record && (await ctx.store.get('task', record.taskId));
-
-  return { record, unseen, batch, ...(status?.task.flow === 'default' ? { status } : {}) };
+  return ctx.store.conversationState(key);
 }
 
 /** A burst gathering under `batch:<conversation>` or `reactions:<conversation>`; the last writer owns it. */
@@ -102,23 +92,30 @@ export function knownKey(
   return `known:${appId}:${installationId}:${channel}:${message}`;
 }
 
-/** The conversation's record, when a task was started in it. */
-export async function conversation(
-  ctx: ServerContext,
-  event: AgentEvent,
-): Promise<Conversation | undefined> {
-  return event.chat ? ctx.store.get<Conversation>('delivery', keyOf(event)) : undefined;
-}
-
 /** The conversation's task, when it still exists and takes steers; a review task never does. */
 export async function conversationTask(
   ctx: ServerContext,
   event: AgentEvent,
 ): Promise<TaskStatus | undefined> {
-  const record = await conversation(ctx, event);
-  const status = record && (await ctx.store.get('task', record.taskId));
+  return event.chat ? (await ctx.store.conversationState(keyOf(event))).status : undefined;
+}
 
-  return status?.task.flow === 'default' ? status : undefined;
+/** What remembering a conversation writes: its record under the thread key, and its root message as known. */
+export function conversationRecord(
+  event: AgentEvent,
+  taskId: string,
+  now: number,
+): { key: string; record: Conversation; root: string; ttlMs: number } | undefined {
+  const thread = event.chat?.thread;
+  if (!thread) return undefined;
+  const root = thread.id.slice((thread.channelId?.length ?? -1) + 1);
+
+  return {
+    key: keyOf(event),
+    record: { at: now, taskId, ...(event.chat?.message ? { seen: event.chat.message.id } : {}) },
+    root: knownKey(event.appId, event.installationId, channelOf(thread), root),
+    ttlMs: CONVERSATION_TTL_MS,
+  };
 }
 
 /** Remembers a conversation's task and its root message, so later messages steer it and reactions on the root are recognized. */
@@ -128,25 +125,26 @@ export async function rememberConversation(
   taskId: string,
   now: number,
 ): Promise<void> {
-  const thread = event.chat?.thread;
-  if (!thread) return;
-  const record: Conversation = {
-    at: now,
-    taskId,
-    ...(event.chat?.message ? { seen: event.chat.message.id } : {}),
-  };
-  const root = thread.id.slice((thread.channelId?.length ?? -1) + 1);
+  const written = conversationRecord(event, taskId, now);
+  if (!written) return;
 
   await ctx.store.putMany(
     'delivery',
     [
-      { id: keyOf(event), value: record },
-      {
-        id: knownKey(event.appId, event.installationId, channelOf(thread), root),
-        value: { at: now },
-      },
+      { id: written.key, value: written.record },
+      { id: written.root, value: { at: now } },
     ],
     { ttlMs: CONVERSATION_TTL_MS },
+  );
+}
+
+/** The known-message keys of messages Coder posted in the event's thread. */
+export function knownPosts(event: AgentEvent, message: string | string[]): string[] {
+  const thread = event.chat?.thread;
+  if (!thread) return [];
+
+  return [...new Set([message].flat().filter(Boolean))].map(message =>
+    knownKey(event.appId, event.installationId, channelOf(thread), message),
   );
 }
 
@@ -157,16 +155,9 @@ export async function rememberPost(
   message: string | string[],
   now: number,
 ): Promise<void> {
-  const thread = event.chat?.thread;
-  if (!thread) return;
-  const messages = [...new Set([message].flat().filter(Boolean))];
-
   await ctx.store.putMany(
     'delivery',
-    messages.map(message => ({
-      id: knownKey(event.appId, event.installationId, channelOf(thread), message),
-      value: { at: now },
-    })),
+    knownPosts(event, message).map(id => ({ id, value: { at: now } })),
     { ttlMs: CONVERSATION_TTL_MS },
   );
 }
@@ -178,23 +169,27 @@ async function markSeen(
   now: number,
 ): Promise<void> {
   if (!event.chat?.message) return;
-  if (ctx.store.markConversation)
-    return ctx.store.markConversation(
-      keyOf(event),
-      taskId,
-      event.chat.message.id,
-      now,
-      CONVERSATION_TTL_MS,
-    );
-  const record = await conversation(ctx, event);
-  if (record?.taskId !== taskId) return;
-
-  await ctx.store.put(
-    'delivery',
+  return ctx.store.markConversation(
     keyOf(event),
-    { ...record, at: now, seen: event.chat.message.id },
-    { ttlMs: CONVERSATION_TTL_MS },
+    taskId,
+    event.chat.message.id,
+    now,
+    CONVERSATION_TTL_MS,
   );
+}
+
+/** What `forgetUnseen` acknowledges, as a new task's admission records it. */
+export function unseenAcknowledgement(
+  event: AgentEvent,
+): { key: string; version: number; epoch?: string } | undefined {
+  const through = event.conversation?.unseen;
+  return event.chat && through !== undefined
+    ? {
+        key: keyOf(event),
+        version: through.version,
+        ...(through.epoch ? { epoch: through.epoch } : {}),
+      }
+    : undefined;
 }
 
 /** Records a message of a conversation with a task that reached Coder but not the agent, for the next turn's `since`. */
@@ -208,9 +203,8 @@ export async function recordUnseen(
 
 /** Acknowledges only the unseen snapshot carried by the delivered event. */
 export async function forgetUnseen(ctx: ServerContext, event: AgentEvent): Promise<void> {
-  const through = event.conversation?.unseen;
-  if (event.chat && through !== undefined)
-    await ctx.store.acknowledgeUnseen(keyOf(event), through.version, through.epoch);
+  const through = unseenAcknowledgement(event);
+  if (through) await ctx.store.acknowledgeUnseen(through.key, through.version, through.epoch);
 }
 
 /** Whether the app receives every message in this conversation. */
@@ -302,44 +296,16 @@ export async function describe(
   };
 }
 
-/** Waits until `ms` have passed on the server's clock. */
-async function settle(ctx: ServerContext, ms: number): Promise<void> {
-  await new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/** Adds to a conversation's batch, becoming its owner; the last writer takes it. */
-async function appendBatch<T>(
-  ctx: ServerContext,
-  key: string,
-  owner: string,
-  items: T[],
-  now: number,
-): Promise<void> {
-  await ctx.store.appendBatch(key, owner, items, now, BATCH_TTL_MS);
-}
-
 /** Reserves the batch while it is delivered; a later owner waits for its acknowledgement. */
 async function takeBatch<T>(
   ctx: ServerContext,
   key: string,
   owner: string,
 ): Promise<Batch<T> | undefined> {
-  const events = (ctx.store.batchEvents ??= new EventTarget());
-  const name = `${ctx.organizationId}:${key}`;
   for (;;) {
-    let wake!: () => void;
-    const finished = new Promise<void>(resolve => (wake = resolve));
-    events.addEventListener(name, wake, { once: true });
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const batch = await ctx.store.claimBatch(key, owner);
-      if (batch !== null) return batch as Batch<T> | undefined;
-      timer = setTimeout(wake, BATCH_LEASE_MS);
-      await finished;
-    } finally {
-      clearTimeout(timer);
-      events.removeEventListener(name, wake);
-    }
+    const batch = await ctx.store.claimBatch(key, owner);
+    if (batch !== null) return batch as Batch<T> | undefined;
+    await new Promise(resolve => setTimeout(resolve, 500));
   }
 }
 
@@ -350,11 +316,7 @@ async function finishBatch(
   accepted: boolean,
   through?: string,
 ): Promise<boolean> {
-  try {
-    return await ctx.store.finishBatch(key, owner, accepted, through);
-  } finally {
-    ctx.store.batchEvents?.dispatchEvent(new Event(`${ctx.organizationId}:${key}`));
-  }
+  return ctx.store.finishBatch(key, owner, accepted, through);
 }
 
 /** The task as it is now, and how many leading items of the claimed batch it already holds: admitted into its record by a steer or resume, or waiting in an inbox entry. */
@@ -397,17 +359,7 @@ async function steerRunning(
       : undefined;
   if (turn && !ACTIVE_STATES.includes(turn.status)) return false;
 
-  return Boolean(
-    await addInbox(
-      ctx,
-      status.task.id,
-      'steer',
-      { text },
-      status.generation ?? 0,
-      status.task,
-      batch,
-    ),
-  );
+  return Boolean(await addInbox(ctx, status, 'steer', { text }, batch));
 }
 
 /** Whether the task runs as a CLI task on this local server. */
@@ -542,12 +494,18 @@ export async function steerConversation(
         },
       }
     : event;
-  await appendBatch(ctx, key, owner, [{ admission: owner, event: compact, user }], now());
+  await ctx.store.appendBatch(
+    key,
+    owner,
+    [{ admission: owner, event: compact, user }],
+    now(),
+    BATCH_TTL_MS,
+  );
   await forgetUnseen(ctx, event);
   detach(
     ctx,
     (async () => {
-      await settle(ctx, ctx.config.steerBatchMs ?? STEER_BATCH_MS);
+      await new Promise(resolve => setTimeout(resolve, ctx.config.steerBatchMs ?? STEER_BATCH_MS));
       const taken = await takeBatch<Steer>(ctx, key, owner);
       if (!taken) return;
       const batch = taken.items.map((steer, index) =>
@@ -623,11 +581,13 @@ export async function reactToConversation(
   if (!status || !ACTIVE_STATES.includes(status.status)) return;
   const key = `reactions:${keyOf(event)}`;
   const owner = randomUUID();
-  await appendBatch(ctx, key, owner, [{ ...reaction, admission: owner }], now());
+  await ctx.store.appendBatch(key, owner, [{ ...reaction, admission: owner }], now(), BATCH_TTL_MS);
   detach(
     ctx,
     (async () => {
-      await settle(ctx, ctx.config.reactionBatchMs ?? REACTION_BATCH_MS);
+      await new Promise(resolve =>
+        setTimeout(resolve, ctx.config.reactionBatchMs ?? REACTION_BATCH_MS),
+      );
       const batch = await takeBatch<Reaction & { admission: string }>(ctx, key, owner);
       if (!batch) return;
       let accepted = false;

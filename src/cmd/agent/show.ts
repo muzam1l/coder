@@ -4,11 +4,9 @@ import process from 'node:process';
 
 import type { agents } from '../../agent';
 import { outStyle, renderTable } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
+import { baseOptions, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
 import { isLocal } from './list';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 type AgentDetail = Awaited<ReturnType<typeof agents.show>>;
 

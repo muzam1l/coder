@@ -1,7 +1,7 @@
 /** `coder model remove`: drop a custom endpoint model. */
 import process from 'node:process';
 
-import { modelRemoveCore } from '../../core/models';
+import { models } from '../../core/models';
 import { outStyle } from '../../tui/output';
 import { command } from '../../cli';
 import { modelOptions } from './add';
@@ -15,7 +15,7 @@ export const commandModelRemove = command({
   },
   options: modelOptions,
   args: 1,
-  run: ({ options, args: [name], cwd }) => modelRemoveCore(cwd, name, options),
+  run: ({ options, args: [name], cwd }) => models.remove(name, { ...options, cwd }),
   print: result => printModelChange('removed', result.removed, result.file),
 });
 

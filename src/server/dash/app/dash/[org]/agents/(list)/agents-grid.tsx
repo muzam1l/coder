@@ -47,7 +47,6 @@ function AgentCard({ agent, catalog }: { agent: AgentCardRow; catalog: Integrati
   );
 }
 
-/** Every agent in pages, searched and filtered on the server. */
 /** Agent kinds a list filters by. */
 export const KINDS: Array<[string, string]> = [
   ['', 'All agents'],

@@ -14,7 +14,6 @@ import type { DrizzleStore } from '../store';
 import {
   addSecret,
   app,
-  appRowId,
   date,
   defined,
   install,
@@ -179,14 +178,40 @@ export function installations(s: DrizzleStore): Kind<Installation> {
     },
     put: (id, value) =>
       s.transaction(`installation:${id}`, async s => {
-        const [existing] = await s.db
-          .select({ secretId: t.tokenSecretId, organizationId: t.organizationId, sealed: secret })
-          .from(t)
-          .leftJoin(secret, eq(secret.id, t.tokenSecretId))
-          .where(eq(t.key, id));
+        const [found] = await s.db
+          .select({
+            row: t,
+            sealed: secret,
+            appKey: app.key,
+            parent: sql<
+              number | null
+            >`(select id from ${app} where organization_id in (${s.organizationId}, ${UNSCOPED_ORGANIZATION}) and key = ${value.app} order by organization_id desc limit 1)`,
+          })
+          .from(sql`(select 1) as anchor`)
+          .leftJoin(t, eq(t.key, id))
+          .leftJoin(app, eq(app.id, t.appId))
+          .leftJoin(secret, eq(secret.id, t.tokenSecretId));
+        const existing = found?.row
+          ? {
+              secretId: found.row.tokenSecretId,
+              organizationId: found.row.organizationId,
+              covers: found.row.covers,
+              deletedAt: found.row.deletedAt,
+              appKey: found.appKey,
+              sealed: found.sealed,
+            }
+          : undefined;
         const taken = () => new Error(`Installation "${id}" belongs to another workspace.`);
         if (existing && existing.organizationId !== s.organizationId) throw taken();
-        if (value.deletedAt === undefined) await checkBinding(s, id, value);
+        if (!found?.parent) throw new Error(`Unknown app "${value.app}".`);
+        if (
+          value.deletedAt === undefined &&
+          (!existing ||
+            existing.appKey !== value.app ||
+            existing.deletedAt !== null ||
+            JSON.stringify(existing.covers ?? []) !== JSON.stringify(value.covers ?? []))
+        )
+          await checkBinding(s, id, value);
         let tokenSecretId = existing?.secretId ?? null;
         if (value.token) {
           if (tokenSecretId) {
@@ -195,7 +220,7 @@ export function installations(s: DrizzleStore): Kind<Installation> {
           } else tokenSecretId = await addSecret(s, 'installation', value.token);
         }
         const row = {
-          appId: await appRowId(s, value.app),
+          appId: found.parent,
           platformInstallId: id.slice(value.app.length + 1),
           account: value.account,
           tokenSecretId: value.token ? tokenSecretId : null,

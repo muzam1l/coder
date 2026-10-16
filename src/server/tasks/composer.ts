@@ -3,7 +3,6 @@ import { defaultAgent } from '../../agent/load';
 import { builtinFlowsDir, flowsIn } from '../../flow/discover';
 import { type ServerContext } from '../context';
 import { agentRecords, prepareAgent } from '../agents/catalog';
-import { seedBuiltinAgents } from '../agents/records';
 import { effectiveConfig, shownConfig } from '../settings/config';
 import { localFolders } from '../settings/folders';
 import { modelList } from '../settings/models';
@@ -13,7 +12,6 @@ import { json } from '../routes/http';
 /** `GET /admin/composer`: everything the New task composer offers, read in one handler. */
 export async function composerOptions(req: Request, ctx: ServerContext): Promise<Response> {
   const { now, local } = await prepareAgent(ctx);
-  if (!local) await seedBuiltinAgents(ctx.store, now);
   const [records, config, runners] = await Promise.all([
     agentRecords(ctx, local, { limit: 200 }),
     shownConfig(ctx),

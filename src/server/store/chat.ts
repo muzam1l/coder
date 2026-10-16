@@ -10,6 +10,7 @@ type Entry = { value: unknown; expiresAt?: number };
 /** Every key in one map: `k:` values and lists, `l:` locks, `q:` queues, `s:` subscriptions. */
 export class LocalChatState implements StateAdapter {
   private readonly memory = new Map<string, Entry>();
+  private loaded = false;
 
   /** Without `file` the state lives in this instance, for a throwaway server. */
   constructor(
@@ -32,14 +33,19 @@ export class LocalChatState implements StateAdapter {
   }
 
   private load(now: number): Map<string, Entry> {
-    let entries = this.memory;
-    if (this.file) {
-      try {
-        entries = new Map(Object.entries(JSON.parse(fs.readFileSync(this.file, 'utf8'))));
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-        entries = new Map();
+    const entries = this.memory;
+    if (!this.loaded) {
+      if (this.file) {
+        try {
+          for (const [key, entry] of Object.entries(
+            JSON.parse(fs.readFileSync(this.file, 'utf8')) as Record<string, Entry>,
+          ))
+            entries.set(key, entry);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+        }
       }
+      this.loaded = true;
     }
     for (const [key, entry] of entries)
       if (entry.expiresAt !== undefined && entry.expiresAt <= now) entries.delete(key);

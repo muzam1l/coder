@@ -2,6 +2,9 @@ import type { TaskRow } from '@coder/client/types';
 import { byListKey, listRank } from '@coder/core/defaults';
 import { eventJsons, replyRequired as turnReplyRequired } from '@coder/core/event-prompt';
 
+/** A task page's tabs, the loading frame's too. */
+export const TASK_TABS = ['Conversation', 'Activity'];
+
 /** Task statuses a list filters by. */
 export const STATUSES: Array<[string, string]> = [
   ['', 'Recent'],

@@ -35,8 +35,6 @@ export const iPlus = 'M12 5v14M5 12h14';
 export const iPencil = 'M4 20h4L19 9l-4-4L4 16v4ZM13 7l4 4';
 export const iMessage = 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z';
 export const iSteer = 'M4 12h12M12 6l6 6-6 6';
-export const iAsk =
-  'M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.6.3-1 .8-1 1.5M12 17h.01';
 export const iShuffle = 'M16 4h4v4M20 4l-7 7M4 20l6-6M16 20h4v-4M20 20l-5-5M4 4l5 5';
 export const iSearch = 'M4 11a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M20 20l-3.5-3.5';
 export const iAlert =

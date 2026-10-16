@@ -17,7 +17,6 @@ const COLUMNS: Array<[string, string, Metric]> = [
 export function TopAgents({
   org,
   rows,
-  known,
   other,
   sort,
   range,
@@ -26,8 +25,6 @@ export function TopAgents({
 }: {
   org: string;
   rows: UsageTotal[];
-  /** Agents this server has; others ran from another folder or were deleted, so they have no page. */
-  known: Set<string>;
   other?: UsageAmount;
   sort: string;
   /** The range query, `range=7d` or `from=…&to=…`. */
@@ -97,21 +94,17 @@ export function TopAgents({
                       <span class="unlinked gone" title="Deleted agent">
                         {row.key}
                       </span>
-                    ) : known.has(row.key) ? (
+                    ) : (
                       <Link
                         class="cover"
                         href="/dash/[org]/agents/[slug]/usage"
                         params={{ org, slug: row.key }}
                         search={withSearch(new URLSearchParams(range), {
-                          from: `/dash/${org}/usage?${range}`,
+                          back: `/dash/${org}/usage?${range}`,
                         })}
                       >
                         {row.key}
                       </Link>
-                    ) : (
-                      <span class="unlinked" title="Not an agent on this server">
-                        {row.key}
-                      </span>
                     )}
                     {bar(row[metric], tops[row.key])}
                   </td>

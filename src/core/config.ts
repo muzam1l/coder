@@ -403,11 +403,6 @@ export function removeModel(
 
 /** Returns human-readable errors; empty array means valid. */
 export function validateConfig(candidate: unknown): string[] {
-  const legacy = Object.keys((candidate as { agents?: object } | null)?.agents ?? {}).filter(key =>
-    ['codex', 'claude', 'custom'].includes(key),
-  );
-  if (legacy.length)
-    return legacy.map(key => `agents.${key}: engine defaults moved to engines.${key}`);
   const result = configSchema.safeParse(candidate);
   if (!result.success) {
     return result.error.issues.map(issue => {
@@ -486,23 +481,9 @@ export function resolveUserConfigFile(): string {
   return coderHome('config.json');
 }
 
-// Everything a workspace gives coder lives under .coder/; a root-level file
-// from before that move is migrated in place on first read.
-const LEGACY_WORKSPACE_CONFIG_FILES = ['coder.config.json', 'coder.json'];
-
-/** `<root>/.coder/config.json`, migrating a legacy root-level config file into it once. */
+/** The repository config under its workspace root. */
 export function resolveWorkspaceConfigFile(workspaceRoot: string): string {
-  const filePath = path.join(workspaceRoot, '.coder', 'config.json');
-  if (fs.existsSync(filePath)) return filePath;
-  for (const legacy of LEGACY_WORKSPACE_CONFIG_FILES) {
-    const from = path.join(workspaceRoot, legacy);
-    if (!fs.existsSync(from)) continue;
-    fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    fs.renameSync(from, filePath);
-    process.stderr.write(`coder: moved ${legacy} to .coder/config.json\n`);
-    break;
-  }
-  return filePath;
+  return path.join(workspaceRoot, '.coder', 'config.json');
 }
 
 /** A server task's workspace config, as JSON; the repo's config may then only narrow it. */
@@ -859,3 +840,14 @@ export function writeConfigFile(targetFile: string, mutate: (config: Record<stri
   fs.mkdirSync(path.dirname(targetFile), { recursive: true });
   fs.writeFileSync(targetFile, `${JSON.stringify(current, null, 2)}\n`, 'utf8');
 }
+
+export const config = {
+  /** A config value by dotted key (or the whole effective config). */
+  get: (key?: string, opts: { cwd?: string } = {}) => configGet(path.resolve(opts.cwd ?? '.'), key),
+  /** Set a config value; `workspace` targets the repo file instead of the user file. */
+  set: (
+    key: string,
+    value: unknown,
+    opts: { workspace?: boolean; cwd?: string; unset?: boolean } = {},
+  ) => configSet(path.resolve(opts.cwd ?? '.'), key, value, opts),
+};

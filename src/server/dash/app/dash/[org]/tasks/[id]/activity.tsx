@@ -25,7 +25,7 @@ import {
 } from '@/comps/ui/icons';
 import { Icon } from '@/comps/ui/icon';
 import { Loading } from '@/comps/ui/card';
-import { formatDuration, formatTime } from '@/utils/format';
+import { ago, formatDuration, formatTime } from '@/utils/format';
 import { usePoll } from '@/utils/client';
 
 const ICONS: Record<TaskDisplayRow['kind'], string> = {
@@ -313,9 +313,6 @@ export function runSummary(rows: TaskDisplayRow[], elapsed?: number) {
     .filter(Boolean)
     .join(' · ');
 }
-
-const ago = (at: number) =>
-  `${formatDuration(Math.max(1000, Date.now() - at)).replace(/\.\d/, '')} ago`;
 
 /** One step in the preview, as an Activity row: its outcome, its title, and when it ended. */
 function Step({

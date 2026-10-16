@@ -19,7 +19,7 @@ import { InfoTip, MoreList } from '@/comps/ui/menu';
 import { Settle } from '@/comps/frame/stream';
 import { loadAgent } from '@/api/load';
 import { needsTunnel } from '@/api/types';
-import { editableAgent } from '@/api/types';
+import { editableAgent, eventNames } from '@/api/types';
 import { TunnelGuide } from '@/app/dash/[org]/settings/tunnel-guide';
 import { Platform } from '@/app/dash/[org]/agents/agent/agent-pills';
 import {
@@ -43,13 +43,6 @@ const OutcomeDialog = dynamic(() =>
 
 /** Outcomes the person fixes by installing again. */
 const RETRY = new Set(['cancelled', 'install-expired', 'platform-error', 'missing-code', 'failed']);
-
-const eventNames = (events: unknown): string[] =>
-  Array.isArray(events)
-    ? events.map(String)
-    : events && typeof events === 'object'
-      ? Object.keys(events)
-      : [];
 
 const REACH_BADGE: Record<Reach, { tone?: 'ok' | 'warn'; label: string }> = {
   installed: { tone: 'ok', label: 'installed' },

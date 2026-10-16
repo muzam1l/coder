@@ -63,8 +63,6 @@ export async function installPage(
 ): Promise<Response | undefined> {
   const id = params.id!;
   const operator = ctx.operatorApp ?? false;
-  if (!/^[a-z0-9_-]+$/.test(url.pathname.split('/')[2]!)) return undefined;
-
   const userId = operator ? OPERATOR : (ctx.session?.user.id ?? 'anonymous');
   const linkState = decodeParam<{
     link?: string;
@@ -148,8 +146,6 @@ export async function completeInstall(
 ): Promise<Response | undefined> {
   const id = params.id!;
   const operator = entry.operatorApp ?? false;
-  if (!/^[a-z0-9_-]+$/.test(url.pathname.split('/')[2]!)) return undefined;
-
   const userId = operator ? OPERATOR : (entry.session?.user.id ?? 'anonymous');
   const linkState = decodeParam<{
     link?: string;
@@ -273,9 +269,7 @@ async function bindInstall(
   delete installation.deletedAt;
   if (integration.repos) {
     const token = await integration.auth.token(
-      installation.token
-        ? { ...installation, token: decryptSecret<string>(ctx.config, installation.token) }
-        : installation,
+      result.token ? { ...installation, token: result.token } : installation,
       credentials,
       undefined,
       { fetch: request },

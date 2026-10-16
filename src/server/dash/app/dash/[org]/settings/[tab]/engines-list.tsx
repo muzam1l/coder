@@ -8,8 +8,14 @@ import { Badge } from '@/comps/ui/badge';
 import { Button } from '@/comps/ui/button';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { Select, type Option } from '@/comps/ui/select';
-import { ENGINES, ENGINE_NAMES, defaultLabel } from '@/app/dash/[org]/settings/model-options';
-import { useConfig, List, Row, EFFORTS, PERMISSIONS, AddRow } from './list';
+import {
+  EFFORTS,
+  ENGINES,
+  ENGINE_NAMES,
+  PERMISSIONS,
+  defaultLabel,
+} from '@/app/dash/[org]/settings/model-options';
+import { useConfig, List, Row, AddRow } from './list';
 import type { ConfigShape, EngineEntry } from '@coder/client/types';
 
 /** Each engine's defaults, the order tasks try them, and the hosts tasks may reach. */
@@ -32,7 +38,7 @@ export function EnginesList({
   const resolved = (name: string, key: 'effort' | 'permissions') =>
     (first.config.engines?.[name]?.[key] ? undefined : first.effective.engines?.[name]?.[key]) ??
     defaults[name]?.[key];
-  const pick = (name: string, key: 'effort' | 'permissions', options: string[]) => (
+  const pick = (name: string, key: 'effort' | 'permissions', options: Option[]) => (
     <label>
       {key}
       <Select
@@ -40,7 +46,7 @@ export function EnginesList({
         value={config.value.engines?.[name]?.[key] ?? ''}
         options={[
           ['', defaultLabel(resolved(name, key) ?? (key === 'permissions' ? 'auto' : undefined))],
-          ...options.map((option): Option => [option, option]),
+          ...options,
         ]}
         onChange={value => void config.patch({ engines: { [name]: { [key]: value || null } } })}
       />

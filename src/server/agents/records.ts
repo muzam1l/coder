@@ -17,6 +17,7 @@ import {
 import { type AgentRecord, type AgentVersionRecord, type AgentPublication } from '../store/types';
 import { readVersion } from '../../core/runtime';
 import type { Store } from '../store/types';
+import type { ServerContext } from '../context';
 
 export interface PublishAgentInput {
   id: string;
@@ -58,23 +59,14 @@ export async function agentWithVersion(
   store: Store,
   slug: string,
 ): Promise<{ record?: AgentRecord; version?: AgentVersionRecord }> {
-  if (store.listAgentsWithVersions) return (await store.listAgentsWithVersions(slug))[0] ?? {};
-  const record = await getAgent(store, slug);
-  return { record, version: record && (await getVersion(store, slug, record.currentVersion)) };
+  return (await store.listAgentsWithVersions(slug))[0] ?? {};
 }
 
 /** Every agent with its current version, in one round of reads where the store can. */
 export async function agentsWithVersions(
   store: Store,
 ): Promise<Array<{ record: AgentRecord; version?: AgentVersionRecord }>> {
-  if (store.listAgentsWithVersions) return store.listAgentsWithVersions();
-  const records = await listAgents(store);
-  return Promise.all(
-    records.map(async record => ({
-      record,
-      version: await getVersion(store, record.id, record.currentVersion),
-    })),
-  );
+  return store.listAgentsWithVersions();
 }
 
 export async function publishAgent(
@@ -82,43 +74,35 @@ export async function publishAgent(
   input: PublishAgentInput,
   now: number,
 ): Promise<AgentPublication> {
-  if (store.publishAgent) {
-    const definition = parseAgentDefinition(input.id, input.definition);
-    const files = input.files && Object.keys(input.files).length ? input.files : undefined;
-    return store.publishAgent(
-      {
-        id: input.id,
-        name: input.name ?? definition.name ?? input.id,
-        ...((input.description ?? definition.description)
-          ? { description: input.description ?? definition.description }
-          : {}),
-        source: input.source,
-        ...(input.repo ? { repo: input.repo } : {}),
-        ...(input.path ? { path: input.path } : {}),
-        currentVersion: 0,
-        createdAt: now,
-        updatedAt: now,
-      },
-      {
-        agent: input.id,
-        version: 0,
-        definition,
-        systemPrompt: input.systemPrompt,
-        ...(files ? { files } : {}),
-        ...(input.commit ? { commit: input.commit } : {}),
-        ...(input.origin ? { source: input.origin } : {}),
-        importedFrom: input.importedFrom,
-        createdAt: now,
-      },
-    );
-  }
-  const loaded = await agentWithVersion(store, input.id);
-  const version = await publishVersion(store, input, now, loaded);
-  return {
-    record: (await getAgent(store, input.id))!,
-    version,
-    unchanged: loaded.record?.currentVersion === version.version,
-  };
+  const definition = parseAgentDefinition(input.id, input.definition);
+  const files = input.files && Object.keys(input.files).length ? input.files : undefined;
+  return store.publishAgent(
+    {
+      id: input.id,
+      name: input.name ?? definition.name ?? input.id,
+      ...((input.description ?? definition.description)
+        ? { description: input.description ?? definition.description }
+        : {}),
+      source: input.source,
+      ...(input.repo ? { repo: input.repo } : {}),
+      ...(input.path ? { path: input.path } : {}),
+      currentVersion: 0,
+      createdAt: now,
+      updatedAt: now,
+    },
+    {
+      agent: input.id,
+      version: 0,
+      definition,
+      systemPrompt: input.systemPrompt,
+      ...(files ? { files } : {}),
+      ...(input.commit ? { commit: input.commit } : {}),
+      ...(input.origin ? { source: input.origin } : {}),
+      importedFrom: input.importedFrom,
+      createdAt: now,
+    },
+  );
+
 }
 
 export async function publishVersion(
@@ -127,7 +111,7 @@ export async function publishVersion(
   now: number,
   loaded?: { record?: AgentRecord; version?: AgentVersionRecord },
 ): Promise<AgentVersionRecord> {
-  if (!loaded && store.publishAgent) return (await publishAgent(store, input, now)).version;
+  if (!loaded) return (await publishAgent(store, input, now)).version;
 
   const definition = parseAgentDefinition(input.id, input.definition);
   const files = input.files && Object.keys(input.files).length ? input.files : undefined;
@@ -330,8 +314,7 @@ export async function seedBuiltinAgent(
       id,
       source: 'builtin',
       definition: builtin.json,
-      systemPrompt: fs.readFileSync(path.join(builtin.dir, 'system.md'), 'utf8'),
-      files: diskFiles(builtin.dir),
+      systemPrompt: builtin.systemPrompt,
       importedFrom: `builtin:${readVersion()}`,
     },
     now,
@@ -356,4 +339,19 @@ export async function seedBuiltinAgents(
     )
       changed = true;
   return changed;
+}
+
+export async function ensureBuiltinAgents(
+  ctx: Pick<ServerContext, 'store' | 'settings'>,
+  now: number,
+): Promise<void> {
+  const settings = (ctx.settings ??= {});
+  if (!settings.builtinAgents)
+    settings.builtinAgents = seedBuiltinAgents(ctx.store, now)
+      .then(() => {})
+      .catch(error => {
+        delete settings.builtinAgents;
+        throw error;
+      });
+  return settings.builtinAgents;
 }

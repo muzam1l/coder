@@ -20,7 +20,7 @@ import {
 import { describeUnsupportedModel, errorText, isStaleAuthError } from './errors';
 import type { MailboxKey } from '../../mailbox';
 import { requestCodexControl, startCodexControlServer } from './control';
-import { binaryAvailable } from '../../../utils/process';
+import { binaryAvailable, processTiming } from '../../../utils/process';
 import { engineEnvironment } from '../../connections';
 import { MACHINE_SANDBOX_ENV } from '../../config';
 import { isCodexSessionArchived, unarchiveCodexSession } from './sessions';
@@ -42,6 +42,7 @@ const SERVICE_NAME = 'coder_runtime';
 
 /** Options accepted by runTurn. */
 export interface RunTurnOptions {
+  availabilityChecked?: boolean;
   prompt?: string;
   model?: string | null;
   /** Codex model provider id (custom OpenAI-compatible endpoints). */
@@ -131,6 +132,7 @@ export function buildCodexMcpOverrides(
             ...(server.env ? { env: server.env } : {}),
           }),
       ...(server.tools?.length ? { enabled_tools: server.tools } : {}),
+      ...(server.autoApprove ? { default_tools_approval_mode: 'approve' } : {}),
     };
   }
   return overrides;
@@ -373,9 +375,10 @@ export async function runTurn(
   options: RunTurnOptions = {},
   internals: { connect?: typeof CodexAppServerClient.connect } = {},
 ): Promise<TurnResult> {
-  const availability = getCodexAvailability(cwd);
-  if (!availability.available) {
-    throw new Error(`Codex CLI is not available: ${availability.detail}`);
+  if (!options.availabilityChecked) {
+    const availability = getCodexAvailability(cwd);
+    if (!availability.available)
+      throw new Error(`Codex CLI is not available: ${availability.detail}`);
   }
 
   const prompt = options.prompt?.trim();
@@ -397,7 +400,9 @@ export async function runTurn(
   const turnOn = async (client: AppServerClient): Promise<TurnResult> => {
     let controlServer: Awaited<ReturnType<typeof startCodexControlServer>> | null = null;
     let threadId: string;
+    processTiming('codex.config.start');
     const effective = await client.request('config/read', { cwd, includeLayers: false });
+    processTiming('codex.config.done');
     const threadConfig = {
       ...(!options.modelProvider ? { model_reasoning_summary: 'auto' } : {}),
       ...configOverrides,
@@ -449,6 +454,7 @@ export async function runTurn(
       emitProgress(options.onProgress, 'Starting Codex task thread.', 'starting', {
         kind: 'status',
       });
+      processTiming('codex.thread.start');
       const response = await client.request('thread/start', {
         cwd,
         model: options.model ?? null,
@@ -476,6 +482,7 @@ export async function runTurn(
       }
     }
 
+    processTiming('codex.thread.ready');
     emitProgress(options.onProgress, `Thread ready (${threadId}).`, 'starting', {
       kind: 'status',
       threadId,
@@ -514,12 +521,13 @@ export async function runTurn(
             : undefined,
         },
       );
+      processTiming('codex.result');
       options.onResult?.({
         status: turnState.finalTurn?.status === 'completed' ? 0 : 1,
         threadId,
         turnId: turnState.turnId,
         finalMessage: turnState.lastAgentMessage,
-        error: turnState.error ?? null,
+        error: turnState.error ?? (turnState.finalTurn?.error as TurnCaptureState['error']) ?? null,
       });
     } finally {
       await (controlServer as Awaited<ReturnType<typeof startCodexControlServer>> | null)?.close();

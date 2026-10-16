@@ -7,6 +7,7 @@ import type { AgentApp, AgentEvent, Installation, Integration, Pushed, TokenBoun
 import {
   canWriteGithub,
   githubCommit,
+  githubTree,
   githubRepository,
   githubRepositoryUrl,
   listGithubDir,
@@ -480,6 +481,7 @@ export const github: Integration = {
     readFile: readGithubFile,
     revalidate: revalidateGithubFile,
     listDir: listGithubDir,
+    tree: githubTree,
     commit: githubCommit,
     list: (_installation, token, request) => listGithubRepositories(token, request),
     get: githubRepository,

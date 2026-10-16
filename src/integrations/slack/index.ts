@@ -155,6 +155,7 @@ export const slack: Integration = {
       on: 'message',
       addressed: true,
     },
+    command: { description: '/setup and other slash commands', on: 'command' },
     channel: {
       description:
         'Every message in channels the agent is in. Slack delivers at most 30,000 events per workspace per app per hour.',
@@ -162,7 +163,6 @@ export const slack: Integration = {
       noisy: true,
       addressed: true,
     },
-    command: { description: '/setup and other slash commands', on: 'command' },
   },
   tools: {
     presets: {

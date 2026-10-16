@@ -5,6 +5,7 @@ import process from 'node:process';
 import { connect, type RemoteClient, type ServerOptions } from '../remote';
 import type { TaskLogLine, TaskStatus } from '../../server/store/types';
 import { readJsonFile } from '../../utils/fsx';
+import { serverEvents } from '../../client';
 import { answerApproval, listPendingApprovals } from '../approvals';
 import { loadConfig } from '../config';
 import { localConnections } from '../connections';
@@ -14,7 +15,7 @@ import {
   dispatchTask,
   selectMcpServers,
   isSandboxFailure,
-  isStartupError,
+  turnFallbackEngine,
   readTask,
   waitTask,
   type DispatchOptions,
@@ -32,7 +33,6 @@ import {
   readTurnResults,
   reconcileTask,
   resolveTaskDir,
-  waitForTerminalTask,
   type TaskLogEntry,
 } from '../state';
 import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Task, type TokenUsage } from '../types';
@@ -166,7 +166,8 @@ async function run(
     : undefined;
   const connected = agent?.connected ?? (await localConnections(opts.connections));
   for (const warning of connected.warnings) opts.onNote?.(warning);
-  const selectedMcp = agent ?? selectMcpServers(opts.mcp, loadConfig(cwd).mcp, {}, connected.mcp);
+  const config = loadConfig(cwd);
+  const selectedMcp = agent ?? selectMcpServers(opts.mcp, config.mcp, {}, connected.mcp);
   const dispatchOpts: DispatchOptions = {
     prompt,
     outputSchema: opts.outputSchema,
@@ -191,7 +192,7 @@ async function run(
     ...(opts.onFallback ? { onFallback: opts.onFallback } : {}),
     ...(opts.onNote ? { onNote: opts.onNote } : {}),
   };
-  let dispatch = await dispatchTask(dispatchOpts);
+  let dispatch = await dispatchTask(dispatchOpts, { config });
 
   if (!opts.wait) {
     const taskId = dispatch.taskId;
@@ -212,14 +213,14 @@ async function run(
   for (;;) {
     const taskId = dispatch.taskId;
     opts.onWaiting?.(taskId);
-    const { task: final, result } = await waitTask(cwd, taskId);
+    const waited = await waitTask(cwd, taskId);
+    const { task: final, result } = waited;
     const turnError = result?.error?.message ?? '';
     if (final.status === 'failed' && isSandboxFailure(final.permissions ?? 'auto', turnError))
       throw new CoderError('read-only-unavailable', turnError);
-    if (final.status === 'failed' && isStartupError(turnError)) {
-      const chain = loadConfig(cwd).chain;
-      const next = chain[chain.indexOf(dispatch.engine) + 1];
-      if (!next)
+    const next = turnFallbackEngine(cwd, waited, config);
+    if (next !== undefined) {
+      if (next === null)
         throw new CoderError('chain-exhausted', turnError, {
           payload: buildFallbackPayload(
             dispatch.engine,
@@ -230,14 +231,17 @@ async function run(
           ),
         });
       opts.onFallback?.({ engine: dispatch.engine, detail: turnError, next });
-      dispatch = await dispatchTask({
-        ...dispatchOpts,
-        engine: next,
-        model: undefined,
-        effort: undefined,
-        name: undefined,
-        simulateApproval: undefined,
-      });
+      dispatch = await dispatchTask(
+        {
+          ...dispatchOpts,
+          engine: next,
+          model: undefined,
+          effort: undefined,
+          name: undefined,
+          simulateApproval: undefined,
+        },
+        { config },
+      );
       continue;
     }
     return {
@@ -298,28 +302,29 @@ async function result(
         },
       );
   }
-  const { steps, result } = readTask(cwd, task.id, { tail: opts.tail });
+  const { steps, result, turns } = readTask(cwd, task.id, { tail: opts.tail });
   const pending = listPendingApprovals(resolveTaskDir(cwd, task.id)).filter(a => !a.response);
   const running = ACTIVE_STATUSES.includes(task.status);
   const lastActivity = running ? lastActivityAt(cwd, task) : task.updatedAt;
   const idle = ageMs(lastActivity);
+  const recent = running ? readTaskLog(cwd, task.id, 200) : [];
   return {
     taskId: task.id,
     status: running && pending.length ? 'waiting-approval' : task.status,
     task,
     result,
     steps,
-    turns: readTurnResults(cwd, task.id),
+    turns,
     pendingApprovals: pending.map(a => ({ id: a.id, summary: a.summary, cwd: a.cwd ?? null })),
     ...(running
       ? {
           idleMs: idle,
           lastActivityAt: lastActivity ?? null,
           stalled: pending.length === 0 && idle > STALL_MS,
-          lastLog: readTaskLog(cwd, task.id, 1)[0],
+          lastLog: recent.at(-1),
           // A task still in flight has no result to quote tokens from; its latest usage snapshot is the running count.
           liveTokens:
-            (readTaskLog(cwd, task.id, 200)
+            (recent
               .reverse()
               .find(
                 entry => entry.kind === 'usage' && String(entry.at ?? '') >= (task.resumedAt ?? ''),
@@ -402,13 +407,22 @@ export interface TaskWatch {
 async function* serverLines(api: RemoteClient, taskId: string): AsyncGenerator<TaskLogLine> {
   let after = -1;
   for (;;) {
-    const status = await api.tasks.get(taskId);
-    for (const line of await api.tasks.logs(taskId, after)) {
-      after = line.seq;
-      yield line;
+    const response = await api.tasks.stream(taskId, after);
+    if (!response.ok || !response.body) {
+      const status = await api.tasks.get(taskId);
+      if (TERMINAL_STATUSES.includes(status.status as Task['status'])) return;
+      if (response.status === 401) continue;
+      throw new CoderError('server', `The task stream answered ${response.status}.`);
     }
-    if (TERMINAL_STATUSES.includes(status.status as Task['status'])) return;
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    let ended = false;
+    for await (const event of serverEvents(response.body)) {
+      if (event.event === 'log') {
+        const line = JSON.parse(event.data) as TaskLogLine;
+        after = line.seq;
+        yield line;
+      } else if (event.event === 'end') ended = true;
+    }
+    if (ended) return;
   }
 }
 
@@ -465,7 +479,7 @@ async function steer(
   });
   if (!opts.wait || outcome.steered === 'queued') return outcome;
   const current = loadTask(cwd, outcome.taskId);
-  const final = current ? await waitForTerminalTask(cwd, current) : null;
+  const final = current ? (await waitTask(cwd, current.id)).task : null;
   const done = readJsonFile<any>(path.join(resolveTaskDir(cwd, outcome.taskId), 'result.json'));
   return { ...outcome, status: final?.status ?? null, finalMessage: done?.finalMessage ?? null };
 }

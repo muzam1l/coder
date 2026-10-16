@@ -19,7 +19,10 @@ import type { Batch, Conversation, ConversationState, Unseen } from '../tasks/co
 import { type PairingRecord } from '../settings/runners';
 import type { SnapshotState } from '../runners/vercel-sandbox';
 import type { RepoFile, RepoPush, SyncMarker } from '../agents/repo';
-import type { HeldToken, TokenDrop } from '../tasks/context';
+import type { HeldToken, HeldWrite, TokenDrop, TokenState } from './tokens';
+
+/** A crashed batch sender releases its reservation after this lease. */
+export const BATCH_LEASE_MS = 30_000;
 
 export interface StoreRecords {
   agent: AgentRecord;
@@ -30,7 +33,7 @@ export interface StoreRecords {
   login: EngineLogin;
   runner: RunnerRecord;
   snapshot:
-    | { connectionSecrets: string; expiresAt?: number }
+    | { secret: string; expiresAt?: number }
     | { resolvedConnections: string; expiresAt?: number }
     | SnapshotState
     | PairingRecord
@@ -161,6 +164,42 @@ export interface DeliveryLease {
   next?: number;
 }
 
+/** What one hosted event's dispatch reads, claimed and loaded in one round trip. */
+/** What one read loaded with a delivery's claim; a store that reads cheaply loads nothing and the dispatch reads. */
+export interface DispatchState {
+  /** The delivery is this request's to handle; false when done or in another's hands. */
+  claimed: boolean;
+  loaded?: DispatchLoaded;
+}
+
+export interface DispatchLoaded {
+  record?: AgentRecord;
+  version?: AgentVersionRecord;
+  /** The installations the event's one connects to, with their apps. */
+  linked: Array<{ installation: Installation; app: AgentApp }>;
+  /** Repository file snapshots under the dispatch's prefixes, by snapshot id. */
+  files: Record<string, RepoFile>;
+  conversation: ConversationState;
+  /** The member the actor is linked to, whose own credentials, runners and connections came along. */
+  requester?: string;
+  credentials: Array<{ id: string; value: StoredCredential }>;
+  runners: Array<{ id: string; value: RunnerRecord }>;
+  connections: Connection[];
+  workspace?: { slug: string; name: string };
+  tokens: TokenState;
+}
+
+export interface DispatchInput {
+  delivery: { key: string; owner: string; at: number; ttlMs: number };
+  agent: string;
+  conversation?: string;
+  /** The platform actor, whose linked member's own records come along. */
+  actor?: { platform: string; id: string };
+  installation: Installation;
+  /** Snapshot id prefixes of the repository files the dispatch may read. */
+  files: string[];
+}
+
 export interface StoreListOptions {
   prefix?: string;
   after?: string;
@@ -177,11 +216,10 @@ export interface StoreListOptions {
 }
 
 export interface Store {
-  connectionContexts?: Map<
-    string,
-    Awaited<ReturnType<typeof import('../connections/resolve').resolveConnections>>
-  >;
-  connectionSecrets?: Map<string, string[]>;
+  watch(
+    kind: 'login' | 'delivery',
+    id: string,
+  ): Promise<ReturnType<typeof import('../../utils/fsx').watchChanges>>;
   localFlows?: Map<string, { stop(): Promise<void>; work: Promise<unknown> }>;
   completionWatches?: Map<string, { stopped: boolean; work: Promise<void> }>;
   handoffs?: Map<string, Promise<unknown>>;
@@ -193,7 +231,7 @@ export interface Store {
     id: string,
     work: CredentialWork<K>,
   ): Promise<boolean>;
-  publishAgent?(record: AgentRecord, version: AgentVersionRecord): Promise<AgentPublication>;
+  publishAgent(record: AgentRecord, version: AgentVersionRecord): Promise<AgentPublication>;
   completeLogin(
     id: string,
     tokenHash: string,
@@ -205,27 +243,23 @@ export interface Store {
     fields: LoginPatch,
     expected?: LoginFence,
   ): Promise<EngineLogin | undefined>;
-  taskInputs?(
+  taskInputs(
     slug: string,
     requester?: string,
     engine?: string,
   ): Promise<{ record?: AgentRecord; version?: AgentVersionRecord; credential?: string }>;
-  listHistory?(taskId: string): Promise<Array<Omit<TaskHistory, 'data' | 'state'>>>;
-  installationApp?(id: string): Promise<{ installation: Installation; app: AgentApp } | undefined>;
-  getApps?(keys: string[]): Promise<Array<{ id: string; value: AgentApp }>>;
-  listCredentials?(options: {
+  listHistory(taskId: string): Promise<Array<Omit<TaskHistory, 'data' | 'state'>>>;
+  installationApp(id: string): Promise<{ installation: Installation; app: AgentApp } | undefined>;
+  getApps(keys: string[]): Promise<Array<{ id: string; value: AgentApp }>>;
+  listCredentials(options: {
     owner?: string;
     engine?: string;
     limit?: number;
   }): Promise<Array<{ id: string; value: import('../settings/credentials').StoredCredential }>>;
-  listAgentSummaries?(
+  listAgentSummaries(
     options?: AgentPageOptions,
   ): Promise<Array<{ record: AgentRecord; version?: AgentVersionSummary }>>;
-  updateMetadata?(
-    kind: MetadataKind,
-    id: string,
-    fields: Record<string, unknown>,
-  ): Promise<boolean>;
+  updateMetadata(kind: MetadataKind, id: string, fields: Record<string, unknown>): Promise<boolean>;
   get<K extends StoreKind>(kind: K, id: string): Promise<StoreRecords[K] | undefined>;
   // Snapshot and delivery keys hold distinct shapes; reads may select the key's shape.
   get<T extends StoreRecords['snapshot']>(kind: 'snapshot', id: string): Promise<T | undefined>;
@@ -284,8 +318,12 @@ export interface Store {
     value: StoreRecords[K],
     opts?: { ttlMs?: number },
   ): Promise<boolean>;
-  /** Atomically remove a live entry, returning whether it existed. */
-  take(kind: StoreKind, id: string): Promise<boolean>;
+  /** Atomically remove a live entry and return its value. */
+  take<K extends StoreKind>(
+    kind: K,
+    id: string,
+    expected?: Partial<StoreRecords[K]>,
+  ): Promise<StoreRecords[K] | undefined>;
   claimDeliveryLease(id: string, owner: string, ttlMs: number): Promise<number | undefined>;
   updateDeliveryLease(
     id: string,
@@ -300,15 +338,14 @@ export interface Store {
     value: T | undefined,
     opts?: { ttlMs?: number },
   ): Promise<boolean>;
-  conversationState?(key: string): Promise<ConversationState>;
-  markConversation?(
+  conversationState(key: string): Promise<ConversationState>;
+  markConversation(
     key: string,
     taskId: string,
     seen: string,
     at: number,
     ttlMs: number,
   ): Promise<void>;
-  batchEvents?: EventTarget;
   appendUnseen(key: string, message: SinceMessage, ttlMs: number): Promise<void>;
   acknowledgeUnseen(key: string, through: number, epoch?: string): Promise<void>;
   appendBatch(
@@ -321,19 +358,30 @@ export interface Store {
   claimBatch(id: string, owner: string): Promise<Batch | null | undefined>;
   /** Releases the sender's reservation; accepted through an admission drops the items up to it, without one the whole reservation. */
   finishBatch(id: string, owner: string, accepted: boolean, through?: string): Promise<boolean>;
+  /** Claims the delivery and reads everything its dispatch needs. */
+  dispatchState(input: DispatchInput): Promise<DispatchState>;
+  /** Held tokens and drops of these installations and apps. */
+  heldTokens(installations: string[], apps: string[]): Promise<TokenState>;
+  /** Keeps a minted token while the drops it was read under stand. */
+  holdToken(write: HeldWrite): Promise<void>;
+  /** Adds a task's secret rows while it is active; true when it was. */
+  saveTaskSecrets(
+    taskId: string,
+    rows: Array<{ id: string; value: string; expiresAt: number }>,
+  ): Promise<boolean>;
   /** Every agent, or one, with its current version in one read. */
-  listAgentsWithVersions?(
-    slug?: string,
+  listAgentsWithVersions(
+    slug?: string | string[],
   ): Promise<Array<{ record: AgentRecord; version?: AgentVersionRecord }>>;
   /** One agent's newest `count` versions below `below`, or below its next version, in one read. */
-  listVersions?(
+  listVersions(
     slug: string,
     count?: number,
     below?: number,
   ): Promise<Array<{ id: string; value: AgentVersionSummary }>>;
   /** Usage summed in the database; stores without it are summed from `list("usage")`. */
-  usageTotals?(query: UsageQuery): Promise<UsageTotalRow[]>;
-  usageSummary?(since: number, by?: UsageGroup): Promise<UsageTotals['totals']>;
+  usageTotals(query: UsageQuery): Promise<UsageTotalRow[]>;
+  usageSummary(since: number, by?: UsageGroup): Promise<UsageTotals['totals']>;
 }
 
 export interface AgentPublication {

@@ -1,6 +1,7 @@
 import type { TaskStatus } from '../store/types';
 import { SERVER_LIMITS } from '../limits';
 import { scoped, type ServerContext } from '../context';
+import { loadedStore } from '../store/primed';
 import { taskCredential, taskHosts } from './context';
 import type { ClaimedTask, TaskFence } from './queue';
 import { taskRunner, type Runner } from '../runners';
@@ -229,9 +230,13 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
     const claimed = await ctx.queue.claim(now(), available, knownWork, concurrentTasks);
     knownWork = false;
     if (!claimed) break;
-    const taskCtx = scoped(ctx, claimed.organizationId);
     const status = claimed.status;
-    if (await startQueuedLocalTask(taskCtx, status)) {
+    const orgCtx = scoped(ctx, claimed.organizationId);
+    const taskCtx =
+      claimed.loaded && orgCtx.store
+        ? { ...orgCtx, store: loadedStore(orgCtx.store, status, claimed.loaded) }
+        : orgCtx;
+    if (await startQueuedLocalTask(taskCtx, status, claimed.token)) {
       knownWork = claimed.more;
       if (!claimed.more) break;
       continue;

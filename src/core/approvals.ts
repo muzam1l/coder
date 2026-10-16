@@ -13,7 +13,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { readJsonFile } from '../utils/fsx';
+import { readJsonFile, watchChanges } from '../utils/fsx';
 
 import type { Approval } from './types';
 
@@ -359,19 +359,14 @@ export async function escalate(
   });
 
   const responseFile = path.join(dir, `${id}.response.json`);
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (fs.existsSync(responseFile)) {
-      try {
-        const response = JSON.parse(fs.readFileSync(responseFile, 'utf8'));
-        const decision = response.decision === 'accept' ? 'accept' : 'decline';
-        onEvent?.({ kind: 'approval-answered', approvalId: id, decision });
-        return decision;
-      } catch {
-        // Partially written response; retry on the next tick.
-      }
-    }
-    await new Promise(resolve => setTimeout(resolve, 400));
+  const response = await watchChanges(dir).until(
+    () => readJsonFile<{ decision: string }>(responseFile) ?? undefined,
+    timeoutMs,
+  );
+  if (response) {
+    const decision = response.decision === 'accept' ? 'accept' : 'decline';
+    onEvent?.({ kind: 'approval-answered', approvalId: id, decision });
+    return decision;
   }
   onEvent?.({
     kind: 'approval-timeout',
@@ -414,87 +409,36 @@ export function createApprovalHandler({
   onEvent = null,
 }: ApprovalHandlerOptions): ApprovalRequestHandler {
   return async (method, params, state) => {
+    const item = state?.itemIndex?.get(params.itemId ?? '');
+    let request: EscalateRequest;
+    let verdict: Verdict;
     if (method === COMMAND_APPROVAL_METHOD) {
-      const item = state?.itemIndex?.get(params.itemId ?? '');
       const command = params.command ?? item?.command ?? '';
       const cwd = params.cwd ?? item?.cwd ?? workspaceRoot;
       const summary = `Run command. ${command || 'Unknown command'}${params.reason ? `. ${params.reason}` : ''}`;
-
-      if (mode === 'deny') {
-        onEvent?.({
-          kind: 'approval-decision',
-          method,
-          decision: 'decline',
-          reason: 'deny mode',
-          summary,
-        });
-        return { decision: 'decline' };
-      }
-
-      const verdict = decideCommand(command, {
+      request = { method, summary, command, cwd, params };
+      verdict = decideCommand(command, {
         networkHost: params.networkApprovalContext?.host ?? null,
         allowedNetworkHosts,
       });
-      onEvent?.({
-        kind: 'approval-decision',
-        method,
-        decision: verdict.decision,
-        reason: verdict.reason,
-        summary,
-      });
-
-      if (verdict.decision === 'escalate') {
-        const decision = await escalate(
-          taskDir,
-          { method, summary, command, cwd, params },
-          { timeoutMs: escalationTimeoutMs, onEvent },
-        );
-        return { decision };
-      }
-      return { decision: verdict.decision };
-    }
-
-    if (method === FILE_CHANGE_APPROVAL_METHOD) {
-      const item = state?.itemIndex?.get(params.itemId ?? '');
+    } else if (method === FILE_CHANGE_APPROVAL_METHOD) {
       const paths = (item?.changes ?? [])
         .map(change => change.path)
-        .filter((changePath): changePath is string => Boolean(changePath));
+        .filter((p): p is string => Boolean(p));
       const summary = `Apply file changes. ${paths.join(', ') || 'Unknown paths'}${params.reason ? `. ${params.reason}` : ''}`;
-
-      if (mode === 'deny') {
-        onEvent?.({
-          kind: 'approval-decision',
-          method,
-          decision: 'decline',
-          reason: 'deny mode',
-          summary,
-        });
-        return { decision: 'decline' };
-      }
-
-      const verdict = decideFileChange(paths, workspaceRoot);
-      onEvent?.({
-        kind: 'approval-decision',
-        method,
-        decision: verdict.decision,
-        reason: verdict.reason,
-        summary,
-      });
-
-      if (verdict.decision === 'escalate') {
-        const decision = await escalate(
-          taskDir,
-          { method, summary, paths, params },
-          { timeoutMs: escalationTimeoutMs, onEvent },
-        );
-        return { decision };
-      }
-      return { decision: verdict.decision };
+      request = { method, summary, paths, params };
+      verdict = decideFileChange(paths, workspaceRoot);
+    } else {
+      onEvent?.({ kind: 'approval-unsupported', method });
+      throw new Error(`Coder does not handle server request ${method}; treating as denied.`);
     }
+    if (mode === 'deny') verdict = { decision: 'decline', reason: 'deny mode' };
+    onEvent?.({ kind: 'approval-decision', method, ...verdict, summary: request.summary });
+    const decision =
+      verdict.decision === 'escalate'
+        ? await escalate(taskDir, request, { timeoutMs: escalationTimeoutMs, onEvent })
+        : verdict.decision;
 
-    // Unknown server request (permissions prompts, elicitations, ...): safest
-    // generic answer is a JSON-RPC error, which Codex treats as a denial.
-    onEvent?.({ kind: 'approval-unsupported', method });
-    throw new Error(`Coder does not handle server request ${method}; treating as denied.`);
+    return { decision };
   };
 }

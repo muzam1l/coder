@@ -59,8 +59,12 @@ export function sessionSlug(ctx: ServerContext): string {
 }
 
 /** The same without a session, such as for a link posted to a platform: the slug as Wular last named it. */
-export async function organizationSlug(ctx: ServerContext): Promise<string> {
-  const known = ctx.session?.organizations.find(org => org.id === ctx.organizationId)?.slug;
+export async function organizationSlug(
+  ctx: ServerContext,
+  workspace?: { slug: string },
+): Promise<string> {
+  const known =
+    ctx.session?.organizations.find(org => org.id === ctx.organizationId)?.slug ?? workspace?.slug;
 
   if (known || !ctx.auth) return known ?? LOCAL_SLUG;
 

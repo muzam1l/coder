@@ -298,7 +298,7 @@ export interface EventSpec {
   description: string;
   /** The Chat SDK handler that raises it; events the integration parses itself have none. */
   on?: ChatRoute;
-  /** Fires on every message and usually wants a text filter. */
+  /** Fires on every message and usually wants a text filter; listed after the other events and off by default. */
   noisy?: true;
   /** A person asks the agent directly; only linked workspace members run it. */
   addressed?: true;
@@ -416,6 +416,8 @@ export interface Repositories {
   ): Promise<'unchanged' | { text?: string; etag?: string }>;
   /** Entry names in a directory; `[]` when it does not exist. */
   listDir(repo: string, path: string, token: string, ref?: string): Promise<string[]>;
+  /** File paths below a directory, relative to it. */
+  tree(repo: string, path: string, token: string, ref?: string): Promise<string[]>;
   /** The commit a ref points at; `undefined` when it does not exist. */
   commit(repo: string, ref: string, token: string): Promise<string | undefined>;
   /** `owner/name` of every repository an installation's token can read. */

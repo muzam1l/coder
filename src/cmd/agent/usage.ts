@@ -3,10 +3,8 @@ import process from 'node:process';
 
 import type { UsageTotals } from '../../server/tasks/usage';
 import { outStyle, renderTable } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
+import { baseOptions, str, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 function printUsage(result: UsageTotals, by?: string): void {
   const rows = Array.isArray(result.totals)

@@ -109,6 +109,49 @@ export async function githubCommit(
   return response ? String(response.data).trim() : undefined;
 }
 
+export async function githubTree(
+  repo: string,
+  path: string,
+  token: string,
+  ref = 'HEAD',
+): Promise<string[]> {
+  const api = await octokit(token);
+  const input = split(repo);
+  const prefix = `${path}/`;
+  const result = await api.git
+    .getTree({ ...input, tree_sha: ref, recursive: '1' })
+    .catch(missing([404]));
+  if (!result) return [];
+  const files: string[] = [];
+  const keep = (name: string) =>
+    name.startsWith(prefix) && name.slice(prefix.length).split('/').length <= 22;
+  if (!result.data.truncated)
+    return result.data.tree.flatMap(entry =>
+      entry.type === 'blob' && entry.path && keep(entry.path)
+        ? [entry.path.slice(prefix.length)]
+        : [],
+    );
+  const walk = async (sha: string, parent = ''): Promise<void> => {
+    const { data } = await api.git.getTree({ ...input, tree_sha: sha });
+    await Promise.all(
+      data.tree.map(async entry => {
+        const name = parent ? `${parent}/${entry.path}` : entry.path;
+        if (!name) return;
+        if (entry.type === 'blob' && keep(name)) files.push(name.slice(prefix.length));
+        else if (
+          entry.type === 'tree' &&
+          entry.sha &&
+          (prefix.startsWith(`${name}/`) || (name.startsWith(prefix) && keep(name)))
+        )
+          await walk(entry.sha, name);
+      }),
+    );
+  };
+  await walk(ref);
+
+  return files.sort();
+}
+
 export async function listGithubDir(
   repo: string,
   path: string,

@@ -469,10 +469,7 @@ form.reply {
   border-top: 1px solid var(--line2);
 }
 
-/* the task's own prompt reads as the brief; later asks and steers keep the accent edge */
-.turn.prompt {
-  border-left-color: var(--fg);
-}
+/* the task's own prompt reads as the brief */
 .turn.prompt .prose {
   font-size: 13.5px;
 }

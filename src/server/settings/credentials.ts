@@ -125,9 +125,7 @@ export async function resolveCredential(
   engine: string | undefined,
   requester?: string,
 ): Promise<{ id: string; value: StoredCredential } | undefined> {
-  const rows = store.listCredentials
-    ? await store.listCredentials({ owner: requester, engine })
-    : await store.list('credential');
+  const rows = await store.listCredentials({ owner: requester, engine });
   const pick = (owner: string | undefined) => {
     const scoped = rows.filter(
       row => row.value.owner === owner && (!engine || row.value.engine === engine),
@@ -143,11 +141,9 @@ export async function visibleCredentials(
   user: string | undefined,
   limit?: number,
 ): Promise<Array<{ id: string; value: StoredCredential }>> {
-  return (
-    store.listCredentials
-      ? await store.listCredentials({ owner: user, limit })
-      : await store.list('credential')
-  ).filter(row => !row.value.owner || row.value.owner === user);
+  return (await store.listCredentials({ owner: user, limit })).filter(
+    row => !row.value.owner || row.value.owner === user,
+  );
 }
 
 /** The caller's saved value for an env variable, then the workspace's; the local server falls back to its environment. */
@@ -430,7 +426,7 @@ export async function reseal(
   }
   for (const { id } of await store.list('snapshot')) {
     const taskId = id.startsWith('connection-secrets:')
-      ? id.slice('connection-secrets:'.length)
+      ? id.slice('connection-secrets:'.length).replace(/:[a-f0-9]{24}$/, '')
       : id.startsWith('connections:')
         ? id.slice('connections:'.length).replace(/:\d+:\d+:[a-f0-9]{12}$/, '')
         : undefined;
@@ -440,8 +436,8 @@ export async function reseal(
       const field =
         'resolvedConnections' in value
           ? 'resolvedConnections'
-          : 'connectionSecrets' in value
-            ? 'connectionSecrets'
+          : 'secret' in value
+            ? 'secret'
             : undefined;
       if (!field) return false;
       const status = taskId ? await locked.get('task', taskId) : undefined;
@@ -449,9 +445,7 @@ export async function reseal(
         await locked.delete('snapshot', id);
         return false;
       }
-      const sealed = (value as { resolvedConnections?: string; connectionSecrets?: string })[
-        field
-      ]!;
+      const sealed = (value as { resolvedConnections?: string; secret?: string })[field]!;
       if (!stale(sealed)) return false;
       await locked.put(
         'snapshot',
@@ -663,6 +657,7 @@ export async function signInEngine(
 ): Promise<Response> {
   const engine = params.engine as 'claude' | 'codex';
   engineSignIn(engine);
+  if (ctx.local) ctx.local.engineChecks = undefined;
 
   return json(await engineStatus());
 }
@@ -675,6 +670,7 @@ export async function signOutEngine(
 ): Promise<Response> {
   const engine = params.engine as 'claude' | 'codex';
   await engineSignOut(engine);
+  if (ctx.local) ctx.local.engineChecks = undefined;
 
   return json(await engineStatus());
 }

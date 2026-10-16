@@ -4,8 +4,6 @@ import { pipeline } from 'node:stream/promises';
 import { type ReadableStream as WebStream } from 'node:stream/web';
 import { decodeJson, encodeJson } from '../../utils/base64url';
 
-const ADMIN_ROLES = new Set(['owner', 'admin']);
-
 export function json(value: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(value), {
     status,
@@ -95,30 +93,21 @@ function headers(input: http.IncomingHttpHeaders): Headers {
   return result;
 }
 
-async function webRequest(
-  req: http.IncomingMessage,
-  limit: number,
-  signal: AbortSignal,
-): Promise<Request> {
+function webRequest(req: http.IncomingMessage, signal: AbortSignal): Request {
   const path = req.url ?? '/';
-  const body = await readLimited(req, req.headers['content-length'], limit);
+  const body = req.method === 'GET' || req.method === 'HEAD' ? undefined : Readable.toWeb(req);
   return new Request(`http://${req.headers.host ?? 'localhost'}${path}`, {
     method: req.method,
     headers: headers(req.headers),
-    body: body.byteLength ? Buffer.from(body) : undefined,
+    body,
+    duplex: 'half',
     signal,
-  });
+  } as RequestInit);
 }
 
 export function nodeListener(
   handle: (request: Request, clientIp?: string) => Promise<Response>,
-  {
-    limit,
-    admit = () => true,
-  }: {
-    limit: (path: string) => number;
-    admit?: (incoming: http.IncomingMessage) => boolean;
-  },
+  { admit = () => true }: { admit?: (incoming: http.IncomingMessage) => boolean } = {},
 ): http.RequestListener {
   return async (incoming, outgoing) => {
     if (!admit(incoming)) return void outgoing.writeHead(404).end('Not found');
@@ -131,7 +120,7 @@ export function nodeListener(
     check();
     try {
       const result = await handle(
-        await webRequest(incoming, limit(incoming.url ?? '/'), left.signal),
+        webRequest(incoming, left.signal),
         incoming.socket.remoteAddress?.replace(/^::ffff:/, ''),
       );
       check();

@@ -24,6 +24,7 @@ import { Hero } from '@/app/dash/[org]/agents/agent/hero';
 import { Back, PageHead } from '@/comps/frame/page-head';
 import { HEADS } from '@/comps/frame/heads';
 import { initial } from '@/utils/format';
+import { eventNames } from '@/api/types';
 import { Field } from '@/comps/ui/field';
 import { showToast, toastError } from '@/comps/frame/task-toasts';
 import { Badge, Chip, Chips } from '@/comps/ui/badge';
@@ -35,7 +36,9 @@ import { Search } from '@/comps/ui/toolbar';
 import { ImportPicker } from './import-picker';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
 import {
+  EFFORTS,
   ENGINE_NAMES,
+  PERMISSIONS,
   defaultLabel,
   modelHeadings,
   modelOptions,
@@ -44,21 +47,11 @@ import {
 } from '@/app/dash/[org]/settings/model-options';
 import { suggestName } from './names';
 
-const PERMISSIONS: Array<[string, string]> = [
-  ['read-only', 'Read only'],
-  ['workspace-write', 'Edit files'],
-  ['auto', 'Auto'],
-];
 const PERMISSION_HINTS: Record<string, string> = {
   'read-only': 'reads the repository and changes nothing',
   'workspace-write': 'edits files inside the repository',
   auto: 'edits files, reaches the network, and asks when it needs more',
 };
-const EFFORTS: Array<[string, string]> = [
-  ['low', 'Low'],
-  ['medium', 'Medium'],
-  ['high', 'High'],
-];
 const PRESETS = ['observe', 'comment', 'write'];
 const ACCESS: Record<string, [string, string]> = {
   observe: ['Observe', 'reads the platform only'],
@@ -78,13 +71,6 @@ const HELPER =
   "Answer the team's questions in the thread.\nRead the code before you answer, cite file paths, and say when you are unsure.\nIf asked to change code, describe the change and stop.";
 
 export type Template = 'import' | 'reviewer' | 'helper' | 'blank';
-
-const eventNames = (events: unknown): string[] =>
-  Array.isArray(events)
-    ? events.map(String)
-    : events && typeof events === 'object'
-      ? Object.keys(events)
-      : [];
 
 const slug = (value: string) =>
   value

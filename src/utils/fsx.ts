@@ -138,3 +138,149 @@ export function createJsonlTail(file: string, from = 0): () => string[] {
     }
   };
 }
+
+/** Directory watches survive atomic replacements; the latch also accepts process/store signals. */
+export function watchChanges(directory?: string, onChange?: (file: string | null) => void) {
+  let changed = false;
+  let closed = false;
+  const waiters = new Set<() => void>();
+  const notify = () => {
+    changed = true;
+    for (const wake of [...waiters]) wake();
+  };
+  // Native watch registration can lag publications made in the same turn.
+  const initial = directory
+    ? setImmediate(() => {
+        notify();
+        onChange?.(null);
+      })
+    : undefined;
+  let watcher: fs.FSWatcher | undefined;
+  try {
+    if (directory)
+      watcher = fs.watch(directory, { persistent: false }, (_event, file) => {
+        notify();
+        onChange?.(file);
+      });
+    watcher?.on('error', notify);
+  } catch {}
+  return {
+    notify,
+    wait(ms: number, signal?: AbortSignal): Promise<void> {
+      if (closed || changed || signal?.aborted || ms <= 0) {
+        changed = false;
+        return Promise.resolve();
+      }
+      return new Promise(resolve => {
+        const wake = () => {
+          clearTimeout(timer);
+          signal?.removeEventListener('abort', wake);
+          waiters.delete(wake);
+          changed = false;
+          resolve();
+        };
+        const timer = setTimeout(wake, ms);
+        waiters.add(wake);
+        signal?.addEventListener('abort', wake, { once: true });
+      });
+    },
+    async until<T>(
+      read: () => T | undefined | Promise<T | undefined>,
+      timeoutMs: number,
+      signal?: AbortSignal,
+      recoveryMs = 30000,
+    ): Promise<T | undefined> {
+      const deadline = Date.now() + timeoutMs;
+      try {
+        for (;;) {
+          const value = await read();
+          if (value !== undefined || closed || Date.now() >= deadline || signal?.aborted) return value;
+          await this.wait(Math.min(recoveryMs, deadline - Date.now()), signal);
+        }
+      } finally {
+        this.close();
+      }
+    },
+    close() {
+      closed = true;
+      clearImmediate(initial);
+      watcher?.close();
+      for (const wake of [...waiters]) wake();
+    },
+  };
+}
+
+/** Serialize file-backed state with a fenced owner marker and a recovery lease. */
+export async function withFileLock<T>(
+  file: string,
+  work: () => T,
+  staleMs = 30000,
+  timeoutMs = Infinity,
+): Promise<Awaited<T>> {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const staging = fs.mkdtempSync(`${file}-`);
+  const owner = `${process.pid}-${randomUUID()}`;
+  fs.mkdirSync(path.join(staging, owner));
+  const changes = watchChanges(path.dirname(file));
+  const deadline = Date.now() + timeoutMs;
+  let acquired = false;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  try {
+    while (!acquired) {
+      try {
+        if (fs.existsSync(file)) throw Object.assign(new Error('Lock is held'), { code: 'EEXIST' });
+        fs.renameSync(staging, file);
+        acquired = true;
+      } catch (error) {
+        if (
+          !['EEXIST', 'ENOTEMPTY', 'ENOTDIR'].includes((error as NodeJS.ErrnoException).code ?? '')
+        )
+          throw error;
+        try {
+          const legacy = fs.statSync(file).isFile();
+          const entries = legacy ? [''] : fs.readdirSync(file);
+          for (const entry of entries) {
+            const marker = legacy ? file : path.join(file, entry);
+            const pid = Number(legacy ? fs.readFileSync(file, 'utf8') : entry.split('-')[0]);
+            let stale = (!legacy || !pid) && Date.now() - fs.statSync(marker).mtimeMs > staleMs;
+            if (pid) {
+              try {
+                process.kill(pid, 0);
+              } catch (error) {
+                stale ||= (error as NodeJS.ErrnoException).code === 'ESRCH';
+              }
+            }
+            if (stale) legacy ? fs.unlinkSync(marker) : fs.rmdirSync(marker);
+          }
+          if (
+            !legacy &&
+            (entries.length ||
+              staleMs === Infinity ||
+              Date.now() - fs.statSync(file).mtimeMs > staleMs)
+          )
+            fs.rmdirSync(file);
+        } catch {}
+        if (Date.now() >= deadline) throw new Error('File lock wait timed out');
+        await changes.wait(Math.min(30000, staleMs, deadline - Date.now()));
+      }
+    }
+    heartbeat = setInterval(() => {
+      try {
+        fs.utimesSync(path.join(file, owner), new Date(), new Date());
+      } catch {}
+    }, 1000);
+    heartbeat.unref();
+    return await work();
+  } finally {
+    changes.close();
+    clearInterval(heartbeat);
+    if (acquired) {
+      try {
+        fs.rmdirSync(path.join(file, owner));
+      } catch {}
+      try {
+        fs.rmdirSync(file);
+      } catch {}
+    } else fs.rmSync(staging, { recursive: true, force: true });
+  }
+}

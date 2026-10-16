@@ -34,7 +34,6 @@ type DashHost = {
   manifest: Manifest;
 };
 
-const DASH_NOT_BUILT = 'The Coder dashboard is not built; run bun run build.';
 const CSP = [
   "default-src 'self'",
   "style-src 'self' 'unsafe-inline'",
@@ -85,9 +84,7 @@ export function serverEntry(root: string): string {
 }
 
 // The build's standalone folder serves itself; root only scopes .env loading, so it stays inside the build.
-async function createDashHost(moduleUrl: string): Promise<DashHost> {
-  const dashRoot = resolveDashRoot(moduleUrl);
-  if (!dashRoot) throw new Error(DASH_NOT_BUILT);
+async function createDashHost(dashRoot: string): Promise<DashHost> {
   const manifest = JSON.parse(readFileSync(manifestFile(dashRoot), 'utf8')) as Manifest;
   const entry = (await import(pathToFileURL(serverEntry(dashRoot)).href)) as {
     createRequestHandler(options: { root: string }): Promise<RequestHandler>;
@@ -98,42 +95,45 @@ async function createDashHost(moduleUrl: string): Promise<DashHost> {
   };
 }
 
-type Loaded = { host: Promise<DashHost>; build?: number; checked: number };
-export class DashboardHosts {
-  readonly hosts = new Map<string, Loaded>();
-}
 /** How often a request looks for a newer build. */
 const RECHECK_MS = 1000;
 
-/** When the build in use was written; undefined while none is complete. */
-function buildStamp(moduleUrl: string): number | undefined {
-  const root = resolveDashRoot(moduleUrl);
-  if (!root) return undefined;
-  try {
-    return statSync(manifestFile(root)).mtimeMs;
-  } catch {
-    return undefined;
+/** The dashboard host, replaced once a rebuild lands so a running server serves it. */
+export class DashboardHosts {
+  private root?: string;
+  private loaded?: { host: Promise<DashHost>; build?: number; checked: number };
+
+  constructor(private readonly moduleUrl = import.meta.url) {}
+
+  /** Undefined while no build is complete. */
+  host(): Promise<DashHost> | undefined {
+    const now = Date.now();
+    const loaded = this.loaded;
+    if (loaded && now - loaded.checked < RECHECK_MS) return loaded.host;
+    this.root ??= resolveDashRoot(this.moduleUrl);
+    if (!this.root) return undefined;
+    let build: number | undefined;
+    try {
+      build = statSync(manifestFile(this.root)).mtimeMs;
+    } catch {}
+    if (loaded) {
+      loaded.checked = now;
+      if (build === undefined || build === loaded.build) return loaded.host;
+    }
+    const next = { build, checked: now, host: createDashHost(this.root) };
+    next.host.catch(() => {
+      if (this.loaded === next) this.loaded = undefined;
+    });
+    this.loaded = next;
+    return next.host;
   }
 }
 
-/** The dashboard host, replaced once a rebuild lands so a running server serves it. */
-function dashHost(moduleUrl: string, { hosts }: DashboardHosts): Promise<DashHost> {
-  const now = Date.now();
-  const loaded = hosts.get(moduleUrl);
-  if (loaded && now - loaded.checked < RECHECK_MS) return loaded.host;
-  const build = buildStamp(moduleUrl);
-  if (loaded) {
-    loaded.checked = now;
-    if (build === undefined || build === loaded.build) return loaded.host;
-  }
-  const next = { build, checked: now, host: createDashHost(moduleUrl) };
-  hosts.set(moduleUrl, next);
-  return next.host;
-}
+const normalize = (pathname: string) =>
+  pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
 
 export function knownRoute(pathname: string, manifest: Manifest): boolean {
-  const normalized =
-    pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
+  const normalized = normalize(pathname);
   return Boolean(
     match('/assets/*', normalized) ||
     match('/dash/*', normalized) ||
@@ -142,14 +142,9 @@ export function knownRoute(pathname: string, manifest: Manifest): boolean {
 }
 
 /** Whether `pathname` is a page of the dashboard build being served. */
-export async function dashPage(pathname: string, cache = new DashboardHosts()): Promise<boolean> {
-  const host = await dashHost(import.meta.url, cache).catch(() => {
-    cache.hosts.delete(import.meta.url);
-  });
-  const normalized =
-    pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
-
-  return Boolean(host?.manifest.routes.some(route => match(route.route, normalized)));
+export async function dashPage(pathname: string, hosts = new DashboardHosts()): Promise<boolean> {
+  const host = await hosts.host()?.catch(() => undefined);
+  return Boolean(host?.manifest.routes.some(route => match(route.route, normalize(pathname))));
 }
 
 const INLINE_SCRIPT = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi;
@@ -266,17 +261,10 @@ async function secure(request: Request, response: Response, nonce: string): Prom
 /** Render a dashboard route through the package's prebuilt pnext server. */
 export async function serveDash(
   req: Request,
-  moduleUrl = import.meta.url,
-  cache = new DashboardHosts(),
+  hosts = new DashboardHosts(),
 ): Promise<Response | undefined> {
-  let host: DashHost;
-  try {
-    host = await dashHost(moduleUrl, cache);
-  } catch (error) {
-    cache.hosts.delete(moduleUrl);
-    if (error instanceof Error && error.message === DASH_NOT_BUILT) return undefined;
-    throw error;
-  }
+  const host = await hosts.host();
+  if (!host) return undefined;
   if (!knownRoute(new URL(req.url).pathname, host.manifest)) return undefined;
   // pnext reads the nonce off the request's policy, as Next.js does with middleware.
   const nonce = randomBytes(16).toString('base64');
@@ -367,35 +355,13 @@ export async function signIn(
   params: Params,
   url: URL,
 ): Promise<Response> {
+  // A memory server keeps no accounts: its dashboard asks for the admin token.
+  if (!ctx.auth) return redirect('/dash');
   // Straight to Wular unless the visitor just signed out or a sign-in failed.
-  if (ctx.auth && !url.searchParams.has('signed_out') && !url.searchParams.has('error'))
+  if (!url.searchParams.has('signed_out') && !url.searchParams.has('error'))
     return toSignIn(req, ctx, url, url.searchParams.get('return'));
 
-  return (
-    (await serveDash(dashRequest(req, ctx), undefined, ctx.dashboardHosts)) ??
-    new Response('UI is not built', { status: 503 })
-  );
-}
-
-export async function loginPage(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  return (
-    (await serveDash(dashRequest(req, ctx), undefined, ctx.dashboardHosts)) ??
-    new Response('UI is not built', { status: 503 })
-  );
-}
-
-export async function dashboard(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  return (await serveDash(dashRequest(req, ctx), undefined, ctx.dashboardHosts)) ?? notFound();
+  return loginPage(req, ctx);
 }
 
 export function dashRequest(req: Request, ctx: ServerContext): Request {
@@ -408,6 +374,11 @@ export function dashRequest(req: Request, ctx: ServerContext): Request {
   return new Request(req, { headers });
 }
 
-export async function pagesFallback(req: Request, ctx: ServerContext, url: URL): Promise<Response> {
-  return (await serveDash(dashRequest(req, ctx), undefined, ctx.dashboardHosts)) ?? notFound();
-}
+export const notBuilt = () => new Response('UI is not built', { status: 503 });
+
+/** A dashboard page, or `miss()` when the build has none at this path. */
+const page = (miss: () => Response) => async (req: Request, ctx: ServerContext) =>
+  (await serveDash(dashRequest(req, ctx), ctx.dashboardHosts)) ?? miss();
+
+export const loginPage = page(notBuilt);
+export const dashboard = page(notFound);

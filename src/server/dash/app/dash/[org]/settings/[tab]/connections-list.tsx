@@ -6,7 +6,6 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
-import { held } from '@/utils/paged';
 import { Card, Empty, FoldCard, Loading } from '@/comps/ui/card';
 import { reasonText } from '@/utils/format';
 import { Field } from '@/comps/ui/field';
@@ -30,6 +29,7 @@ import type {
   RegistryInput,
 } from '@coder/client/types';
 import { Notice } from '@/comps/ui/notice';
+import { CONNECTION_SCOPES } from '@/app/dash/[org]/settings/model-options';
 
 type Answer = ConnectionRow & { authorize?: string };
 
@@ -75,10 +75,6 @@ const HELP: Record<string, string> = {
 };
 const READ_ONLY: [string, string] = ['observe', 'Read only'];
 const READ_WRITE: [string, string] = ['write', 'Read and write'];
-const SCOPES: Array<[string, string]> = [
-  ['me', 'Just me'],
-  ['', 'Workspace'],
-];
 
 const STATUS: Record<ConnectionRow['status'], { tone?: 'ok' | 'warn'; label: string }> = {
   ok: { tone: 'ok', label: 'connected' },
@@ -145,7 +141,7 @@ function Who({
   if (local || !admin) return null;
   return (
     <Field label="Scope" group>
-      <Select label="Scope" options={SCOPES} value={value} onChange={onChange} />
+      <Select label="Scope" options={CONNECTION_SCOPES} value={value} onChange={onChange} />
     </Field>
   );
 }
@@ -301,14 +297,13 @@ function AddMcp(props: AddProps) {
     if (!q.trim()) {
       void client.mcp.search('').then(
         items => items.length && setFound(now => now ?? { q, items }),
-        () => {},
+        reason => console.error('coder dashboard: known servers', reason),
       );
       return;
     }
     setFound({ q });
     void client.mcp
       .search(q.trim())
-      .then(held(performance.now()))
       .then(items => setFound(now => (now?.q === q ? { q, items } : now)))
       .catch(reason => setFound(now => (now?.q === q ? { q, error: reasonText(reason) } : now)));
   };
@@ -441,7 +436,7 @@ function AddMcp(props: AddProps) {
               </div>
             ) : !found.items ? (
               <div class="registry-note">
-                <Loading label="Searching known servers" inline dots />
+                <Loading label="Searching known servers" inline dots late />
               </div>
             ) : found.items.length ? (
               found.items.map(server => (
@@ -713,9 +708,7 @@ export function ConnectionsList({
                     badges={
                       <span class="conn-badges">
                         <Badge>{row.owner ? (row.mine ? 'yours' : 'member') : 'workspace'}</Badge>
-                        {row.provider === 'env' ? null : (
-                          <Badge>{row.access === 'write' ? 'read and write' : 'read only'}</Badge>
-                        )}
+                        <Badge>{row.access === 'write' ? 'read and write' : 'read only'}</Badge>
                         <Badge tone={STATUS[row.status].tone}>{STATUS[row.status].label}</Badge>
                       </span>
                     }

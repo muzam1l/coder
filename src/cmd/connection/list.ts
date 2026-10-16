@@ -3,9 +3,9 @@ import process from 'node:process';
 
 import type { connection } from '../../core/connection';
 import { formatHints, outStyle, renderTable } from '../../tui/output';
-import { baseOptions } from '../../utils/args';
+import { baseOptions, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-import { describe, serverOptions } from './add';
+import { describe } from './add';
 
 type Listed = Awaited<ReturnType<typeof connection.list>>;
 

@@ -1,5 +1,5 @@
 /** `coder model unalias`: drop a named spec. */
-import { modelUnaliasCore } from '../../core/models';
+import { models } from '../../core/models';
 import { command } from '../../cli';
 import { modelOptions } from './add';
 import { printModelChange } from './remove';
@@ -13,6 +13,6 @@ export const commandModelUnalias = command({
   },
   options: modelOptions,
   args: 1,
-  run: ({ options, args: [name], cwd }) => modelUnaliasCore(cwd, name, options),
+  run: ({ options, args: [name], cwd }) => models.unalias(name, { ...options, cwd }),
   print: result => printModelChange('unaliased', result.unaliased, result.file),
 });

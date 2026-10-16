@@ -2,11 +2,9 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
+import { baseOptions, flag, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
 import { plural } from './archive';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 export const commandDelete = command({
   name: 'task delete',

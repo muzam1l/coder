@@ -1,7 +1,7 @@
 /** `coder config [list|get|set|unset]`: the effective config, or one dotted key in the user (or --workspace) file. */
 import process from 'node:process';
 
-import { configGet, configSet, loadConfig, resolveUserConfigFile } from '../core/config';
+import { config, configSet, resolveUserConfigFile } from '../core/config';
 import { CoderError } from '../core/dispatch';
 import type { CoderConfig, EngineConfig } from '../core/types';
 import { renderCommandHelp } from '../tui/help';
@@ -47,10 +47,10 @@ export const commandConfig = command({
   args: Number.POSITIVE_INFINITY,
   run({ options, args: [action, key, ...valueParts], cwd }): ConfigResult | undefined {
     if (!action || action === 'help') return undefined;
-    if (action === 'list') return { action, config: loadConfig(cwd) };
+    if (action === 'list') return { action, config: config.get(undefined, { cwd }) as CoderConfig };
     if (action === 'get') {
       if (!key) throw usage('coder config get <key>  (e.g. chain, engines.codex.model)');
-      return { action, value: configGet(cwd, key) };
+      return { action, value: config.get(key, { cwd }) };
     }
     if (action !== 'set' && action !== 'unset')
       throw usage('coder config <list|get|set|unset> [<key> [value]] [--workspace]');
@@ -58,7 +58,8 @@ export const commandConfig = command({
       throw usage(`coder config ${action} <key>${action === 'set' ? ' <value>' : ''}`);
     return {
       action,
-      set: configSet(cwd, key, parseValue(valueParts.join(' ')), {
+      set: config.set(key, parseValue(valueParts.join(' ')), {
+        cwd,
         workspace: options.workspace,
         unset: action === 'unset',
       }),

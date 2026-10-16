@@ -28,8 +28,14 @@ export function Collapse({
     measure();
     const observer = new ResizeObserver(measure);
     observer.observe(el);
-    return () => observer.disconnect();
-  }, [children, open]);
+    // The clamped box keeps its size as content grows, so content changes measure too.
+    const changes = new MutationObserver(measure);
+    changes.observe(el, { childList: true, subtree: true, characterData: true });
+    return () => {
+      observer.disconnect();
+      changes.disconnect();
+    };
+  }, [open]);
 
   return (
     <div class={`collapse${long ? ' long' : ''}${open ? ' open' : ''}`} style={`--lines:${lines}`}>

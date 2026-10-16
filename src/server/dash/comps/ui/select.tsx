@@ -1,5 +1,5 @@
 import './select.css';
-import type { ComponentChildren, Ref } from 'preact';
+import type { ComponentChildren, Ref, RefObject } from 'preact';
 import { Fragment } from 'preact';
 import { useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
@@ -10,6 +10,44 @@ import { MenuLabel, MenuOption, MenuPanel } from './menu-items';
 export type Option = [value: string, label: string];
 
 const PAGE = 10;
+
+/** A top-layer list's place at `anchor`, flipped up near the bottom, following scrolls and resizes; a dialog or scroll box never clips it. */
+export function usePlace(
+  anchor: RefObject<HTMLElement>,
+  list: RefObject<HTMLElement>,
+  open: boolean,
+  max: number,
+  deps: unknown[] = [],
+) {
+  const [place, setPlace] = useState('');
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    list.current?.showPopover();
+    const position = () => {
+      const box = anchor.current?.getBoundingClientRect();
+      const menu = list.current;
+      if (!box || !menu) return;
+      const below = innerHeight - box.bottom - 12;
+      const up = below < Math.min(menu.scrollHeight, 240) && box.top > below;
+      setPlace(
+        `left:${Math.round(Math.min(box.left, innerWidth - menu.offsetWidth - 8))}px;min-width:${Math.round(box.width)}px;` +
+          (up
+            ? `bottom:${Math.round(innerHeight - box.top + 4)}px;max-height:${Math.round(Math.min(max, box.top - 12))}px`
+            : `top:${Math.round(box.bottom + 4)}px;max-height:${Math.round(Math.min(max, below))}px`),
+      );
+    };
+    position();
+    addEventListener('resize', position);
+    addEventListener('scroll', position, true);
+    return () => {
+      removeEventListener('resize', position);
+      removeEventListener('scroll', position, true);
+    };
+  }, [open, ...deps]);
+
+  return place;
+}
 
 /** A select in the menu style, with keyboard, type-ahead and touch; `name` posts its value. */
 export function Select({
@@ -53,9 +91,9 @@ export function Select({
   const current = options[selected]?.[0] ?? '';
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(selected);
-  const [place, setPlace] = useState('');
   const button = useRef<HTMLButtonElement>(null);
   const list = useRef<HTMLDivElement>(null);
+  const place = usePlace(button, list, open, 560);
   const typed = useRef({ text: '', at: 0 });
   const id = useId();
 
@@ -129,36 +167,14 @@ export function Select({
     event.preventDefault();
   };
 
-  // In the top layer, so a dialog or scroll box never clips it; flips up near the bottom.
   useLayoutEffect(() => {
     if (!open) return;
-    list.current?.showPopover();
-    const position = () => {
-      const box = button.current?.getBoundingClientRect();
-      const menu = list.current;
-      if (!box || !menu) return;
-      const below = innerHeight - box.bottom - 12;
-      const up = below < Math.min(menu.scrollHeight, 240) && box.top > below;
-      setPlace(
-        `left:${Math.round(Math.min(box.left, innerWidth - menu.offsetWidth - 8))}px;min-width:${Math.round(box.width)}px;` +
-          (up
-            ? `bottom:${Math.round(innerHeight - box.top + 4)}px;max-height:${Math.round(Math.min(560, box.top - 12))}px`
-            : `top:${Math.round(box.bottom + 4)}px;max-height:${Math.round(Math.min(560, below))}px`),
-      );
-    };
-    position();
     const outside = (event: PointerEvent) => {
       const target = event.target as Node;
       if (!button.current?.contains(target) && !list.current?.contains(target)) close(false);
     };
-    addEventListener('resize', position);
-    addEventListener('scroll', position, true);
     document.addEventListener('pointerdown', outside);
-    return () => {
-      removeEventListener('resize', position);
-      removeEventListener('scroll', position, true);
-      document.removeEventListener('pointerdown', outside);
-    };
+    return () => document.removeEventListener('pointerdown', outside);
   }, [open]);
 
   useLayoutEffect(() => {
@@ -267,7 +283,3 @@ export const SelectList = ({
     {children}
   </MenuPanel>
 );
-
-/** The label a filter's value shows. */
-export const labelOf = (options: Array<[string, string]>, value: string) =>
-  (options.find(([key]) => key === value) ?? options[0]!)[1];

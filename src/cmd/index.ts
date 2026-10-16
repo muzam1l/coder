@@ -17,8 +17,6 @@ export const COMMANDS: Record<string, Load> = {
   // Standalone commands.
   config: async () => (await import('./config')).commandConfig,
   'setup-host': setupHost,
-  'host-setup': setupHost, // alias for setup-host
-  setup: setupHost, // back-compat alias for setup-host
   model: async () => (await import('./model')).commandModel,
   connection: async () => (await import('./connection')).commandConnection,
   docs: async () => (await import('./docs')).commandDocs,
@@ -37,7 +35,6 @@ export const COMMANDS: Record<string, Load> = {
   auth: async () => (await import('./auth')).commandAuth,
   credentials: async () => (await import('./credentials')).commandCredentials,
   upgrade,
-  update: upgrade,
 };
 
 export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
@@ -72,7 +69,7 @@ export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
     { usage: 'docs [topic]', blurb: 'print bundled documentation (for agents to read)' },
     {
       usage: 'upgrade [--cli-only|--plugins-only]',
-      blurb: 'update the CLI and host plugins (alias: update)',
+      blurb: 'update the CLI and host plugins',
     },
   ],
   start: [

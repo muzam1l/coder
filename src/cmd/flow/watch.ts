@@ -1,7 +1,9 @@
 /** `coder flow watch`: follow a run live, and the step renderer every flow command paints with. */
 import process from 'node:process';
+import fs from 'node:fs';
+import path from 'node:path';
 
-import { readTaskLog } from '../../core/state';
+import { readTaskLog, resolveTaskDir } from '../../core/state';
 import type { FlowWatch, RunResult } from '../../flow/runs';
 import type { RunSummary } from '../../flow/executor';
 import type { FlowEvent } from '../../flow/types';
@@ -16,6 +18,7 @@ import {
   printJson,
 } from '../../tui/output';
 import { LiveRegion, muteKeys, termCols, termRows, type LiveStream } from '../../tui/live';
+import { createJsonlTail, watchChanges } from '../../utils/fsx';
 import { baseOptions, tailOption } from '../../utils/args';
 import { command } from '../../cli';
 
@@ -173,6 +176,8 @@ export class FlowStepRenderer {
   // line under its row. It is never wrapped because a second row buys little and costs
   // half the viewport when tasks run wide).
   private previews = new Map<string, string>();
+  private tails = new Map<string, () => string[]>();
+  private previewWatchers = new Map<string, ReturnType<typeof watchChanges>>();
   private frame = 0;
   // Whether anything has been committed yet. The first row gets no spacer.
   private hasCommitted = false;
@@ -202,6 +207,16 @@ export class FlowStepRenderer {
           return;
         }
         this.active.set(e.taskId, entry);
+        this.previewWatchers.get(e.taskId)?.close();
+        this.previewWatchers.set(
+          e.taskId,
+          watchChanges(resolveTaskDir(process.cwd(), e.taskId), file => {
+            if (file && file !== 'log.jsonl') return;
+            this.refreshPreviews(e.taskId);
+            this.repaint();
+          }),
+        );
+        this.refreshPreviews(e.taskId);
         this.spin(true);
         this.repaint();
         return;
@@ -209,6 +224,9 @@ export class FlowStepRenderer {
       case 'task-end': {
         this.active.delete(e.taskId);
         this.previews.delete(e.taskId);
+        this.tails.delete(e.taskId);
+        this.previewWatchers.get(e.taskId)?.close();
+        this.previewWatchers.delete(e.taskId);
         this.idle();
         const known = this.names.get(e.taskId);
         this.final(
@@ -256,6 +274,8 @@ export class FlowStepRenderer {
   /** Stream over: flush the held line (closing its leg if nested), stop the spinner. */
   done(): void {
     this.spin(false);
+    for (const watcher of this.previewWatchers.values()) watcher.close();
+    this.previewWatchers.clear();
     this.flush(0);
     if (this.tty) this.repaint();
     this.region.done();
@@ -332,17 +352,30 @@ export class FlowStepRenderer {
 
   // Latest progress-log line per running task: one railed row, clipped to the
   // terminal so the preview itself can never wrap.
-  private refreshPreviews(): void {
-    for (const taskId of this.active.keys()) {
-      try {
-        const last = readTaskLog(process.cwd(), taskId, 1)[0];
-        const msg = last?.message?.replace(/\s+/g, ' ').trim();
-        if (!msg) continue;
-        const width = (termCols(this.stream) ?? 120) - 8;
-        this.previews.set(taskId, msg.length > width ? `${msg.slice(0, width - 1)}…` : msg);
-      } catch {
-        // Best-effort preview.
+  private refreshPreviews(taskId: string): void {
+    try {
+      let tail = this.tails.get(taskId);
+      let last;
+      if (!tail) {
+        const file = path.join(resolveTaskDir(process.cwd(), taskId), 'log.jsonl');
+        const size = fs.existsSync(file) ? fs.statSync(file).size : 0;
+        last = readTaskLog(process.cwd(), taskId, 1)[0];
+        tail = createJsonlTail(file, size);
+        this.tails.set(taskId, tail);
       }
+      for (const line of tail()) {
+        try {
+          last = JSON.parse(line);
+        } catch {
+          last = { message: line };
+        }
+      }
+      const msg = last?.message?.replace(/\s+/g, ' ').trim();
+      if (!msg) return;
+      const width = (termCols(this.stream) ?? 120) - 8;
+      this.previews.set(taskId, msg.length > width ? `${msg.slice(0, width - 1)}…` : msg);
+    } catch {
+      // Best-effort preview.
     }
   }
 
@@ -356,8 +389,6 @@ export class FlowStepRenderer {
       // unref: the spinner must never keep the process alive on its own.
       this.timer = setInterval(() => {
         this.frame++;
-        // Preview refresh hits the task log on disk. Throttle it to about every 480ms.
-        if (this.frame % 4 === 0) this.refreshPreviews();
         this.repaint();
       }, 120).unref();
     } else if (!on && this.timer) {

@@ -1,7 +1,6 @@
 /** `coder server app create <integration>`: open the page that creates the built-in agent's public app. */
 import process from 'node:process';
 
-import { CoderError } from '../../../core/dispatch';
 import { openUrl } from '../../../tui/prompt';
 import { flag, str } from '../../../utils/args';
 import { command } from '../../../cli';
@@ -25,11 +24,10 @@ export const commandServerAppCreate = command({
   },
   options: { org: str, name: str, json: flag },
   args: 1,
+  required: ['<integration>'],
   async run({ options, args: [integration] }) {
     const { serverAppLink } = await import('../../../server/agents/apps');
 
-    if (!integration)
-      throw new CoderError('invalid-option', 'Missing integration, such as github or linear.');
     return serverAppLink(integration, { owner: options.org, name: options.name });
   },
   json: ({ url }) => ({ ok: true, url }),

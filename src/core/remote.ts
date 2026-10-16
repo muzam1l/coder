@@ -151,8 +151,6 @@ const ENGINES = ['claude', 'codex', 'custom'] as const;
 const invalid = (message: string, hint?: string) =>
   new CoderError('invalid-option', message, hint ? { hint } : {});
 
-const pause = () => new Promise(resolve => setTimeout(resolve, 1000));
-
 async function stdinValue(): Promise<string> {
   let value = '';
   for await (const chunk of process.stdin) value += chunk.toString();
@@ -233,8 +231,7 @@ export async function loginCredential(
   options.onStart?.(() => api.cancelLogin(login.id));
   const settle = async (done: (state: LoginView['state']) => boolean) => {
     while (!done(login.state)) {
-      await pause();
-      login = await api.loginStatus(login.id);
+      login = await api.loginStatus(login.id, login.state);
     }
   };
 
@@ -245,3 +242,13 @@ export async function loginCredential(
   await settle(state => state === 'done' || state === 'failed');
   return login;
 }
+
+export const credentials = {
+  list: (options: ServerOptions = {}) => connect(options).credentials.list(),
+  add: addCredential,
+  remove: (label: string, options: ServerOptions & { workspace?: boolean } = {}) =>
+    connect(options).credentials.remove(label, options),
+  default: (label: string, options: ServerOptions & { workspace?: boolean } = {}) =>
+    connect(options).credentials.setDefault(label, options),
+  login: loginCredential,
+};

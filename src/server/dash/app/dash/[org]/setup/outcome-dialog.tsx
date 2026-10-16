@@ -13,6 +13,7 @@ export function OutcomeDialog({
   text,
   issues,
   cancel = 'Close',
+  focus,
   children,
 }: {
   ok: boolean;
@@ -21,6 +22,7 @@ export function OutcomeDialog({
   /** Where a failure is reported. */
   issues?: string;
   cancel?: string;
+  focus?: 'cancel' | 'actions';
   children?: ComponentChildren;
 }) {
   const steps = toChildArray(children);
@@ -42,6 +44,7 @@ export function OutcomeDialog({
       title={title}
       icon={ok ? iCheck : iAlert}
       cancel={cancel}
+      focus={focus}
       actions={
         report || steps.length ? (
           <>

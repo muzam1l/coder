@@ -6,7 +6,12 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 import { CoderError } from './dispatch';
-import { compareVersions, clearUpdateCache, detectPackageManager } from './update-check';
+import {
+  compareVersions,
+  clearUpdateCache,
+  detectPackageManager,
+  PM_COMMANDS,
+} from './update-check';
 import { readVersion, resolveMarketplaceDir, CLI_PATH, readManifestVersion } from './runtime';
 import type { Availability, Engine, CoderConfig } from './types';
 import { getCodexAuthStatus, getCodexAvailability } from './engines/codex';
@@ -194,23 +199,19 @@ export interface SetupHostReport {
 
 // Print-free core: probe engines, seed the chain, install requested host plugins.
 // It performs the real side effects (installs, chain seeding) - just no output.
-// Hosts are named (`claude`, `agents`, or `codex` as an alias for agents) or flagged; onStart runs once they check out.
+// onStart runs once the requested hosts check out.
 export async function setupHostCore(
   cwd: string,
-  opts: { hosts?: string[]; claude?: boolean; codex?: boolean; agents?: boolean } = {},
+  opts: { hosts?: string[] } = {},
   onStart?: () => void,
 ): Promise<SetupHostReport> {
   const hosts = opts.hosts ?? [];
-  const unknown = hosts.find(host => !['claude', 'codex', 'agents'].includes(host));
+  const unknown = hosts.find(host => !['claude', 'agents'].includes(host));
   if (unknown)
-    throw new CoderError(
-      'invalid-option',
-      `Unknown host "${unknown}". Use claude, codex, or agents.`,
-      {
-        hint: 'Codex, Pi, OpenCode, and other Agent Skills hosts: coder setup-host agents',
-      },
-    );
-  const want = (host: 'claude' | 'codex' | 'agents') => opts[host] || hosts.includes(host);
+    throw new CoderError('invalid-option', `Unknown host "${unknown}". Use claude or agents.`, {
+      hint: 'Codex, Pi, OpenCode, and other Agent Skills hosts: coder setup-host agents',
+    });
+  const want = (host: 'claude' | 'agents') => hosts.includes(host);
   onStart?.();
 
   let availability = getCodexAvailability(cwd);
@@ -241,7 +242,7 @@ export async function setupHostCore(
   const marketplaceDir = resolveMarketplaceDir();
   const claudePlugin = want('claude') ? installClaudePlugin(marketplaceDir) : null;
   // Codex, Pi, OpenCode and other Agent Skills hosts read ~/.agents/skills.
-  const agentsPlugin = want('agents') || want('codex') ? installAgentsSkill(marketplaceDir) : null;
+  const agentsPlugin = want('agents') ? installAgentsSkill(marketplaceDir) : null;
 
   const config = loadConfig(cwd);
   // Ready as long as one engine is usable: installed AND logged in.
@@ -308,16 +309,7 @@ export async function upgradeCore(
   // 1. Update the CLI through whichever package manager installed it.
   if (doCli) {
     const detected = detectPackageManager(CLI_PATH);
-    const [pmBin, ...pmArgs]: [string, ...string[]] =
-      opts.pm === 'npm'
-        ? ['npm', 'install', '-g', '@wular/coder@latest']
-        : opts.pm === 'pnpm'
-          ? ['pnpm', 'add', '-g', '@wular/coder@latest']
-          : opts.pm === 'yarn'
-            ? ['yarn', 'global', 'add', '@wular/coder@latest']
-            : opts.pm === 'bun'
-              ? ['bun', 'add', '-g', '@wular/coder@latest']
-              : detected.command;
+    const [pmBin, ...pmArgs] = (opts.pm && PM_COMMANDS[opts.pm]) || detected.command;
     const pm = opts.pm ?? detected.pm;
     onStep?.(`via ${pm}`);
     // Capture output (instead of inherit) so the package manager's noise does
@@ -369,4 +361,8 @@ export async function upgradeCore(
   }
 
   return report;
+}
+
+export function setupHost(hosts: string[] = [], opts: { cwd?: string } = {}) {
+  return setupHostCore(path.resolve(opts.cwd ?? '.'), { hosts });
 }

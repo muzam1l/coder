@@ -169,26 +169,12 @@ export async function updateMetadata(
   id: string,
   fields: Record<string, unknown>,
 ): Promise<boolean> {
-  if (store.updateMetadata) return store.updateMetadata(kind, id, fields);
-
-  const current = await store.get(kind, id);
-  if (!current) return false;
-
-  await store.put(kind, id, { ...current, ...fields });
-
-  return true;
+  return store.updateMetadata(kind, id, fields);
 }
 
 export async function getApps(
   store: Store,
   keys: string[],
 ): Promise<Array<{ id: string; value: AgentApp }>> {
-  const unique = [...new Set(keys)];
-  if (store.getApps) return store.getApps(unique);
-
-  const apps = await Promise.all(
-    unique.map(async id => ({ id, value: await store.get('app', id) })),
-  );
-
-  return apps.filter((row): row is { id: string; value: AgentApp } => Boolean(row.value));
+  return store.getApps([...new Set(keys)]);
 }

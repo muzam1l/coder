@@ -23,7 +23,6 @@ import { Icon } from '@/comps/ui/icon';
 import { Menu } from '@/comps/ui/menu';
 import { MenuRadio } from '@/comps/ui/menu-items';
 import { Back, PageHead } from '@/comps/frame/page-head';
-import { backFrom } from '@/comps/frame/heads';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
 import { Status } from '@/app/dash/[org]/tasks/list/status';
 import {
@@ -33,6 +32,7 @@ import {
   sourceLabel,
   taskActive,
   taskTitle,
+  TASK_TABS,
   type EventMessage,
 } from '@/app/dash/[org]/tasks/list/task';
 import { useAction } from '@/utils/action';
@@ -40,8 +40,6 @@ import { useZone } from '@/app/zone';
 import { Approval, TaskActions } from './task-actions';
 import { Activity, RunPreview, runSummary } from './activity';
 import { toastError, useTaskEvents, watchTask } from '@/comps/frame/task-toasts';
-
-const TABS = ['Conversation', 'Activity'];
 
 type Tab = 'conversation' | 'activity';
 
@@ -145,20 +143,11 @@ function ResultBody({ value, required }: { value: unknown; required: boolean }) 
   return <div class="body md">{markdown(text)}</div>;
 }
 
-/** Back to where the task was opened from: a `back` path, a `from` list, or Tasks. */
+/** Back to where the task was opened from, a `back` path, or Tasks. */
 function TaskBack() {
   const search = useSearchParams();
   const org = useOrg();
-  return (
-    <Back
-      {...backFrom(search.get('from'), {
-        href: '/dash/[org]/tasks',
-        params: { org },
-        label: 'Tasks',
-      })}
-      back={search.get('back')}
-    />
-  );
+  return <Back href="/dash/[org]/tasks" params={{ org }} label="Tasks" back={search.get('back')} />;
 }
 
 /** The task's one-row head: back, title, status, source and agent, its actions, and a muted line with created time, source, folder, and the agent with its model. */
@@ -205,7 +194,7 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
               class="agent-link"
               href="/dash/[org]/agents/[slug]"
               params={{ org, slug: task.task.agent }}
-              search={{ from: `/dash/${org}/tasks/${task.task.id}` }}
+              search={{ back: `/dash/${org}/tasks/${task.task.id}` }}
             >
               <Icon d={iAgent} />
               {task.task.agent}
@@ -243,7 +232,8 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
   const tz = useZone(serverZone);
   const [task, setTask] = useState(initial);
   const [lines, setLines] = useState(initial.logs ?? []);
-  const [complete, setComplete] = useState((initial.logs?.length ?? 0) < LOG_CHUNK);
+  // A full first page leaves older lines for the stream to replay; turns wait for them.
+  const [caughtUp, setCaughtUp] = useState((initial.logs?.length ?? 0) < LOG_PAGE);
   const [tab, setTab] = useState<Tab>('conversation');
   const [at, setAt] = useState<number | 'end'>();
   const [sent, setSent] = useState<Array<{ kind: string; text: string; turn: number }>>([]);
@@ -299,7 +289,14 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
   }, []);
 
   // Logs stream from when the task runs until the stream ends them, which waits for logs still arriving.
-  const [streaming, setStreaming] = useState(live);
+  const [streaming, setStreaming] = useState(live || !caughtUp);
+  // Each catch-up opens a fresh stream, which says again when it has caught up.
+  const [follows, setFollows] = useState(0);
+  const resume = () => {
+    setCaughtUp(false);
+    setStreaming(true);
+    setFollows(n => n + 1);
+  };
 
   // Each turn's reads apply to it alone: a continue, here or from elsewhere, starts the next.
   const [round, setRound] = useState(0);
@@ -318,10 +315,10 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
       .catch(reason => toastError('Task not refreshed', reasonText(reason)));
   };
 
-  // A running stream follows its own cursor; a stopped page fetches the lines it missed.
+  // A running stream follows its own cursor; a stopped page streams the lines it missed.
   const catchUp = () => {
     reload();
-    if (!streaming) setComplete(false);
+    if (!streaming) resume();
   };
 
   // A new turn's prompt, from this page or elsewhere; its state comes from the events stream.
@@ -349,7 +346,7 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
       // A turn continued and finished elsewhere while this page heard nothing of it.
       if (!live && !taskActive(event) && event.finishedAt !== task.finishedAt) {
         reload();
-        setComplete(false);
+        resume();
       }
       setTask(current => ({
         ...current,
@@ -371,21 +368,9 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
     catchUp,
   );
 
-  // Older lines a chunk at a time, then the stream follows the run.
-  useEffect(() => {
-    if (complete) return;
-    void client.tasks
-      .logs(task.task.id, after.current, LOG_CHUNK)
-      .then(more => {
-        append(more);
-        if (more.length < LOG_CHUNK) setComplete(true);
-      })
-      .catch(reason => toastError('Activity not loaded', reasonText(reason)));
-  }, [complete, lines.length]);
-
   // A hidden tab holds no log stream and resumes from its cursor.
   useEffect(() => {
-    if (!complete || !streaming || !visible) return;
+    if (!streaming || !visible) return;
     const abort = new AbortController();
     const follow = async () => {
       while (!abort.signal.aborted) {
@@ -398,17 +383,22 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
           for await (const event of serverEvents(response.body)) {
             if (abort.signal.aborted) return;
             if (event.event === 'log') append([JSON.parse(event.data)]);
-            else if (event.event === 'end') return setStreaming(false);
+            else if (event.event === 'caught-up') setCaughtUp(true);
+            else if (event.event === 'end') {
+              setCaughtUp(true);
+              return setStreaming(false);
+            }
           }
-        } catch {
+        } catch (reason) {
           if (abort.signal.aborted) return;
+          console.error('coder dashboard: task stream', reason);
         }
         await new Promise(done => setTimeout(done, 1000));
       }
     };
     void follow();
     return () => abort.abort();
-  }, [complete, streaming, visible, round]);
+  }, [streaming, visible, round, follows]);
 
   const turns = task.turns ?? [
     {
@@ -429,7 +419,7 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
   const replied = useMemo(() => turnReplies(turns, lines), [turns, lines]);
   // Turns show once their log lines are in, so a reply never pushes what is already shown.
   const loaded = turns.findIndex(
-    turn => !complete && (!lines.length || within(turn, lines.at(-1)!)),
+    turn => !caughtUp && (!lines.length || within(turn, lines.at(-1)!)),
   );
   const shown = loaded < 0 ? turns : turns.slice(0, loaded);
 
@@ -515,7 +505,7 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
         </p>
       ))}
       <nav class="tabs" role="tablist" aria-label="Task">
-        {TABS.map(label => {
+        {TASK_TABS.map(label => {
           const key = label.toLowerCase() as Tab;
           return (
             <button
@@ -687,5 +677,5 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
   );
 }
 
-/** Lines per request when a task's log loads or follows. */
-export const LOG_CHUNK = 500;
+/** Lines the task read carries; a full page means more wait in the log. */
+const LOG_PAGE = 500;

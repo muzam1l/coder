@@ -15,7 +15,7 @@ import { ServerLimits } from '../limits';
 import { RegistryIndex } from '../settings/mcp';
 import { sql } from 'drizzle-orm';
 import { createBackend } from '../store';
-import { recoverLocalTasks, stopLocalTasks, syncLocalUsage } from '../tasks/local';
+import { engineStatus, recoverLocalTasks, stopLocalTasks, syncLocalUsage } from '../tasks/local';
 import { LogWatcher, TaskWatcher } from '../tasks/stream';
 import type { ServerContext, ServerConfig } from '.';
 
@@ -136,6 +136,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
       if (existing) return existing;
       const store = backend.store(organizationId);
       const fileReads: ServerContext['fileReads'] = new Map();
+      const settings = { registry };
       const value: ServerContext = {
         limits,
         ...(backend.connection
@@ -147,7 +148,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
             }
           : {}),
         config,
-        settings: { registry },
+        settings,
         organizationId,
         integrations,
         runners,
@@ -161,7 +162,13 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
         chatState: backend.chatState,
         fileReads,
         repositoryLists: new Map(),
-        loadAgent: remoteAgentLoader(integrations, { cwd, config, store, fileReads }),
+        loadAgent: remoteAgentLoader(integrations, {
+          ...(options.local ? { cwd } : {}),
+          config,
+          store,
+          fileReads,
+          settings,
+        }),
         ...(auth ? { auth } : {}),
         scope: context,
         webhookTarget: (key, installationKey) => backend.webhookTarget(key, installationKey),
@@ -183,6 +190,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
     };
 
     const defaultContext = context(backend.defaultOrganizationId);
+    if (defaultContext.local) void engineStatus(defaultContext).catch(() => {});
     let usageStart: ReturnType<typeof setImmediate> | undefined;
     if (options.local) {
       await recoverLocalTasks(defaultContext);

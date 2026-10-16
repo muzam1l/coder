@@ -5,9 +5,16 @@ import type { JWK } from 'jose';
 import type { Integration } from '../../integrations/types';
 import type { Agent, AgentApp, AgentEvent, Installation, RunnerKind } from '../../agent/types';
 import type { Runner } from '../runners';
-import type { Store } from '../store/types';
+import type { AgentRecord, AgentVersionRecord, Store } from '../store/types';
 import type { TokenSource } from '../tasks/context';
 import type { TaskQueue } from '../tasks/queue';
+
+/** An agent's record and version, as one read loaded them, and the store that read holds repository files in. */
+export interface LoadedAgent {
+  record?: AgentRecord;
+  version?: AgentVersionRecord;
+  store?: Store;
+}
 
 export interface ServerConfig {
   limits?: import('../limits').LimitsConfig;
@@ -173,6 +180,11 @@ export interface ServerContext {
     archiveScan?: number;
     usageSync?: Promise<void>;
     cacheMaintenance?: Promise<void>;
+    engineChecks?: {
+      expiresAt: number;
+      work: Promise<import('../tasks/local').EngineStatus>;
+      availability: Partial<Record<'claude' | 'codex', import('../../core/types').Availability>>;
+    };
   };
   /** Resolve a callback tenant without exposing tasks from other organizations. */
   taskOrganization?(taskId: string, tokenHash: string): Promise<string | undefined>;
@@ -185,12 +197,13 @@ export interface ServerContext {
   /** Chat SDK state for every app; a context without one keeps it for the request only. */
   chatState?: StateAdapter;
   syncAgent?(slug: string): Promise<unknown>;
-  /** Load the app's server-owned agent version and per-repository usage. */
+  /** Load the app's server-owned agent version and per-repository usage; `known` is what the event's dispatch read already. */
   loadAgent(
     app: AgentApp,
     installation: Installation,
     event: AgentEvent,
     tokens: TokenSource,
+    known?: LoadedAgent,
   ): Promise<Agent>;
   /** Test or host override for outbound credential validation. */
   fetch?: typeof fetch;
@@ -205,7 +218,8 @@ export interface ServerContext {
 }
 
 export interface ServerSettings {
-  taskLogSecrets?: Map<string, Promise<string[]>>;
+  builtinAgents?: Promise<void>;
+  taskLogSecrets?: Map<string, Promise<(text: string) => string>>;
   cancelChecks?: Map<string, { timer: ReturnType<typeof setTimeout>; finish(): void }>;
   runnerInstances?: Map<string, { signature: string; runner: Runner }>;
   configUpdate?: Promise<unknown>;

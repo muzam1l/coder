@@ -8,6 +8,7 @@ import { useRef, useState } from 'preact/hooks';
 import { client } from '@/utils/client';
 import { toastFailure } from '@/utils/action';
 import type { Config, ConfigPatch } from '@coder/client/types';
+import { mergePatch } from '@coder/core/defaults';
 
 import { iDots } from '@/comps/ui/icons';
 import { Button } from '@/comps/ui/button';
@@ -17,18 +18,6 @@ import { Menu } from '@/comps/ui/menu';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 
-/** RFC 7396: objects merge, null deletes, anything else replaces. */
-function merged<T>(target: T, patch: unknown): T {
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return patch as T;
-  const out: Record<string, unknown> =
-    target && typeof target === 'object' && !Array.isArray(target) ? { ...target } : {};
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null) delete out[key];
-    else out[key] = merged(out[key], value);
-  }
-  return out as T;
-}
-
 /** Config edits shown at once and sent as merge patches; the newest answer wins and a failure rolls back. */
 export function useConfig(first: Config) {
   const [value, setValue] = useState(first);
@@ -36,7 +25,7 @@ export function useConfig(first: Config) {
   const saved = useRef(first);
   const patch = (body: ConfigPatch) => {
     const seq = ++sent.current;
-    setValue(now => merged(now, body));
+    setValue(now => mergePatch(now, body));
     return client.config.patch(body).then(
       answer => {
         saved.current = answer;
@@ -54,10 +43,6 @@ export function useConfig(first: Config) {
   };
   return { value, patch };
 }
-
-export const EFFORTS = ['low', 'medium', 'high'];
-
-export const PERMISSIONS = ['read-only', 'workspace-write', 'auto'];
 
 /** The add row: its fields, and Enter in any of them adds. */
 export function AddRow({

@@ -6,15 +6,14 @@ import { task, taskHistory, taskInbox, taskLog, usage } from '../schema';
 import type { DrizzleStore } from '../store';
 import { reviewKey } from '../../../tasks/queue';
 import {
-  appRowId,
+  app,
+  UNSCOPED_ORGANIZATION,
   date,
   defined,
   install,
-  installationRowId,
   ms,
   taskRecord,
   storedTaskContext,
-  taskRowId,
   type Kind,
 } from './shared';
 
@@ -41,9 +40,11 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
         reviewKey: reviewKey(j) ?? null,
         runner: j.runner,
         permissions: j.permissions ?? null,
-        appId: j.event ? await appRowId(s, j.event.appId) : null,
+        appId: j.event
+          ? sql`(select id from ${app} where organization_id in (${s.organizationId}, ${UNSCOPED_ORGANIZATION}) and key = ${j.event.appId} order by organization_id desc limit 1)`
+          : null,
         installationId: j.event
-          ? await installationRowId(s, `${j.event.appId}:${j.event.installationId}`)
+          ? sql`(select id from ${install} where organization_id = ${s.organizationId} and key = ${`${j.event.appId}:${j.event.installationId}`})`
           : null,
         event: j.event ?? null,
         prompt: j.prompt ?? null,
@@ -176,7 +177,7 @@ export function histories(s: DrizzleStore): Kind<TaskHistory> {
         .insert(t)
         .values({
           organizationId: s.organizationId,
-          taskId: await taskRowId(s, parts(id)[0]!),
+          taskId: sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${parts(id)[0]})`,
           conversation: value.conversation,
           ...row,
         })
@@ -184,9 +185,8 @@ export function histories(s: DrizzleStore): Kind<TaskHistory> {
     },
     delete: async id => {
       const [publicId, conversation] = parts(id);
-      const taskId = await taskRowId(s, publicId!).catch(() => undefined);
-      if (taskId !== undefined)
-        await s.db.delete(t).where(and(eq(t.taskId, taskId), eq(t.conversation, conversation!)));
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${publicId})`;
+      await s.db.delete(t).where(and(eq(t.taskId, taskId), eq(t.conversation, conversation!)));
     },
   };
 }
@@ -226,7 +226,7 @@ export function logs(s: DrizzleStore): Kind<Omit<TaskLogLine, 'seq'>> {
         .insert(t)
         .values({
           organizationId: s.organizationId,
-          taskId: await taskRowId(s, id.slice(0, split)),
+          taskId: sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id.slice(0, split)})`,
           seq: Number(id.slice(split + 1)),
           ...row,
         })
@@ -234,11 +234,8 @@ export function logs(s: DrizzleStore): Kind<Omit<TaskLogLine, 'seq'>> {
     },
     delete: async id => {
       const split = id.lastIndexOf(':');
-      const taskId = await taskRowId(s, id.slice(0, split)).catch(() => undefined);
-      if (taskId !== undefined)
-        await s.db
-          .delete(t)
-          .where(and(eq(t.taskId, taskId), eq(t.seq, Number(id.slice(split + 1)))));
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id.slice(0, split)})`;
+      await s.db.delete(t).where(and(eq(t.taskId, taskId), eq(t.seq, Number(id.slice(split + 1)))));
     },
   };
 }
@@ -283,7 +280,7 @@ export function inboxes(s: DrizzleStore): Kind<{
       const split = id.lastIndexOf(':');
       await s.db.insert(t).values({
         organizationId: s.organizationId,
-        taskId: await taskRowId(s, id.slice(0, split)),
+        taskId: sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id.slice(0, split)})`,
         seq: value.seq,
         generation: value.generation,
         kind: value.kind,
@@ -293,11 +290,8 @@ export function inboxes(s: DrizzleStore): Kind<{
     },
     delete: async id => {
       const split = id.lastIndexOf(':');
-      const taskId = await taskRowId(s, id.slice(0, split)).catch(() => undefined);
-      if (taskId !== undefined)
-        await s.db
-          .delete(t)
-          .where(and(eq(t.taskId, taskId), eq(t.seq, Number(id.slice(split + 1)))));
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id.slice(0, split)})`;
+      await s.db.delete(t).where(and(eq(t.taskId, taskId), eq(t.seq, Number(id.slice(split + 1)))));
     },
   };
 }
@@ -332,10 +326,10 @@ export function usages(s: DrizzleStore): Kind<UsageRecord> {
       }));
     },
     put: async (id, value) => {
-      const taskId = await taskRowId(s, id);
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id})`;
       const row = {
         installationId: value.installationId
-          ? await installationRowId(s, value.installationId)
+          ? sql`(select id from ${install} where organization_id = ${s.organizationId} and key = ${value.installationId})`
           : null,
         agent: value.agent,
         target: value.target,
@@ -353,8 +347,8 @@ export function usages(s: DrizzleStore): Kind<UsageRecord> {
         .onConflictDoUpdate({ target: t.taskId, set: row });
     },
     delete: async id => {
-      const taskId = await taskRowId(s, id).catch(() => undefined);
-      if (taskId !== undefined) await s.db.delete(t).where(eq(t.taskId, taskId));
+      const taskId = sql`(select id from ${task} where organization_id = ${s.organizationId} and public_id = ${id})`;
+      await s.db.delete(t).where(eq(t.taskId, taskId));
     },
   };
 }

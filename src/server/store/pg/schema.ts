@@ -96,7 +96,7 @@ export const agentVersion = pgTable(
     id: bigserial({ mode: 'number' }).primaryKey(),
     agentId: bigint({ mode: 'number' })
       .notNull()
-      .references(() => agent.id),
+      .references(() => agent.id, { onDelete: 'cascade' }),
     version: integer().notNull(),
     definition: jsonb().$type<AgentDefinition>().notNull(),
     systemPrompt: text().notNull(),

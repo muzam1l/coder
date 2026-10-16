@@ -7,7 +7,7 @@ import type { AppCheck, CreateStart } from '@coder/client/types';
 import type { CreateStep, PlatformPost } from '@coder/integrations/types';
 import { client } from '@/utils/client';
 import { useAction } from '@/utils/action';
-import { iAlert, iDots, iDown, iOut, iPlus, iSpark, iSteer, iUpload, iX } from '@/comps/ui/icons';
+import { iDots, iDown, iOut, iPlus, iSpark, iSteer, iUpload, iX } from '@/comps/ui/icons';
 import { Modal } from '@/comps/ui/modal';
 import { reasonText } from '@/utils/format';
 import { ConfirmDialog } from '@/comps/ui/confirm';
@@ -20,6 +20,7 @@ import { Menu } from '@/comps/ui/menu';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { Segmented } from '@/comps/ui/segmented';
 import { showToast, toastError } from '@/comps/frame/task-toasts';
+import { OutcomeDialog } from '@/app/dash/[org]/setup/outcome-dialog';
 
 /** Who can install a new app, as the create link's `public`, with what owning it then means. */
 const WHO = {
@@ -504,34 +505,11 @@ function FailedDialog({
   };
 
   return (
-    <Modal
-      class="outcome-dialog"
-      tone="error"
-      title={title}
-      icon={iAlert}
-      cancel="Close"
-      focus="actions"
-      // A reload must not show it again.
-      onClose={() => history.replaceState(history.state, '', location.pathname)}
-      actions={
-        <>
-          {issues ? (
-            <Button
-              variant="outline"
-              href={`${issues}?${new URLSearchParams({ title, body: text })}`}
-              external
-            >
-              Report issue
-            </Button>
-          ) : null}
-          <Button autofocus onClick={retry}>
-            Try again
-          </Button>
-        </>
-      }
-    >
-      <p>{text}</p>
-    </Modal>
+    <OutcomeDialog ok={false} title={title} text={text} issues={issues} focus="actions">
+      <Button autofocus onClick={retry}>
+        Try again
+      </Button>
+    </OutcomeDialog>
   );
 }
 

@@ -39,7 +39,9 @@ export function TaskActions({ task, live }: { task: TaskRow; live: boolean }) {
   const action = useAction();
   const removing = useAction({ leaves: true });
   const [outcome, setOutcome] = useState('');
-  const [archived, setArchived] = useState(Boolean(task.archivedAt));
+  // Archived here shows at once; the task's events bring `archivedAt` after.
+  const [archivedHere, setArchivedHere] = useState(false);
+  const archived = archivedHere || Boolean(task.archivedAt);
   const [confirming, setConfirming] = useState(false);
 
   const act = async (name: 'cancel' | 'archive') => {
@@ -57,7 +59,7 @@ export function TaskActions({ task, live }: { task: TaskRow; live: boolean }) {
       })
       .then(ok => ok || setConfirming(false));
 
-  const archive = () => void act('archive').then(setArchived);
+  const archive = () => void act('archive').then(setArchivedHere);
 
   return (
     <>

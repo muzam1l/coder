@@ -23,6 +23,14 @@ const FONTS = [
   'fira-code-latin-700-normal-98730669',
 ];
 
+// Keep the first frame's font when a preloaded face arrives late.
+const FONT_FALLBACK = `(() => {
+  for (const face of document.fonts) face.load().catch(() => {});
+  requestAnimationFrame(() => {
+    if ([...document.fonts].some(face => face.status !== 'loaded')) document.documentElement.classList.add('font-fallback');
+  });
+})()`;
+
 export default function RootLayout({
   request,
   children,
@@ -44,6 +52,7 @@ export default function RootLayout({
             crossOrigin="anonymous"
           />
         ))}
+        <script dangerouslySetInnerHTML={{ __html: FONT_FALLBACK }} />
         <Zone />
         {children}
       </body>

@@ -64,7 +64,7 @@ export const GET = (request: Request) => handler(request, waitUntil);
 export const POST = GET;
 ```
 
-Run `await handler.scheduled()` from an hourly scheduled job to sweep expired state across every workspace, renew platform subscriptions, and start queued tasks. Each call deletes bounded batches; run it more frequently when expiry traffic exceeds 1,000 entries per hour. Call `await handler.close()` when the host shuts down. Other active handlers retain their shared database pool until they close.
+Run `await handler.scheduled()` from a scheduled job to sweep expired state across every workspace, renew platform subscriptions, start queued tasks, and deliver pending messages. Call `await handler.close()` when the host shuts down.
 
 `DATABASE_POOL_MAX` sets the process pool limit, defaulting to 10 connections on a persistent host and 2 on Vercel. `DATABASE_IDLE_TIMEOUT` sets idle expiry in seconds, defaulting to 240 and 30 respectively. Set these before creating a handler; handlers sharing a database share the first pool's settings.
 
@@ -151,11 +151,11 @@ A platform user who addresses an agent must be linked to a member of the workspa
 
 `local-docker` and `github-actions` run in the runner image, which holds the engines and tools. A custom `image` needs `node`, `bun`, `git`, `curl`, `tar`, `claude`, `codex` and `github-mcp-server`.
 
-`local-docker`, `vercel-sandbox` and `github-actions` download this server's version of Coder from npm at start, with nothing to install. `tarballUrl` points them at another package, such as an unpublished build.
+`local-docker`, `vercel-sandbox` and `github-actions` download this server's built runner from its public, immutable `/runner/<hash>.tgz` URL. Repository snapshots are specific to that build.
 
 On `vercel-sandbox` each task uses the universal image's engines without their own sandbox, and its machine stops when the task ends. Repository snapshots hold the checkout and its installed dependencies. The default is 1 CPU and 2 GB memory; `vcpus` selects a larger machine.
 
-Access-token authentication needs a token, team ID and project ID. Settings → Runners accepts the IDs directly, or the adapter app can supply `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`. The firewall injects engine API keys into provider requests, and the task sees a placeholder. Below `auto`, a task's machine reaches only this server, npm, its engine, integrations, connections, MCP servers and `allowedNetworkHosts`.
+Access-token authentication needs a token, team ID and project ID. Settings → Runners accepts the IDs directly, or the adapter app can supply `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`. The firewall injects engine API keys into provider requests, and the task sees a placeholder. Below `auto`, a task's machine reaches only this server, its engine, integrations, connections, MCP servers and `allowedNetworkHosts`.
 
 For GitHub Actions, save the output of `coder server workflow` as `.github/workflows/coder-agent.yml` on the workflow repository's default branch. Save it again after each Coder upgrade. It accepts `task`, `server`, `token`, `mode` and `tarball`, names each run `Coder agent <task ID>`, and runs the task in the runner image with the callback URL and attempt token in the environment. The workflow token needs repository Actions read and write; a classic token for a private repository needs `repo`. A result returns through the authenticated task callback. No result artifact is required.
 

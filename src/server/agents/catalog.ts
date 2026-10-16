@@ -8,15 +8,7 @@ import {
   type AgentVersionSummary,
 } from '../store/types';
 import { type ServerContext } from '../context';
-import {
-  getAgent,
-  agentWithVersion,
-  agentsWithVersions,
-  getVersion,
-  seedBuiltinAgent,
-  seedBuiltinAgents,
-  versionKey,
-} from './records';
+import { getAgent, agentWithVersion, getVersion, ensureBuiltinAgents, versionKey } from './records';
 import { syncLocalAgents } from '../store/local';
 import { agentApps } from './connections';
 import { failedDeliveries } from '../tasks/failures';
@@ -43,14 +35,13 @@ export async function sourceUrl(
 }
 
 export async function loadAgent(ctx: ServerContext, slug: string, now: number) {
-  const loaded = await agentWithVersion(ctx.store, slug);
-  return (await seedBuiltinAgent(ctx.store, now, slug, loaded))
-    ? agentWithVersion(ctx.store, slug)
-    : loaded;
+  if (builtinDefinitions()[slug]) await ensureBuiltinAgents(ctx, now);
+  return agentWithVersion(ctx.store, slug);
 }
 
 export async function prepareAgent(ctx: ServerContext, slug?: string) {
   const now = (ctx.now ?? Date.now)();
+  if (!slug || builtinDefinitions()[slug]) await ensureBuiltinAgents(ctx, now);
   // An agent folder the CLI cannot load keeps the last good versions here.
   const local = ctx.local
     ? await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations, slug).catch(() => undefined)
@@ -69,20 +60,12 @@ export async function agentRecords(
   local: Array<{ record: AgentRecord; version?: AgentVersionRecord }> | undefined,
   { after, q, source, platform, limit }: AgentPageOptions & { limit: number },
 ): Promise<AgentRecord[]> {
-  if (!local && ctx.store.listAgentSummaries)
+  if (!local)
     return (await ctx.store.listAgentSummaries({ after, q, source, platform, limit })).map(
       ({ record }) => record,
     );
 
-  return (
-    local ??
-    (platform
-      ? await agentsWithVersions(ctx.store)
-      : (await ctx.store.list('agent')).map(({ value: record }) => ({
-          record,
-          version: undefined,
-        })))
-  )
+  return (local ?? [])
     .filter(({ version }) => !platform || Boolean(version?.definition?.integrations?.[platform]))
     .map(({ record }) => record)
     .filter(
@@ -104,21 +87,13 @@ export async function listAgents(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const slug = params.slug!;
-  const versionNumber = params.version ? Number(params.version) : undefined;
-  if (params.version && !/^\d+$/.test(url.pathname.split('/').at(-1)!)) return notFound();
-
   const fields = url.searchParams.get('fields');
   if (fields && !['id', 'id,name'].includes(fields)) return json({ error: 'Invalid fields' }, 400);
-  const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
-  if (!local && ctx.store.listAgentSummaries) {
-    await seedBuiltinAgents(ctx.store, now);
-    if (paged(url) && !fields) return json(await agentsPage(ctx, url));
-  }
+  const { local } = await prepareAgent(ctx);
+  if (!local && paged(url) && !fields) return json(await agentsPage(ctx, url));
 
   const limit = pageLimit(url, 200);
   if (fields) {
-    if (!local && !ctx.store.listAgentSummaries) await seedBuiltinAgents(ctx.store, now);
     const records = await agentRecords(ctx, local, {
       after: decodeCursor<string>(url),
       q: url.searchParams.get('q')?.trim().toLowerCase(),
@@ -132,24 +107,7 @@ export async function listAgents(
     return json(paged(url) ? { ...result, items: result.items.map(shape) } : records.map(shape));
   }
 
-  let agents =
-    local ??
-    (ctx.store.listAgentSummaries
-      ? await ctx.store.listAgentSummaries({ limit })
-      : await agentsWithVersions(ctx.store));
-  if (
-    !local &&
-    !ctx.store.listAgentSummaries &&
-    (await seedBuiltinAgents(
-      ctx.store,
-      now,
-      agents as Array<{
-        record: AgentRecord;
-        version?: AgentVersionRecord;
-      }>,
-    ))
-  )
-    agents = await agentsWithVersions(ctx.store);
+  const agents = local ?? (await ctx.store.listAgentSummaries({ limit }));
   if (paged(url)) return json(await agentsPage(ctx, url, agents));
 
   let apps:
@@ -187,9 +145,6 @@ export async function listVersions(
   url: URL,
 ): Promise<Response> {
   const slug = params.slug!;
-  const versionNumber = params.version ? Number(params.version) : undefined;
-  if (params.version && !/^\d+$/.test(url.pathname.split('/').at(-1)!)) return notFound();
-
   const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
   const limit = pageLimit(url, 10, 50);
   const below = decodeCursor<number>(url);
@@ -197,7 +152,7 @@ export async function listVersions(
     local ? loadCurrent().then(row => row.record) : getAgent(ctx.store, slug),
     local
       ? Promise.resolve(local.flatMap(({ version }) => (version ? [{ value: version }] : [])))
-      : ctx.store.listVersions?.(slug, limit + 1, below),
+      : ctx.store.listVersions(slug, limit + 1, below),
   ]);
   if (!record) return json({ error: `No agent named "${slug}"` }, 404);
 
@@ -231,16 +186,13 @@ export async function readAgent(
   url: URL,
 ): Promise<Response> {
   const slug = params.slug!;
-  const versionNumber = params.version ? Number(params.version) : undefined;
-  if (params.version && !/^\d+$/.test(url.pathname.split('/').at(-1)!)) return notFound();
-
   const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
   const withVersions = url.searchParams.get('versions') !== '0';
   const withContent = url.searchParams.get('content') !== '0';
   const withHandles = url.searchParams.get('handles') === '1';
   const requester = ctx.session?.user.id;
   const [{ record, version: current }, rows, apps, deliveries, credentials] = await Promise.all([
-    !withContent && !local && ctx.store.listAgentSummaries && !builtinDefinitions()[slug]
+    !withContent && !local
       ? ctx.store
           .listAgentSummaries({ slug })
           .then((rows): { record?: AgentRecord; version?: AgentVersionSummary } => rows[0] ?? {})
@@ -248,17 +200,11 @@ export async function readAgent(
     withVersions
       ? local
         ? local.flatMap(({ version }) => (version ? [{ value: version }] : []))
-        : ctx.store.listVersions
-          ? ctx.store.listVersions(slug)
-          : ctx.store.list('agentversion', { prefix: `${slug}:` })
+        : ctx.store.listVersions(slug)
       : [],
     withHandles ? agentApps(ctx, slug) : [],
     withHandles ? failedDeliveries(ctx.store, slug) : undefined,
-    withHandles
-      ? ctx.store.listCredentials
-        ? ctx.store.listCredentials({ owner: requester })
-        : ctx.store.list('credential')
-      : undefined,
+    withHandles ? ctx.store.listCredentials({ owner: requester }) : undefined,
   ]);
   if (!record) return json({ error: `No agent named "${slug}"` }, 404);
 
@@ -378,7 +324,7 @@ export async function agentsPage(
                 value?.toLowerCase().includes(q),
               )),
         )
-      : ctx.store.listAgentSummaries!({
+      : ctx.store.listAgentSummaries({
           after,
           source,
           q,
@@ -447,14 +393,7 @@ async function versionsPage(
   below: number,
   read?: Array<{ value: AgentVersionSummary }>,
 ) {
-  const from = below - limit - 2;
-  const rows =
-    read ??
-    (await ctx.store.list('agentversion', {
-      prefix: `${record.id}:`,
-      ...(from > 0 ? { after: versionKey(record.id, from) } : {}),
-      limit: limit + 1,
-    }));
+  const rows = read ?? (await ctx.store.listVersions(record.id, limit + 1, below));
   const newest = rows
     .map(({ value }) => {
       const { systemPrompt, files, definition, ...metadata } = value as AgentVersionRecord;

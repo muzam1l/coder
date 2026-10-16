@@ -21,11 +21,11 @@ import type {
 import type { TaskTurn } from '../../client/types';
 import type { AgentRecord, TaskStatus } from '../store/types';
 import { PERMISSION_MODES, type Permission } from '../../core/config';
-import { agentWithVersion, seedBuiltinAgent, toAgent } from '../agents/records';
+import { ensureBuiltinAgents, toAgent } from '../agents/records';
 import type { ServerContext } from '../context';
 import { syncLocalAgents } from '../store/local';
 import { machineSignedIn, runLocalTask } from './local';
-import { credentialFix, resolveCredential } from '../settings/credentials';
+import { credentialFix } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { installationToken } from './context';
 import { chooseRunner } from '../runners';
@@ -208,14 +208,9 @@ export async function createTask(
   const requester = ctx.session?.user.id;
   const slug = input.agent || defaultAgent();
   if (!slug) throw new TaskInputError('Name an agent: this server has no default agent.');
+  if (slug === defaultAgent()) await ensureBuiltinAgents(ctx, now);
   if (ctx.local) await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
-  const inputs = () =>
-    ctx.store.taskInputs
-      ? ctx.store.taskInputs(slug, requester, input.engine)
-      : agentWithVersion(ctx.store, slug);
-  const initial = await inputs();
-  let loaded = initial;
-  if (await seedBuiltinAgent(ctx.store, now, slug, loaded)) loaded = await inputs();
+  const loaded = await ctx.store.taskInputs(slug, requester, input.engine);
   const { record, version } = loaded;
   const chosen = await chooseRunner(ctx, {
     requester,
@@ -235,9 +230,7 @@ export async function createTask(
   const agent = toAgent(record, version, usage, ctx.integrations);
   const settings = effectiveSettings(agent);
 
-  const credential = ctx.store.taskInputs
-    ? (loaded as { credential?: string }).credential
-    : (await resolveCredential(ctx.store, settings.engine, requester))?.id;
+  const credential = loaded.credential;
   const engine = settings.engine ?? DEFAULT_ENGINE;
   if (!credential && chosen.runner !== 'http' && !(await machineSignedIn(ctx, settings.engine)))
     throw new TaskInputError(

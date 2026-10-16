@@ -9,7 +9,6 @@ import { Button, LinkButton } from '@/comps/ui/button';
 import { Stream } from '@/comps/frame/stream';
 import { LoadingTabs, Tabs } from '@/comps/ui/tabs';
 import { editableAgent } from '@/api/types';
-import { backFrom } from '@/comps/frame/heads';
 import { LoadingHero, Hero } from '@/app/dash/[org]/agents/agent/hero';
 import { loadAgent } from '@/api/load';
 import { loadTasks } from '@/app/dash/[org]/tasks/list/tasks-section';
@@ -79,13 +78,13 @@ function AgentHead({
   agent,
   org,
   tasks,
-  from,
+  backPath,
   back,
 }: {
   agent: AgentRow;
   org: string;
   tasks?: TasksPage;
-  from: string | null;
+  backPath: string | null;
   back: ComponentChildren;
 }) {
   const counts: Partial<Record<(typeof TABS)[number][0], number>> = {
@@ -101,7 +100,7 @@ function AgentHead({
         items={TABS.map(([href, label]) => ({
           href,
           params: { org, slug: agent.id },
-          search: from ? { from } : undefined,
+          search: backPath ? { back: backPath } : undefined,
           label,
           count: counts[href],
         }))}
@@ -123,10 +122,8 @@ export default function AgentTabsLayout({
   // Read from the address, not the params promise, so the layout renders with the loading frame.
   const org = orgOf(request);
   const slug = decodeURIComponent(url.pathname.split('/')[4]!);
-  const from = url.searchParams.get('from');
-  const back = (
-    <Back {...backFrom(from, { href: '/dash/[org]/agents', params: { org }, label: 'Agents' })} />
-  );
+  const backPath = url.searchParams.get('back');
+  const back = <Back href="/dash/[org]/agents" params={{ org }} label="Agents" back={backPath} />;
 
   return (
     <Page>
@@ -140,7 +137,7 @@ export default function AgentTabsLayout({
               : lastTask(request, slug)
             ).catch(() => undefined),
           ]).then(([agent, tasks]) => (
-            <AgentHead agent={agent} org={org} tasks={tasks} from={from} back={back} />
+            <AgentHead agent={agent} org={org} tasks={tasks} backPath={backPath} back={back} />
           ))
         }
       />

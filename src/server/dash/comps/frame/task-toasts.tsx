@@ -240,7 +240,9 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
               channel?.postMessage(message);
               receive(message);
             }
-        } catch {}
+        } catch (reason) {
+          if (!once.signal.aborted) console.error('coder dashboard: events', reason);
+        }
         abort.signal.removeEventListener('abort', stop);
         // A new task set opens the next stream at once.
         if (once.signal.aborted) continue;
@@ -258,7 +260,9 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
     if (channel)
       void navigator.locks
         .request(`${EVENTS}:${org}`, { signal: abort.signal }, lead)
-        .catch(() => {});
+        .catch(reason => {
+          if (!abort.signal.aborted) console.error('coder dashboard: events', reason);
+        });
     else void lead();
     return () => {
       abort.abort();
@@ -405,10 +409,10 @@ export function TaskToasts() {
   const dismiss = (key: string) => setToasts(list => list.filter(toast => toast.key !== key));
 
   useTaskEvents(event => {
-    const all = read();
-    const seen = all[event.id];
+    const seen = watched[event.id];
     if (seen?.org !== org) return;
     if (event.deleted) {
+      const all = read();
       delete all[event.id];
       return save(all);
     }

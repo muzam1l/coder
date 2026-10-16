@@ -9,7 +9,7 @@ import { useAction } from '@/utils/action';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Link } from '@wular/pnext/link';
-import { editableAgent } from '@/api/types';
+import { editableAgent, eventNames } from '@/api/types';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 import type { AgentRow, AgentSettings, ConnectionRow, IntegrationInfo } from '@coder/client/types';
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
@@ -20,7 +20,9 @@ import { Chips } from '@/comps/ui/badge';
 import { Select, type Option } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
 import {
+  EFFORTS,
   ENGINE_NAMES,
+  PERMISSIONS,
   defaultLabel,
   modelHeadings,
   modelOptions,
@@ -29,16 +31,7 @@ import {
 } from '@/app/dash/[org]/settings/model-options';
 import type { Defaults } from '@/app/dash/[org]/tasks/composer';
 
-const EFFORTS = ['low', 'medium', 'high'];
-const PERMISSIONS = ['read-only', 'workspace-write', 'auto'];
-const PRESETS = ['observe', 'comment', 'write'];
-
-const eventNames = (events: unknown): string[] =>
-  Array.isArray(events)
-    ? events.map(String)
-    : events && typeof events === 'object'
-      ? Object.keys(events)
-      : [];
+const PRESETS = ['observe', 'comment', 'write'].map((preset): Option => [preset, preset]);
 
 function Choice({
   name,
@@ -52,17 +45,18 @@ function Choice({
   label: string;
   hint?: string;
   value?: string;
-  options: string[];
+  options: Option[];
   blank: string;
 }) {
-  const list = value && !options.includes(value) ? [...options, value] : options;
+  const list: Option[] =
+    value && !options.some(([key]) => key === value) ? [...options, [value, value]] : options;
   return (
     <Field label={label} hint={hint} group>
       <Select
         name={name}
         label={label}
         defaultValue={value ?? ''}
-        options={[['', blank], ...list.map((option): Option => [option, option])]}
+        options={[['', blank], ...list]}
       />
     </Field>
   );
@@ -359,7 +353,7 @@ export function AgentSettingsForm({
                       }
                       options={
                         typeof tools === 'string'
-                          ? PRESETS.slice(0, PRESETS.indexOf(tools) + 1)
+                          ? PRESETS.slice(0, PRESETS.findIndex(([key]) => key === tools) + 1)
                           : tools
                             ? PRESETS
                             : PRESETS.slice(0, 1)

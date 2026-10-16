@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 import type { AgentRecord, AgentVersionRecord, AgentPublication } from '../../types';
 import { agent, agentVersion } from '../schema';
 import type { DrizzleStore } from '../store';
-import { agentRowId, agentValue, date, versionValue, type Kind } from './shared';
+import { agentValue, date, versionValue, type Kind } from './shared';
 
 export function publishAgent(
   s: DrizzleStore,
@@ -123,7 +123,7 @@ export async function insertVersion(
   const rows = await s.db
     .insert(agentVersion)
     .values({
-      agentId: await agentRowId(s, id.slice(0, split)),
+      agentId: sql`(select id from ${agent} where organization_id = ${s.organizationId} and slug = ${id.slice(0, split)})`,
       version: Number(id.slice(split + 1)),
       definition: value.definition,
       systemPrompt: value.systemPrompt,
@@ -165,11 +165,10 @@ export function agentVersions(s: DrizzleStore): Kind<AgentVersionRecord> {
     },
     delete: async id => {
       const split = id.lastIndexOf(':');
-      const owner = await agentRowId(s, id.slice(0, split)).catch(() => undefined);
-      if (owner !== undefined)
-        await s.db
-          .delete(t)
-          .where(and(eq(t.agentId, owner), eq(t.version, Number(id.slice(split + 1)))));
+      const owner = sql`(select id from ${agent} where organization_id = ${s.organizationId} and slug = ${id.slice(0, split)})`;
+      await s.db
+        .delete(t)
+        .where(and(eq(t.agentId, owner), eq(t.version, Number(id.slice(split + 1)))));
     },
   };
 }

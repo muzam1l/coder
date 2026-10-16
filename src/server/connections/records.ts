@@ -369,23 +369,19 @@ export async function connectionRows(
     ? await ctx.store.get('delivery', `connection-authorized:${authorization}`)
     : undefined;
 
-  return Promise.all(
-    records.map(async record => {
-      const connection = record;
+  return records.map(connection => {
+    const row = connectionRow(connection, owner, ctx.config);
+    if (
+      authorization &&
+      connection.auth === 'oauth' &&
+      (!receipt ||
+        !('target' in receipt) ||
+        receipt.target !== `${connection.id}:${connection.createdAt}`)
+    )
+      row.status = 'authorize';
 
-      const row = connectionRow(connection, owner, ctx.config);
-      if (
-        authorization &&
-        connection.auth === 'oauth' &&
-        (!receipt ||
-          !('target' in receipt) ||
-          receipt.target !== `${connection.id}:${connection.createdAt}`)
-      )
-        row.status = 'authorize';
-
-      return row;
-    }),
-  );
+    return row;
+  });
 }
 
 const holds = (
@@ -536,6 +532,7 @@ export async function addConnection(
           `${new URL(input.endpoint.url).hostname} takes a key, not a sign-in.`,
           'key',
         );
+      console.error('coder server: connection discovery failed', error);
       throw refuse(502, 'Could not start authorization');
     }
     if (connection.auth === 'oauth' && ctx.local?.port === 0)
@@ -565,6 +562,8 @@ export async function addConnection(
       ...(authorize ? { authorize } : {}),
     };
   } catch (error) {
+    if (!(error instanceof OAuthClientRequired))
+      console.error('coder server: connection authorization failed', error);
     await ctx.store.withAppLock(`connection:${connection.id}`, async store => {
       const current = await store.get('connection', connection.id);
       if (isDeepStrictEqual(current, connection)) await store.delete('connection', connection.id);
@@ -630,6 +629,8 @@ export async function connectionAuthorization(ctx: ServerContext, id: string): P
   try {
     return await authorization(ctx, connection);
   } catch (error) {
+    if (!(error instanceof OAuthClientRequired))
+      console.error('coder server: connection authorization failed', error);
     throw error instanceof OAuthClientRequired
       ? refuse(400, error.message)
       : refuse(502, 'Could not start authorization');
@@ -637,9 +638,23 @@ export async function connectionAuthorization(ctx: ServerContext, id: string): P
 }
 
 export async function listConnections(req: Request, ctx: ServerContext): Promise<Response> {
-  return json(
-    await connectionRows(ctx, new URL(req.url).searchParams.get('authorization') ?? undefined),
-  );
+  const url = new URL(req.url);
+  const authorization = url.searchParams.get('authorization') ?? undefined;
+  const waiting = url.searchParams.get('wait');
+  if (!authorization || !waiting) return json(await connectionRows(ctx, authorization));
+  const changes = await ctx.store.watch('delivery', `connection-authorized:${authorization}`);
+  const deadline = Date.now() + 25000;
+  try {
+    for (;;) {
+      const rows = await connectionRows(ctx, authorization);
+      const row = rows.find(row => row.id === waiting);
+      if (!row || row.status === 'ok' || Date.now() >= deadline || req.signal.aborted)
+        return json(rows);
+      await changes.wait(Math.min(10000, deadline - Date.now()), req.signal);
+    }
+  } finally {
+    changes.close();
+  }
 }
 
 export async function createConnection(req: Request, ctx: ServerContext): Promise<Response> {

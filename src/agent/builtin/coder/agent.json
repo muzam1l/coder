@@ -1,6 +1,5 @@
 {
   "name": "Coder",
-  "default": true,
   "description": "Answers engineering questions, reviews pull requests, and makes requested changes.",
   "permissions": "workspace-write",
   "integrations": {

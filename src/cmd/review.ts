@@ -86,12 +86,11 @@ export const commandReview = command({
     ),
   },
   async run({ options, cwd }) {
-    const { runFlowByName } = await import('../flow/executor');
+    const { review } = await import('../flow/executor');
 
     if (options.json && options.md)
       throw new CoderError('invalid-option', '--json and --md are mutually exclusive.');
-    const run = await runFlowByName('review', { cwd, args: { ...options, cwd } });
-    return { ...(run.result as ReviewResult), runId: run.runId };
+    return review.run({ ...options, cwd });
   },
   print: result => process.stdout.write(renderReviewMarkdown(result)),
 });

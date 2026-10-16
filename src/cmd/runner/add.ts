@@ -1,13 +1,13 @@
 import process from 'node:process';
 import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
 import { str, strList } from '../../utils/args';
-import { CoderError } from '../../core/errors';
 import { runnerOptions } from './remove';
 
 export const commandRunnerAdd = command({
   name: 'runner add',
   globalFlags: { cwd: false },
   args: 1,
+  required: ['<kind>'],
   help: {
     usage:
       'coder runner add <kind> [--name <name>] [--scope <scope>] [--field key=value …] [--server [url]] [--json]',
@@ -22,7 +22,6 @@ export const commandRunnerAdd = command({
   },
   options: { ...runnerOptions, name: str, scope: str, field: strList },
   async run({ options, args: [kind] }) {
-    if (!kind) throw new CoderError('invalid-option', 'Missing runner kind.');
     const { addRunnerFields } = await import('../../runner');
     return addRunnerFields(kind, options);
   },

@@ -31,14 +31,12 @@ jobs:
 }
 
 export interface GithubActionsOptions {
-  tarballUrl?: string;
   token?: string;
   repo?: string;
   workflow?: string;
   ref?: string;
   fetch?: typeof fetch;
   lookupTimeoutMs?: number;
-  pollIntervalMs?: number;
 }
 
 type GithubHandle = { repo: string; run: number };
@@ -118,15 +116,11 @@ export class GithubActionsRunner implements Runner {
       if (!body.default_branch) throw new Error('GitHub repository has no default branch');
       ref = body.default_branch;
     }
-    const path = `/repos/${repo}/actions/workflows/${workflow}/runs?event=workflow_dispatch&per_page=100&branch=${encodeURIComponent(ref)}`;
-    const previous = await this.request(path, {}, Math.max(1, deadline - Date.now()));
-    if (!previous.ok) throw new Error(`GitHub workflow run lookup failed: ${previous.status}`);
-    const baseline = (await previous.json()) as { workflow_runs: Array<{ id: number }> };
-    const latest = Math.max(0, ...baseline.workflow_runs.map(run => run.id));
     const dispatched = await this.request(
       `/repos/${repo}/actions/workflows/${workflow}/dispatches`,
       {
         method: 'POST',
+        headers: { 'x-github-api-version': '2026-03-10' },
         body: JSON.stringify({
           ref,
           inputs: {
@@ -134,49 +128,19 @@ export class GithubActionsRunner implements Runner {
             server: env.CODER_SERVER,
             token: env.CODER_TASK_TOKEN,
             mode: env.CODER_INBOX_MODE,
-            tarball: this.options.tarballUrl ?? runnerTarball(),
+            tarball: runnerTarball(env.CODER_SERVER!),
           },
         }),
       },
       Math.max(1, deadline - Date.now()),
     );
-    if (dispatched.status !== 204) {
-      const body = (await dispatched.json().catch(() => ({}))) as { message?: string };
-      if (
-        dispatched.status === 422 &&
-        /unexpected inputs provided/i.test(body.message ?? '') &&
-        /\btarball\b/i.test(body.message ?? '')
-      )
-        throw new Error(
-          'The saved GitHub workflow lacks the tarball input; regenerate it with coder server workflow.',
-        );
+    if (dispatched.status !== 200)
       throw new Error(`GitHub workflow dispatch failed: ${dispatched.status}`);
-    }
-    do {
-      for (let page = 1; Date.now() < deadline; page++) {
-        const runs = await this.request(
-          `${path}&page=${page}`,
-          {},
-          Math.max(1, deadline - Date.now()),
-        );
-        if (!runs.ok) throw new Error(`GitHub workflow run lookup failed: ${runs.status}`);
-        const body = (await runs.json()) as {
-          workflow_runs: Array<{ id: number; display_title: string }>;
-        };
-        const run = body.workflow_runs.find(
-          item => item.id > latest && item.display_title === `Coder agent ${task.id}`,
-        );
-        if (run) return encodeJson({ repo, run: run.id } satisfies GithubHandle);
-        if (!runs.headers.get('link')?.includes('rel="next"')) break;
-      }
-      await new Promise(resolve =>
-        setTimeout(
-          resolve,
-          Math.min(this.options.pollIntervalMs ?? 1000, Math.max(0, deadline - Date.now())),
-        ),
-      );
-    } while (Date.now() < deadline);
-    throw new Error(`GitHub workflow run for task ${task.id} was not found before timeout`);
+    const run = (await dispatched.json()) as { workflow_run_id?: number };
+    if (!Number.isSafeInteger(run.workflow_run_id) || run.workflow_run_id! <= 0)
+      throw new Error('GitHub workflow dispatch returned no run id');
+
+    return encodeJson({ repo, run: run.workflow_run_id! } satisfies GithubHandle);
   }
 
   async status(handle: string) {

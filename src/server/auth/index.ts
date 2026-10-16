@@ -1,6 +1,14 @@
+import { isDeepStrictEqual } from 'node:util';
 /** Sign-in with Wular: an OpenID Connect client with a stateless encrypted session cookie, and the bearer tokens Wular issues for this server. */
 import { and, eq } from 'drizzle-orm';
-import { EncryptJWT, createRemoteJWKSet, jwtDecrypt, jwtVerify, type JWTPayload } from 'jose';
+import {
+  EncryptJWT,
+  createRemoteJWKSet,
+  jwtDecrypt,
+  jwtVerify,
+  errors,
+  type JWTPayload,
+} from 'jose';
 import * as oidc from 'openid-client';
 
 import type { AuthApi, ServerConfig, OrganizationInfo, SessionInfo } from '../context';
@@ -240,7 +248,7 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
         .then(tokens => fromTokens(tokens, claims))
         .then(next => {
           // A request waits on Wular here already; the names are saved beside it.
-          void remember(next.orgs);
+          if (!isDeepStrictEqual(next.orgs, claims.orgs)) void remember(next.orgs);
           return next;
         })
         .catch((error: unknown) => {
@@ -271,7 +279,15 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
           typ: 'at+jwt',
         }),
       )
-      .catch(() => undefined);
+      .catch(error => {
+        if (
+          !(error instanceof errors.JOSEError) ||
+          error instanceof errors.JWKSTimeout ||
+          error.code === 'ERR_JOSE_GENERIC'
+        )
+          console.error('coder server: bearer verification unavailable', error);
+        return undefined;
+      });
     const payload = verified?.payload;
     if (!payload?.sub) return undefined;
     const info: SessionInfo = {
@@ -469,20 +485,15 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
         ...(extra.organizations ? { organizations: extra.organizations } : {}),
         ...(extra.token ? { token: extra.token } : {}),
       };
-      await accountDb(store)
+      const [row] = await accountDb(store)
         .insert(platformLink)
         .values({ platform, platformUserId, userId: user.id, ...known })
         .onConflictDoUpdate({
           target: [platformLink.platform, platformLink.platformUserId],
           set: known,
           setWhere: eq(platformLink.userId, user.id),
-        });
-      const [row] = await accountDb(store)
-        .select({ userId: platformLink.userId })
-        .from(platformLink)
-        .where(
-          and(eq(platformLink.platform, platform), eq(platformLink.platformUserId, platformUserId)),
-        );
+        })
+        .returning({ userId: platformLink.userId });
       return row?.userId === user.id ? 'linked' : 'taken';
     },
     async linkedAccounts(userId, store) {

@@ -1,5 +1,5 @@
 import { redirect, json, forbidden, toLogin, notFound, decodeParam } from './http';
-import { dashPage, pagesFallback, toSignIn } from '../dash/serve';
+import { dashboard, dashPage, toSignIn } from '../dash/serve';
 import { registration } from '../settings/runners';
 import { authorizeTask } from '../tasks/callbacks';
 import { OPERATOR, type AppsContext } from '../agents/platform';
@@ -11,6 +11,7 @@ import { taskClaims, taskTokenHash } from '../tasks/token';
 import { decryptSecret } from '../store/secrets';
 import { safeEqual } from '../../utils/crypto';
 import { scoped, type ServerContext } from '../context';
+import { loadedStore } from '../store/primed';
 import { MCP_CLIENT_PATH } from '../connections/oauth';
 import { LOCAL_SLUG } from '../auth/account';
 
@@ -243,22 +244,33 @@ export async function taskGuard(
   params: Params,
   url: URL,
   allowCompleted = false,
+  include?: 'secrets' | 'context',
 ) {
   const id = params.id!;
   const token = bearerToken(req);
-  if (token && ctx.taskOrganization && ctx.scope) {
-    const organization = await ctx.taskOrganization(id!, taskTokenHash(token));
-    if (organization) ctx = scoped(ctx, organization);
-  }
+  // The organization the token claims; `authorizeTask` trusts it only once the hash matches a task there.
+  const organization = token && claimedOrganization(token);
+  if (organization && ctx.scope) ctx = scoped(ctx, organization);
 
-  const authorized = await authorizeTask(req, ctx, id!, allowCompleted);
+  const authorized = await authorizeTask(req, ctx, id!, allowCompleted, include);
+  if (authorized instanceof Response) return authorized;
+  const { status, loaded } = authorized;
 
-  return authorized instanceof Response ? authorized : { ...ctx, callbackTask: authorized };
+  return {
+    ...ctx,
+    ...(loaded ? { store: loadedStore(ctx.store, status, loaded) } : {}),
+    callbackTask: status,
+  };
 }
 
-export function completedTaskGuard(req: Request, ctx: ServerContext, params: Params, url: URL) {
-  return taskGuard(req, ctx, params, url, req.method === 'POST');
-}
+/** A task guard that loads `include` with the task; a callback that redacts still reports for a finished task. */
+const loading =
+  (include: 'secrets' | 'context', allowCompleted: (req: Request) => boolean) =>
+  (req: Request, ctx: ServerContext, params: Params, url: URL) =>
+    taskGuard(req, ctx, params, url, allowCompleted(req), include);
+export const secretsGuard = loading('secrets', req => req.method === 'POST');
+export const logsGuard = loading('secrets', () => true);
+export const contextGuard = loading('context', () => false);
 
 export function claimedOrganization(token: string): string | undefined {
   const { organization } = taskClaims(token);
@@ -293,6 +305,8 @@ export async function operatorTransaction(req: Request, url: URL): Promise<strin
 }
 
 export async function createAllowed(req: Request, ctx: AppsContext, params: Params, url: URL) {
+  if (!/^[a-z0-9_-]+$/.test(params.integration ?? params.id ?? ''))
+    return dashboard(req, ctx);
   const tx = await operatorTransaction(req, url);
   const server = ctx.serverOrganizationId ?? ctx.organizationId;
   if (tx && nonceUser(ctx, tx) === OPERATOR && nonceOrganization(ctx, tx) === server)
@@ -302,17 +316,19 @@ export async function createAllowed(req: Request, ctx: AppsContext, params: Para
 }
 
 export function installAllowed(req: Request, ctx: AppsContext, params: Params, url: URL) {
+  if (!/^[a-z0-9_-]+$/.test(params.integration ?? params.id ?? ''))
+    return dashboard(req, ctx);
   return provisioningAdmin(req, ctx);
 }
 
 export async function oauthAllowed(req: Request, ctx: ServerContext, params: Params, url: URL) {
-  const id = url.pathname.split('/')[2]!;
-  const integration = /^[a-z0-9_-]+$/.test(id) ? ctx.integrations[params.integration!] : undefined;
+  if (!/^[a-z0-9_-]+$/.test(params.integration ?? '')) return dashboard(req, ctx);
+  const integration = ctx.integrations[params.integration!];
 
   if (!integration?.auth.user || !ctx.auth || !ctx.config.publicUrl) return notFound();
   if (req.method !== 'GET') return ctx;
   const signed = await signedIn(req, ctx);
-  return signed?.session ? { ...ctx, linkContext: signed } : toLogin(url);
+  return signed?.session ? signed : toLogin(url);
 }
 
 export async function connectionOAuthAllowed(
@@ -395,7 +411,7 @@ export function engineAllowed(req: Request, ctx: ServerContext, params: Params, 
 }
 
 export async function metadataAllowed(req: Request, ctx: ServerContext, params: Params, url: URL) {
-  return ctx.config.publicUrl && ctx.auth ? ctx : pagesFallback(req, ctx, url);
+  return ctx.config.publicUrl && ctx.auth ? ctx : dashboard(req, ctx);
 }
 export async function accountAllowed(req: Request, ctx: ServerContext, params: Params, url: URL) {
   if (!ctx.auth) return authorize(req, ctx);
@@ -472,7 +488,7 @@ export async function tokenLinkAllowed(req: Request, ctx: ServerContext, params:
   const signed = await signedIn(req, ctx);
   if (!signed?.session)
     return req.method === 'GET' ? toLogin(url) : json({ error: 'Sign in first.' }, 401);
-  return { ...ctx, linkContext: signed };
+  return signed;
 }
 
 export function apiAllowed(req: Request, ctx: ServerContext, params: Params, url: URL) {

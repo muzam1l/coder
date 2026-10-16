@@ -31,8 +31,10 @@ import type {
   FlowTaskOptions,
   FlowTaskResult,
   GateResult,
+  FlowEvent,
+  FlowRecord,
 } from './types';
-import { readFlowRecord, writeFlowRecord } from './runs';
+import { writeFlowRecord } from './runs';
 
 // ---------------------------------------------------------------------------
 // ALS: run services (ctx) and per-invocation scope (args + nesting depth)
@@ -42,32 +44,7 @@ import { readFlowRecord, writeFlowRecord } from './runs';
 export interface FlowHooks {
   /** Fired once the run is armed, with a stop handle for a SIGINT handler. */
   onStart?: (h: { runId: string; requestStop: () => void; runningIds: () => string[] }) => void;
-  /** A task was dispatched (real dispatches only, never dry-run). */
-  onTaskStart?: (info: {
-    taskId: string;
-    name?: string;
-    prompt: string;
-    engine?: string;
-    depth?: number;
-  }) => void;
-  /** A task reached a terminal state. */
-  onTaskEnd?: (info: { taskId: string; status: string; tokens: TokenUsage | null }) => void;
-  /** A gate command was spawned (real runs only, never dry-run or replay). */
-  onGateStart?: (info: { gateId: string; cmd: string; depth?: number }) => void;
-  /** A gate command finished; `gateId` pairs it with its onGateStart. */
-  onGate?: (info: {
-    gateId?: string;
-    cmd: string;
-    ok: boolean;
-    code: number;
-    depth?: number;
-  }) => void;
-  /** The flow called log(). */
-  onLog?: (msg: string, depth?: number) => void;
-  /** A sub-flow started (depth is the sub-flow's own nesting level). */
-  onFlowStart?: (info: { name: string; depth: number }) => void;
-  /** A resume replayed recorded steps from the journal. */
-  onReplay?: (count: number) => void;
+  onEvent?: (event: FlowEvent) => void;
 }
 
 export interface RunContext {
@@ -89,6 +66,12 @@ export interface RunContext {
   integrationToken?: string;
   connections?: { mcp: Record<string, McpServerSpec>; env: Record<string, string>; ids: string[] };
   ceiling?: { agent: string; permissions: string };
+}
+
+export function emitFlowEvent(ctx: RunContext | undefined, event: FlowEvent): void {
+  if (!ctx) return;
+  fs.appendFileSync(path.join(ctx.runDir, 'events.jsonl'), `${JSON.stringify(event)}\n`, 'utf8');
+  ctx.hooks.onEvent?.(event);
 }
 
 interface Scope {
@@ -319,14 +302,12 @@ async function runOneTask(
   prompt: string,
   opts: FlowTaskOptions,
   ctx: RunContext | undefined,
+  outputSchema: object | null,
 ): Promise<TurnOutcome> {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : (ctx?.cwd ?? process.cwd());
-  const outputSchema = opts.returns ? await toJSONSchema(opts.returns) : null;
   const system =
     opts.returns && !outputSchema
-      ? [opts.system, jsonReplyPrompt(await toJSONSchema(opts.returns))]
-          .filter(Boolean)
-          .join('\n\n')
+      ? [opts.system, jsonReplyPrompt(null)].filter(Boolean).join('\n\n')
       : opts.system;
   // Chain engine override for mid-turn fallback attempts; mirrors dispatch's
   // own startup fallback (next engine runs on its config defaults).
@@ -344,10 +325,23 @@ async function runOneTask(
     const selected = ctx?.connections
       ? selectMcpServers(request.mcp, loadConfig(cwd).mcp, {}, ctx.connections.mcp)
       : undefined;
+    const started = (taskId: string) => {
+      const task = loadTask(cwd, taskId);
+      const engine = task ? formatEngineSpec(task) : undefined;
+      emitFlowEvent(ctx, {
+        kind: 'task-start',
+        taskId: taskId,
+        name: opts.name,
+        prompt,
+        engine,
+        depth: currentDepth(),
+      });
+    };
     const dispatch = mailbox
       ? await askWorker<{ taskId: string }>('dispatch', request)
       : await dispatchTask({
           ...request,
+          onWorker: started,
           ...(ctx?.connections
             ? {
                 ...selected,
@@ -364,22 +358,17 @@ async function runOneTask(
               `${f.engine} failed to start. Falling back to ${f.next}. ${f.detail.replace(/\s+/g, ' ').slice(0, 140)}`,
             ),
         });
-    // Resolved engine spec ("claude/opus/medium") from the task record. The
-    // dispatch may have picked the engine via the chain, not the flow author.
-    const task = loadTask(cwd, dispatch.taskId);
-    const engine = task ? formatEngineSpec(task) : undefined;
-    ctx?.hooks.onTaskStart?.({
-      taskId: dispatch.taskId,
-      name: opts.name,
-      prompt,
-      engine,
-      depth: currentDepth(),
-    });
+    if (mailbox) started(dispatch.taskId);
     const waited = await waitTurn(cwd, dispatch.taskId, ctx);
 
     if (waited.next) {
       const next = waited.next;
-      ctx?.hooks.onTaskEnd?.({ taskId: dispatch.taskId, status: 'failed', tokens: null });
+      emitFlowEvent(ctx, {
+        kind: 'task-end',
+        taskId: dispatch.taskId,
+        status: 'failed',
+        tokens: null,
+      });
       chainEngine = next;
       continue;
     }
@@ -400,6 +389,7 @@ async function executeTask(
   prompt: string,
   opts: FlowTaskOptions,
   ctx?: RunContext,
+  outputSchema: object | null = null,
 ): Promise<FlowTaskResult> {
   if (ctx?.dryRun) {
     process.stdout.write(`\n[dry-run] task${opts.name ? ` (${opts.name})` : ''}:\n${prompt}\n`);
@@ -415,7 +405,7 @@ async function executeTask(
     };
   }
 
-  const first = await runOneTask(prompt, opts, ctx);
+  const first = await runOneTask(prompt, opts, ctx, outputSchema);
   if (first.status !== 'completed') {
     const result: FlowTaskResult = { ...first, data: undefined };
     throw new CoderError(
@@ -467,10 +457,55 @@ async function executeTask(
   return { taskId: first.taskId, status: 'completed', output, data, tokens, model: first.model };
 }
 
-async function returnsPart(returns: unknown): Promise<unknown> {
-  if (!returns) return undefined;
-  const json = await toJSONSchema(returns);
-  return json ?? '<schema>';
+async function journaled(
+  ctx: RunContext,
+  fp: string,
+  run: () => Promise<FlowTaskResult>,
+): Promise<FlowTaskResult> {
+  const hit = ctx.journal.replay(fp);
+  if (hit) return hit.result as FlowTaskResult;
+  if (++ctx.taskCount > ctx.maxTasks)
+    throw new Error(
+      `Flow exceeded --max-tasks (${ctx.maxTasks}). Raise it with --max-tasks, or fix a runaway loop; the run is resumable.`,
+    );
+
+  return ctx.semaphore.run(async () => {
+    const startedAt = new Date().toISOString();
+    let res: FlowTaskResult;
+    try {
+      res = await run();
+    } catch (error) {
+      const failed =
+        error instanceof CoderError ? (error.result as FlowTaskResult | undefined) : undefined;
+      if (failed)
+        emitFlowEvent(ctx, {
+          kind: 'task-end',
+          taskId: failed.taskId,
+          status: failed.status === 'completed' ? 'failed' : failed.status,
+          tokens: failed.tokens,
+        });
+      throw error;
+    }
+    recordLedger(ctx, res);
+    if (!ctx.dryRun)
+      emitFlowEvent(ctx, {
+        kind: 'task-end',
+        taskId: res.taskId,
+        status: res.status,
+        tokens: res.tokens,
+      });
+    ctx.journal.record({
+      kind: 'task',
+      fingerprint: fp,
+      result: res,
+      taskId: res.taskId,
+      tokens: res.tokens,
+      startedAt,
+      endedAt: new Date().toISOString(),
+    });
+
+    return res;
+  });
 }
 
 // With a `returns` schema, `data` is guaranteed (validation failure throws
@@ -491,68 +526,16 @@ export async function task<T = unknown>(
   opts: FlowTaskOptions<T> = {},
 ): Promise<FlowTaskResult<T>> {
   const ctx = ctxALS.getStore();
-  if (!ctx) {
-    return executeTask(prompt, opts) as Promise<FlowTaskResult<T>>;
-  }
-  // `agent` is the engine's journal key from before the rename.
-  const part = {
-    prompt,
-    agent: opts.engine,
-    model: opts.model,
-    effort: opts.effort,
-    ...(opts.mcp !== undefined ? { mcp: opts.mcp } : {}),
-    permissions: opts.permissions,
-    name: opts.name,
-    system: opts.system,
-    // Removed option, kept so journals recorded before still replay.
-    resume: undefined,
-    cwd: opts.cwd,
-    ...(opts.addDirs?.length ? { addDirs: opts.addDirs } : {}),
-    returns: await returnsPart(opts.returns),
-  };
-  const fp = fingerprint('task', defined(part));
-  const hit = ctx.journal.replay(fp, fingerprint('task', part));
-  if (hit) return hit.result as FlowTaskResult<T>;
+  const outputSchema = opts.returns ? await toJSONSchema(opts.returns) : null;
+  const run = () => executeTask(prompt, opts, ctx, outputSchema);
+  if (!ctx) return run() as Promise<FlowTaskResult<T>>;
+  const { returns, ...options } = opts;
+  const fp = fingerprint(
+    'task',
+    defined({ prompt, ...options, returns: returns ? (outputSchema ?? '<schema>') : undefined }),
+  );
 
-  ctx.taskCount += 1;
-  if (ctx.taskCount > ctx.maxTasks) {
-    throw new Error(
-      `Flow exceeded --max-tasks (${ctx.maxTasks}). Raise it with --max-tasks, or fix a runaway loop; the run is resumable.`,
-    );
-  }
-  return ctx.semaphore.run(async () => {
-    const startedAt = new Date().toISOString();
-    let res: FlowTaskResult;
-    try {
-      res = await executeTask(prompt, opts, ctx);
-    } catch (e) {
-      // Surface the failed task before rethrowing (a completed status here means
-      // the reply failed structured-output validation).
-      const failed = e instanceof CoderError ? (e.result as FlowTaskResult | undefined) : undefined;
-      if (failed) {
-        ctx.hooks.onTaskEnd?.({
-          taskId: failed.taskId,
-          status: failed.status === 'completed' ? 'failed' : failed.status,
-          tokens: failed.tokens,
-        });
-      }
-      throw e;
-    }
-    recordLedger(ctx, res);
-    if (!ctx.dryRun) {
-      ctx.hooks.onTaskEnd?.({ taskId: res.taskId, status: res.status, tokens: res.tokens });
-    }
-    ctx.journal.record({
-      kind: 'task',
-      fingerprint: fp,
-      result: res,
-      taskId: res.taskId,
-      tokens: res.tokens,
-      startedAt,
-      endedAt: new Date().toISOString(),
-    });
-    return res as FlowTaskResult<T>;
-  });
+  return journaled(ctx, fp, run) as Promise<FlowTaskResult<T>>;
 }
 
 /** Continue a task this run started, on the same id, and await the turn. Mirrors `coder task steer --wait`. */
@@ -584,33 +567,7 @@ export async function steer(
   };
   if (!ctx) return run();
 
-  const fp = fingerprint('steer', defined({ taskId, text, ...opts }));
-  const hit = ctx.journal.replay(fp);
-  if (hit) return hit.result as FlowTaskResult;
-
-  ctx.taskCount += 1;
-  if (ctx.taskCount > ctx.maxTasks) {
-    throw new Error(
-      `Flow exceeded --max-tasks (${ctx.maxTasks}). Raise it with --max-tasks, or fix a runaway loop; the run is resumable.`,
-    );
-  }
-  return ctx.semaphore.run(async () => {
-    const startedAt = new Date().toISOString();
-    const res = await run();
-    recordLedger(ctx, res);
-    if (!ctx.dryRun)
-      ctx.hooks.onTaskEnd?.({ taskId: res.taskId, status: res.status, tokens: res.tokens });
-    ctx.journal.record({
-      kind: 'task',
-      fingerprint: fp,
-      result: res,
-      taskId: res.taskId,
-      tokens: res.tokens,
-      startedAt,
-      endedAt: new Date().toISOString(),
-    });
-    return res;
-  });
+  return journaled(ctx, fingerprint('steer', defined({ taskId, text, ...opts })), run);
 }
 
 // ---------------------------------------------------------------------------
@@ -688,9 +645,9 @@ export async function gate(cmd: string, opts: { cwd?: string } = {}): Promise<Ga
   // events.jsonl.
   const gateId = `gate-${process.pid}-${randomUUID()}`;
   const depth = currentDepth();
-  ctx.hooks.onGateStart?.({ gateId, cmd, depth });
+  emitFlowEvent(ctx, { kind: 'gate-start', gateId, cmd, depth });
   const res = await executeGate(cmd, cwd);
-  ctx.hooks.onGate?.({ gateId, cmd, ok: res.ok, code: res.code, depth });
+  emitFlowEvent(ctx, { kind: 'gate', gateId, cmd, ok: res.ok, code: res.code, depth });
   ctx.journal.record({
     kind: 'gate',
     fingerprint: fp,
@@ -738,10 +695,11 @@ export async function pipeline<T>(items: T[], ...stages: Stage[]): Promise<any[]
   return Promise.all(
     items.map(async (item, index) => {
       let value: unknown = item;
-      for (const stage of stages) {
+      for (const [i, stage] of stages.entries()) {
         try {
           value = await stage(value, item, index);
-        } catch {
+        } catch (error) {
+          log(`stage ${i + 1} failed: ${error instanceof Error ? error.message : String(error)}`);
           return null;
         }
       }
@@ -754,25 +712,11 @@ export async function pipeline<T>(items: T[], ...stages: Stage[]): Promise<any[]
 // log()
 // ---------------------------------------------------------------------------
 
-/** Emit a progress line: appended to the run's flow.log and streamed to watchers. */
+/** Emit a progress line to the run's event stream. */
 export function log(msg: string): void {
   const ctx = ctxALS.getStore();
-  if (ctx) {
-    try {
-      fs.appendFileSync(
-        path.join(ctx.runDir, 'flow.log'),
-        `${JSON.stringify({ at: new Date().toISOString(), message: msg })}\n`,
-        'utf8',
-      );
-    } catch {
-      // Best-effort log line.
-    }
-  }
-  if (ctx?.hooks.onLog) {
-    ctx.hooks.onLog(msg, currentDepth());
-  } else if (process.stderr.isTTY || !ctx) {
-    process.stderr.write(`[flow] ${msg}\n`);
-  }
+  emitFlowEvent(ctx, { kind: 'log', message: msg, depth: currentDepth() });
+  if (!ctx || (process.stderr.isTTY && !ctx.hooks.onEvent)) process.stderr.write(`[flow] ${msg}\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -890,36 +834,33 @@ async function importResolved(fileToImport: string, ext: string, origName: strin
   }
 }
 
-// Rewrite coder/zod specifiers to shipped copies. When a rewrite is needed we
-// import a temp sibling (same dir, so relative imports still resolve) and clean
-// it up; otherwise the original file is imported untouched. Inside an agent's
-// sandbox the temp module goes in the mailbox, the one writable path.
 async function importFlow(filePath: string): Promise<any> {
   if (!fs.existsSync(filePath)) throw new Error(`Cannot read flow file: ${filePath}`);
   await hookFlowImports(path.dirname(filePath));
   return importResolved(filePath, path.extname(filePath), filePath);
 }
 
-export async function loadAndRun(filePath: string, rawArgs: unknown): Promise<unknown> {
+export async function loadAndRun(
+  filePath: string,
+  rawArgs: unknown,
+  record?: FlowRecord,
+): Promise<unknown> {
   const scope = scopeALS.getStore()!;
   scope.args = rawArgs ?? {};
   const mod = await importFlow(filePath);
   const ctx = ctxALS.getStore();
   if (ctx?.flowConcurrency && !scope.depth && typeof mod.concurrency === 'number') {
     ctx.semaphore.limit = Math.max(1, mod.concurrency);
-    writeFlowRecord(ctx.runDir, {
-      ...readFlowRecord(ctx.runId)!,
-      concurrency: ctx.semaphore.limit,
-    });
+    if (record) {
+      record.concurrency = ctx.semaphore.limit;
+      writeFlowRecord(ctx.runDir, record);
+    }
   }
   const schema = mod.args;
   let effective = scope.args;
   if (isZodLike(schema)) {
-    const parsed = schema.safeParse(rawArgs ?? {});
-    if (!parsed.success) {
-      const v = validate(schema, rawArgs ?? {});
-      throw new Error(`Invalid flow args: ${(v as any).errors ?? 'validation failed'}`);
-    }
+    const parsed = validate(schema, rawArgs ?? {});
+    if (!parsed.ok) throw new Error(`Invalid flow args: ${parsed.errors}`);
     effective = parsed.data;
     scope.args = effective;
   }
@@ -956,7 +897,7 @@ export async function flow(name: string, args?: unknown): Promise<unknown> {
   if (hit) return hit.result;
 
   const startedAt = new Date().toISOString();
-  ctx.hooks.onFlowStart?.({ name: resolved.name, depth: (scope?.depth ?? 0) + 1 });
+  emitFlowEvent(ctx, { kind: 'flow-start', name: resolved.name, depth: (scope?.depth ?? 0) + 1 });
   const result = await scopeALS.run(
     { args: args ?? {}, depth: (scope?.depth ?? 0) + 1, imports: scope?.imports },
     () => loadAndRun(resolved.path, args),

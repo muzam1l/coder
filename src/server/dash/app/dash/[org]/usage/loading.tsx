@@ -1,6 +1,5 @@
 import '@/comps/ui/segmented.css';
 import '@/app/dash/[org]/usage/range-bar.css';
-import './usage.css';
 import { HEADS } from '@/comps/frame/heads';
 import { LoadingRange } from '@/app/dash/[org]/usage/range-bar';
 import { Loading } from '@/comps/ui/card';

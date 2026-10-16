@@ -2,11 +2,9 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
+import { baseOptions, str, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
 import { idAndText } from './steer';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 type Answered = { answer: string | null; error?: string; ok: boolean };
 

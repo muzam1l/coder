@@ -10,27 +10,8 @@ export class MemoryCache<T> {
       max: number;
       now?: () => number;
       accept?: (value: T) => boolean;
-    } = {
-      ttlMs: 600_000,
-      max: 100,
     },
   ) {}
-
-  get size() {
-    return this.entries.size;
-  }
-
-  get inFlight() {
-    return this.pending.size;
-  }
-
-  has(key: string) {
-    return this.entries.has(key);
-  }
-
-  keys() {
-    return this.entries.keys();
-  }
 
   /** The fresh value, else one fetch shared by concurrent callers; a failed refresh falls back to the expired value. */
   async get(key: string, fetch: () => Promise<T | undefined>): Promise<T | undefined> {
@@ -38,9 +19,6 @@ export class MemoryCache<T> {
     const at = now();
     const cached = this.entries.get(key);
     if (cached && at - cached.at < this.options.ttlMs) return cached.value;
-
-    for (const [other, entry] of this.entries)
-      if (other !== key && at - entry.at >= this.options.ttlMs) this.entries.delete(other);
 
     let refresh = this.pending.get(key);
     if (!refresh) {
@@ -55,7 +33,10 @@ export class MemoryCache<T> {
             this.entries.delete(oldest);
           return value;
         })
-        .catch(() => cached?.value)
+        .catch(error => {
+          console.error(`coder server: model probe failed for ${key}`, error);
+          return cached?.value;
+        })
         .finally(() => this.pending.delete(key));
       this.pending.set(key, refresh);
     }

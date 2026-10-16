@@ -3,7 +3,7 @@ import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
 import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
-import { credentialOptions, missingLabel } from './remove';
+import { credentialOptions } from './remove';
 
 export const commandCredentialsDefault = command({
   name: 'credentials default',
@@ -14,11 +14,11 @@ export const commandCredentialsDefault = command({
   },
   options: credentialOptions,
   args: 1,
+  required: ['<label>'],
   async run({ options, args: [label] }) {
-    const { connect } = await import('../../core/remote');
+    const { credentials } = await import('../../core/remote');
 
-    if (!label) throw missingLabel();
-    return connect(options).credentials.setDefault(label, options);
+    return credentials.default(label, options);
   },
   print: (_, { args: [label] }) => process.stdout.write(`Made default ${outStyle.bold(label!)}.\n`),
 });

@@ -8,7 +8,7 @@ import { errStyle, formatHints, formatTokens, outStyle } from '../../tui/output'
 import { baseOptions, flag, optStr, str, strList } from '../../utils/args';
 import { TASK_FLAGS } from '.';
 import { command, MODEL_HINT } from '../../cli';
-import { finishedHints, printOutcome } from './result';
+import { finalMessageLine, finishedHints, printOutcome } from './result';
 import { printLine } from './watch';
 
 export function taskRunNextSteps(taskId: string): string {
@@ -69,7 +69,7 @@ function printFinished(done: {
 }): void {
   // Blank lines around the answer so it stands apart from the [coder] chrome.
   process.stdout.write(
-    `\n${done.finalMessage || (done.error ? `${outStyle.red('error:')} ${done.error}` : '(no final message)')}\n\n`,
+    `\n${finalMessageLine({ finalMessage: done.finalMessage ?? undefined }, done.error, '(no final message)')}\n\n`,
   );
   const tokensNote = done.tokens ? ` tokens=${formatTokens(done.tokens, done.model)}` : '';
   process.stderr.write(
@@ -134,8 +134,6 @@ export const commandTask = command({
     model: str,
     effort: str,
     permissions: str,
-    // Older plugin skills still pass --host; every engine now runs through the runtime's own CLI path.
-    host: str,
     name: str,
     system: str,
     mcp: str,

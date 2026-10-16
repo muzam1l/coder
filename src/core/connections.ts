@@ -1,3 +1,4 @@
+import { withFileLock } from '../utils/fsx';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -243,69 +244,7 @@ export class LocalConnections {
       id === undefined
         ? this.lock
         : `${this.lock}-${createHash('sha256').update(id).digest('hex')}`;
-    fs.mkdirSync(path.dirname(lock), { recursive: true });
-    const staging = fs.mkdtempSync(`${lock}-`);
-    const owner = `${process.pid}-${Date.now()}-${randomUUID()}`;
-    fs.mkdirSync(path.join(staging, owner), { mode: 0o700 });
-    let acquired = false;
-    let heartbeat: ReturnType<typeof setInterval> | undefined;
-    try {
-      for (;;) {
-        try {
-          fs.renameSync(staging, lock);
-          acquired = true;
-          break;
-        } catch (error) {
-          if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? ''))
-            throw error;
-          const entries = (() => {
-            try {
-              return fs.readdirSync(lock);
-            } catch (error) {
-              if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
-              throw error;
-            }
-          })();
-          for (const entry of entries) {
-            const marker = path.join(lock, entry);
-            const pid = Number(entry.split('-')[0]);
-            try {
-              let stale = Date.now() - fs.statSync(marker).mtimeMs > 30_000;
-              if (Number.isInteger(pid) && pid > 0) {
-                try {
-                  process.kill(pid, 0);
-                } catch (error) {
-                  stale ||= (error as NodeJS.ErrnoException).code === 'ESRCH';
-                }
-              }
-              if (stale) fs.rmdirSync(marker);
-            } catch {}
-          }
-          try {
-            fs.rmdirSync(lock);
-          } catch {}
-          await new Promise(resolve => setTimeout(resolve, 25));
-        }
-      }
-      heartbeat = setInterval(() => {
-        try {
-          fs.utimesSync(path.join(lock, owner), new Date(), new Date());
-        } catch {}
-      }, 1_000);
-      heartbeat.unref();
-
-      return await work();
-    } finally {
-      clearInterval(heartbeat);
-      if (acquired) {
-        try {
-          fs.rmdirSync(path.join(lock, owner));
-        } catch {}
-        try {
-          fs.rmdirSync(lock);
-        } catch {}
-      } else fs.rmSync(staging, { recursive: true, force: true });
-    }
+    return withFileLock(lock, work);
   }
 
   list(): Connection[] {
@@ -363,6 +302,14 @@ export class LocalConnections {
         return sealed ? [{ id, value: { ...record, ...JSON.parse(sealed) } }] : [];
       },
     );
+  }
+
+  credential(id: string): SealedCredential | undefined {
+    const record = read<Record<string, CredentialRecord>>(this.credentialFile, {})[id];
+    if (!record) return undefined;
+    const sealed = this.secrets.get(`credential/${id}`);
+
+    return sealed ? { ...record, ...JSON.parse(sealed) } : undefined;
   }
 
   putCredential(id: string, value: SealedCredential): void {
@@ -713,7 +660,7 @@ export async function localConnections(
       if (connection.provider === 'env') {
         const name = (connection.keyIn as { env: string }).env;
         try {
-          const stored = local.credentials().find(row => row.id === connection!.credential)?.value;
+          const stored = local.credential(connection.credential!);
           const key =
             stored?.iv === 'plain'
               ? (

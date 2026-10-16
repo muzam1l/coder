@@ -10,6 +10,7 @@ import {
 } from '../../core/config';
 import { taskError } from '../tasks/admin';
 import { json } from '../routes/http';
+import { mergePatch } from '../../core/defaults';
 import { type ServerContext } from '../context';
 import { type Store } from '../store/types';
 
@@ -21,12 +22,7 @@ export type StoredConfig = Partial<CoderConfig>;
 
 export class ConfigError extends Error {}
 
-const read = async (store: Store) => (await store.get('config', 'workspace')) ?? {};
-
-/** The config a task runs with. */
-export async function taskConfig(store: Store): Promise<Partial<CoderConfig>> {
-  return read(store);
-}
+export const taskConfig = async (store: Store) => (await store.get('config', 'workspace')) ?? {};
 
 /** `$CODER_HOME/config.json`, the file `coder config` reads and writes. */
 function userConfig(): Partial<CoderConfig> {
@@ -47,20 +43,12 @@ function withoutMcp<T extends Partial<CoderConfig>>(config: T): T {
 
 /** The config as members see it. */
 export async function shownConfig(where: Where): Promise<Partial<CoderConfig>> {
-  return where.local ? withoutMcp(userConfig()) : read(where.store);
+  return where.local ? withoutMcp(userConfig()) : taskConfig(where.store);
 }
 
 /** The config tasks run with: a local server's folder config, else the shown one over the defaults. */
 export const effectiveConfig = (where: Where, config: Partial<CoderConfig>) =>
   where.local ? withoutMcp(loadConfig(where.local.cwd)) : withDefaults(config);
-
-/** Validate and store a whole config. */
-export async function saveConfig(
-  where: Where,
-  next: Partial<CoderConfig>,
-): Promise<Partial<CoderConfig>> {
-  return serialize(where, locked => storeConfig(locked, next));
-}
 
 async function serialize<T>(where: Where, work: (locked: Where) => Promise<T>): Promise<T> {
   const settings = (where.settings ??= {});
@@ -91,11 +79,8 @@ async function storeConfig(where: Where, next: unknown): Promise<Partial<CoderCo
     return shownConfig(where);
   }
   await where.store.put('config', 'workspace', next);
-  return shownConfig(where);
+  return withoutMcp(next);
 }
-
-const current = async (where: Where) =>
-  where.local ? withoutMcp(userConfig()) : taskConfig(where.store);
 
 /** Change part of the config, as `coder model` changes one file. */
 export async function updateConfig(
@@ -103,7 +88,7 @@ export async function updateConfig(
   change: (config: Partial<CoderConfig>) => void,
 ): Promise<Partial<CoderConfig>> {
   return serialize(where, async locked => {
-    const config = structuredClone(await current(locked));
+    const config = structuredClone(await shownConfig(locked));
     change(config);
     return storeConfig(locked, config);
   });
@@ -112,27 +97,8 @@ export async function updateConfig(
 /** RFC 7396 merge patch; validation applies to the resulting config. */
 export function patchConfig(where: Where, patch: unknown): Promise<Partial<CoderConfig>> {
   return serialize(where, async locked =>
-    storeConfig(locked, mergePatch(await current(locked), patch)),
+    storeConfig(locked, mergePatch(await shownConfig(locked), patch)),
   );
-}
-
-function mergePatch(target: unknown, patch: unknown): unknown {
-  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return patch;
-  const result: Record<string, unknown> =
-    target && typeof target === 'object' && !Array.isArray(target)
-      ? Object.fromEntries(Object.entries(target))
-      : {};
-  for (const [key, value] of Object.entries(patch)) {
-    if (value === null) delete result[key];
-    else
-      Object.defineProperty(result, key, {
-        value: mergePatch(Object.hasOwn(result, key) ? result[key] : undefined, value),
-        writable: true,
-        enumerable: true,
-        configurable: true,
-      });
-  }
-  return result;
 }
 
 export async function body<T>(req: Request): Promise<T> {
@@ -145,12 +111,7 @@ export async function change(
   ctx: ServerContext,
   apply: (config: Partial<CoderConfig>) => void,
 ): Promise<Response> {
-  try {
-    return json(await updateConfig(ctx, apply));
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-    throw error;
-  }
+  return updateConfig(ctx, apply).then(json).catch(taskError);
 }
 
 export async function readConfig(
@@ -159,19 +120,9 @@ export async function readConfig(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  try {
-    {
-      {
-        const config = await shownConfig(ctx);
-
-        return json({ config, effective: effectiveConfig(ctx, config) });
-      }
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+  return shownConfig(ctx)
+    .then(config => json({ config, effective: effectiveConfig(ctx, config) }))
+    .catch(taskError);
 }
 
 export async function patchConfiguration(
@@ -180,36 +131,12 @@ export async function patchConfiguration(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  try {
-    {
-      {
-        const patch = await req.json().catch(() => {
-          throw new ConfigError('A JSON body is required');
-        });
-
-        return json(await patchConfig(ctx, patch));
-      }
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
-}
-
-export async function saveConfiguration(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  try {
-    {
-      return json(await saveConfig(ctx, await body(req)));
-    }
-  } catch (error) {
-    if (error instanceof ConfigError) return json({ error: error.message }, 400);
-
-    return taskError(error);
-  }
+  return req
+    .json()
+    .catch(() => {
+      throw new ConfigError('A JSON body is required');
+    })
+    .then(patch => patchConfig(ctx, patch))
+    .then(json)
+    .catch(taskError);
 }

@@ -1,10 +1,13 @@
 // Builds the CLI beside dist and moves it in file by file, so a running `coder` never misses a file, then builds the dashboard.
 // `bun scripts/build.ts dash` rebuilds the dashboard alone, keeping the previous build's assets for open pages.
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import os from 'node:os';
 import {
   cpSync,
   existsSync,
   mkdirSync,
+  mkdtempSync,
   readFileSync,
   readdirSync,
   renameSync,
@@ -140,10 +143,44 @@ function buildCli(root: string): number {
         '--log-level',
         'warn',
       ]);
-    if (status === 0) swapCli(path.join(root, stage), path.join(root, 'dist'));
+    if (status === 0) {
+      packRunner(root, path.join(root, stage));
+      swapCli(path.join(root, stage), path.join(root, 'dist'));
+    }
     return status;
   } finally {
     rmSync(path.join(root, stage), { recursive: true, force: true });
+  }
+}
+
+export function packPackage(root: string, out = root): string {
+  const packed = spawnSync(
+    'npm',
+    ['pack', '--json', '--ignore-scripts', '--workspaces=false', '--pack-destination', out],
+    { cwd: root, encoding: 'utf8' },
+  );
+  if (packed.status !== 0) throw new Error(packed.stderr || 'Coder package build failed');
+  const [{ filename }] = Object.values(JSON.parse(packed.stdout)) as { filename: string }[];
+
+  return filename;
+}
+
+export function packRunner(root: string, stage: string): void {
+  const copy = mkdtempSync(path.join(os.tmpdir(), 'coder-runner-'));
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+    writeFileSync(
+      path.join(copy, 'package.json'),
+      JSON.stringify({ ...pkg, files: ['bin', 'dist'] }),
+    );
+    cpSync(path.join(root, 'bin'), path.join(copy, 'bin'), { recursive: true });
+    cpSync(stage, path.join(copy, 'dist'), { recursive: true });
+    const archive = path.join(copy, packPackage(copy));
+    const hash = createHash('sha256').update(readFileSync(archive)).digest('hex');
+    renameSync(archive, path.join(stage, 'runner.tgz'));
+    writeFileSync(path.join(stage, 'runner.json'), `${JSON.stringify({ hash })}\n`);
+  } finally {
+    rmSync(copy, { recursive: true, force: true });
   }
 }
 

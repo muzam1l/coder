@@ -3,11 +3,9 @@ import process from 'node:process';
 
 import { ageMs } from '../../core/state';
 import type { ApprovalRow } from '../../core/task';
-import { formatAge, formatHints, outStyle } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
+import { formatAge, formatHints, outStyle, renderTable } from '../../tui/output';
+import { baseOptions, serverOptions } from '../../utils/args';
 import { command, SERVER_FLAG } from '../../cli';
-
-const serverOptions = { server: optStr, workspace: str, yes: flag };
 
 /** One task's approvals and whether each was answered. */
 function printTaskApprovals(
@@ -39,19 +37,22 @@ function printPendingApprovals(
     return void process.stdout.write(
       `${s.dim('No pending approvals.')}\n\n${formatHints(['Check tasks: coder task list'], s)}\n`,
     );
-  const w = {
-    id: Math.max('approval-id'.length, ...rows.map(r => r.id.length)),
-    task: Math.max('task-id'.length, ...rows.map(r => r.taskId.length)),
-  };
   process.stdout.write(
-    s.bold(s.light(`${'approval-id'.padEnd(w.id)}  ${'task-id'.padEnd(w.task)}  age    summary\n`)),
+    `${renderTable(
+      [
+        {
+          header: 'approval-id',
+          value: (r: (typeof rows)[number]) => r.id,
+          paint: cell => s.cyan(cell),
+        },
+        { header: 'task-id', value: r => r.taskId, paint: cell => s.cyan(cell) },
+        { header: 'age', value: r => (r.createdAt ? formatAge(ageMs(r.createdAt)) : '-') },
+        { header: 'summary', value: r => r.summary, paint: cell => s.light(cell) },
+      ],
+      rows,
+      s,
+    )}\n`,
   );
-  for (const r of rows) {
-    const age = r.createdAt ? formatAge(ageMs(r.createdAt)) : '-';
-    process.stdout.write(
-      `${s.cyan(r.id.padEnd(w.id))}  ${s.cyan(r.taskId.padEnd(w.task))}  ${age.padEnd(5)}  ${s.light(r.summary)}\n`,
-    );
-  }
   const ref = rows.length === 1 ? rows[0]!.id : '<approval-id>';
   process.stdout.write(`\n${formatHints([`Answer: coder task approve ${ref} [--deny]`], s)}\n`);
 }

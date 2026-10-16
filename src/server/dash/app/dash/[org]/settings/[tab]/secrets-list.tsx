@@ -11,11 +11,7 @@ import { Button, IconButton } from '@/comps/ui/button';
 import { Select } from '@/comps/ui/select';
 import { Row } from './list';
 import type { ConnectionRow } from '@coder/client/types';
-
-const SCOPES: Array<[string, string]> = [
-  ['me', 'Just me'],
-  ['', 'Workspace'],
-];
+import { CONNECTION_SCOPES } from '@/app/dash/[org]/settings/model-options';
 
 /** Secrets tasks read as environment variables; Enter adds one, and a broken one takes a new value in place. */
 export function TaskSecrets({
@@ -166,7 +162,7 @@ export function TaskSecrets({
               {admin && !local ? (
                 <Select
                   label="Who can use this secret"
-                  options={SCOPES}
+                  options={CONNECTION_SCOPES}
                   value={scope}
                   onChange={setScope}
                 />

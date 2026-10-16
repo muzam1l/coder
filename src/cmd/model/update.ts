@@ -1,5 +1,5 @@
 /** `coder model update`: change fields of a custom endpoint model. */
-import { modelUpdateCore } from '../../core/models';
+import { models } from '../../core/models';
 import { command } from '../../cli';
 import { modelOptions, modelSavedJson, printModelSaved, writeOptions } from './add';
 
@@ -18,7 +18,7 @@ export const commandModelUpdate = command({
   },
   options: modelOptions,
   args: 1,
-  run: ({ options, args: [name], cwd }) => modelUpdateCore(cwd, name, writeOptions(options)),
+  run: ({ options, args: [name], cwd }) => models.update(name, { ...writeOptions(options), cwd }),
   json: modelSavedJson,
   print: result => printModelSaved(result, 'updated'),
 });

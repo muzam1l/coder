@@ -85,19 +85,6 @@ const RANK: Record<Severity, number> = {
   nit: 3,
 };
 
-export type Exec = ReviewExec;
-
-function shell(cwd: string): Exec {
-  return (command, args, input) =>
-    execFileSync(command, args, {
-      cwd,
-      input,
-      encoding: 'utf8',
-      maxBuffer: 64 * 1024 * 1024,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-}
-
 /** New-side line ranges per file from a unified diff. */
 export function changedLines(patch: string): Map<string, Array<[number, number]>> {
   const ranges = new Map<string, Array<[number, number]>>();
@@ -119,7 +106,7 @@ export function fingerprint(file: string, text: string, category: string): strin
 }
 
 /** Rules come from the base commit, so a PR cannot rewrite the rules that review it. */
-function readRules(exec: Exec, sha: string, file: string): string | undefined {
+function readRules(exec: ReviewExec, sha: string, file: string): string | undefined {
   try {
     const text = exec('git', ['show', `${sha}:${file}`]);
     return text.length > 32_000 ? `${text.slice(0, 32_000)}\n[truncated]` : text;
@@ -129,25 +116,28 @@ function readRules(exec: Exec, sha: string, file: string): string | undefined {
 }
 
 /** AGENTS.md / CLAUDE.md, then .coder/review.md, all read at `sha`. */
-export function repositoryRules(exec: Exec, sha: string): Array<[name: string, text: string]> {
+export function repositoryRules(
+  exec: ReviewExec,
+  sha: string,
+): Array<[name: string, text: string]> {
   return ['AGENTS.md', 'CLAUDE.md', '.coder/review.md'].flatMap(name => {
     const text = readRules(exec, sha, name);
     return text?.trim() ? [[name, text] as [string, string]] : [];
   });
 }
 
-function defaultBase(exec: Exec): string {
+function defaultBase(exec: ReviewExec): string {
   for (const cmd of [
     ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
     ['rev-parse', '--verify', 'origin/main'],
     ['rev-parse', '--verify', 'origin/master'],
   ]) {
     try {
-      exec('git', cmd);
+      const resolved = exec('git', cmd).trim();
       return exec('git', [
         'merge-base',
         'HEAD',
-        cmd[0] === 'symbolic-ref' ? exec('git', cmd).trim() : cmd[2]!,
+        cmd[0] === 'symbolic-ref' ? resolved : cmd[2]!,
       ]).trim();
     } catch {
       /* next */
@@ -157,7 +147,7 @@ function defaultBase(exec: Exec): string {
 }
 
 export interface ReviewServices {
-  exec?: Exec;
+  exec?: ReviewExec;
   reviewTask?: typeof task;
   /** Test-only override for the transient task credential. */
   integrationToken?: string;
@@ -165,7 +155,7 @@ export interface ReviewServices {
 
 /** Resolve local refs directly and delegate pull requests to their integration. */
 async function resolveTarget(
-  exec: Exec,
+  exec: ReviewExec,
   a: ReviewArgs,
   cwd: string,
   auth: ReviewAuth,
@@ -328,7 +318,7 @@ export default async function review(
 
   const started = Date.now();
   const cwd = path.resolve(a.cwd ?? process.cwd());
-  const exec = services.exec ?? shell(cwd);
+  const exec = services.exec ?? reviewCli(cwd);
   const integrationToken = services.integrationToken ?? currentIntegrationToken();
   const integrationAuth: ReviewAuth = {
     ...(integrationToken ? { token: integrationToken } : {}),
@@ -555,23 +545,11 @@ export default async function review(
 
 export type ReviewExec = (command: string, args: string[], input?: string) => string;
 
-export interface ReviewPostFinding {
-  file: string;
-  line: number;
-  severity: 'critical' | 'major' | 'minor' | 'nit';
-  category: string;
-  summary: string;
-  failure_scenario: string;
-  fingerprint: string;
-}
-
-export interface ReviewPostSummary {
-  author: string;
-  baseSha: string;
-  headSha: string;
-  model: string | null;
-  elapsedMs: number;
-}
+export type ReviewPostFinding = Finding;
+export type ReviewPostSummary = Pick<
+  ReviewSummary,
+  'baseSha' | 'headSha' | 'model' | 'elapsedMs'
+> & { author: string };
 
 export interface ReviewPostInput {
   repo: string;

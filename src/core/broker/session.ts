@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import { watchChanges } from '../../utils/fsx';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -40,22 +41,23 @@ function connectToEndpoint(endpoint: string) {
 }
 
 export async function waitForBrokerEndpoint(endpoint: string, timeoutMs = 2000) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const ready = await new Promise<boolean>(resolve => {
-      const socket = connectToEndpoint(endpoint);
-      socket.on('connect', () => {
-        socket.end();
-        resolve(true);
-      });
-      socket.on('error', () => resolve(false));
-    });
-    if (ready) {
-      return true;
-    }
-    await new Promise(resolve => setTimeout(resolve, 50));
-  }
-  return false;
+  const target = parseBrokerEndpoint(endpoint);
+  return Boolean(
+    await watchChanges(path.dirname(target.path)).until(
+      () =>
+        new Promise<true | undefined>(resolve => {
+          const socket = connectToEndpoint(endpoint);
+          socket.on('connect', () => {
+            socket.end();
+            resolve(true);
+          });
+          socket.on('error', () => resolve(undefined));
+        }),
+      timeoutMs,
+      undefined,
+      target.kind === 'pipe' ? 250 : 1000,
+    ),
+  );
 }
 
 export interface SpawnBrokerProcessOptions {
