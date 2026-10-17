@@ -257,13 +257,7 @@ const enginesRoutes = group(
 
 const appsRoutes = [
   route('POST', '/apps/:id/install', (req, ctx, params, url) =>
-    adminInstallLink(
-      req,
-      ctx,
-      params.id!,
-      url.searchParams.get('back'),
-      url.searchParams.get('link'),
-    ),
+    adminInstallLink(req, ctx, params.id!, url.searchParams.get('back')),
   ),
   route('POST', '/apps/create/:integration', adminCreateTransaction),
   route('GET', '/apps', listApps),

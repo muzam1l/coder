@@ -137,6 +137,10 @@ export const afterCursor = (row: TaskStatus, before?: ListCursor) =>
       (row.updatedAt === before.updatedAt && row.task.id > before.id)
     : byListKey(listCursor(row), before) > 0);
 
+/** What a continued task takes for its next turn: the prompt and context, and the agent as it is now. */
+export type TaskRefresh = Pick<AgentTask, 'prompt' | 'context'> &
+  Partial<Pick<AgentTask, 'definition' | 'usage' | 'tools' | 'files' | 'permissions'>>;
+
 export interface TaskFence {
   generation?: number;
   attempts?: number;
@@ -293,7 +297,7 @@ export interface TaskQueue {
   continueTask(
     organizationId: string,
     id: string,
-    task: Pick<AgentTask, 'prompt' | 'context'>,
+    task: TaskRefresh,
     now: number,
     fence: TaskFence,
   ): Promise<boolean>;
@@ -803,7 +807,7 @@ export class StoreQueue implements TaskQueue {
   continueTask(
     _organizationId: string,
     id: string,
-    task: Pick<AgentTask, 'prompt' | 'context'>,
+    task: TaskRefresh,
     now: number,
     fence: TaskFence,
   ): Promise<boolean> {

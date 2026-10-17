@@ -81,7 +81,6 @@ import {
   heldTokensQuery,
   runners,
   sealedCredential,
-  sealedInstallation,
   sealedRow,
   sealedRunner,
   state,
@@ -414,7 +413,7 @@ export class DrizzleStore implements Store {
       kind === 'app'
         ? ['name', 'agentsRepo', 'branch']
         : kind === 'installation'
-          ? ['account', 'self', 'covers', 'repos', 'connections', 'settings', 'deletedAt', 'uninstalled']
+          ? ['account', 'self', 'covers', 'repos', 'settings', 'deletedAt', 'uninstalled']
           : ['name', 'config', 'lastSeen', 'updatedAt'];
     if (Object.keys(fields).some(key => !allowed.includes(key)))
       throw new Error('Invalid metadata fields');
@@ -1081,9 +1080,6 @@ export class DrizzleStore implements Store {
     const mine = (column: SQL) => sql`${column} = ${this.organizationId}`;
     const sealedRows = (query: SQL) =>
       sql`(select coalesce(jsonb_agg(${sealedRow(sql`r`, sql`s`)}), '[]'::jsonb) from ${query})`;
-    const links = Object.values(input.installation.connections ?? {}).flatMap(link =>
-      link.kind === 'installation' ? [link.id] : [],
-    );
     const snapshots = statePrefix(this.organizationId, 'snapshot');
     const files = input.files.map(prefix => `${escapeLike(snapshots + prefix)}%`);
     const [row] = await queryRows<{
@@ -1099,7 +1095,6 @@ export class DrizzleStore implements Store {
       runners: Sealed[];
       connections: Connection[];
       workspace: { slug: string; name: string } | null;
-      linked: Array<Parameters<typeof sealedInstallation>[0]>;
       files: Record<string, RepoFile>;
       tokens: Record<string, unknown>;
     }>(
@@ -1114,11 +1109,7 @@ export class DrizzleStore implements Store {
       ), conversation as (select ${live(conversation)} as value),
       member as (select ${platformLink.userId} as requester from ${platformLink}
         where ${platformLink.platform} = ${input.actor?.platform ?? null}::text and ${platformLink.platformUserId} = ${input.actor?.id ?? null}::text
-          and ${platformLink.organizations} ? ${this.organizationId} limit 1),
-      linked as (select i.*, a.key as app_key, ${sealedRow(sql`i`, sql`s`)} || jsonb_build_object('app', to_jsonb(a), 'credentials', to_jsonb(c)) as row
-        from ${install} i join ${app} a on a.id = i.app_id and a.organization_id in (${this.organizationId}, ${UNSCOPED_ORGANIZATION})
-        join ${secret} c on c.id = a.credentials_secret_id left join ${secret} s on s.id = i.token_secret_id
-        where ${mine(sql`i.organization_id`)} and i.deleted_at is null and i.key = any(${sql.param(links)}::text[]))
+          and ${platformLink.organizations} ? ${this.organizationId} limit 1)
       select exists (select 1 from claim) as claimed,
         (select to_jsonb(a) from ${agent} a where ${mine(sql`a.organization_id`)} and a.slug = ${input.agent}) as record,
         (select to_jsonb(v) from ${agentVersion} v join ${agent} a on a.id = v.agent_id and v.version = a.current_version
@@ -1133,10 +1124,9 @@ export class DrizzleStore implements Store {
         (select coalesce(jsonb_agg(${t.value}), '[]'::jsonb) from ${t}
           where ${t.key} like ${`${escapeLike(statePrefix(this.organizationId, 'connection'))}%`} and ${this.live(t.expiresAt)} and ${owned(sql`${t.value}->>'owner'`)}) as connections,
         ${live('workspace')} as workspace,
-        (select coalesce(jsonb_agg(row), '[]'::jsonb) from linked) as linked,
         (select coalesce(jsonb_object_agg(${t.key}, ${t.value}), '{}'::jsonb) from ${t}
           where ${this.live(t.expiresAt)} and ${t.key} like any(${sql.param(files)}::text[])) as files,
-        ${heldTokensQuery(this.organizationId, [input.installation.id, ...links], [input.installation.app], sql`select ${snapshots}::text || 'token-drop:' || app_key from linked`)} as tokens`,
+        ${heldTokensQuery(this.organizationId, [input.installation.id], [input.installation.app])} as tokens`,
     );
     if (!row?.claimed) return { claimed: false };
     const record = row.record ? agentValue(fromJson(agent, row.record)) : undefined;
@@ -1161,7 +1151,6 @@ export class DrizzleStore implements Store {
         runners: row.runners.map(sealedRunner),
         connections: row.connections,
         ...(row.workspace ? { workspace: row.workspace } : {}),
-        linked: row.linked.map(sealedInstallation),
         files: Object.fromEntries(
           Object.entries(row.files).map(([key, value]) => [key.slice(snapshots.length), value]),
         ),

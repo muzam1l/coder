@@ -105,11 +105,6 @@ export function dispatchStore(store: Store, loaded: DispatchLoaded, input: Dispa
   const own = (owner: string | undefined) => owner === undefined || owner === loaded.requester;
   const visible = (row: { owner?: string }, owner: string | undefined) =>
     !row.owner || row.owner === owner;
-  const links = Object.values(input.installation.connections ?? {}).flatMap(link =>
-    link.kind === 'installation' ? [link.id] : [],
-  );
-  const installations = [input.installation.id, ...links];
-  const apps = [input.installation.app, ...loaded.linked.map(entry => entry.app.id)];
 
   return primed(store, {
     get: (kind: StoreKind, id: string) =>
@@ -118,8 +113,6 @@ export function dispatchStore(store: Store, loaded: DispatchLoaded, input: Dispa
         : kind === 'snapshot' && input.files.some(prefix => id.startsWith(prefix))
           ? loaded.files[id]
           : MISS,
-    installationApp: (id: string) =>
-      links.includes(id) ? loaded.linked.find(entry => entry.installation.id === id) : MISS,
     conversationState: (key: string) => (key === input.conversation ? loaded.conversation : MISS),
     listCredentials: (opts: { owner?: string; limit?: number }) =>
       own(opts.owner) && opts.limit === undefined
@@ -134,7 +127,7 @@ export function dispatchStore(store: Store, loaded: DispatchLoaded, input: Dispa
               .map(value => ({ id: value.id, value }))
           : MISS,
     heldTokens: (read: string[], drops: string[]) =>
-      read.every(id => installations.includes(id)) && drops.every(id => apps.includes(id))
+      same(read, [input.installation.id]) && same(drops, [input.installation.app])
         ? loaded.tokens
         : MISS,
   });

@@ -1,10 +1,5 @@
 import { type CreateState } from '../../integrations/types';
-import {
-  type AgentApp,
-  type AgentDefinition,
-  type InstallationLink,
-  type Installation,
-} from '../../agent/types';
+import { type AgentDefinition } from '../../agent/types';
 import { consumeNonce, inspectNonce } from '../auth/nonce';
 import { type SetupOutcome } from '../../client/types';
 import { type ServerContext } from '../context';
@@ -110,34 +105,3 @@ export async function takeCreateState(
   };
 }
 
-export async function siblingApp(
-  ctx: ServerContext,
-  app: AgentApp,
-  integration: string,
-): Promise<AgentApp | undefined> {
-  const apps = await ctx.store.list('app', {
-    prefix: `${integration}:`,
-  });
-
-  return apps.find(
-    entry => entry.value.integration === integration && entry.value.agent === app.agent,
-  )?.value;
-}
-
-export function link(installation: Installation, integration: string, id: string): Installation {
-  const connection: InstallationLink = { kind: 'installation', id };
-  return {
-    ...installation,
-    connections: { ...installation.connections, [integration]: connection },
-  };
-}
-
-export async function linkedSibling(
-  ctx: ServerContext,
-  linked: Installation,
-  integration: string,
-): Promise<AgentApp | undefined> {
-  const app = await ctx.store.get('app', linked.app);
-
-  return app && siblingApp(ctx, app, integration);
-}

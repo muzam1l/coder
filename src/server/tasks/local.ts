@@ -60,7 +60,7 @@ import { resolveConnections, taskConnectionSecrets } from '../connections/resolv
 import { connectionEnvironment, narrowConnections } from '../../core/connections';
 import { nativeToolEnvironment, type ReplyEndpoint } from '../../agent/mcp';
 import { connectionWarnings } from './logs';
-import { assertEnabled, check, TaskInputError, taskCwd, type NewTask } from './create';
+import { assertEnabled, check, refreshedTask, TaskInputError, taskCwd, type NewTask } from './create';
 import { rememberPost } from './conversation';
 import {
   sessionKey,
@@ -285,7 +285,12 @@ export async function startLocalTask(
         } as AgentTask),
     );
     const connected = connectionEnvironment(resolved.mcp, resolved.env);
-    const native = nativeToolEnvironment({ tools: resolved.tools }, resolved.tokens);
+    const native = nativeToolEnvironment(
+      { tools: resolved.tools },
+      resolved.tokens,
+      undefined,
+      Object.keys(resolved.nativeTokens),
+    );
     const agent =
       slug !== preferred
         ? await agentTaskOptions(cwd, slug, input.mcp?.join(','), connected.mcp)
@@ -770,9 +775,10 @@ async function turnConnections(
   ]);
   const connected = connectionEnvironment(resolved.mcp, resolved.env);
   const native = nativeToolEnvironment(
-    { ...task, tools: resolved.tools, toolScopes: resolved.toolScopes },
+    { ...task, tools: resolved.tools },
     resolved.tokens,
     reply,
+    Object.keys(resolved.nativeTokens),
   );
 
   return {
@@ -819,7 +825,7 @@ export async function runLocalTask(
     ...resolved.secrets,
     ...Object.values(resolved.tokens),
   ]);
-  task = { ...task, tools: resolved.tools, toolScopes: resolved.toolScopes };
+  task = { ...task, tools: resolved.tools };
   const tokens = resolved.tokens;
   const token = task.event && handles[task.event.integration];
   const cwd = taskCwd(ctx, task) ?? ctx.local!.cwd;
@@ -873,7 +879,7 @@ export async function runLocalTask(
     if (existing.status === 'queued' && !existing.pid)
       worker = spawnWorker(cwd, existing.id, {
         ...connectionEnvironment(resolved.mcp, resolved.env).env,
-        ...nativeToolEnvironment(task, tokens, reply).env,
+        ...nativeToolEnvironment(task, tokens, reply, Object.keys(resolved.nativeTokens)).env,
       });
     watchCompletion(ctx, existing.id, completion, worker);
     return row(cwd, existing);
@@ -890,7 +896,7 @@ export async function runLocalTask(
     flow: task.flow,
     task,
     taskId,
-    toolEnvironment: { tokens },
+    toolEnvironment: { tokens, native: Object.keys(resolved.nativeTokens) },
     ...(reply ? { replyEndpoint: reply } : {}),
     connections: resolved.mcp,
     connectionEnv: resolved.env,
@@ -1061,6 +1067,7 @@ export async function resumeLocalTask(
   }
 
   const next = {
+    ...(previous ? await refreshedTask(ctx, previous.task) : {}),
     prompt: text,
     context: { ...previous?.task.context, ...context, ...(outputSchema ? { outputSchema } : {}) },
   };

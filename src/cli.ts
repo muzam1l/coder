@@ -390,7 +390,7 @@ async function route(): Promise<void> {
   // Passive, non-blocking update notice. Skip internal/refresh commands so the
   // detached refresher never re-triggers itself.
   if (
-    !['task worker', 'flow drive', 'task mcp', 'agent tools', 'upgrade refresh'].includes(
+    !['task worker', 'flow drive', 'task mcp', 'task hub', 'agent tools', 'upgrade refresh'].includes(
       `${subcommand} ${argv[0]}`,
     )
   ) {

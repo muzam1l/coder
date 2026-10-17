@@ -136,9 +136,6 @@ export interface AgentApp {
   createdAt: number;
 }
 
-/** A handle on another integration, linked to this installation at install time. */
-export type InstallationLink = { kind: 'installation'; id: string };
-
 /**
  * Access to a service with no handle: an MCP server, or a native integration's token. It wakes nothing.
  * Store kind `connection`; id is the slug, or `<user id>:<slug>` for a member's own.
@@ -173,8 +170,6 @@ export interface Connection {
 
 /** Per-installation settings a user sets from the platform (`/setup` in Slack). */
 export interface InstallationSettings {
-  /** `owner/name` of the repo whose `.coder/` holds this agent's usage and instructions. */
-  configRepo?: string;
   model?: string;
   engine?: string;
   effort?: string;
@@ -196,8 +191,6 @@ export interface Installation {
   /** Accounts an install spanning several covers (Slack workspaces of an org install). */
   covers?: string[];
   repos?: string[];
-  /** Other integrations this install can act on, keyed by integration id. */
-  connections?: Record<string, InstallationLink>;
   settings?: InstallationSettings;
   createdAt: number;
   deletedAt?: number;
@@ -244,19 +237,9 @@ export interface AgentTask {
   /** Stored agent body for runners whose checkout does not contain the agent. */
   files?: Record<string, string>;
   usage?: AgentUsage;
-  /** Effective tools per integration the task may act on (event integration + connections). */
+  /** Effective tools per integration the agent declares, by its access mode; every installation of the agent's apps serves them. */
   tools: Record<string, string[]>;
-  /** Frozen per-integration write targets. Missing scope means read-only tools only. */
-  toolScopes?: Record<
-    string,
-    {
-      repo?: { owner: string; name: string };
-      /** Chat SDK thread id. */
-      thread?: string;
-      within?: string;
-    }
-  >;
-  /** Context gathered by the receiver: repository instructions and who asked. */
+  /** Context gathered by the receiver: notes for the turn and who asked. */
   context?: TaskContext;
   /** What the platform thread gets when the run fails without an answer. */
   failureReply?: string;
@@ -270,10 +253,8 @@ export interface TaskContext {
   messages?: Array<{ user: string; text: string; ts: string }>;
   /** Completed turns of this task, kept across dashboard continuations. */
   turns?: TaskTurn[];
-  /** Extra instructions from the config repo (`.coder/<agent>.md`). */
+  /** Notes the receiver adds for the agent, such as a missing account connection. */
   instructions?: string;
-  /** The config repo `instructions` came from. */
-  repository?: string;
   /** Whether this turn requires a reply. */
   mustReply?: boolean;
   /** The last conversation batch each kind admitted, by steer or resume. */

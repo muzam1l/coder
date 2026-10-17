@@ -175,8 +175,6 @@ export interface DispatchState {
 export interface DispatchLoaded {
   record?: AgentRecord;
   version?: AgentVersionRecord;
-  /** The installations the event's one connects to, with their apps. */
-  linked: Array<{ installation: Installation; app: AgentApp }>;
   /** Repository file snapshots under the dispatch's prefixes, by snapshot id. */
   files: Record<string, RepoFile>;
   conversation: ConversationState;

@@ -93,6 +93,7 @@ export const commandTaskGroup = group(
   {
     worker: async () => (await import('./worker')).commandWorker,
     mcp: async () => (await import('./mcp')).commandTaskMcp,
+    hub: async () => (await import('./hub')).commandTaskHub,
     run: async () => (await import('./run')).commandTask,
     list: async () => (await import('./list')).commandTasks,
     ls: async () => (await import('./list')).commandTasks,

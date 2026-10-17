@@ -16,8 +16,6 @@ import {
   OPERATOR,
   outcome,
   platformsPath,
-  link,
-  linkedSibling,
   backPath,
 } from './platform';
 
@@ -63,11 +61,7 @@ export async function installPage(
   const id = params.id!;
   const operator = ctx.operatorApp ?? false;
   const userId = operator ? OPERATOR : (ctx.session?.user.id ?? 'anonymous');
-  const linkState = decodeParam<{
-    link?: string;
-    tx?: string;
-    back?: string;
-  }>(url.searchParams.get('state'));
+  const linkState = decodeParam<{ tx?: string; back?: string }>(url.searchParams.get('state'));
   const back = backPath(linkState?.back);
   const integration = ctx.integrations[id!];
   if (!integration) return outcome(ctx, 'unknown-integration', { platform: id }, back);
@@ -146,12 +140,9 @@ export async function completeInstall(
   const id = params.id!;
   const operator = entry.operatorApp ?? false;
   const userId = operator ? OPERATOR : (entry.session?.user.id ?? 'anonymous');
-  const linkState = decodeParam<{
-    link?: string;
-    tx?: string;
-    back?: string;
-    installation?: string;
-  }>(url.searchParams.get('state'));
+  const linkState = decodeParam<{ tx?: string; back?: string; installation?: string }>(
+    url.searchParams.get('state'),
+  );
   // Resolve in the workspace the transaction was issued for.
   const issued =
     linkState?.tx && entry.session
@@ -188,18 +179,11 @@ export async function completeInstall(
   if (!(await consumeNonce(ctx, linkState!.tx!, 'install', userId, transactionTarget)))
     return outcome(ctx, 'install-expired', retry, stated);
 
-  const app = await ctx.store.get('app', appId ?? transactionTarget);
-  // Install callback: state carries the one-time transaction and optional sibling link.
-
-  const linked = linkState?.link ? await ctx.store.get('installation', linkState.link) : undefined;
-  const target = app ?? (linked && (await linkedSibling(ctx, linked, id!)));
+  const target = await ctx.store.get('app', appId ?? transactionTarget);
   // GitHub's setup redirect carries no app id; the installation webhook records the install.
-  if (!target)
-    return linkState && !linkState.link
-      ? outcome(ctx, 'connected', { platform: id }, stated)
-      : outcome(ctx, 'unknown-app', { platform: id }, stated);
+  if (!target) return outcome(ctx, 'connected', { platform: id }, stated);
 
-  return bindInstall(req, ctx, integration, target, linked, stated, linkState?.installation);
+  return bindInstall(req, ctx, integration, target, stated, linkState?.installation);
 }
 
 /** Finish the install with the platform and bind the installation to `target` in this workspace. */
@@ -208,7 +192,6 @@ async function bindInstall(
   ctx: AppsContext,
   integration: Integration,
   target: AgentApp,
-  linked: Installation | undefined,
   stated: string | undefined,
   verifying: string | undefined,
 ): Promise<Response> {
@@ -259,7 +242,7 @@ async function bindInstall(
     id: installationId,
     app: target.id,
     integration: id!,
-    account: result.account ?? existing?.account ?? linked?.account ?? { login: 'unknown' },
+    account: result.account ?? existing?.account ?? { login: 'unknown' },
     ...(result.token ? { token: encryptSecret(ctx.config, result.token) } : {}),
     ...(result.installer ? { installer: result.installer } : {}),
     ...(result.self ? { self: result.self } : {}),
@@ -277,9 +260,6 @@ async function bindInstall(
     );
     installation.repos = await integration.repos.list(installation, token, request);
   }
-
-  const sibling = linked && !linked.deletedAt ? linked : undefined;
-  if (sibling) installation = link(installation, sibling.integration, sibling.id);
 
   try {
     installation = (await storeInstallation(
@@ -299,7 +279,6 @@ async function bindInstall(
         )
       : outcome(ctx, 'installation-taken', { platform: id }, back);
   }
-  if (sibling) await ctx.store.put('installation', sibling.id, link(sibling, id!, installationId));
   if (installation.installer && integration.welcome)
     await greet(
       ctx,

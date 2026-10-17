@@ -51,4 +51,4 @@ coder run --mcp all "..."
 coder run --mcp '[{"name":"tmp","command":"node","args":["server.js"]}]' "..."
 ```
 
-Claude gets the servers through `--mcp-config` with the allowlist as `mcp__<name>__<tool>`; Codex gets them as `mcp_servers.<name>` overrides with `enabled_tools`. Agents attach their integration tools the same way, so an agent never needs an entry here.
+Claude gets the servers through `--mcp-config` with the allowlist as `mcp__<name>__<tool>`, and finds their tools with its tool search. Codex gets one `coder` server whose `find_tools` and `call_tool` reach every server on demand; a server starts on its first use. Agents attach their integration tools the same way, so an agent never needs an entry here.

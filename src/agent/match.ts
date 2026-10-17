@@ -3,7 +3,7 @@ import { INTEGRATIONS } from '../integrations';
 import type { Agent, AgentEvent } from './types';
 
 /** Effective tools for every integration the agent declares and the catalog knows. */
-function declaredTools(agent: Agent): Record<string, string[]> {
+export function declaredTools(agent: Agent): Record<string, string[]> {
   const result: Record<string, string[]> = {};
   for (const id of Object.keys(agent.definition.integrations)) {
     const integration = INTEGRATIONS[id];

@@ -403,7 +403,7 @@ export interface TokenInput {
 
 /** Tokens: minted and narrowed by Coder, never by an adapter. */
 export interface IntegrationAuth {
-  /** Mint a token narrowed to `bound`: its repository and what its tools need. */
+  /** Mint a token narrowed to `bound`: what its tools need. */
   token(
     installation: Installation,
     credentials: unknown,
@@ -517,9 +517,8 @@ export interface Integration {
   ): Pick<AgentEvent, 'type' | 'actor' | 'promptContext'> | undefined;
 }
 
-/** What a minted token may reach: one repository, and the permissions its tools need. */
+/** What a minted token may reach: the permissions its tools need, across its whole installation. */
 export interface TokenBound {
-  repo?: { owner: string; name: string };
   tools?: string[];
 }
 

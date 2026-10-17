@@ -220,6 +220,7 @@ export interface ServerContext {
 export interface ServerSettings {
   builtinAgents?: Promise<void>;
   taskLogSecrets?: Map<string, Promise<(text: string) => string>>;
+  agentInstallations?: Map<string, Promise<import('../../agent/types').Installation[]>>;
   cancelChecks?: Map<string, { timer: ReturnType<typeof setTimeout>; finish(): void }>;
   runnerInstances?: Map<string, { signature: string; runner: Runner }>;
   configUpdate?: Promise<unknown>;

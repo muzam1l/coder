@@ -17,9 +17,9 @@ A platform event's task: a Slack thread or DM, a GitHub pull request or issue, a
  <instructions>
   {system.md, then the agent's other .md files}
  </instructions>
- <repository-instructions repo="{config repo}">
-  {.coder/{agent}.md from the config repo}
- </repository-instructions>
+ <notes>
+  {notes the receiver adds, such as a missing account connection}
+ </notes>
 </developer-instructions>
 <!-- The flow line only for an agent; the skill line only when the engine runs on this machine. -->
 <runtime>
@@ -63,7 +63,7 @@ A platform event's task: a Slack thread or DM, a GitHub pull request or issue, a
   Read, and reply in this conversation. Nothing else changes.
  </read-only>
 </access-modes>
-<!-- The events the agent subscribes to, its access mode and its conversation tools. -->
+<!-- The events the agent subscribes to, its access mode, its conversation tools and its MCP servers: one line each, never their tools. -->
 <settings>
  <events>
   {events}
@@ -74,8 +74,14 @@ A platform event's task: a Slack thread or DM, a GitHub pull request or issue, a
  <tools>
   reply; react; history
  </tools>
+ <servers>
+  {name}: {what it reaches}; read-write
+  Their tools load on demand through tool search.
+ </servers>
 </settings>
 ```
+
+On Codex, and custom models through it, the last line of `<servers>` reads: `Their tools load on demand: find_tools(server, query) lists the matching tools of a server with their schemas, call_tool(server, tool, args) runs one.`
 
 ### Messages
 
@@ -123,8 +129,9 @@ The new engine conversation's first turn then carries it:
 ### Tools
 
 - The engine's own tools (Claude Code's or Codex's), limited by `permissions`: `read-only` cannot edit.
-- Each platform the agent declared, by its access mode. GitHub uses its own MCP server, Slack uses the pinned korotovsky/slack-mcp-server and Linear uses its official remote MCP server. Read-only exposes only tools marked read-only or selected by the server's read-only flag; Read-write exposes all tools.
+- Every installation of the agent's apps on each platform it declared, by its access mode: one server per installation, the task's own as `github`, every other as `github-{account}`. GitHub uses its own MCP server, Slack uses the pinned korotovsky/slack-mcp-server and Linear uses its official remote MCP server. Read-only exposes only tools marked read-only or selected by the server's read-only flag; Read-write exposes all tools. A GitHub server also lets `git` clone that account's repositories.
 - MCP servers the agent definition declares, and workspace connections bound to the task.
+- Tools load on demand: Claude Code through its tool search, Codex through one `coder` server whose `find_tools(server, query)` lists a server's matching tools with their schemas and `call_tool(server, tool, args)` runs one. A server starts on its first use.
 - Under `permissions: auto`, the approval tool Coder answers itself.
 - This machine's own MCP servers only with `mcp: "all"`.
 - `reply`, `react` and `history`, on every platform whatever the preset:
@@ -147,9 +154,9 @@ Every other task: `coder task run` with or without `--agent`, flow steps, dashbo
  <instructions>
   {system.md, then the agent's other .md files}
  </instructions>
- <repository-instructions repo="{config repo}">
-  {.coder/{agent}.md from the config repo}
- </repository-instructions>
+ <notes>
+  {notes the receiver adds, such as a missing account connection}
+ </notes>
 </developer-instructions>
 <!-- Only with an agent. -->
 <access-modes>
@@ -167,6 +174,10 @@ Every other task: `coder task run` with or without `--agent`, flow steps, dashbo
  <current-access-mode>
   read-write
  </current-access-mode>
+ <servers>
+  {name}: {what it reaches}; read-write
+  Their tools load on demand through tool search.
+ </servers>
 </settings>
 <!-- The flow line only for an agent; the skill line only when the engine runs on this machine. -->
 <runtime>

@@ -35,6 +35,11 @@ export async function serveTools<C>(
     try {
       if (!tool) throw new Error(`unknown tool: ${params?.name}`);
       const result = await tool.handler(params?.arguments ?? {}, ctx);
+      // A handler that forwards another server's result passes it through whole.
+      if (result && typeof result === 'object' && Array.isArray((result as { content?: unknown }).content)) {
+        send({ jsonrpc: '2.0', id, result });
+        return;
+      }
       text = typeof result === 'string' ? result : JSON.stringify(result);
     } catch (error) {
       isError = true;

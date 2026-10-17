@@ -38,7 +38,6 @@ async function access(ctx: ServerContext, repo: string): Promise<RepositoryAcces
         integration,
         installation,
         decryptSecret(ctx.config, app.credentials),
-        { repo: { owner: repo.split('/')[0]!, name: repo.split('/')[1]! } },
       );
       if (
         installation.repos?.includes(repo) ||

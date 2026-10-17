@@ -9,7 +9,7 @@ import {
   type BrokerRule,
 } from '../runners/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
-import type { AgentEvent, InstallationLink, Installation } from '../../agent/types';
+import type { AgentEvent, Installation } from '../../agent/types';
 import type { EngineCredential, Store, TaskStatus } from '../store/types';
 import { dropKey, heldKey, type HeldToken } from '../store/tokens';
 import type { ServerContext } from '../context';
@@ -28,6 +28,7 @@ import { LocalStore } from '../store/local';
 import { mcpSecretValue } from '../../core/mcp';
 import { findConnection, nativeCredential, nativeApp } from '../connections/records';
 import { updateMetadata } from '../store';
+import { handleKey } from '../../agent/mcp';
 
 /** Installation tokens are encrypted at rest; integrations see plaintext only in memory. */
 export function unsealed(ctx: ServerContext, installation: Installation): Installation {
@@ -144,8 +145,8 @@ export interface PlatformAccess {
   /** The installation's store id. */
   installation: string;
   record?: Installation;
-  /** A token that can see `repo` (`owner/name`), by default the access's own repository. */
-  token(repo?: string): Promise<string | undefined>;
+  /** A read token for the whole installation. */
+  token(): Promise<string | undefined>;
   fetch: typeof fetch;
 }
 
@@ -184,14 +185,6 @@ export async function requesterToken(
   return access.accessToken;
 }
 
-/** A bound on one repository, when there is one, and the tools a token serves. */
-export function tokenBound(
-  repo: { owner: string; name: string } | undefined,
-  tools: string[],
-): TokenBound {
-  return { ...(repo ? { repo: { owner: repo.owner, name: repo.name } } : {}), tools };
-}
-
 /** A task's platform token: the requester's own when its trigger acts as them, else the installation's narrowed to `bound`. */
 export async function taskToken(
   ctx: ServerContext,
@@ -212,58 +205,7 @@ export async function taskToken(
   );
 }
 
-const repoName = (value: string | undefined) => {
-  const match = value && /^([^/]+)\/([^/]+)$/.exec(value);
-  return match ? { owner: match[1]!, name: match[2]! } : undefined;
-};
-
-/** A connected installation that can mint, narrowed to the task's frozen bound, or before a task to its config repository read-only. */
-async function connection(
-  ctx: ServerContext,
-  integration: string,
-  link: InstallationLink,
-  task?: Pick<TaskStatus['task'], 'tools' | 'toolScopes'>,
-): Promise<
-  | {
-      installation: string;
-      record: Installation;
-      repo: { owner: string; name: string };
-      mint(repo?: { owner: string; name: string }): Promise<string>;
-    }
-  | undefined
-> {
-  const resolved = await ctx.store.installationApp(link.id);
-  if (!resolved) return undefined;
-  const { installation: linked, app } = resolved;
-  const target = ctx.integrations[integration];
-  if (!app || !target) return undefined;
-
-  const repo = task ? task.toolScopes?.[integration]?.repo : repoName(linked.settings?.configRepo);
-  if (!repo) return undefined;
-
-  return {
-    installation: linked.id,
-    record: linked,
-    repo,
-    mint: async (read = repo) =>
-      installationToken(
-        ctx,
-        target,
-        linked,
-        decryptSecret(ctx.config, app.credentials),
-        tokenBound(read, task ? (task.tools[integration] ?? []) : target.tools.presets.read),
-        task && ctx.config.taskTimeoutMs,
-      ),
-  };
-}
-
-const connectionFailed = (integration: string) => (error: unknown) => {
-  console.error(`coder server: could not mint a connected ${integration} token`, error);
-
-  return undefined;
-};
-
-/** Dispatch's access: the event installation's read token and connected installations' config repository tokens, none minted until asked for. */
+/** Dispatch's access: the event installation's read token, minted once when asked for. */
 export function dispatchTokens(
   ctx: ServerContext,
   integration: Integration,
@@ -272,66 +214,52 @@ export function dispatchTokens(
   credentials: unknown,
 ): EventTokens {
   const minted: string[] = [];
-  const scoped = (
-    own: { owner: string; name: string } | undefined,
-    mint: (repo: typeof own) => Promise<string | undefined>,
-  ) => {
-    const tokens = new Map<string, Promise<string | undefined>>();
-    return (repo?: string) => {
-      const bound = repo ? repoName(repo) : own;
-      if (repo && !bound) return Promise.resolve(undefined);
-
-      const key = bound ? `${bound.owner}/${bound.name}` : '';
-      let token = tokens.get(key);
-      if (!token) {
-        token = mint(bound).then(value => {
-          if (value) minted.push(value);
-          return value;
-        });
-        tokens.set(key, token);
-      }
-
-      return token;
-    };
+  let token: Promise<string | undefined> | undefined;
+  const access: PlatformAccess = {
+    installation: installation.id,
+    record: installation,
+    fetch: ctx.fetch ?? fetch,
+    token: () =>
+      (token ??= installationToken(ctx, integration, installation, credentials, {
+        tools: integration.tools.presets.read,
+      }).then(value => {
+        minted.push(value);
+        return value;
+      })),
   };
-  const access = async (id: string): Promise<PlatformAccess | undefined> => {
-    const fetcher = ctx.fetch ?? fetch;
-    if (id === event.integration)
-      return {
-        installation: installation.id,
-        record: installation,
-        fetch: fetcher,
-        token: scoped(event.repo, repo =>
-          installationToken(
-            ctx,
-            integration,
-            installation,
-            credentials,
-            tokenBound(repo, integration.tools.presets.read),
-          ),
-        ),
-      };
-    const link = installation.connections?.[id];
-    const linked = link && (await connection(ctx, id, link));
-    return (
-      linked && {
-        installation: linked.installation,
-        record: linked.record,
-        fetch: fetcher,
-        token: scoped(linked.repo, repo => linked.mint(repo).catch(connectionFailed(id))),
-      }
-    );
-  };
-  const found = new Map<string, Promise<PlatformAccess | undefined>>();
 
   return Object.assign(
-    (id: string) => {
-      if (!found.has(id)) found.set(id, access(id));
-      return found.get(id)!;
-    },
+    async (id: string) => (id === event.integration ? access : undefined),
     { minted },
   );
 }
+
+/** The live installations of the agent's apps, read once per task start and shared by its readers for a minute. */
+export function agentInstallations(
+  ctx: ServerContext,
+  task: Pick<TaskStatus['task'], 'id' | 'agent'>,
+): Promise<Installation[]> {
+  const cache = ((ctx.settings ??= {}).agentInstallations ??= new Map());
+  const key = `${ctx.organizationId}:${task.id}`;
+  let rows = cache.get(key);
+  if (!rows) {
+    rows = ctx.store
+      .list('installation', { agent: task.agent, active: true })
+      .then(rows => rows.map(row => row.value));
+    cache.set(key, rows);
+    setTimeout(() => cache.delete(key), 60_000).unref();
+  }
+
+  return rows;
+}
+
+const tokenFailed = (id: string) => (error: unknown) => {
+  console.error(`coder server: could not mint a token for ${id}`, error);
+
+  return undefined;
+};
+
+/** The task's tokens by handle: the event installation's, then one per other installation of the agent's apps. */
 export async function eventTokens(
   ctx: ServerContext,
   task: TaskStatus['task'],
@@ -355,19 +283,33 @@ export async function eventTokens(
     installation,
     event,
     decryptSecret(ctx.config, app.credentials),
-    tokenBound(
-      task.toolScopes?.[event.integration]?.repo ?? event.repo,
-      task.tools[event.integration] ?? (posts ? integration.tools.presets.read : []),
-    ),
+    { tools: task.tools[event.integration] ?? (posts ? integration.tools.presets.read : []) },
     taskActAs(task),
   );
   const tokens: Record<string, string> = { [event.integration]: eventToken };
+  const others = (await agentInstallations(ctx, task)).filter(
+    other => other.id !== installation.id && other.integration in task.tools,
+  );
+  const apps = new Map(
+    (await ctx.store.getApps([...new Set(others.map(other => other.app))])).map(row => [
+      row.id,
+      row.value,
+    ]),
+  );
   await Promise.all(
-    Object.entries(installation.connections ?? {}).map(async ([id, link]) => {
-      if (id === event.integration || !(id in task.tools)) return;
-      const linked = await connection(ctx, id, link, task);
-      const token = await linked?.mint().catch(connectionFailed(id));
-      if (token) tokens[id] = token;
+    others.map(async other => {
+      const target = ctx.integrations[other.integration];
+      const owner = apps.get(other.app);
+      if (!target || !owner) return;
+      const token = await installationToken(
+        ctx,
+        target,
+        other,
+        decryptSecret(ctx.config, owner.credentials),
+        { tools: task.tools[other.integration] ?? [] },
+        ctx.config.taskTimeoutMs,
+      ).catch(tokenFailed(other.id));
+      if (token) tokens[handleKey(other.integration, other.account.login)] = token;
     }),
   );
 
@@ -432,7 +374,7 @@ export async function taskContext(
         integration,
         installation,
         decryptSecret(ctx.config, app.credentials),
-        tokenBound(task.toolScopes?.[event.integration]?.repo ?? event.repo, read),
+        { tools: read },
         ctx.config.taskTimeoutMs,
       );
     }
@@ -454,7 +396,7 @@ export async function taskContext(
     warnings.push(`${name} is temporarily unavailable; skipped for this task.`);
   }
   const currentSecrets = await connectionSecretValues(ctx, task);
-  const safeTask = { ...task, tools: resolved.tools, toolScopes: resolved.toolScopes };
+  const safeTask = { ...task, tools: resolved.tools };
   const connectionSecrets = await taskConnectionSecrets(ctx, task.id, [
     ...resolved.secrets,
     ...currentSecrets,
@@ -641,22 +583,10 @@ async function storedPlatformSecrets(
   task: TaskStatus['task'],
 ): Promise<string[]> {
   if (!task.event) return [];
-  const installation = await ctx.store.get(
-    'installation',
-    `${task.event.appId}:${task.event.installationId}`,
-  );
-  const secrets: string[] = [];
-  for (const row of [
-    installation,
-    ...(await Promise.all(
-      Object.values(installation?.connections ?? {})
-        .filter(link => link.kind === 'installation')
-        .map(link => ctx.store.get('installation', link.id)),
-    )),
-  ])
-    if (row?.token) secrets.push(decryptSecret<string>(ctx.config, row.token));
 
-  return secrets;
+  return (await agentInstallations(ctx, task)).flatMap(row =>
+    row.token ? [decryptSecret<string>(ctx.config, row.token)] : [],
+  );
 }
 
 export async function taskLogSecrets(ctx: ServerContext, status: TaskStatus): Promise<string[]> {

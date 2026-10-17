@@ -71,6 +71,7 @@ import {
   FALLBACK_NOTE,
   taskSystemPrompt,
   type AgentPromptParts,
+  type PromptServer,
 } from './prompts';
 
 const STARTUP_ERROR_PATTERN =
@@ -484,6 +485,19 @@ export function resolveAddDirs(cwd: string, dirs: string[] = []): string[] {
   return resolved;
 }
 
+/** The servers the prompt lists: every one whose tools load on demand. */
+export function promptServers(servers: McpServerSpec[] = []): PromptServer[] {
+  return servers
+    .filter(server => !server.alwaysLoad && (server.command || server.url))
+    .map(({ name, description, access, connection, url }) => ({
+      name,
+      description:
+        description ??
+        (connection ? `connection ${connection}` : url && URL.canParse(url) ? new URL(url).host : 'MCP server'),
+      ...(access ? { access } : {}),
+    }));
+}
+
 function isSandboxFailure(permissions: string, detail: string): boolean {
   return permissions === 'read-only' && CLAUDE_SANDBOX_UNAVAILABLE_PATTERN.test(detail ?? '');
 }
@@ -645,6 +659,8 @@ async function attemptOnce(
     systemPrompt: taskSystemPrompt({
       cwd,
       ...opts.agentPrompt,
+      servers: promptServers(opts.mcp),
+      hub: resolved.engine !== 'claude',
       instructions: opts.system ?? undefined,
       conversation: opts.conversation,
       agent: Boolean(opts.agentId),

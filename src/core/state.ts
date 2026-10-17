@@ -288,6 +288,10 @@ export function reconcileTask(cwd: string, task: Task, startMs = processStartMs)
     dead = Number.isFinite(ts) && Date.now() - ts > STALE_NO_PID_MS;
   }
   if (dead) {
+    // The worker may have finished since `task` was read; judge its latest record.
+    const latest = loadTask(cwd, task.id);
+    if (latest && (latest.status !== task.status || latest.updatedAt !== task.updatedAt))
+      return reconcileTask(cwd, latest, startMs);
     if (!active) return writeTask(cwd, task.id, { rollingOver: false }, { touch: false });
     return writeTask(cwd, task.id, {
       status: 'failed',

@@ -28,57 +28,86 @@ export function tokenEnvName(integration: string): string {
   return `APP_TOKEN_${integration.toUpperCase().replace(/[^A-Z0-9]/g, '_')}`;
 }
 
+/** A server name from a handle key: `github:Acme Org` becomes `github-acme-org`. */
+const serverName = (key: string) =>
+  key
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+
 /** MCP spec for an integration's tools; the token reaches only the tool server, never the engine. */
 export function agentToolServer(
   integration: string,
   tools: string[],
-  context: { token: string; event?: AgentEvent; scope?: unknown },
+  context: { token: string; event?: AgentEvent; account?: string },
 ): McpServerSpec {
-  const { server, presets } = INTEGRATIONS[integration]!.tools;
-  const { readOnly, ...spec } = server(tools, context.event, context.token);
+  const { name, tools: catalog, repos } = INTEGRATIONS[integration]!;
+  const { readOnly, ...spec } = catalog.server(tools, context.event, context.token);
   const env = Object.entries(spec.env ?? {}).find(([, value]) => value === context.token)?.[0];
+  const access = tools.some(tool => !catalog.presets.read.includes(tool)) ? 'write' : 'read';
 
   return {
     ...spec,
+    name: serverName(handleKey(integration, context.account)),
+    integration,
+    ...(context.account ? { account: context.account } : {}),
+    description: context.account
+      ? `${name} ${context.account}`
+      : `${name}, the account this task started in`,
+    access,
     ...(readOnly && spec.command
-      ? { command: process.execPath, args: [CLI_PATH, 'agent', 'tools', integration] }
+      ? { command: process.execPath, args: [CLI_PATH, 'agent', 'tools', integration], readOnly }
       : {}),
     ...(env ? { credentialFields: { env } } : {}),
-    ...(INTEGRATIONS[integration]!.repos?.credentialUsername
-      ? { gitCredential: tools.some(tool => !presets.read.includes(tool)) }
-      : {}),
+    ...(repos?.credentialUsername ? { gitCredential: true } : {}),
   };
 }
 
-/** The token an integration's tool server spec carries, whatever env name holds it. */
-export function toolServerToken(servers: McpServerSpec[], integration: string): string | undefined {
-  if (!INTEGRATIONS[integration]) return undefined;
-  const probe = agentToolServer(integration, [], { token: '\0' });
+/** A tool server name for an installation: the event's own keeps its integration id, every other one adds its account. */
+export const handleKey = (integration: string, account?: string) =>
+  account ? `${integration}:${account}` : integration;
+
+/** The token a platform tool server spec carries, whatever env name or header its integration uses. */
+export function serverToken(server: McpServerSpec | undefined): string | undefined {
+  if (!server?.integration || !INTEGRATIONS[server.integration]) return undefined;
+  const probe = agentToolServer(server.integration, [], { token: '\0' });
   const key = Object.entries(probe.env ?? {}).find(([, value]) => value === '\0')?.[0];
-  const server = servers.find(server => server.name === probe.name);
   const header = probe.credentialFields?.header;
 
   return key
-    ? server?.env?.[key] || undefined
-    : header ? server?.headers?.[header]?.replace(/^Bearer /, '') : undefined;
+    ? server.env?.[key] || undefined
+    : header ? server.headers?.[header]?.replace(/^Bearer /, '') : undefined;
 }
 
-/** One tool server per integration in `task.tools` that has a token. */
+/** The token of the task's own tool server for an integration. */
+export function toolServerToken(servers: McpServerSpec[], integration: string): string | undefined {
+  return serverToken(servers.find(server => server.name === integration));
+}
+
+/** One tool server per handle token whose integration is in `task.tools`; a second account of the same name gets a numbered server. A member's `native` token keeps its own scopes, so it clones only in write mode. */
 export function taskToolServers(
-  task: Pick<AgentTask, 'tools' | 'event' | 'toolScopes'>,
+  task: Pick<AgentTask, 'tools' | 'event'>,
   tokens: Record<string, string | undefined>,
+  native: Iterable<string> = [],
 ): McpServerSpec[] {
-  return Object.entries(task.tools).flatMap(([id, tools]) => {
-    const token = tokens[id];
-    return INTEGRATIONS[id] && token && tools.length
-      ? [
-          agentToolServer(id, tools, {
-            token,
-            ...(task.event ? { event: task.event } : {}),
-            scope: task.toolScopes?.[id],
-          }),
-        ]
-      : [];
+  const names = new Set<string>();
+  const personal = new Set(native);
+
+  return Object.entries(tokens).flatMap(([key, token]) => {
+    const [id, account] = key.split(/:(.*)/) as [string, string?];
+    const tools = task.tools[id];
+    if (!INTEGRATIONS[id] || !token || !tools?.length) return [];
+    const server = agentToolServer(id, tools, {
+      token,
+      ...(task.event ? { event: task.event } : {}),
+      ...(account ? { account } : {}),
+    });
+    if (personal.has(key) && server.access === 'read') delete server.gitCredential;
+    let name = server.name;
+    for (let suffix = 2; names.has(name); suffix++) name = `${server.name}-${suffix}`;
+    names.add(name);
+
+    return [{ ...server, name }];
   });
 }
 
@@ -90,13 +119,14 @@ export interface ReplyEndpoint {
 
 /** Task tool servers with their tokens in the worker env, under names every turn of the task shares. */
 export function nativeToolEnvironment(
-  task: Pick<AgentTask, 'tools' | 'event' | 'toolScopes'>,
+  task: Pick<AgentTask, 'tools' | 'event'>,
   tokens: Record<string, string | undefined>,
   reply?: ReplyEndpoint,
+  native: Iterable<string> = [],
 ) {
   return connectionEnvironment(
     Object.fromEntries([
-      ...taskToolServers(task, tokens).map(server => [
+      ...taskToolServers(task, tokens, native).map(server => [
         `native:${server.name}`,
         { ...server, resolved: true },
       ]),
@@ -134,18 +164,50 @@ export function turnToolServers(
     : rest;
 }
 
+/** The servers a Codex turn gets: the ones loaded directly, then one hub that fronts the rest on demand. */
+export function hubbedToolServers(
+  cwd: string,
+  taskId: string,
+  servers: McpServerSpec[],
+): McpServerSpec[] {
+  const direct = servers.filter(server => server.alwaysLoad);
+  if (direct.length === servers.length) return servers;
+  // The hub and the servers it starts see the worker's PATH, not the engine's.
+  const env = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] =>
+        /^(?:PATH|CODER_(?:HOME|CONNECTION_[A-F0-9]{24}|MCP_[A-Z_]+))$/.test(entry[0]) &&
+        entry[1] !== undefined,
+    ),
+  );
+
+  return [
+    ...direct,
+    {
+      name: 'coder',
+      command: process.execPath,
+      args: [CLI_PATH, 'task', 'hub', taskId, '--cwd', cwd],
+      env,
+      tools: ['find_tools', 'call_tool'],
+      alwaysLoad: true,
+    },
+  ];
+}
+
 export async function gitToolEnvironment(
   servers: McpServerSpec[],
 ): Promise<{ env: Record<string, string>; close(): Promise<void> }> {
-  const credentials = Object.values(INTEGRATIONS).flatMap(integration => {
-    const repos = integration.repos;
-    const password = toolServerToken(
-      servers.filter(server => server.gitCredential),
-      integration.id,
-    );
+  const credentials = servers.flatMap(server => {
+    const repos = server.integration ? INTEGRATIONS[server.integration]?.repos : undefined;
+    const password = server.gitCredential && repos?.credentialUsername && serverToken(server);
 
-    return repos?.credentialUsername && password && !/[\r\n]/.test(password)
-      ? repos.cloneHosts.map(host => ({ host, username: repos.credentialUsername, password }))
+    return password && !/[\r\n]/.test(password)
+      ? repos!.cloneHosts.map(host => ({
+          host,
+          username: repos!.credentialUsername,
+          password,
+          ...(server.account ? { owner: server.account.toLowerCase() } : {}),
+        }))
       : [];
   });
   if (!credentials.length) return { env: {}, close: async () => {} };
@@ -155,6 +217,7 @@ export async function gitToolEnvironment(
     await fs.writeFile(path.join(root, 'tokens.json'), JSON.stringify(credentials), {
       mode: 0o600,
     });
+    // The account's own token for its repositories, else the task's own installation.
     await fs.writeFile(
       helper,
       `const fs = require('node:fs');
@@ -164,7 +227,9 @@ process.stdin.on('end', () => {
   if (process.argv[2] !== 'get') return;
   const fields = Object.fromEntries(input.trim().split('\\n').map(line => { const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)]; }));
   const entries = JSON.parse(fs.readFileSync(require('node:path').join(__dirname, 'tokens.json'), 'utf8'));
-  const credential = entries.find(entry => fields.protocol === 'https' && fields.host === entry.host);
+  const owner = (fields.path || '').split('/')[0].toLowerCase();
+  const hosted = entries.filter(entry => fields.protocol === 'https' && fields.host === entry.host);
+  const credential = hosted.find(entry => entry.owner === owner) || hosted.find(entry => !entry.owner) || hosted[0];
   if (credential) process.stdout.write('username=' + credential.username + '\\npassword=' + credential.password + '\\n');
 });
 `,
@@ -177,11 +242,13 @@ process.stdin.on('end', () => {
 
     return {
       env: {
-        GIT_CONFIG_COUNT: String(count + 2),
+        GIT_CONFIG_COUNT: String(count + 3),
         [`GIT_CONFIG_KEY_${count}`]: 'credential.helper',
         [`GIT_CONFIG_VALUE_${count}`]: '',
         [`GIT_CONFIG_KEY_${count + 1}`]: 'credential.helper',
         [`GIT_CONFIG_VALUE_${count + 1}`]: `!${quote(process.execPath)} ${quote(helper)}`,
+        [`GIT_CONFIG_KEY_${count + 2}`]: 'credential.useHttpPath',
+        [`GIT_CONFIG_VALUE_${count + 2}`]: 'true',
       },
       close: () => fs.rm(root, { recursive: true, force: true }),
     };

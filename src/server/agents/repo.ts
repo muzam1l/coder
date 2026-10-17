@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
 import { AgentLoadError, agentsFromSources, assertNotReserved, loadAgents } from '../../agent/load';
-import { INTEGRATIONS, repositoryReader } from '../../integrations';
+import { INTEGRATIONS } from '../../integrations';
 import type { AppDrift, Integration, IntegrationApp, Pushed } from '../../integrations/types';
 import type { AppCheck } from '../../client/types';
 import type {
@@ -60,27 +60,11 @@ export interface RepoPush {
 const fileKey = (installation: string, repo: string, ref: string) =>
   `repo-file:${installation}@${repo}@${ref}:`;
 
-/** The repository file snapshots an event's dispatch may read: the event's repository at its default branch and the config repository, through the reader installation. */
-export function dispatchFilePrefixes(
-  integrations: Record<string, Integration>,
-  installation: Installation,
-  event: AgentEvent,
-): string[] {
-  const reader = repositoryReader(integrations);
-  const via =
-    event.integration === reader?.id
-      ? installation.id
-      : installation.connections?.[reader?.id ?? '']?.id;
+/** The repository file snapshots an event's dispatch may read: the event's repository at its default branch, through its installation. */
+export function dispatchFilePrefixes(installation: Installation, event: AgentEvent): string[] {
   const repo = eventRepo(event);
-  const configRepo = installation.settings?.configRepo;
-  if (!reader || !via) return [];
 
-  return [
-    ...(repo && event.integration === reader.id
-      ? [fileKey(via, repo, event.repo?.defaultBranch ?? '')]
-      : []),
-    ...(configRepo ? [fileKey(via, configRepo, '')] : []),
-  ];
+  return repo ? [fileKey(installation.id, repo, event.repo?.defaultBranch ?? '')] : [];
 }
 const pushKey = (installation: string, repo: string, ref: string) =>
   `repo-push:${installation}@${repo}@${ref}`;
@@ -137,7 +121,7 @@ async function storedFile(
 
   const fence = pushKey(access.installation, repo, ref ?? '');
   const [token, push] = await Promise.all([
-    access.token(repo),
+    access.token(),
     commit ? undefined : store.get<RepoPush>('snapshot', fence),
   ]);
   signal.throwIfAborted();
@@ -206,10 +190,9 @@ async function repositoryAccess(
 ): Promise<RepositoryAccess | undefined> {
   for (const integration of Object.values(integrations)) {
     if ((!event.repo && integration.id === event.integration) || !integration.repos) continue;
-    const token = await (await tokens(integration.id))?.token(repo);
+    const token = await (await tokens(integration.id))?.token();
     if (token) return { contents: integration as Contents, token };
   }
-  const [owner, name] = repo.split('/');
 
   for (const { value: app } of await options.store.list('app')) {
     if (app.agentsRepo !== repo) continue;
@@ -229,7 +212,6 @@ async function repositoryAccess(
       return {
         contents: integration as Contents,
         token: await integration.auth.token(plain, decryptSecret(options.config, app.credentials), {
-          ...(owner && name ? { repo: { owner, name } } : {}),
           tools: integration.tools.presets.read,
         }),
         app,
@@ -260,26 +242,22 @@ export function remoteAgentLoader(
   const cwd = options.cwd;
   const now = options.now ?? Date.now;
 
+  /** The usage in the event's own repository, when it has one. */
   async function usageFor(
     files: Pick<ServerContext, 'store' | 'fileReads'>,
-    installation: Installation,
     event: AgentEvent,
     tokens: TokenSource,
   ): Promise<unknown> {
-    const reader = repositoryReader(integrations);
-    const access = reader?.repos && (await tokens(reader.id));
-    if (!reader || !access) return undefined;
     const repo = eventRepo(event);
-    if (event.integration === reader.id && repo)
-      return readUsage(files, reader, access, repo, event.repo?.defaultBranch);
-    const configRepo = installation.settings?.configRepo;
-    if (configRepo) return readUsage(files, reader, access, configRepo);
-    return undefined;
+    const contents = integrations[event.integration];
+    const access = repo && contents?.repos && (await tokens(event.integration));
+    if (!repo || !access) return undefined;
+
+    return readUsage(files, contents!, access, repo, event.repo?.defaultBranch);
   }
 
   async function stored(
     app: AgentApp,
-    installation: Installation,
     event: AgentEvent,
     tokens: TokenSource,
     known?: LoadedAgent,
@@ -294,14 +272,14 @@ export function remoteAgentLoader(
     if (!record) return undefined;
     if (record.problems?.length) throw new AgentLoadError(record.problems.join('\n'));
     if (!version) throw new Error(`No version ${record.currentVersion} for agent "${record.id}".`);
-    const usage = await usageFor(files, installation, event, tokens);
+    const usage = await usageFor(files, event, tokens);
     const entry =
       usage && typeof usage === 'object'
         ? (usage as Record<string, unknown>)[app.agent]
         : undefined;
     if (entry === false || (entry as AgentUsage | undefined)?.disabled)
       throw new Error(
-        `Agent "${app.agent}" is disabled in ${eventRepo(event) ?? installation.settings?.configRepo ?? app.agentsRepo}.`,
+        `Agent "${app.agent}" is disabled in ${eventRepo(event) ?? app.agentsRepo}.`,
       );
     return toAgent(
       record,
@@ -311,7 +289,7 @@ export function remoteAgentLoader(
     );
   }
 
-  return async (app, installation, event, tokens, known) => {
+  return async (app, _installation, event, tokens, known) => {
     const onDisk = cwd
       ? (await loadAgents(cwd, integrations)).find(
           candidate => candidate.id === app.agent && !candidate.builtin,
@@ -319,7 +297,7 @@ export function remoteAgentLoader(
       : undefined;
     if (onDisk) return onDisk;
 
-    const existing = await stored(app, installation, event, tokens, known);
+    const existing = await stored(app, event, tokens, known);
     if (existing) return existing;
 
     if (app.agentsRepo) {
@@ -333,14 +311,14 @@ export function remoteAgentLoader(
           access.token,
           now(),
         );
-        const imported = await stored(app, installation, event, tokens);
+        const imported = await stored(app, event, tokens);
         if (imported) return imported;
         throw new Error(`No agent "${app.agent}" in ${app.agentsRepo}.`);
       }
     }
 
     if (await seedBuiltinAgent(options.store, now(), app.agent, {})) {
-      const builtin = await stored(app, installation, event, tokens);
+      const builtin = await stored(app, event, tokens);
       if (builtin) return builtin;
     }
     throw new Error(

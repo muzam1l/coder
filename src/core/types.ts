@@ -41,8 +41,16 @@ export interface McpServerSpec {
   credentialFields?: { env?: string; header?: string };
   /** Tool allowlist; omit or empty for every tool the server offers. */
   tools?: string[];
-  /** Schemas load before the first prompt instead of behind tool search. */
+  /** Schemas load before the first prompt instead of behind tool search or the hub. */
   alwaysLoad?: boolean;
+  /** Only tools the server marks read-only may be called. */
+  readOnly?: boolean;
+  /** The integration a platform tool server reaches, and the account of its installation. */
+  integration?: string;
+  account?: string;
+  /** What the server reaches and the access it allows, as the prompt lists it. */
+  description?: string;
+  access?: 'read' | 'write';
 }
 
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';

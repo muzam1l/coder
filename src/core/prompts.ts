@@ -23,19 +23,16 @@ const block = (name: string, sections: string[]) => tag(name, sections.filter(Bo
 
 // Task system prompt (core/dispatch), passed to the engine on every turn.
 
-/** What whoever built the agent wrote, plus the installation's repository instructions. */
+/** What whoever built the agent wrote, plus the receiver's notes for this task. */
 export function developerInstructions(parts: {
   description?: string;
   instructions?: string;
-  repositoryInstructions?: string;
-  repository?: string;
+  notes?: string;
 }): string {
-  const repository = parts.repository ? ` repo="${xml(parts.repository)}"` : '';
-
   return block('developer-instructions', [
     tag('description', parts.description),
     tag('instructions', parts.instructions),
-    tag('repository-instructions', parts.repositoryInstructions, repository),
+    tag('notes', parts.notes),
   ]);
 }
 
@@ -51,7 +48,18 @@ export interface AgentPromptParts {
   access?: 'read' | 'write';
 }
 
+/** One MCP server as the prompt lists it: its name, what it reaches and the access it allows. */
+export interface PromptServer {
+  name: string;
+  description?: string;
+  access?: 'read' | 'write';
+}
+
 export interface SystemPromptParts extends AgentPromptParts {
+  /** The task's MCP servers, without their tools. */
+  servers?: PromptServer[];
+  /** Tools load through the hub's find_tools and call_tool, not the engine's own tool search. */
+  hub?: boolean;
   cwd?: string;
   /** A platform event's task, whose final message is a reply in a thread; otherwise a general task. */
   conversation?: boolean;
@@ -96,6 +104,21 @@ const ACCESS_MODES = `<intro>
 
 const RESULT = 'When finished, give a concise summary of what you did and found.';
 
+const HUB =
+  'Their tools load on demand: find_tools(server, query) lists the matching tools of a server with their schemas, call_tool(server, tool, args) runs one.';
+const TOOL_SEARCH = 'Their tools load on demand through tool search.';
+
+/** One line per server: name, what it reaches, its access mode; then how tools are reached. */
+function serverLines(parts: SystemPromptParts): string | undefined {
+  if (!parts.servers?.length) return undefined;
+  const mode = (access = parts.access ?? 'write') => (access === 'read' ? 'read-only' : 'read-write');
+  const lines = parts.servers.map(
+    server => `${server.name}: ${server.description ?? 'MCP server'}; ${mode(server.access)}`,
+  );
+
+  return [...lines, parts.hub ? HUB : TOOL_SEARCH].join('\n');
+}
+
 /** Everything fixed for a task, in the order the engine reads it. */
 export function taskSystemPrompt(parts: SystemPromptParts): string {
   const flows = parts.agent
@@ -110,6 +133,7 @@ export function taskSystemPrompt(parts: SystemPromptParts): string {
       parts.access && (parts.access === 'read' ? 'read-only' : 'read-write'),
     ),
     tag('tools', parts.conversation ? 'reply; react; history' : undefined),
+    tag('servers', serverLines(parts)),
   ]);
   if (parts.conversation)
     return [

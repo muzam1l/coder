@@ -325,7 +325,7 @@ export async function resolveConnections(
           secrets.push(token);
           spec = await connectionMcp({ ...connection, access }, token, ctx.fetch ?? fetch);
         }
-        if (spec) mcp[id] = spec;
+        if (spec) mcp[id] = { ...spec, description: connection.name, access };
       } else if (!nativeTokens[connection.provider] && token) {
         const integration = ctx.integrations[connection.provider];
         if (!integration) throw new Error('Unknown integration');
@@ -350,10 +350,7 @@ export async function resolveConnections(
     }
   }
 
-  const toolScopes = { ...task.toolScopes };
-  for (const id of Object.keys(nativeTokens)) toolScopes[id] = {};
-
-  return { mcp, env, tokens, nativeTokens, tools, toolScopes, warnings, secrets };
+  return { mcp, env, tokens, nativeTokens, tools, warnings, secrets };
 }
 
 export async function resolvedTaskConnections(
@@ -368,7 +365,6 @@ export async function resolvedTaskConnections(
       tokens: handles,
       nativeTokens: {},
       tools: status.task.tools,
-      toolScopes: status.task.toolScopes,
       warnings: [],
       secrets: [],
     };

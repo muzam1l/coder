@@ -57,7 +57,6 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
         runnerId: j.runnerId ?? null,
         usage: j.usage ?? null,
         tools: j.tools,
-        toolScopes: j.toolScopes ?? null,
         context:
           value.logsComplete === undefined
             ? (storedTaskContext(j) ?? null)

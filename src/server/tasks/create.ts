@@ -8,9 +8,11 @@ import { dashPath, sessionSlug } from '../auth/account';
 import { randomBytes } from 'node:crypto';
 
 import { effectiveSettings } from '../../agent/definition';
+import { declaredTools, matchAgent } from '../../agent/match';
 import { defaultAgent } from '../../agent/load';
 import type { Integration } from '../../integrations/types';
 import type {
+  Agent,
   AgentApp,
   AgentEvent,
   AgentTask,
@@ -27,7 +29,7 @@ import { syncLocalAgents } from '../store/local';
 import { runLocalTask } from './local';
 import { credentialFix, resolveEngine } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
-import { installationToken } from './context';
+import { dispatchTokens, installationToken } from './context';
 import { chooseRunner } from '../runners';
 
 export interface NewTask {
@@ -302,6 +304,52 @@ export function taskTurns(status: TaskStatus): TaskTurn[] {
   ];
 }
 
+/** The agent as it is now, for a task's next turn: definition, usage, files and tools by the current access mode; the engine stays with the conversation. A disabled agent fails the turn; one the store no longer holds keeps the task's snapshot. */
+export async function refreshedTask(
+  ctx: ServerContext,
+  task: AgentTask,
+): Promise<Partial<Pick<AgentTask, 'definition' | 'usage' | 'tools' | 'files' | 'permissions'>>> {
+  const event = task.event;
+  let agent: Agent | undefined;
+  if (event) {
+    const [app, installation] = await Promise.all([
+      ctx.store.get('app', event.appId),
+      ctx.store.get('installation', `${event.appId}:${event.installationId}`),
+    ]);
+    if (!app || !installation || installation.deletedAt || !ctx.loadAgent) return {};
+    assertEnabled(ctx, task.agent, await ctx.store.get('agent', task.agent));
+    const integration = ctx.integrations[event.integration]!;
+    const credentials = decryptSecret(ctx.config, app.credentials);
+    agent = await ctx.loadAgent(
+      app,
+      installation,
+      event,
+      dispatchTokens(ctx, integration, installation, event, credentials),
+    );
+  } else {
+    if (task.agent === defaultAgent()) await ensureBuiltinAgents(ctx, (ctx.now ?? Date.now)());
+    const { record, version } = await agentWithVersion(ctx.store, task.agent);
+    assertEnabled(ctx, task.agent, record);
+    if (!record || !version) return {};
+    agent = toAgent(record, version, task.usage, ctx.integrations);
+  }
+  const match = event && matchAgent(event, agent);
+  const { engine, model, effort } = task.usage ?? {};
+
+  return {
+    definition: agent.definition,
+    usage: {
+      ...agent.usage,
+      ...(engine ? { engine } : {}),
+      ...(model ? { model } : {}),
+      ...(effort ? { effort } : {}),
+    },
+    tools: match?.tools ?? declaredTools(agent),
+    ...(agent.files ? { files: agent.files } : {}),
+    permissions: match?.permissions ?? effectiveSettings(agent).permissions,
+  };
+}
+
 /** Ask a finished task something new: the same task runs again with the earlier turns as its thread. */
 /** What a resumed turn may change: model and effort, and permissions only downward. */
 export interface TurnOverrides {
@@ -353,14 +401,16 @@ export async function continueTask(
   const context = status.task.context ?? {};
   const turns = taskTurns(status);
   turns.at(-1)!.finishedAt ??= now;
+  const current = await refreshedTask(ctx, status.task);
   const next: TaskStatus = {
     task: {
       ...status.task,
+      ...current,
       prompt: text,
       ...(model || effort
         ? {
             usage: {
-              ...status.task.usage,
+              ...(current.usage ?? status.task.usage),
               ...(model ? { model } : {}),
               ...(effort ? { effort: effort as AgentUsage['effort'] } : {}),
             },

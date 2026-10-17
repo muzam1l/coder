@@ -7,7 +7,6 @@ import { effectiveSettings } from '../../agent/definition';
 import type { Integration } from '../../integrations/types';
 import { matchAgent } from '../../agent/match';
 import type {
-  Agent,
   AgentApp,
   AgentEvent,
   AgentTask,
@@ -175,42 +174,6 @@ async function sendLink(
   await replies.whisper(text(`${base}/connect?token=${encodeURIComponent(link)}`));
 }
 
-/** The integrations the agent declares that the event can reach, found without minting. */
-async function reachable(tokens: EventTokens, agent: Agent): Promise<Set<string>> {
-  const ids = Object.keys(agent.definition.integrations);
-  const found = await Promise.all(ids.map(id => tokens(id)));
-
-  return new Set(ids.filter((_, index) => found[index]));
-}
-
-async function frozenToolScopes(
-  installation: Installation,
-  event: AgentEvent,
-  tokens: EventTokens,
-): Promise<NonNullable<AgentTask['toolScopes']>> {
-  const scopes: NonNullable<AgentTask['toolScopes']> = {};
-  if (event.repo)
-    scopes[event.integration] = {
-      repo: { owner: event.repo.owner, name: event.repo.name },
-    };
-  else if (event.chat)
-    scopes[event.integration] = {
-      thread: event.chat.thread.id,
-      ...(event.within ? { within: event.within } : {}),
-    };
-
-  for (const [id, connection] of Object.entries(installation.connections ?? {})) {
-    if (connection.kind !== 'installation') continue;
-
-    const linked = (await tokens(id))?.record;
-    const configRepo = linked?.settings?.configRepo;
-    const match = configRepo && /^([^/]+)\/([^/]+)$/.exec(configRepo);
-    if (match) scopes[id] = { repo: { owner: match[1]!, name: match[2]! } };
-  }
-
-  return scopes;
-}
-
 async function setupText(ctx: ServerContext, engine: string, slug?: string): Promise<string> {
   return `No model is configured yet. If you have access to it, [add one here](${await credentialFix(ctx, engine, slug)}).`;
 }
@@ -285,7 +248,7 @@ export async function dispatchEvent(
         : {}),
       ...(event.actor.id ? { actor: { platform: integration.id, id: event.actor.id } } : {}),
       installation,
-      files: dispatchFilePrefixes(ctx.integrations, installation, event),
+      files: dispatchFilePrefixes(installation, event),
     };
     const { claimed: mine, loaded } = await ctx.store.dispatchState(input);
     if (!mine) return {};
@@ -549,20 +512,10 @@ async function claimed(
   const requester = personal ? member?.id : undefined;
   const actAs = personal ? match.actAs : undefined;
   const settings = effectiveSettings(agent);
-  const declared = await reachable(tokens, agent);
-  const [route, resolved, toolScopes, context, grants, personalToken] = await Promise.all([
+  const [route, resolved, context, grants, personalToken] = await Promise.all([
     chooseRunner(ctx, { requester, agent: agent.definition.runner }),
     resolveEngine(ctx, settings, requester),
-    frozenToolScopes(installation, event, tokens),
-    buildContext(
-      ctx,
-      integration,
-      installation,
-      event,
-      async id => (declared.has(id) ? tokens(id) : undefined),
-      agent,
-      member ?? null,
-    ),
+    buildContext(ctx, integration, event, member ?? null),
     connectionGrants(ctx, requester, agent.usage?.connections),
     actAs === 'requester'
       ? requesterToken(ctx, integration, event, credentials).catch(() => undefined)
@@ -608,18 +561,6 @@ async function claimed(
       .filter(Boolean)
       .join('\n\n');
 
-  const tools = Object.fromEntries(
-    Object.entries(match.tools)
-      .filter(([id]) => declared.has(id))
-      .map(([id, names]): [string, string[]] => {
-        if (toolScopes[id]) return [id, names];
-        // A linked platform without a bound repository gets no tools at all.
-        if (id !== event.integration) return [id, []];
-        const reads = new Set(ctx.integrations[id]?.tools.presets.read ?? []);
-        return [id, names.filter(name => reads.has(name))];
-      })
-      .filter(([, names]) => names.length),
-  );
   if (Buffer.byteLength(JSON.stringify(event)) > CONTEXT_LIMIT)
     throw new Error('Event exceeds 256 KB');
   if (Buffer.byteLength(JSON.stringify(context)) > CONTEXT_LIMIT)
@@ -645,9 +586,8 @@ async function claimed(
     ...(requester ? { requester } : {}),
     ...(agent.files ? { files: agent.files } : {}),
     usage: { ...agent.usage, engine },
-    tools,
+    tools: match.tools,
     connections: grants,
-    ...(Object.keys(toolScopes).length ? { toolScopes } : {}),
     ...(Object.keys(context).length ? { context } : {}),
   };
   if (ctx.local && !event.repo && route.runner === 'local' && !route.runnerId)

@@ -56,6 +56,7 @@ import {
   type Completion,
   type TaskFence,
   type TaskPatch,
+  type TaskRefresh,
 } from '../../tasks/queue';
 import {
   taskRecord,
@@ -289,13 +290,13 @@ export class DrizzleQueue implements TaskQueue {
       } inserted as (
         insert into ${task} (organization_id, public_id, source, status, agent, flow, review_key, runner, permissions,
           app_id, installation_id, event, prompt, args, mcp, author, definition, credential, requester,
-          runner_id, usage, tools, tool_scopes, context, files, attempts, created_at, updated_at)
+          runner_id, usage, tools, context, files, attempts, created_at, updated_at)
         select ${organizationId}, ${agentTask.id}, ${agentTask.source}, 'queued', ${agentTask.agent}, ${agentTask.flow}, ${reviewKey(agentTask) ?? null}, ${agentTask.runner}, ${agentTask.permissions ?? null},
           ${event ? sql`coalesce((select id from ${app} where key = ${event.appId} and organization_id in (${organizationId}, '')), 0)` : sql`null`},
           ${event ? sql`coalesce((select id from ${install} where key = ${`${event.appId}:${event.installationId}`} and organization_id = ${organizationId}), 0)` : sql`null`},
           ${json(event)}, ${agentTask.prompt ?? null}, ${json(agentTask.args)}, ${json(agentTask.mcp)}, ${agentTask.author ?? null}, ${json(agentTask.definition)},
           ${agentTask.credential ?? null}, ${agentTask.requester ?? null}, ${agentTask.runnerId ?? null}, ${json(agentTask.usage)}, ${json(agentTask.tools)},
-          ${json(agentTask.toolScopes)}, ${json(storedTaskContext(agentTask))}, ${json(agentTask.files)}, 0, ${stamp}::timestamptz, ${stamp}::timestamptz
+          ${json(storedTaskContext(agentTask))}, ${json(agentTask.files)}, 0, ${stamp}::timestamptz, ${stamp}::timestamptz
         from capacity where allowed ${session ? sql`and ${session.create} and not exists (select 1 from target)` : sql``} ${delivery ? sql`and exists (select 1 from receipt)` : sql``}
         returning id
       )${recorded} select allowed, exists (select 1 from inserted) as inserted ${session ? sql`, exists (select 1 from forwarded) as steered` : sql``} from capacity`;
@@ -673,7 +674,7 @@ export class DrizzleQueue implements TaskQueue {
   async continueTask(
     organizationId: string,
     id: string,
-    next: Pick<AgentTask, 'prompt' | 'context'>,
+    next: TaskRefresh,
     now: number,
     fence: TaskFence,
   ): Promise<boolean> {
@@ -683,6 +684,11 @@ export class DrizzleQueue implements TaskQueue {
       .set({
         prompt: next.prompt ?? null,
         context,
+        ...(next.definition ? { definition: next.definition } : {}),
+        ...(next.usage ? { usage: next.usage } : {}),
+        ...(next.tools ? { tools: next.tools } : {}),
+        ...('files' in next ? { files: next.files ?? null } : {}),
+        ...('permissions' in next ? { permissions: next.permissions ?? null } : {}),
         status: 'queued',
         attempts: 0,
         generation: sql`${task.generation} + 1`,

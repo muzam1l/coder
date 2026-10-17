@@ -332,7 +332,6 @@ export interface InstallationRow {
   /** The app was removed or uninstalled on the platform. */
   uninstalled?: boolean;
   settings?: {
-    configRepo?: string;
     model?: string;
     engine?: string;
     effort?: string;

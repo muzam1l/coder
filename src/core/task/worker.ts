@@ -38,7 +38,7 @@ import { resolveMcpServers } from '../dispatch';
 import { injectedConnectionEnvironment, redactConnectionSecrets } from '../connections';
 import type { Task, ProgressUpdate, TurnResult } from '../types';
 import { agentMailboxDir, MAILBOX_ENV } from '../mailbox';
-import { gitToolEnvironment, turnToolServers } from '../../agent/mcp';
+import { gitToolEnvironment, hubbedToolServers, turnToolServers } from '../../agent/mcp';
 import { recentExchanges } from '../engines/history';
 import { rolloverPrompt, SUMMARY_REQUEST } from '../prompts';
 
@@ -326,12 +326,16 @@ async function executeCodexTurn(
         config.engines.codex?.network,
       ),
       approvalsReviewer: mode.approvalMode === 'auto' ? 'auto_review' : null,
-      mcpServers: turnToolServers(
-        task,
-        taskDir,
-        resolveMcpServers(task.mcp, process.env, undefined, {
-          onWarning: message => onProgress({ kind: 'warning', message }),
-        }),
+      mcpServers: hubbedToolServers(
+        cwd,
+        task.id,
+        turnToolServers(
+          task,
+          taskDir,
+          resolveMcpServers(task.mcp, process.env, undefined, {
+            onWarning: message => onProgress({ kind: 'warning', message }),
+          }),
+        ),
       ),
       nativeMcp: task.nativeMcp ?? false,
       // Read-only: the mailbox is the one writable path; extra directories stay read-only.

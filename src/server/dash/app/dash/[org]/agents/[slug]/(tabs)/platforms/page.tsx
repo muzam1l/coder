@@ -153,7 +153,7 @@ function Platforms({
                       entry.account.type?.toLowerCase(),
                       entry.covers &&
                         `${entry.covers.length} ${info?.covered ?? 'account'}${entry.covers.length === 1 ? '' : 's'}`,
-                      [entry.settings?.configRepo, entry.settings?.engine, entry.settings?.effort]
+                      [entry.settings?.engine, entry.settings?.effort]
                         .filter(Boolean)
                         .join(', '),
                     ]

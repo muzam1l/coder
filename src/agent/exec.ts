@@ -329,7 +329,7 @@ export async function execAgent(options: {
   onEngine?: (engine: string) => Promise<boolean | void>;
   onStart?: import('../flow/runtime').FlowHooks['onStart'];
   /** Secrets passed only to task-core MCP children, never inherited by the engine. */
-  toolEnvironment?: { tokens: Record<string, string> };
+  toolEnvironment?: { tokens: Record<string, string>; native?: string[] };
   /** Where the conversation tools post, when the caller posts replies for the task. */
   replyEndpoint?: ReplyEndpoint;
   connections?: Record<string, McpServerSpec>;
@@ -370,6 +370,7 @@ export async function execAgent(options: {
     task,
     options.toolEnvironment?.tokens ?? localTokens(task, process.env),
     options.replyEndpoint,
+    options.toolEnvironment?.native,
   );
 
   if (flow === 'default') {
@@ -759,8 +760,7 @@ export function agentDeveloperInstructions(agent: Agent, context?: TaskContext):
   return developerInstructions({
     description: agent.definition.description,
     instructions: agentInstructions(agent),
-    repositoryInstructions: context?.instructions,
-    repository: context?.repository,
+    notes: context?.instructions,
   });
 }
 

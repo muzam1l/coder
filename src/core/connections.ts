@@ -405,7 +405,7 @@ async function sseConnection(spec: McpServerSpec, request: typeof fetch, signal:
   })().catch(fail);
 
   return {
-    async rpc(method: string, params?: unknown, id?: number): Promise<any> {
+    async rpc(method: string, params?: unknown, id?: number, _signal?: AbortSignal): Promise<any> {
       const url = await endpoint;
       signal.throwIfAborted();
       if (streamError) throw streamError;
@@ -449,6 +449,214 @@ async function sseConnection(spec: McpServerSpec, request: typeof fetch, signal:
   };
 }
 
+/** One tool as a server lists it. */
+export interface McpToolInfo {
+  name: string;
+  description?: string;
+  inputSchema?: unknown;
+  annotations?: { readOnlyHint?: boolean };
+}
+
+export interface McpClient {
+  /** One request with the next id; the answer's result. */
+  rpc(method: string, params?: unknown): Promise<any>;
+  initialize(): Promise<void>;
+  /** Every tool, page by page; initializes first when needed. */
+  tools(): Promise<McpToolInfo[]>;
+  close(): Promise<void>;
+}
+
+/** A client for one server spec: stdio, streamable HTTP or legacy SSE. `startup` bounds connecting, initialize and the tool list only; the session then lives until `close`. */
+export async function mcpClient(
+  spec: McpServerSpec,
+  request: typeof fetch = fetch,
+  startup?: AbortSignal,
+): Promise<McpClient> {
+  let version = spec.type === 'sse' ? '2024-11-05' : '2025-11-25';
+  const life = new AbortController();
+  const within = <T>(work: Promise<T>): Promise<T> =>
+    startup
+      ? Promise.race([
+          work,
+          new Promise<never>((_, reject) => {
+            const abort = () => reject(startup.reason ?? new Error('MCP startup timed out'));
+            if (startup.aborted) abort();
+            startup.addEventListener('abort', abort, { once: true });
+          }),
+        ])
+      : work;
+  const base = await within(
+    spec.command
+      ? stdioRpc(spec)
+      : spec.type === 'sse'
+        ? sseConnection(spec, request, life.signal)
+        : httpRpc(spec, request, () => version),
+  );
+  let next = 1;
+  const call = (method: string, params?: unknown, signal?: AbortSignal) =>
+    base.rpc(method, params, next++, signal);
+  let initialized: Promise<void> | undefined;
+  const client: McpClient = {
+    rpc: (method, params) => call(method, params),
+    initialize: () =>
+      (initialized ??= within(
+        call(
+          'initialize',
+          {
+            protocolVersion: version,
+            capabilities: {},
+            clientInfo: { name: 'coder', version: '1' },
+          },
+          startup,
+        ).then(async result => {
+          version = result?.protocolVersion ?? version;
+          await base.rpc('notifications/initialized');
+        }),
+      )),
+    async tools() {
+      await client.initialize();
+      const tools: McpToolInfo[] = [];
+      const cursors = new Set<string>();
+      let cursor: string | undefined;
+      do {
+        const result = await within(
+          call('tools/list', cursor === undefined ? {} : { cursor }, startup),
+        );
+        if (!Array.isArray(result?.tools)) throw new Error('Invalid tools');
+        tools.push(...result.tools.filter((tool: McpToolInfo) => typeof tool.name === 'string'));
+        cursor = result.nextCursor;
+        if (cursor !== undefined) {
+          if (typeof cursor !== 'string' || cursors.has(cursor))
+            throw new Error('Invalid tools cursor');
+          cursors.add(cursor);
+        }
+      } while (cursor !== undefined);
+
+      return tools;
+    },
+    async close() {
+      life.abort();
+      await base.close();
+    },
+  };
+
+  return client;
+}
+
+async function stdioRpc(spec: McpServerSpec) {
+  const { spawn } = await import('node:child_process');
+  const readline = await import('node:readline');
+  const child = spawn(spec.command!, spec.args ?? [], {
+    env: { ...process.env, ...spec.env },
+    stdio: ['pipe', 'pipe', 'inherit'],
+  });
+  const pending = new Map<
+    number,
+    { resolve(value: unknown): void; reject(error: unknown): void }
+  >();
+  let exited: Error | undefined;
+  const fail = (error: Error) => {
+    exited = error;
+    for (const waiting of pending.values()) waiting.reject(error);
+    pending.clear();
+  };
+  child.once('error', error =>
+    fail(new Error(`MCP server ${spec.name} could not start: ${error.message}`)),
+  );
+  child.once('close', code =>
+    fail(new Error(`MCP server ${spec.name} exited with status ${code}`)),
+  );
+  readline.createInterface({ input: child.stdout, terminal: false }).on('line', line => {
+    let message: { id?: number; result?: unknown; error?: { message?: string } };
+    try {
+      message = JSON.parse(line);
+    } catch {
+      return;
+    }
+    const waiting = message.id === undefined ? undefined : pending.get(message.id);
+    if (!waiting) return;
+    pending.delete(message.id!);
+    if (message.error) waiting.reject(new Error(message.error.message ?? 'MCP error'));
+    else waiting.resolve(message.result);
+  });
+
+  return {
+    rpc(method: string, params?: unknown, id?: number, _signal?: AbortSignal) {
+      if (exited) return Promise.reject(exited);
+      const answer =
+        id === undefined
+          ? Promise.resolve(undefined)
+          : new Promise((resolve, reject) => pending.set(id, { resolve, reject }));
+      child.stdin.write(
+        `${JSON.stringify({ jsonrpc: '2.0', method, ...(id === undefined ? {} : { id }), ...(params ? { params } : {}) })}\n`,
+      );
+
+      return answer;
+    },
+    async close() {
+      child.stdin.end();
+      child.kill();
+    },
+  };
+}
+
+async function httpRpc(spec: McpServerSpec, request: typeof fetch, version: () => string) {
+  let session: string | undefined;
+  const headers = () => ({
+    ...spec.headers,
+    'mcp-protocol-version': version(),
+    ...(session ? { 'mcp-session-id': session } : {}),
+  });
+
+  return {
+    async rpc(method: string, params?: unknown, id?: number, signal?: AbortSignal) {
+      const response = await request(spec.url!, {
+        method: 'POST',
+        redirect: 'manual',
+        ...(signal ? { signal } : {}),
+        headers: {
+          ...headers(),
+          'content-type': 'application/json',
+          accept: 'application/json, text/event-stream',
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0',
+          method,
+          ...(id === undefined ? {} : { id }),
+          ...(params ? { params } : {}),
+        }),
+      });
+      checkResponse(response);
+      session = response.headers.get('mcp-session-id') ?? session;
+      if (id === undefined) {
+        await response.body?.cancel();
+        return undefined;
+      }
+      const raw = await response.text();
+      const messages = response.headers.get('content-type')?.includes('text/event-stream')
+        ? raw.split(/\r?\n\r?\n/).flatMap(event => {
+            const data = event
+              .split(/\r?\n/)
+              .filter(line => line.startsWith('data:'))
+              .map(line => line.slice(5).trimStart())
+              .join('\n');
+            return data ? [JSON.parse(data)] : [];
+          })
+        : [JSON.parse(raw)];
+      const message = messages.find(message => message.id === id);
+      if (!message?.result || message.error) throw new Error('Invalid MCP response');
+
+      return message.result;
+    },
+    async close() {
+      if (!session) return;
+      await request(spec.url!, { method: 'DELETE', redirect: 'manual', headers: headers() })
+        .then(response => response.body?.cancel())
+        .catch(() => {});
+    },
+  };
+}
+
 export async function connectionMcp(
   connection: Connection,
   token: string | undefined,
@@ -478,101 +686,22 @@ export async function connectionMcp(
       throw new Error('Read-only requires tools');
     return spec;
   }
-  const signal = AbortSignal.timeout(5_000);
-  let session: string | undefined;
-  let version = spec.type === 'sse' ? '2024-11-05' : '2025-11-25';
-  const httpRpc = async (method: string, params?: unknown, id?: number) => {
-    const response = await request(spec.url!, {
-      method: 'POST',
-      redirect: 'manual',
-      signal,
-      headers: {
-        ...spec.headers,
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream',
-        'mcp-protocol-version': version,
-        ...(session ? { 'mcp-session-id': session } : {}),
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method,
-        ...(id === undefined ? {} : { id }),
-        ...(params ? { params } : {}),
-      }),
-    });
-    checkResponse(response);
-    session = response.headers.get('mcp-session-id') ?? session;
-    if (id === undefined) {
-      await response.body?.cancel();
-      return undefined;
-    }
-    const raw = await response.text();
-    const messages = response.headers.get('content-type')?.includes('text/event-stream')
-      ? raw.split(/\r?\n\r?\n/).flatMap(event => {
-          const data = event
-            .split(/\r?\n/)
-            .filter(line => line.startsWith('data:'))
-            .map(line => line.slice(5).trimStart())
-            .join('\n');
-          return data ? [JSON.parse(data)] : [];
-        })
-      : [JSON.parse(raw)];
-    const message = messages.find(message => message.id === id);
-    if (!message?.result || message.error) throw new Error('Invalid MCP response');
-
-    return message.result;
-  };
-  const legacy = spec.type === 'sse' ? await sseConnection(spec, request, signal) : undefined;
-  const rpc = legacy?.rpc ?? httpRpc;
+  const client = await mcpClient(spec, request, AbortSignal.timeout(5_000));
   try {
-    const initialized = await rpc(
-      'initialize',
-      { protocolVersion: version, capabilities: {}, clientInfo: { name: 'coder', version: '1' } },
-      1,
-    );
-    version = initialized.protocolVersion ?? version;
-    await rpc('notifications/initialized');
+    await client.initialize();
     if (connection.access === 'write') return spec;
-    spec.tools = [];
-    let cursor: string | undefined;
-    let id = 2;
-    const cursors = new Set<string>();
-    do {
-      signal.throwIfAborted();
-      const result = await rpc('tools/list', cursor === undefined ? {} : { cursor }, id++);
-      if (!Array.isArray(result.tools)) throw new Error('Invalid tools');
-      spec.tools.push(
-        ...result.tools
-          .filter(
-            (tool: { name?: string; annotations?: { readOnlyHint?: boolean } }) =>
-              typeof tool.name === 'string' &&
-              connectionToolName(tool.name) &&
-              tool.annotations?.readOnlyHint === true &&
-              (!connection.endpoint?.tools?.length ||
-                connection.endpoint.tools.includes(tool.name)),
-          )
-          .map((tool: { name: string }) => tool.name),
-      );
-      cursor = result.nextCursor;
-      if (cursor !== undefined) {
-        if (typeof cursor !== 'string' || cursors.has(cursor))
-          throw new Error('Invalid tools cursor');
-        cursors.add(cursor);
-      }
-    } while (cursor !== undefined);
+    spec.tools = (await client.tools())
+      .filter(
+        tool =>
+          connectionToolName(tool.name) &&
+          tool.annotations?.readOnlyHint === true &&
+          (!connection.endpoint?.tools?.length || connection.endpoint.tools.includes(tool.name)),
+      )
+      .map(tool => tool.name);
 
-    return spec.tools!.length ? spec : undefined;
+    return spec.tools.length ? spec : undefined;
   } finally {
-    if (legacy) await legacy.close();
-    if (session)
-      await request(spec.url!, {
-        method: 'DELETE',
-        redirect: 'manual',
-        signal,
-        headers: { ...spec.headers, 'mcp-session-id': session, 'mcp-protocol-version': version },
-      })
-        .then(response => response.body?.cancel())
-        .catch(() => {});
+    await client.close();
   }
 }
 
@@ -723,7 +852,8 @@ export async function localConnections(
           token = await credential(true, token);
           spec = await connectionMcp({ ...connection, access: connection.access ?? mode }, token);
         }
-        if (spec) mcp[id] = spec;
+        if (spec)
+          mcp[id] = { ...spec, description: connection.name, access: connection.access ?? mode };
       } catch (error) {
         if (connectionRevoked(error))
           await local.withLock(async () => {

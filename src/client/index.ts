@@ -488,9 +488,8 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   readonly apps = {
     list: (agent?: string): Promise<Array<StoredRow<AppRow>>> =>
       this.request(queryPath('/admin/apps', { agent })),
-    /** `link` is the installation the new one connects to. */
-    install: (id: string, back?: string, link?: string): Promise<{ url: string }> =>
-      this.post(queryPath(`/admin/apps/${encodeURIComponent(id)}/install`, { back, link })),
+    install: (id: string, back?: string): Promise<{ url: string }> =>
+      this.post(queryPath(`/admin/apps/${encodeURIComponent(id)}/install`, { back })),
     /** Forgets a workspace app and its installs; the app itself stays on the platform. */
     remove: (id: string): Promise<{ ok: true }> =>
       this.request(`/admin/apps/${encodeURIComponent(id)}`, { method: 'DELETE' }),

@@ -838,7 +838,10 @@ async function runCheckedOutTask(
       task: restored
         ? { ...remote.task, context: { ...remote.task.context, messages: undefined } }
         : remote.task,
-      toolEnvironment: { tokens: { ...remote.tokens, ...remote.nativeTokens } },
+      toolEnvironment: {
+        tokens: { ...remote.tokens, ...remote.nativeTokens },
+        native: Object.keys(remote.nativeTokens ?? {}),
+      },
       replyEndpoint: { url: `${auth.server}/tasks/${encodeURIComponent(id)}`, token: auth.token },
       connections: remote.connections,
       connectionEnv: remote.connectionEnv,

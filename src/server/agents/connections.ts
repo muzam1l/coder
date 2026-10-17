@@ -21,7 +21,6 @@ export async function adminInstallLink(
   ctx: ServerContext,
   appId: string,
   back: string | null,
-  link: string | null,
 ): Promise<Response> {
   const app = await ctx.store.get('app', appId);
   if (!app) return json({ error: 'Unknown app' }, 404);
@@ -30,7 +29,7 @@ export async function adminInstallLink(
   if (!publicUrl) return json({ error: 'PUBLIC_URL is not set on this server' }, 400);
 
   const tx = await issueNonce(ctx, 'install', ctx.session?.user.id ?? 'anonymous', app.id);
-  const state = encodeJson({ tx, ...(back ? { back } : {}), ...(link ? { link } : {}) });
+  const state = encodeJson({ tx, ...(back ? { back } : {}) });
 
   return json({
     url: `${publicUrl.replace(/\/$/, '')}/install/${app.integration}?app=${encodeURIComponent(app.id)}&state=${state}`,
@@ -143,21 +142,9 @@ export async function removeApp(
     return json({ error: 'Only whoever runs this server can remove its shared apps.' }, 403);
 
   const now = ctx.now?.() ?? Date.now();
-  const rows = await ctx.store.list('installation');
-  const removed = new Set(rows.filter(({ value }) => value.app === app.id).map(({ id }) => id));
-  for (const { id, value } of rows) {
-    if (removed.has(id)) {
-      if (!value.deletedAt) await updateMetadata(ctx.store, 'installation', id, { deletedAt: now });
-      continue;
-    }
-    // Sibling links to the removed installations go too.
-    const links = Object.entries(value.connections ?? {});
-    const kept = links.filter(([, link]) => !removed.has(link.id));
-    if (kept.length < links.length)
-      await updateMetadata(ctx.store, 'installation', id, {
-        connections: kept.length ? Object.fromEntries(kept) : undefined,
-      });
-  }
+  for (const { id, value } of await ctx.store.list('installation'))
+    if (value.app === app.id && !value.deletedAt)
+      await updateMetadata(ctx.store, 'installation', id, { deletedAt: now });
   await ctx.store.delete('app', app.id);
   await dropTokens(ctx.store, app.id);
 
@@ -251,7 +238,7 @@ export async function listInstallations(
 
   return json(
     rows.map(({ id, value }) => {
-      const { token: _token, connections: _connections, ...safe } = value;
+      const { token: _token, ...safe } = value;
       const url =
         value.account.url ?? ctx.integrations[value.integration]?.app.accountUrl?.(value.account);
 

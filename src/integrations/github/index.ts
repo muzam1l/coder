@@ -220,7 +220,7 @@ export function parseGithubEvent(
 async function mintInstallationToken(
   config: { appId: string; privateKey: string },
   installationId: string | number,
-  scope: { repositories?: string[]; permissions?: Record<string, string> } = {},
+  scope: { permissions?: Record<string, string> } = {},
   request?: typeof fetch,
 ): Promise<{ token: string; expiresAt: number }> {
   const client = await octokit(
@@ -230,7 +230,6 @@ async function mintInstallationToken(
   const { token, expiresAt } = (await client.auth({
     type: 'installation',
     installationId,
-    ...(scope.repositories ? { repositoryNames: scope.repositories } : {}),
     ...(scope.permissions ? { permissions: scope.permissions } : {}),
   })) as { token: string; expiresAt: string };
   return { token, expiresAt: Date.parse(expiresAt) };
@@ -242,18 +241,13 @@ export async function installationToken(
   return (await mintInstallationToken(...input)).token;
 }
 
-/** The app key and the exact scope, repositories sorted; an omitted part differs from an empty one. */
+/** The app key and the exact scope; an omitted part differs from an empty one. */
 function githubReuseKey(credentials: unknown, bound?: TokenBound): string {
   const { appId, privateKey } = credentials as GithubAppCredentials;
-  const { repositories, permissions } = githubTokenScope(bound);
+  const { permissions } = githubTokenScope(bound);
   return createHash('sha256')
     .update(
-      JSON.stringify([
-        appId,
-        privateKey,
-        repositories ? [...repositories].sort() : null,
-        permissions ? Object.entries(permissions).sort() : null,
-      ]),
+      JSON.stringify([appId, privateKey, permissions ? Object.entries(permissions).sort() : null]),
     )
     .digest('base64url');
 }
@@ -387,15 +381,9 @@ export function githubPush(body: unknown, app: AgentApp): Pushed | undefined {
       : {}),
   };
 }
-/** The narrowest token for a bound: its repository, and the permissions its tools need. */
-export function githubTokenScope(bound: TokenBound = {}): {
-  repositories?: string[];
-  permissions?: Record<string, string>;
-} {
-  return {
-    ...(bound.repo ? { repositories: [bound.repo.name] } : {}),
-    ...(bound.tools ? { permissions: githubAppPermissions(bound.tools) } : {}),
-  };
+/** The narrowest token for a bound: the permissions its tools need, on every repository of the installation. */
+export function githubTokenScope(bound: TokenBound = {}): { permissions?: Record<string, string> } {
+  return bound.tools ? { permissions: githubAppPermissions(bound.tools) } : {};
 }
 const GITHUB_MARK =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 98 96" fill="none" style="color:light-dark(#000,#fff)"><g clip-path="url(#github-mark-4)"><path d="M 41.44 69.38 C 28.81 67.85 19.91 58.76 19.91 46.99 C 19.91 42.21 21.63 37.04 24.5 33.59 C 23.26 30.43 23.45 23.73 24.88 20.96 C 28.71 20.48 33.88 22.49 36.94 25.27 C 40.58 24.12 44.41 23.54 49.1 23.54 C 53.79 23.54 57.61 24.12 61.06 25.17 C 64.03 22.49 69.29 20.48 73.12 20.96 C 74.46 23.54 74.65 30.24 73.4 33.5 C 76.47 37.13 78.09 42.01 78.09 46.99 C 78.09 58.76 69.19 67.66 56.37 69.29 C 59.62 71.39 61.82 75.99 61.82 81.25 L 61.82 91.21 C 61.82 94.08 64.22 95.7 67.09 94.55 C 84.41 87.95 98 70.63 98 49.19 C 98 22.11 75.99 0 48.9 0 C 21.82 0 0 22.11 0 49.19 C 0 70.44 13.49 88.05 31.68 94.65 C 34.26 95.61 36.75 93.88 36.75 91.3 L 36.75 83.64 C 35.41 84.22 33.69 84.6 32.16 84.6 C 25.84 84.6 22.11 81.16 19.43 74.74 C 18.38 72.16 17.23 70.63 15.03 70.34 C 13.88 70.25 13.49 69.77 13.49 69.19 C 13.49 68.04 15.41 67.18 17.32 67.18 C 20.1 67.18 22.49 68.91 24.98 72.45 C 26.89 75.22 28.9 76.47 31.29 76.47 C 33.69 76.47 35.22 75.61 37.42 73.4 C 39.05 71.78 40.29 70.34 41.44 69.38 Z" fill="black" style="fill:currentColor"/></g><defs><clipPath id="github-mark-4"><rect width="98" height="96" fill="white"/></clipPath></defs></svg>';
