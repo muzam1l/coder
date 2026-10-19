@@ -125,7 +125,7 @@ function OverviewBody({
           <div>
             <dt>Permissions</dt>
             <dd>
-              {agent.settings?.permissions ?? definition?.permissions ?? defaultLabel('read-only')}
+              {agent.settings?.permissions ?? definition?.permissions ?? defaultLabel('auto')}
             </dd>
           </div>
           {agent.local ? (

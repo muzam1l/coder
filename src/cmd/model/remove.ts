@@ -1,21 +1,22 @@
 /** `coder model remove`: drop a custom endpoint model. */
 import process from 'node:process';
 
-import { models } from '../../core/models';
 import { outStyle } from '../../tui/output';
+import { str } from '../../utils/args';
 import { command } from '../../cli';
-import { modelOptions } from './add';
+import { workspaceFlag } from './add';
 
 export const commandModelRemove = command({
-  name: 'model remove',
-  help: {
-    usage: 'coder model remove <name>',
-    summary: 'Remove a configured custom model.',
-    flags: [['--workspace', 'target <repo>/.coder/config.json instead of the user file']],
+  name: 'remove',
+  description: 'delete a custom model',
+  usage: 'Remove a configured custom model.',
+  access: 'write',
+  args: { name: str('the custom model'), workspace: workspaceFlag },
+  cli: { positional: ['name'] },
+  run: async ({ options, args: [name], cwd }) => {
+    const { models } = await import('../../core/models');
+    return models.remove(name, { ...options, cwd });
   },
-  options: modelOptions,
-  args: 1,
-  run: ({ options, args: [name], cwd }) => models.remove(name, { ...options, cwd }),
   print: result => printModelChange('removed', result.removed, result.file),
 });
 

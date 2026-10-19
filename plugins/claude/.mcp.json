@@ -1,0 +1,5 @@
+{
+  "mcpServers": {
+    "coder": { "command": "coder", "args": ["mcp"] }
+  }
+}

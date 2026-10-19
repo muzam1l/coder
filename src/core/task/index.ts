@@ -248,7 +248,7 @@ async function run(
       taskId,
       status: final.status,
       finalMessage: result?.finalMessage,
-      ...(turnError ? { error: turnError } : {}),
+      ...(turnError || final.error ? { error: turnError || final.error } : {}),
       tokens: result?.tokens ?? null,
       model: result?.model ?? final.model ?? null,
     };
@@ -426,24 +426,34 @@ async function* serverLines(api: RemoteClient, taskId: string): AsyncGenerator<T
   }
 }
 
-/** Follow a task live. `tail` replays only the last n steps (default 1). Omit the id for the latest task. */
+async function* each<T>(items: T[] | Promise<T[]>): AsyncGenerator<T> {
+  yield* await items;
+}
+
+/** Follow a task live. `tail` replays only the last n steps (default 1); `from` lists the log from that event on, without following. Omit the id for the latest task. */
 async function watch(
   id?: string,
-  opts: TaskOptions & { tail?: number | 'all' } = {},
+  opts: TaskOptions & { tail?: number | 'all'; from?: number } = {},
 ): Promise<TaskWatch> {
   const { cwd, api } = target(opts);
   if (api) {
     const task = await serverTask(api, id);
     return {
       task,
-      events: serverLines(api, task.task.id),
+      events:
+        opts.from === undefined
+          ? serverLines(api, task.task.id)
+          : each(api.tasks.logs(task.task.id, opts.from - 1) as Promise<TaskLogLine[]>),
       final: () => api.tasks.get(task.task.id),
     };
   }
   const task = localTask(cwd, id);
   return {
     task,
-    events: streamTask(cwd, task.id, { tail: opts.tail }),
+    events:
+      opts.from === undefined
+        ? streamTask(cwd, task.id, { tail: opts.tail })
+        : each(readTaskLog(cwd, task.id, Infinity).slice(opts.from)),
     async final() {
       const current = reconcileTask(cwd, loadTask(cwd, task.id) ?? task);
       const result = readJsonFile<any>(path.join(resolveTaskDir(cwd, task.id), 'result.json'));

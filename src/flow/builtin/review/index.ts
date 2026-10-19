@@ -1,5 +1,5 @@
 /**
- * Built-in `review` flow behind `coder review` and the `coder` agent. An ordinary
+ * Built-in `review` flow behind `coder review`, review agents and the task `review` tool. An ordinary
  * flow file: a repo `.coder/flows/review.ts` overrides it.
  */
 import { execFileSync } from 'node:child_process';
@@ -10,9 +10,8 @@ import path from 'node:path';
 import * as z from 'zod';
 import { CoderError, task } from '@wular/coder/flow';
 
-import { currentIntegrationToken } from '../runtime';
-import { mailboxDir, askWorker } from '../../core/mailbox';
-import { reviewPrompt, reviewSystemPrompt } from '../../core/prompts';
+import { currentIntegrationToken } from '../../runtime';
+import { reviewPrompt, reviewSystemPrompt } from './prompts';
 
 export const description = 'Review a code change.';
 
@@ -78,6 +77,35 @@ export interface ReviewSummary {
 export interface ReviewResult {
   findings: Finding[];
   summary: ReviewSummary;
+}
+
+/** A review's findings as the CLI prints them and a task receives them. */
+export function renderReviewMarkdown(result: ReviewResult & { runId: string }): string {
+  const { summary } = result;
+  const range = `\`${summary.baseSha}\`${summary.worktree ? ' through the working tree' : `..\`${summary.headSha}\``}`;
+  const warnings = (summary.warnings ?? []).flatMap(w => [w, '']);
+  if (summary.worktree && !summary.files)
+    return `${['# Coder review', '', `Nothing to review from ${range}.`, '', ...warnings, `Flow run: \`${result.runId}\``].join('\n')}\n`;
+  const lines = [
+    '# Coder review',
+    '',
+    `Reviewed ${range}${summary.model ? ` with ${summary.model}` : ''} in ${(summary.elapsedMs / 1000).toFixed(1)}s.`,
+    '',
+    ...warnings,
+    ...(result.findings.length
+      ? result.findings.flatMap(f => [
+          `- **${f.severity.toUpperCase()}** [\`${f.file}:${f.line}\`]. ${f.summary}`,
+          `  ${f.failure_scenario}`,
+        ])
+      : ['No findings after checking against the repository.']),
+  ];
+  if (summary.posted !== undefined)
+    lines.push(
+      '',
+      `Posted ${summary.posted} new inline comment${summary.posted === 1 ? '' : 's'}.`,
+    );
+  lines.push('', `Flow run: \`${result.runId}\``);
+  return `${lines.join('\n')}\n`;
 }
 
 const RANK: Record<Severity, number> = {
@@ -177,14 +205,7 @@ async function resolveTarget(
     ...(a.since ? { since: a.since } : {}),
     ...(a.author ? { author: a.author } : {}),
   };
-  return viaWorker(auth)
-    ? askWorker<ReviewTarget>('review', { op: 'resolveTarget', input })
-    : resolveReviewTarget(input, auth);
-}
-
-/** Inside an agent's sandbox the worker holds the platform token and acts for the flow. */
-function viaWorker(auth: ReviewAuth): boolean {
-  return Boolean(mailboxDir()) && !auth.token && !auth.exec;
+  return resolveReviewTarget(input, auth);
 }
 
 type Ranges = Map<string, Array<[number, number]>>;
@@ -537,9 +558,7 @@ export default async function review(
       summary: postSummary,
       ...(since ? { since } : {}),
     };
-    summary.posted = viaWorker(integrationAuth)
-      ? await askWorker<number>('review', { op: 'post', input })
-      : postReview(input, integrationAuth);
+    summary.posted = postReview(input, integrationAuth);
   }
   if (warnings.length) summary.warnings = warnings;
   return result;

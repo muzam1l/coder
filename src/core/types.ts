@@ -7,6 +7,7 @@
 // Config domain types are inferred from the zod schemas in config.ts.
 import type { Engine, Effort, Permission } from './config';
 import type { TokenUsage } from './task/log-view';
+import type { SystemPromptParts } from './task/context/system';
 export type { TokenUsage } from './task/log-view';
 
 export type {
@@ -21,6 +22,10 @@ export type {
   Permission,
 } from './config';
 
+export const NOT_REINVOKED = 'Background processes will not re-invoke you.';
+export const SHELL_WAIT =
+  'Wait on each task with `coder task result <task-id> --wait` in its own background shell, one per task, never several tasks in one call, so each approval and answer reaches you.';
+
 /** An extra MCP server attached to a task, with the tools the engine may call. */
 /** One MCP server in the `.mcp.json` entry shape: stdio (`command`) or remote (`url`). */
 export interface McpServerSpec {
@@ -33,9 +38,9 @@ export interface McpServerSpec {
   args?: string[];
   /** Values may hold `${VAR}` placeholders, resolved from the environment at spawn time. */
   env?: Record<string, string>;
-  /** Remote server; `type` defaults to `http` (streamable HTTP), `sse` for legacy servers. */
+  /** Remote server, streamable HTTP. */
   url?: string;
-  type?: 'stdio' | 'http' | 'sse';
+  type?: 'stdio' | 'http';
   headers?: Record<string, string>;
   /** Credential destination supplied by the connection resolver, removed before persistence. */
   credentialFields?: { env?: string; header?: string };
@@ -72,7 +77,9 @@ export interface Task {
   // Harness-supplied standing instructions (--system), kept separate from the
   // task prompt so previews (list/result/stream) show only the task itself.
   system?: string | null;
-  // The engine's system prompt, passed on every turn.
+  // What the engine's system prompt says, rendered on every turn with the task's servers.
+  promptParts?: Omit<SystemPromptParts, 'servers'>;
+  // A system prompt as given, for a task without promptParts.
   systemPrompt?: string;
   model?: string | null;
   effort?: Effort | null;
@@ -171,7 +178,6 @@ export interface TurnResult {
   threadId: string | null;
   turnId?: string | null;
   finalMessage?: string;
-  touchedFiles?: string[];
   tokens?: TokenUsage | null;
   contextTokens?: number;
   /** The model that ran the turn (tokens are only comparable per model). */
@@ -216,22 +222,3 @@ export interface Style {
   red: Painter;
   yellow: Painter;
 }
-
-/** A [flag-or-command, description] pair rendered in help tables. */
-export type HelpRow = [string, string];
-
-/** Help metadata for one command. */
-export interface CommandHelpSpec {
-  usage: string;
-  summary?: string;
-  flags?: HelpRow[];
-  globalFlags?: HelpRow[];
-  exitCodes?: HelpRow[];
-  examples?: HelpRow[];
-  /** Environment variables the command reads: name → what it does. */
-  env?: HelpRow[];
-  seeAlso?: string;
-}
-
-/** A subcommand handler. Receives the argv slice after the command name. */
-export type CommandHandler = (argv: string[]) => Promise<void> | void;

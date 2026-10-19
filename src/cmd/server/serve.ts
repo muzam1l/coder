@@ -7,10 +7,10 @@ import type { RunnerKind } from '../../agent/types';
 import { CoderError } from '../../core/dispatch';
 import { coderHome } from '../../core/state';
 import type { ServeDetails } from '../../server/serve';
-import { formatHints, outStyle } from '../../tui/output';
+import { outStyle } from '../../tui/output';
 import { openUrl } from '../../tui/prompt';
-import { baseOptions, flag, str } from '../../utils/args';
-import { command } from '../../cli';
+import { arg, flag, str } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 
 function printServe(result: ServeDetails): void {
   const s = outStyle;
@@ -44,40 +44,29 @@ function printServe(result: ServeDetails): void {
         `\n  Cache migration failed: ${error instanceof Error ? error.message : String(error)}\n`,
       ),
     );
-
-  if (result.mode === 'memory')
-    process.stdout.write(
-      `\n${formatHints([`the CLI reaches this server with its token in ADMIN_TOKEN: coder task list --server ${result.publicUrl}`], s)}\n`,
-    );
-  if (result.dashboard) {
-    const opened = process.stdout.isTTY && openUrl(result.dashboard);
-    process.stdout.write(
-      opened
-        ? `\nOpening the dashboard in your browser. If it doesn't open, go to:\n  ${result.dashboard}\n`
-        : `\n  ${s.light('dashboard')}  ${result.dashboard}\n`,
-    );
-  }
 }
 
 export const commandServerServe = command({
-  name: 'server serve',
-  help: {
-    usage:
-      'coder server serve [--port <n>] [--host <address>] [--memory] [--runner <name>] [--json] [--cwd <dir>]',
-    summary:
-      "Run the Coder server on Bun: the address platforms deliver events to, the dashboard, and the worker that runs tasks. With DATABASE_URL it is a full server with sign-in and workspaces. Without one it is the dashboard for this machine's CLI: its config, agents, tasks and engine logins, on loopback only. --memory makes a throwaway test server that keeps everything in memory. Configured through the environment; every variable is in coder docs self-host.",
-    flags: [
-      [
-        '--port <n>',
-        'listen port (default: PORT, else the port in a localhost PUBLIC_URL, else 8787)',
-      ],
-      [
-        '--host <address>',
-        'listen address (default: HOST, else 127.0.0.1 without a database, else every interface)',
-      ],
-      ['--memory', 'a throwaway test server: everything in memory, no sign-in, admin token only'],
-      ['--runner <name>', 'local, local-docker, vercel-sandbox, github-actions, or http'],
-    ],
+  name: 'serve',
+  description: 'run the server',
+  usage:
+    "Run the Coder server on Bun: the address platforms deliver events to, the dashboard, and the worker that runs tasks. With DATABASE_URL it is a full server with sign-in and workspaces. Without one it is the dashboard for this machine's CLI: its config, agents, tasks and engine logins, on loopback only. --memory makes a throwaway test server that keeps everything in memory. Configured through the environment; every variable is in coder docs self-host.",
+  access: 'write',
+  args: {
+    port: arg(
+      z.optional(z.coerce.number().check(z.int(), z.positive())),
+      'listen port (default: PORT, else the port in a localhost PUBLIC_URL, else 8787)',
+      '<n>',
+    ),
+    host: str(
+      'listen address (default: HOST, else 127.0.0.1 without a database, else every interface)',
+      '<address>',
+    ),
+    memory: flag('a throwaway test server: everything in memory, no sign-in, admin token only'),
+    runner: str('local, local-docker, vercel-sandbox, github-actions, or http', '<name>'),
+  },
+  mcp: false,
+  cli: {
     env: [
       [
         'PUBLIC_URL',
@@ -114,22 +103,9 @@ export const commandServerServe = command({
       ['SERVER_NAME', 'what the dashboard calls this server (default Coder)'],
     ],
     examples: [
-      [
-        'PUBLIC_URL=https://abc.ngrok.app coder server serve',
-        'receive GitHub and Slack events through a tunnel; the tunnel serves only their webhooks and callbacks',
-      ],
-      [
-        'PUBLIC_URL=https://agents.example.com DATABASE_URL=postgres://... coder server serve',
-        'on your own host, backed by Postgres',
-      ],
+      'PUBLIC_URL=https://abc.ngrok.app coder server serve  # receive GitHub and Slack events through a tunnel; the tunnel serves only their webhooks and callbacks',
+      'PUBLIC_URL=https://agents.example.com DATABASE_URL=postgres://... coder server serve  # on your own host, backed by Postgres',
     ],
-  },
-  options: {
-    ...baseOptions,
-    port: z.optional(z.coerce.number().check(z.int(), z.positive())),
-    host: str,
-    runner: str,
-    memory: flag,
   },
   async run({ options, cwd }) {
     const { rerunUnderBun } = await import('../../server/env');
@@ -166,5 +142,22 @@ export const commandServerServe = command({
     ...(result.mintedToken ? { adminToken: result.mintedToken } : {}),
     warnings: result.warnings,
   }),
+  next: ({ result }) =>
+    result.mode === 'memory'
+      ? nextSteps([
+          `the CLI reaches this server with its token in ADMIN_TOKEN: coder task list --server ${result.publicUrl}`,
+        ])
+      : [],
   print: printServe,
+  afterNext(result) {
+    const s = outStyle;
+    if (result.dashboard) {
+      const opened = process.stdout.isTTY && openUrl(result.dashboard);
+      process.stdout.write(
+        opened
+          ? `\nOpening the dashboard in your browser. If it doesn't open, go to:\n  ${result.dashboard}\n`
+          : `\n  ${s.light('dashboard')}  ${result.dashboard}\n`,
+      );
+    }
+  },
 });

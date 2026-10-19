@@ -94,7 +94,12 @@ export async function startCodexControlServer(
     if (closing) throw controlError('Codex owner endpoint is shutting down.', true);
     const validated = validateOwnerRequest(request, request.id, threadId, turnId);
     try {
-      return await client.request(validated.method, validated.params);
+      const result = await client.request(validated.method, validated.params);
+      // An interrupt leaves the turn's commands running as background terminals.
+      if (validated.method === 'turn/interrupt')
+        await client.request('thread/backgroundTerminals/clean', { threadId });
+
+      return result;
     } catch (error) {
       throw controlError(
         error instanceof Error ? error.message : String(error),

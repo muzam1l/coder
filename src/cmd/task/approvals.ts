@@ -1,30 +1,25 @@
-/** `coder task approvals [id]`: pending approvals, or one task's approvals and their answers. */
+/** `coder task approvals [id]`: pending approvals across tasks or for one task. */
 import process from 'node:process';
 
 import { ageMs } from '../../core/state';
 import type { ApprovalRow } from '../../core/task';
-import { formatAge, formatHints, outStyle, renderTable } from '../../tui/output';
-import { baseOptions, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { formatAge, outStyle, renderTable } from '../../tui/output';
+import { serverOptions, str } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 
-/** One task's approvals and whether each was answered. */
+/** One task's pending approvals. */
 function printTaskApprovals(
   taskId: string,
   items: Array<{ id: string; summary: string; answered?: string | null }>,
 ): void {
   const s = outStyle;
   if (!items.length)
-    return void process.stdout.write(`${s.dim(`No approvals for task ${taskId}.`)}\n`);
+    return void process.stdout.write(`${s.dim(`No pending approvals for task ${taskId}.`)}\n`);
   for (const item of items) {
     const state = item.answered ?? 'pending';
     process.stdout.write(
       `${s.cyan(item.id)}  ${state.padEnd(8)} ${s.dim(String(item.summary ?? ''))}\n`,
     );
-  }
-  const pending = items.filter(item => !item.answered);
-  if (pending.length) {
-    const ref = pending.length === 1 ? pending[0]!.id : '<approval-id>';
-    process.stdout.write(`\n${formatHints([`Answer: coder task approve ${ref} [--deny]`], s)}\n`);
   }
 }
 
@@ -33,10 +28,7 @@ function printPendingApprovals(
   rows: Array<{ id: string; taskId: string; summary: string; createdAt?: string }>,
 ): void {
   const s = outStyle;
-  if (!rows.length)
-    return void process.stdout.write(
-      `${s.dim('No pending approvals.')}\n\n${formatHints(['Check tasks: coder task list'], s)}\n`,
-    );
+  if (!rows.length) return void process.stdout.write(`${s.dim('No pending approvals.')}\n`);
   process.stdout.write(
     `${renderTable(
       [
@@ -53,23 +45,20 @@ function printPendingApprovals(
       s,
     )}\n`,
   );
-  const ref = rows.length === 1 ? rows[0]!.id : '<approval-id>';
-  process.stdout.write(`\n${formatHints([`Answer: coder task approve ${ref} [--deny]`], s)}\n`);
 }
 
 export const commandApprovals = command({
-  name: 'task approvals',
-  help: {
-    usage: 'coder task approvals [task-id] [--server [url]]',
-    summary:
-      "Without a task id: pending approvals across all tasks. With one: that task's\npermission escalations and how each was answered.",
-    flags: [SERVER_FLAG],
-  },
-  options: { ...baseOptions, ...serverOptions },
-  args: 1,
+  name: 'approvals',
+  description: 'pending approvals (all tasks, or one)',
+  usage:
+    'List only pending approvals across all tasks, or for one task. Answered approvals stay in the task log.',
+  access: 'read',
+  args: { 'task-id': str('one task (default: pending approvals of every task)'), ...serverOptions },
+  cli: { positional: ['task-id'] },
   run: async ({ options, args: [id] }) => {
     const { tasks } = await import('../../core/task');
-    return tasks.approvals(id, { ...options, organization: options.workspace });
+    const rows = await tasks.approvals(id, { ...options, organization: options.workspace });
+    return rows.filter(row => row.answered == null);
   },
   json: (rows, { options, args: [id] }) =>
     options.server === undefined && id
@@ -82,15 +71,21 @@ export const commandApprovals = command({
             createdAt,
           }))
         : rows,
+  next({ result: rows, args }) {
+    if (args.server !== undefined)
+      return rows.length ? [] : nextSteps(['Check tasks: coder task list']);
+    const pending = rows;
+    if (!pending.length) return args['task-id'] ? [] : nextSteps(['Check tasks: coder task list']);
+    const ref = pending.length === 1 ? pending[0]!.id : '<approval-id>';
+    return nextSteps([`Answer: coder task approve ${ref} [--deny]`]);
+  },
   print(rows, { options, args: [id] }) {
     if (options.server === undefined)
       return id
         ? printTaskApprovals(id, rows as ApprovalRow[])
         : printPendingApprovals(rows as ApprovalRow[]);
     if (!rows.length)
-      return void process.stdout.write(
-        `${outStyle.dim('No pending approvals.')}\n\n${formatHints(['Check tasks: coder task list'], outStyle)}\n`,
-      );
+      return void process.stdout.write(`${outStyle.dim('No pending approvals.')}\n`);
     for (const row of rows) process.stdout.write(`${row.taskId}  ${JSON.stringify(row)}\n`);
   },
 });

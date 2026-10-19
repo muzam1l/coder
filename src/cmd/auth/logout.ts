@@ -2,18 +2,19 @@
 import process from 'node:process';
 
 import { flag, optStr } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { command } from '../../cli';
 import { ownHint } from './login';
 
 export const commandLogout = command({
-  name: 'auth logout',
-  globalFlags: { cwd: false },
-  help: {
-    usage: 'coder auth logout [--server [url]] [--json]',
-    summary: 'Revoke the saved session for that server at Wular Auth and forget its tokens.',
-    flags: [SERVER_FLAG],
+  name: 'logout',
+  description: 'sign out and forget the saved session',
+  usage: 'Revoke the saved session for that server at Wular Auth and forget its tokens.',
+  access: 'write',
+  args: {
+    server: optStr('sign out of this Coder server (default: the hosted one)', '[url]'),
+    yes: flag('connect to a server used for the first time without asking'),
   },
-  options: { json: flag, server: optStr, yes: flag },
+  globalFlags: { cwd: false },
   run: async ({ options }) => {
     const { sessions } = await import('../../client/auth/sign-in');
     return sessions.logout(options).catch(ownHint);

@@ -43,6 +43,8 @@ npm install -g @wular/coder
 | Claude Code                                                    | `coder setup-host claude`<br>or, inside Claude Code:<br>`/plugin marketplace add muzam1l/coder`<br>`/plugin install coder@coder-plugins`<br>`/coder:setup` |
 | Codex, Pi, OpenCode and any host that reads `~/.agents/skills` | `coder setup-host agents`                                                                                                                                  |
 
+`coder setup-host` adds Coder's MCP server as well; more in [setup-host](docs/cli/index.md).
+
 **Connect a model.** Coder uses the engines you're signed in to, or your own model ([Models](docs/models.md)).
 
 ```bash
@@ -121,7 +123,7 @@ export default await pipeline(
 );
 ```
 
-[CLI](docs/cli.md) · [Flows](docs/flows.md) · [Review](docs/review.md) · [SDK](docs/sdk.md)
+[CLI](docs/cli/index.md) · [Flows](docs/flows.md) · [Review](docs/review.md) · [SDK](docs/sdk.md)
 
 ## Self-host
 

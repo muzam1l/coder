@@ -10,6 +10,7 @@ import { processTiming } from '../../utils/process';
 import { AGENT_TASK_PREFIX, execAgent, agentTaskOptions, threadReply } from '../../agent/exec';
 import type { AgentTask, TaskContext, TaskSource } from '../../agent/types';
 import { defaultAgent } from '../../agent/load';
+import { pendingCall } from '../../core/task/async';
 import type { TaskTurn } from '../../client/types';
 import type { TaskLogLine, TaskStatus, UsageRecord } from '../store/types';
 import { deleteTask, stopTask, askTask, steerTask, recentTasks } from '../../core/task/actions';
@@ -48,7 +49,7 @@ import {
 } from '../../core/state';
 import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Task, type Availability } from '../../core/types';
 import { SKIPPED } from '../../core/defaults';
-import { eventJsons } from '../../core/event-prompt';
+import { eventJsons } from '../../agent/context/turn';
 import { readFlowRecord } from '../../flow/runs';
 import { stopRun, stopFlowTasks } from '../../flow/executor';
 import { applyTaskMessage } from '../../runner/task';
@@ -662,10 +663,11 @@ function watchCompletion(
               if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
             }
             const task = reconcileTask(saved.cwd, found, startMs);
-            // A completed turn's worker may still run queued steers or a summary.
+            // A completed turn's worker may still run queued steers, a summary or a review's result.
             const ended =
               !ACTIVE_STATUSES.includes(task.status) &&
-              !(task.pid && pidIsOurWorker(task.pid, task, startMs));
+              !(task.pid && pidIsOurWorker(task.pid, task, startMs)) &&
+              !pendingCall(resolveTaskDir(saved.cwd, id));
             const done =
               ended && (task.status !== 'completed' || turns.length > (saved.turns ?? 0));
             if (done) {

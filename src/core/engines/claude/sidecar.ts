@@ -13,7 +13,7 @@ import { spawn } from 'node:child_process';
 
 import { CLAUDE_SIDECAR_FLAGS } from '../../config';
 import { readJsonFile, withFileLock, writeJsonFileAtomic } from '../../../utils/fsx';
-import { approvalActionPrompt, approvalReviewerPrompt } from '../../prompts';
+import { approvalActionPrompt, approvalReviewerPrompt } from '../../task/context/prompts';
 
 export interface SidecarAsk {
   /** The task's goal, included in the seed turn. */

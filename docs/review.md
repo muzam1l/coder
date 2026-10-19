@@ -39,3 +39,7 @@ Changed submodules are reviewed file by file under their path. Uninitialized one
 ## Exit codes
 
 The command exits `0` when the review completes, even with findings, `1` when the diff, review, or posting fails, `3` when no engine starts, and `4` while a task awaits approval.
+
+## From a task
+
+Every task has a `review` tool. It reviews the task's uncommitted changes in the background, or those since `base`, and sends the findings to the task as a message. One review runs at a time, at most 5 per task.

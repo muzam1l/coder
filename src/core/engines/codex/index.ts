@@ -30,7 +30,6 @@ import {
   type TurnCaptureState,
   type ProgressReporter,
   buildTaskThreadName,
-  collectTouchedFiles,
   collectTokenUsage,
   emitProgress,
   captureTurn,
@@ -81,23 +80,6 @@ export function codexSandboxPolicy(
 ): Record<string, unknown> | null {
   if (sandbox !== 'workspace-write' || !writableRoots.length) return null;
   return { type: 'workspaceWrite', writableRoots, networkAccess: networkAccess ?? false };
-}
-
-const READ_ONLY_PROFILE = 'coder_read_only';
-
-/** Per-thread permission profile: read-only everywhere except the given roots, or null when none apply. */
-export function codexReadOnlyProfile(
-  sandbox: string | undefined,
-  writableRoots: string[] = [],
-): Record<string, unknown> | null {
-  if ((sandbox ?? 'read-only') !== 'read-only' || !writableRoots.length) return null;
-  return {
-    default_permissions: READ_ONLY_PROFILE,
-    [`permissions.${READ_ONLY_PROFILE}`]: {
-      extends: ':read-only',
-      filesystem: Object.fromEntries(writableRoots.map(root => [root, 'write'])),
-    },
-  };
 }
 
 /** Thread-scoped MCP servers, with Codex's per-server tool allowlists. */
@@ -418,11 +400,11 @@ export async function runTurn(
     process.env[MACHINE_SANDBOX_ENV] === '1' && (options.sandbox ?? 'read-only') !== 'read-only'
       ? 'danger-full-access'
       : options.sandbox;
-  const profile = codexReadOnlyProfile(mode, options.writableRoots);
-  // A permission profile replaces the sandbox mode; codex rejects the two together.
-  const sandbox = profile ? {} : { sandbox: mode ?? 'read-only' };
-  const merged = { ...(options.configOverrides ?? {}), ...profile };
-  const configOverrides = Object.keys(merged).length ? merged : null;
+  const sandbox = { sandbox: mode ?? 'read-only' };
+  const configOverrides =
+    options.configOverrides && Object.keys(options.configOverrides).length
+      ? options.configOverrides
+      : null;
   const sandboxPolicy = codexSandboxPolicy(mode, options.networkAccess, options.writableRoots);
 
   const turnOn = async (client: AppServerClient): Promise<TurnResult> => {
@@ -572,7 +554,6 @@ export async function runTurn(
       error: turnState.error ?? (turnState.finalTurn?.error as TurnCaptureState['error']) ?? null,
       stderr: cleanCodexStderr(client.stderr),
       fileChanges: turnState.fileChanges,
-      touchedFiles: collectTouchedFiles(turnState.fileChanges),
       tokens: collectTokenUsage(turnState),
       contextTokens: turnState.contextTokens,
       model: options.model ?? null,
@@ -619,7 +600,8 @@ export async function runTurn(
       return retry();
     });
     const didNothing =
-      !result.touchedFiles?.length && !(result.commandExecutions as unknown[]).length;
+      !(result.fileChanges as unknown[] | undefined)?.length &&
+      !(result.commandExecutions as unknown[]).length;
     if (!retried && didNothing && isStaleAuthError(result.error?.message)) {
       result = await retry();
     }

@@ -2,9 +2,8 @@
 import process from 'node:process';
 
 import type { agents } from '../../../agent';
-import { formatHints, outStyle, renderTable } from '../../../tui/output';
-import { flag } from '../../../utils/args';
-import { command } from '../../../cli';
+import { outStyle, renderTable } from '../../../tui/output';
+import { command, nextSteps } from '../../../cli';
 
 function printIntegrations(rows: ReturnType<typeof agents.integrations.list>): void {
   const s = outStyle;
@@ -20,23 +19,22 @@ function printIntegrations(rows: ReturnType<typeof agents.integrations.list>): v
       { style: s, border: true },
     ),
   );
-  process.stdout.write(
-    `\n${formatHints(['Event descriptions and the tools each preset allows: coder agent integrations show <id>'], s)}\n`,
-  );
 }
 
 export const commandIntegrationsList = command({
-  name: 'agent integrations list',
+  name: 'list',
+  description: 'list integrations with their events and tools',
+  usage:
+    'One row per integration: its id, the events an agent can wire, and every tool it offers; `show` splits the tools by preset.',
+  access: 'read',
   globalFlags: { cwd: false },
-  help: {
-    usage: 'coder agent integrations list [--json]',
-    summary:
-      'One row per integration: its id, the events an agent can wire, and every tool it offers; `show` splits the tools by preset.',
-  },
-  options: { json: flag },
   run: async () => {
     const { agents } = await import('../../../agent');
     return agents.integrations.list();
   },
+  next: () =>
+    nextSteps([
+      'Event descriptions and the tools each preset allows: coder agent integrations show <id>',
+    ]),
   print: printIntegrations,
 });

@@ -2,18 +2,16 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { serverOptions, str } from '../../utils/args';
+import { command } from '../../cli';
 
 export const commandStop = command({
-  name: 'task stop',
-  help: {
-    usage: 'coder task stop <task-id> [--server [url]]',
-    summary: 'Interrupt a running task and mark it cancelled.',
-    flags: [SERVER_FLAG],
-  },
-  options: { ...baseOptions, ...serverOptions },
-  args: 1,
+  name: 'stop',
+  description: 'interrupt a running task',
+  usage: 'Interrupt a running task and mark it cancelled.',
+  access: 'write',
+  args: { 'task-id': str('the task to stop'), ...serverOptions },
+  cli: { positional: ['task-id'] },
   run: async ({ options, args: [id] }) => {
     const { tasks } = await import('../../core/task');
     return tasks.stop(id, { ...options, organization: options.workspace });

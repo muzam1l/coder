@@ -2,19 +2,18 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import * as z from 'zod/mini';
+
+import { serverOptions } from '../../utils/args';
+import { command } from '../../cli';
 
 export const commandConnectionRemove = command({
-  name: 'connection remove',
-  helpName: 'connection rm',
-  help: {
-    usage: 'coder connection rm <name> [--server [url]] [--json]',
-    summary: 'Remove a connection. The credential an API key connection reads stays.',
-    flags: [SERVER_FLAG],
-  },
-  options: { ...baseOptions, ...serverOptions },
-  args: 1,
+  name: 'rm',
+  description: 'remove a connection',
+  usage: 'Remove a connection. The credential an API key connection reads stays.',
+  access: 'write',
+  args: { name: z.string().check(z.describe('the connection')), ...serverOptions },
+  cli: { positional: ['name'] },
   run: async ({ options, args: [name], cwd }) => {
     const { connection } = await import('../../core/connection');
     return connection.remove(name, { ...options, cwd });

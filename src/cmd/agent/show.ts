@@ -4,8 +4,8 @@ import process from 'node:process';
 
 import type { agents } from '../../agent';
 import { outStyle, renderTable } from '../../tui/output';
-import { baseOptions, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { serverOptions, str } from '../../utils/args';
+import { command } from '../../cli';
 import { isLocal } from './list';
 
 type AgentDetail = Awaited<ReturnType<typeof agents.show>>;
@@ -72,16 +72,16 @@ function printAgentDetail(detail: ReturnType<typeof agentDetail>): void {
 }
 
 export const commandAgentShow = command({
-  name: 'agent show',
-  help: {
-    usage: 'coder agent show <id> [--server [url]] [--json] [--cwd <dir>]',
-    summary:
-      'Describe one agent as it will run here, or its active version on a server: its settings, access and per-integration events.',
-    flags: [SERVER_FLAG],
-    examples: [['coder agent show coder', 'what the built-in agent listens to and may do']],
+  name: 'show',
+  description: 'one agent in full: settings, integrations, events, tools',
+  usage:
+    'Describe one agent as it will run here, or its active version on a server: its settings, access and per-integration events.',
+  access: 'read',
+  args: { id: str('the agent'), ...serverOptions },
+  cli: {
+    positional: ['id'],
+    examples: ['coder agent show coder  # what the built-in agent listens to and may do'],
   },
-  options: { ...baseOptions, ...serverOptions },
-  args: 1,
   run: async ({ options, args: [id], cwd }) => {
     const { agents } = await import('../../agent');
     return agents.show(id, { ...options, cwd, organization: options.workspace });

@@ -1,6 +1,6 @@
 # MCP
 
-Give tasks tools of your own: an MCP server is a [connection](agents/index.md#connections), or an entry under `mcp` in a config file you edit, attached to a task by name. Nothing from a config file attaches unless asked, so the default run stays lean. `--mcp all` also loads your engine's own MCP servers and connectors.
+Give tasks tools of your own: an MCP server is a [connection](agents/index.md#connections), or an entry under `mcp` in a config file you edit, attached to a task by name. Nothing from a config file attaches unless asked, so the default run stays lean. `--mcp all` also loads your engine's own MCP servers and connectors. To use Coder itself as an MCP server in your host, see [In your local harness](../README.md#in-your-local-harness).
 
 ```sh
 coder connection add docs --access write -- npx -y docs-mcp           # stdio server: the command after --
@@ -32,12 +32,12 @@ Entries in `.coder/config.json`, `~/.coder/config.json` and an agent's `agent.js
 }
 ```
 
-| Key                      | Purpose                                                             |
-| ------------------------ | ------------------------------------------------------------------- |
-| `command`, `args`, `env` | Stdio server to spawn                                               |
-| `url`, `headers`, `type` | Remote server; `type` is `http` (streamable HTTP, default) or `sse` |
-| `tools`                  | Allowlist of tool names; omit for every tool the server offers      |
-| `description`            | What the server is for                                              |
+| Key                      | Purpose                                                        |
+| ------------------------ | -------------------------------------------------------------- |
+| `command`, `args`, `env` | Stdio server to spawn                                          |
+| `url`, `headers`         | Remote server, streamable HTTP                                 |
+| `tools`                  | Allowlist of tool names; omit for every tool the server offers |
+| `description`            | What the server is for                                         |
 
 Repository servers need local approval with `coder connection approve <name>`; `coder connection list` shows which are approved. `${VAR}` and `${VAR:-default}` expand from the environment, except in a repository remote entry's URL and headers, where they stay literal; use a connection for credentials.
 
@@ -51,4 +51,4 @@ coder run --mcp all "..."
 coder run --mcp '[{"name":"tmp","command":"node","args":["server.js"]}]' "..."
 ```
 
-Claude gets the servers through `--mcp-config` with the allowlist as `mcp__<name>__<tool>`, and finds their tools with its tool search. Codex gets one `coder` server whose `find_tools` and `call_tool` reach every server on demand; a server starts on its first use. Agents attach their integration tools the same way, so an agent never needs an entry here.
+A server's `tools` list limits what a task can call; read-only tasks get only the tools a server marks read-only. Agents attach their integration tools the same way, so an agent never needs an entry here.

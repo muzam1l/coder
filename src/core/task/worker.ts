@@ -37,10 +37,11 @@ import { detectWireApi } from '../engines/codex/wire';
 import { resolveMcpServers } from '../dispatch';
 import { injectedConnectionEnvironment, redactConnectionSecrets } from '../connections';
 import type { Task, ProgressUpdate, TurnResult } from '../types';
-import { agentMailboxDir, MAILBOX_ENV } from '../mailbox';
-import { gitToolEnvironment, hubbedToolServers, turnToolServers } from '../../agent/mcp';
+import { gitToolEnvironment } from '../../agent/mcp';
+import { turnToolServers } from './mcp';
 import { recentExchanges } from '../engines/history';
-import { rolloverPrompt, SUMMARY_REQUEST } from '../prompts';
+import { taskSystemPrompt } from './context/system';
+import { rolloverPrompt, SUMMARY_REQUEST } from '../../agent/context/turn';
 
 // Agent tasks serve several people in one workspace, so the engine keeps no memories between them.
 const AGENT_MEMORY_OFF = {
@@ -55,6 +56,36 @@ type TurnControls = {
   steerable?: boolean;
   onResult?: (result: TurnResult) => void;
 };
+
+/** A turn's MCP servers, each narrowed to the tools it may call, and the system prompt that lists them. */
+async function turnTools(cwd: string, task: Task, onProgress: (update: ProgressUpdate) => void) {
+  const onWarning = (message: string) => onProgress({ kind: 'warning', message });
+  const access = task.promptParts?.access ?? (task.permissions === 'read-only' ? 'read' : 'write');
+  const tools = await turnToolServers(
+    task,
+    resolveTaskDir(cwd, task.id),
+    resolveMcpServers(task.mcp, process.env, undefined, { onWarning }),
+    { access, onWarning },
+  );
+  const systemPrompt = task.promptParts
+    ? taskSystemPrompt({
+        ...task.promptParts,
+        tools: tools.tools,
+        ...(tools.lines ? { servers: tools.lines } : {}),
+      })
+    : task.systemPrompt;
+
+  return { ...tools, systemPrompt };
+}
+
+/** Tells the parent, if it still listens; a parent that left meanwhile is no error. */
+function notifyParent(message: 'result' | 'settled') {
+  if (!process.connected) return;
+  process.send?.(message, undefined, undefined, error => {
+    if (error && (error as NodeJS.ErrnoException).code !== 'EPIPE')
+      process.stderr.write(`coder worker: ${error.message}\n`);
+  });
+}
 
 function taskPrompt(task: Task): string {
   // Resumed turns run currentPrompt; task.prompt stays the original task text.
@@ -249,6 +280,7 @@ async function executeCodexTurn(
   const taskDir = resolveTaskDir(cwd, task.id);
   const config = loadConfig(cwd);
   const onProgress = buildProgressLogger(cwd, task.id, { echo });
+  const tools = await turnTools(cwd, task, onProgress);
 
   const mode = PERMISSION_MODES[task.permissions ?? 'auto'] ?? PERMISSION_MODES.auto;
   const onApprovalRequest =
@@ -296,26 +328,18 @@ async function executeCodexTurn(
     ? await startChatBridge(customEntry, customEntry.wireApi ?? 'chat')
     : null;
   const custom = resolveCustomModel(config, task.model, bridge ?? undefined);
-  const mailbox = agentMailboxDir(cwd, task);
   try {
     const result = await runTurn(cwd, {
       availabilityChecked: process.env.CODER_ENGINE_CHECKED === '1',
       prompt: taskPrompt(task),
-      developerInstructions: task.systemPrompt,
+      developerInstructions: tools.systemPrompt,
       outputSchema: task.outputSchema,
       model: custom?.model ?? resolveCodexModel(task.model),
       modelProvider: custom?.modelProvider ?? null,
-      // The mailbox path reaches the sandboxed shell per thread, not through the shared app-server's env.
+      // The env reaches the sandboxed shell per thread, not through the shared app-server's env.
       configOverrides: {
         ...custom?.configOverrides,
-        ...(mailbox || Object.keys(env).length
-          ? {
-              'shell_environment_policy.set': {
-                ...env,
-                ...(mailbox ? { [MAILBOX_ENV]: mailbox } : {}),
-              },
-            }
-          : {}),
+        ...(Object.keys(env).length ? { 'shell_environment_policy.set': env } : {}),
         ...(task.agentId ? AGENT_MEMORY_OFF.codex : {}),
       },
       effort: task.effort,
@@ -326,23 +350,10 @@ async function executeCodexTurn(
         config.engines.codex?.network,
       ),
       approvalsReviewer: mode.approvalMode === 'auto' ? 'auto_review' : null,
-      mcpServers: hubbedToolServers(
-        cwd,
-        task.id,
-        turnToolServers(
-          task,
-          taskDir,
-          resolveMcpServers(task.mcp, process.env, undefined, {
-            onWarning: message => onProgress({ kind: 'warning', message }),
-          }),
-        ),
-      ),
+      mcpServers: tools.servers,
       nativeMcp: task.nativeMcp ?? false,
-      // Read-only: the mailbox is the one writable path; extra directories stay read-only.
-      writableRoots: [
-        ...(mode.sandbox === 'read-only' ? [] : (task.addDirs ?? [])),
-        ...(mailbox ? [mailbox] : []),
-      ],
+      // Read-only: extra directories stay read-only.
+      writableRoots: mode.sandbox === 'read-only' ? [] : (task.addDirs ?? []),
       onApprovalRequest,
       onHeartbeat: buildHeartbeat(cwd, task.id),
       onResult,
@@ -385,18 +396,14 @@ async function executeClaudeTurn(
   const taskDir = resolveTaskDir(cwd, task.id);
   const config = loadConfig(cwd);
   const onProgress = buildProgressLogger(cwd, task.id, { echo });
+  const tools = await turnTools(cwd, task, onProgress);
 
   const mode = PERMISSION_MODES[task.permissions ?? 'auto'] ?? PERMISSION_MODES.auto;
-  const mailbox = agentMailboxDir(cwd, task);
   try {
     const result = await runClaudeTurn(cwd, {
-      env: {
-        ...env,
-        ...(mailbox ? { [MAILBOX_ENV]: mailbox } : {}),
-        ...(task.agentId ? AGENT_MEMORY_OFF.claude : {}),
-      },
+      env: { ...env, ...(task.agentId ? AGENT_MEMORY_OFF.claude : {}) },
       prompt: taskPrompt(task),
-      systemPrompt: task.systemPrompt,
+      systemPrompt: tools.systemPrompt,
       excludeDynamicSections: task.conversation,
       settingSources:
         task.agentId && task.source && !['cli', 'dashboard', 'schedule'].includes(task.source)
@@ -409,14 +416,8 @@ async function executeClaudeTurn(
       approvalTaskId: mode.approvalMode === 'auto' ? task.id : null,
       allowedNetworkHosts: config.approvals.allowedNetworkHosts,
       additionalDirectories: task.addDirs,
-      ...(mailbox ? { writableDirectories: [mailbox] } : {}),
-      mcpServers: turnToolServers(
-        task,
-        taskDir,
-        resolveMcpServers(task.mcp, process.env, undefined, {
-          onWarning: message => onProgress({ kind: 'warning', message }),
-        }),
-      ),
+      mcpServers: tools.servers,
+      deniedMcpTools: tools.denied,
       nativeMcp: task.nativeMcp ?? false,
       promptCacheTtl:
         task.conversation && (env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY)
@@ -477,7 +478,7 @@ function recordTurnResult(
   );
 
   processTiming('worker.result.recorded', { taskId: task.id, finalized: false });
-  if (process.connected) process.send?.('result');
+  notifyParent('result');
   return entry.at;
 }
 
@@ -516,7 +517,7 @@ export async function drainSteerQueue(cwd: string, taskId: string): Promise<void
           : claimSteers(cwd, taskId);
       if (!queued.length) {
         writeTask(cwd, taskId, { steerClosed: true, steerEndpoint: null });
-        if (process.connected) process.send?.('settled');
+        notifyParent('settled');
       }
       return queued;
     });
@@ -540,12 +541,8 @@ export async function drainSteerQueue(cwd: string, taskId: string): Promise<void
   }
 }
 
-/** The detached worker: mark the task running, run its turn and any steered follow-ups; `startMailbox` serves the agent mailbox meanwhile. */
-export async function runWorker(
-  cwd: string,
-  task: Task,
-  startMailbox: (cwd: string, task: Task) => () => void,
-): Promise<void> {
+/** The detached worker: mark the task running, run its turn and any steered follow-ups. */
+export async function runWorker(cwd: string, task: Task): Promise<void> {
   if (task.dispatchId && !task.resumedAt) {
     try {
       fs.writeFileSync(path.join(resolveTaskDir(cwd, task.id), `start-${task.dispatchId}`), '', {
@@ -557,10 +554,8 @@ export async function runWorker(
     }
   }
   writeTask(cwd, task.id, { status: 'running', pid: process.pid, steerClosed: false });
-  let stopMailbox = () => {};
   let inbox: { close(): Promise<void> } | undefined;
   try {
-    stopMailbox = startMailbox(cwd, task);
     if (task.name?.startsWith('agent:')) {
       const { startInboxControl, applyTaskMessage } = await import('../../runner/task');
       inbox = startInboxControl(resolveTaskDir(cwd, task.id), task.name.slice(6), entry =>
@@ -595,10 +590,9 @@ export async function runWorker(
     await withTaskAdmission(cwd, task.id, () => {
       if (loadTask(cwd, task.id)?.pid === process.pid) {
         writeTask(cwd, task.id, { steerClosed: true, steerEndpoint: null });
-        if (process.connected) process.send?.('settled');
+        notifyParent('settled');
       }
     });
-    stopMailbox();
     await inbox?.close();
   }
 }

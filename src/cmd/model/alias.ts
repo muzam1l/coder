@@ -1,22 +1,27 @@
 /** `coder model alias`: a named spec for any model name. */
 import process from 'node:process';
 
-import { models } from '../../core/models';
 import { outStyle } from '../../tui/output';
+import { str } from '../../utils/args';
 import { command } from '../../cli';
-import { modelOptions } from './add';
+import { workspaceFlag } from './add';
 
 export const commandModelAlias = command({
-  name: 'model alias',
-  help: {
-    usage: 'coder model alias <name> <spec> [--workspace]',
-    summary:
-      'Save an alias for an engine spec, e.g. fast -> codex:luna. An alias may reuse a\nbuilt-in name to override it.',
-    flags: [['--workspace', 'target <repo>/.coder/config.json instead of the user file']],
+  name: 'alias',
+  description: 'name a spec, e.g. fast codex:luna',
+  usage:
+    'Save an alias for an engine spec, e.g. fast -> codex:luna. An alias may reuse a\nbuilt-in name to override it.',
+  access: 'write',
+  args: {
+    name: str('the alias'),
+    spec: str('the engine spec, such as codex:luna'),
+    workspace: workspaceFlag,
   },
-  options: modelOptions,
-  args: 2,
-  run: ({ options, args: [name, spec], cwd }) => models.alias(name, spec, { ...options, cwd }),
+  cli: { positional: ['name', 'spec'] },
+  run: async ({ options, args: [name, spec], cwd }) => {
+    const { models } = await import('../../core/models');
+    return models.alias(name, spec, { ...options, cwd });
+  },
   print: printModelAlias,
 });
 

@@ -1,4 +1,4 @@
-/** One codex turn as the app-server reports it: its items captured into progress lines, touched files, token usage and the final message. */
+/** One codex turn as the app-server reports it: its items captured into progress lines, token usage and the final message. */
 import fs from 'node:fs';
 
 import { shortPath } from '../../../utils/fsx';
@@ -138,18 +138,6 @@ function extractTurnId(message: AppServerMessage): string | null {
     return message.params.turn.id;
   }
   return null;
-}
-
-export function collectTouchedFiles(fileChanges: TurnItem[]): string[] {
-  const paths = new Set<string>();
-  for (const fileChange of fileChanges) {
-    for (const change of fileChange.changes ?? []) {
-      if (change.path) {
-        paths.add(change.path);
-      }
-    }
-  }
-  return [...paths];
 }
 
 function changedLineRanges(diff: string, kind: string): string[] {
@@ -379,8 +367,20 @@ function describeGenericItem(item: TurnItem): ProgressLine {
       ([key, value]) =>
         value != null &&
         ![
-          'id', 'type', 'kind', 'name', 'tool', 'status', 'result', 'results', 'output',
-          'error', 'contentItems', 'success', 'durationMs', 'exitCode',
+          'id',
+          'type',
+          'kind',
+          'name',
+          'tool',
+          'status',
+          'result',
+          'results',
+          'output',
+          'error',
+          'contentItems',
+          'success',
+          'durationMs',
+          'exitCode',
         ].includes(key),
     ),
   );
@@ -484,7 +484,8 @@ function describeCompletedItem(item: TurnItem, cwd?: string): ProgressLine | nul
       };
     case 'mcpToolCall':
       return {
-        message: itemText(item.error ?? item.result) || `${item.server}/${item.tool} ${item.status}`,
+        message:
+          itemText(item.error ?? item.result) || `${item.server}/${item.tool} ${item.status}`,
         phase: 'investigating',
         extra: {
           kind: 'tool-result',
@@ -517,8 +518,10 @@ function describeCompletedItem(item: TurnItem, cwd?: string): ProgressLine | nul
           tool: describeStartedItem(item, cwd)?.extra?.tool,
           durationMs: item.durationMs,
           isError:
-            item.status === 'failed' || item.status === 'declined' ||
-            item.success === false || item.error != null,
+            item.status === 'failed' ||
+            item.status === 'declined' ||
+            item.success === false ||
+            item.error != null,
         },
       };
   }

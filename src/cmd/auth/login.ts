@@ -4,8 +4,8 @@ import process from 'node:process';
 import { CoderError } from '../../core/dispatch';
 import { outStyle } from '../../tui/output';
 import { canPrompt, openUrl, pick } from '../../tui/prompt';
-import { flag, optStr, str } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { flag, serverOptions } from '../../utils/args';
+import { command } from '../../cli';
 
 // Sign-in failures keep their own hint, not the "sign in" one the helper gives a missing session.
 export const ownHint = (error: unknown): never => {
@@ -15,38 +15,40 @@ export const ownHint = (error: unknown): never => {
 };
 
 export const commandLogin = command({
-  name: 'auth login',
+  name: 'login',
+  description: 'sign in through the browser',
+  usage:
+    'Sign in with Wular Auth in your browser. The CLI keeps the tokens in ~/.coder/session.json, and commands that talk to a server then act as you.',
+  access: 'write',
+  args: {
+    ...serverOptions,
+    device: flag('show a code to approve on another device; the default without a local browser'),
+  },
   globalFlags: { cwd: false },
-  help: {
-    usage: 'coder auth login [--server [url]] [--workspace <slug>] [--device] [--json]',
-    summary:
-      'Sign in with Wular Auth in your browser. The CLI keeps the tokens in ~/.coder/session.json, and commands that talk to a server then act as you.',
-    flags: [
-      SERVER_FLAG,
-      ['--device', 'show a code to approve on another device; the default without a local browser'],
-    ],
+  cli: {
     env: [['CODER_SERVER', 'the server to use instead of https://coder.wular.ai']],
     examples: [
-      ['coder auth login', 'sign in to the hosted service'],
-      ['coder auth login --server https://agents.example.com', 'sign in to a self-hosted server'],
+      'coder auth login  # sign in to the hosted service',
+      'coder auth login --server https://agents.example.com  # sign in to a self-hosted server',
     ],
   },
-  options: { json: flag, server: optStr, workspace: str, yes: flag, device: flag },
-  run: async ({ options }) => {
+  run: async ({ options, tool }) => {
     const { hasBrowser, sessions } = await import('../../client/auth/sign-in');
+    // A tool's stdout is the MCP stream.
+    const out = tool ? process.stderr : process.stdout;
     return sessions
       .login({
         server: options.server,
         yes: options.yes,
         device: options.device || !hasBrowser(),
         open: url => {
-          process.stdout.write(
+          out.write(
             `Opening your browser to sign in. If it does not open, visit\n${outStyle.light(url)}\n`,
           );
           openUrl(url);
         },
         onCode: (code, url) =>
-          process.stdout.write(
+          out.write(
             `Confirm this code in your browser: ${outStyle.bold(code)}\n${outStyle.light(url)}\n`,
           ),
         organization: options.workspace,

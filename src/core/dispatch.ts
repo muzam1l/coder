@@ -66,16 +66,10 @@ import {
 } from './types';
 import { listPendingApprovals } from './approvals';
 import { mcpApproved, mcpWarnings } from './mcp';
-import {
-  FALLBACK_INSTRUCTIONS,
-  FALLBACK_NOTE,
-  taskSystemPrompt,
-  type AgentPromptParts,
-  type PromptServer,
-} from './prompts';
+import type { AgentPromptParts } from './task/context/system';
 
 const STARTUP_ERROR_PATTERN =
-  /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|not available|ENOENT/i;
+  /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|not available|\bat capacity\b|ENOENT/i;
 
 // An engine that could not start. A model the account lacks is the caller's
 // choice to fix, not a reason to switch engines.
@@ -485,19 +479,6 @@ export function resolveAddDirs(cwd: string, dirs: string[] = []): string[] {
   return resolved;
 }
 
-/** The servers the prompt lists: every one whose tools load on demand. */
-export function promptServers(servers: McpServerSpec[] = []): PromptServer[] {
-  return servers
-    .filter(server => !server.alwaysLoad && (server.command || server.url))
-    .map(({ name, description, access, connection, url }) => ({
-      name,
-      description:
-        description ??
-        (connection ? `connection ${connection}` : url && URL.canParse(url) ? new URL(url).host : 'MCP server'),
-      ...(access ? { access } : {}),
-    }));
-}
-
 function isSandboxFailure(permissions: string, detail: string): boolean {
   return permissions === 'read-only' && CLAUDE_SANDBOX_UNAVAILABLE_PATTERN.test(detail ?? '');
 }
@@ -656,16 +637,13 @@ async function attemptOnce(
     ...(opts.taskId ? { dispatchId: randomUUID() } : {}),
     name: taskExtras.name ?? null,
     system: opts.system ?? null,
-    systemPrompt: taskSystemPrompt({
+    promptParts: {
       cwd,
       ...opts.agentPrompt,
-      servers: promptServers(opts.mcp),
-      hub: resolved.engine !== 'claude',
       instructions: opts.system ?? undefined,
       conversation: opts.conversation,
-      agent: Boolean(opts.agentId),
       local: process.env.CODER_MCP_MODE !== 'cloud',
-    }),
+    },
     engine: resolved.engine,
     prompt: opts.prompt,
     ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
@@ -744,6 +722,8 @@ async function attemptOnce(
         readTurnResults(cwd, taskId).at(-1)?.status === 0
       )
         break;
+      if (listPendingApprovals(resolveTaskDir(cwd, taskId)).some(approval => !approval.response))
+        break;
       worked = working() || worked;
       if (current.threadId) {
         readyAt ??= Date.now();
@@ -798,8 +778,9 @@ export function buildFallbackPayload(
       action: 'run-native-subagent',
       reason: 'no-engine-available',
       permissions,
-      instructions: FALLBACK_INSTRUCTIONS,
-      note: FALLBACK_NOTE,
+      instructions:
+        'Mention the engine failure to the user, including any limit reset time. If your harness has a native subagent facility, spawn one subagent with fallback.task verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If fallback.permissions is "read-only", append: "Investigate and report without modifying anything." If it is "workspace-write", append: "Never touch anything outside the workspace." Relay its output when it completes. If your harness has no native subagent facility, report the failure and stop; do not implement the task yourself.',
+      note: 'Every coder engine failed to start. Spawn your own native subagent and forward the task verbatim; tell it to never run git write operations (commit, checkout, stash, reset, push, ...) and to honor the permissions.',
       ...(system ? { system } : {}),
       task,
     },
@@ -813,10 +794,9 @@ export function buildFallbackPayload(
  */
 export async function dispatchTask(
   opts: DispatchOptions,
-  // Worker-internal: a task an agent's flow asked for through its mailbox, already capped.
-  internal: { fromMailbox?: boolean; waitForStartup?: boolean; config?: CoderConfig } = {},
+  internal: { waitForStartup?: boolean; config?: CoderConfig } = {},
 ): Promise<DispatchResult> {
-  if (process.env[WORKER_ENV] && !internal.fromMailbox) {
+  if (process.env[WORKER_ENV]) {
     throw new CoderError(
       'nested-dispatch',
       'Nested dispatch is disabled inside a worker; do the work directly.',
@@ -911,15 +891,14 @@ export interface TaskResult {
 }
 
 function nextFallbackEngine(engine: Engine, config: CoderConfig): Engine | undefined {
-  return config.chain.slice(config.chain.indexOf(engine) + 1).find(next =>
-    next !== 'custom' || Object.values(config.models ?? {}).some(isEndpointModel),
-  );
+  return config.chain
+    .slice(config.chain.indexOf(engine) + 1)
+    .find(next => next !== 'custom' || Object.values(config.models ?? {}).some(isEndpointModel));
 }
 
 function turnHasSideEffects(result: TurnResult | null, toolUsed = false): boolean {
   return Boolean(
     toolUsed ||
-    result?.touchedFiles?.length ||
     (result?.fileChanges as unknown[] | undefined)?.length ||
     (result?.commandExecutions as unknown[] | undefined)?.length,
   );

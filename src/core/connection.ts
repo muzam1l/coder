@@ -21,7 +21,6 @@ export interface ConnectionAddOptions extends ConnectionOptions {
   header?: string;
   /** A remote MCP server. */
   url?: string;
-  transport?: 'http' | 'sse';
   /** A stdio MCP server's command line. */
   command?: string[];
   tools?: string[];
@@ -163,7 +162,7 @@ async function input(name: string, opts: ConnectionAddOptions): Promise<Connecti
       ...access,
       ...(auth ? { auth } : {}),
       endpoint: opts.url
-        ? { url: opts.url, ...(opts.transport ? { type: opts.transport } : {}), ...tools }
+        ? { url: opts.url, ...tools }
         : { command, ...(args.length ? { args } : {}), ...tools },
       ...(auth === 'key'
         ? {

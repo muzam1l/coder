@@ -13,9 +13,11 @@ import process from 'node:process';
 
 import type { Socket } from 'node:net';
 
+import { defineCommand } from 'contextjsx';
+import { parse } from 'contextjsx/emit';
 import * as z from 'zod/mini';
 
-import { parseArgs, str } from '../../utils/args';
+import { str } from '../../utils/args';
 import {
   BROKER_APP_SERVER_EXITED_METHOD,
   BROKER_BUSY_RPC_CODE,
@@ -26,7 +28,7 @@ import {
 } from '../engines/codex/app-server';
 import { codexAuthFingerprint, errorText } from '../engines/codex/errors';
 import { parseBrokerEndpoint } from './endpoint';
-import { loadBrokerSession } from './session';
+import { clearBrokerSession, loadBrokerSession } from './session';
 import { connectionEnvironmentKey, redactConnectionSecrets } from '../connections';
 
 /** A JSON-RPC frame passing through the broker (request, response, or notification). */
@@ -43,6 +45,9 @@ type AppClient = Awaited<ReturnType<typeof CodexAppServerClient.connect>>;
 const STREAMING_METHODS = new Set(['turn/start', 'review/start', 'thread/compact/start']);
 const ORPHAN_CHECK_MS = 30_000;
 const APP_SERVER_START_TIMEOUT_MS = 30_000;
+// Codex unloads a thread 30 minutes after its last subscriber, and any
+// app-server resumes it from disk, so an idle broker holds nothing past that.
+const IDLE_EXIT_MS = 30 * 60_000;
 
 function buildStreamThreadIds(
   method: string,
@@ -71,12 +76,14 @@ function send(socket: Socket, message: JsonRpcMessage) {
 }
 
 // Requests a second client may send while another client owns the active
-// stream: interrupting/steering the turn, or archiving/deleting a finished
-// thread this app-server still holds loaded. All leave stream ownership
-// untouched, so the broker forwards them instead of returning "busy".
+// stream: interrupting/steering the turn, stopping a stopped turn's commands,
+// or archiving/deleting a finished thread this app-server still holds loaded.
+// All leave stream ownership untouched, so the broker forwards them instead
+// of returning "busy".
 const PASSTHROUGH_DURING_STREAM = new Set([
   'turn/interrupt',
   'turn/steer',
+  'thread/backgroundTerminals/clean',
   'thread/archive',
   'thread/delete',
 ]);
@@ -97,18 +104,25 @@ async function main() {
   const [subcommand, ...argv] = process.argv.slice(2);
   if (subcommand !== 'serve') {
     throw new Error(
-      'Usage: coder broker serve --endpoint <value> [--cwd <path>] [--pid-file <path>] [--network-access <true|false>]',
+      'Usage: coder broker serve --endpoint <value> [--cwd <path>] [--pid-file <path>] [--network-access <true|false>] [--idle-ms <ms>]',
     );
   }
 
-  const { options } = parseArgs(
-    argv,
-    z.object({
-      cwd: str,
-      'pid-file': str,
-      endpoint: z.string(),
-      'network-access': z.optional(z.enum(['true', 'false'])),
+  const options = parse(
+    defineCommand({
+      name: 'broker',
+      description: 'The codex app-server broker',
+      access: 'write',
+      args: {
+        cwd: str(),
+        'pid-file': str(),
+        endpoint: z.string(),
+        'network-access': z.optional(z.enum(['true', 'false'])),
+        'idle-ms': str(),
+      },
+      run() {},
     }),
+    argv,
   );
 
   const cwd = options.cwd ? path.resolve(process.cwd(), options.cwd) : process.cwd();
@@ -116,6 +130,7 @@ async function main() {
   const listenTarget = parseBrokerEndpoint(endpoint);
   const pidFile = options['pid-file'] ? path.resolve(options['pid-file']) : null;
   const networkAccess = options['network-access'] === 'true';
+  const idleMs = Number(options['idle-ms'] ?? IDLE_EXIT_MS);
   writePidFile(pidFile);
 
   // The shared app-server. Replaced when it dies or its login goes stale,
@@ -280,16 +295,23 @@ async function main() {
     }
   }
 
+  // Stops accepting and drops its session record first, so the next dispatch starts a fresh broker.
   async function shutdown(server: import('node:net').Server) {
     stopping = true;
+    const closed = new Promise(resolve => server.close(resolve));
+    if (listenTarget.kind === 'unix' && fs.existsSync(listenTarget.path)) {
+      fs.unlinkSync(listenTarget.path);
+    }
+    const connectionKey = connectionEnvironmentKey();
+    if (loadBrokerSession(cwd, networkAccess, connectionKey)?.endpoint === endpoint) {
+      clearBrokerSession(cwd, networkAccess, connectionKey);
+    }
+
     for (const socket of sockets) {
       socket.end();
     }
     await appClient?.close().catch(() => {});
-    await new Promise(resolve => server.close(resolve));
-    if (listenTarget.kind === 'unix' && fs.existsSync(listenTarget.path)) {
-      fs.unlinkSync(listenTarget.path);
-    }
+    await closed;
     if (pidFile && fs.existsSync(pidFile)) {
       fs.unlinkSync(pidFile);
     }
@@ -297,7 +319,21 @@ async function main() {
 
   appClient = await startAppClient();
 
+  // Every live task holds a socket for its turn, so no sockets means no live tasks.
+  let idleTimer: NodeJS.Timeout | undefined;
+  function exitWhenIdle() {
+    clearTimeout(idleTimer);
+    if (sockets.size === 0) {
+      idleTimer = setTimeout(async () => {
+        log(`No clients for ${idleMs / 1000}s; exiting.`);
+        await shutdown(server);
+        process.exit(0);
+      }, idleMs);
+    }
+  }
+
   const server = net.createServer(socket => {
+    clearTimeout(idleTimer);
     sockets.add(socket);
     socket.setEncoding('utf8');
     let buffer = '';
@@ -456,11 +492,13 @@ async function main() {
     socket.on('close', () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
+      exitWhenIdle();
     });
 
     socket.on('error', () => {
       sockets.delete(socket);
       clearSocketOwnership(socket);
+      exitWhenIdle();
     });
   });
 
@@ -489,6 +527,7 @@ async function main() {
   }, ORPHAN_CHECK_MS).unref();
 
   server.listen(listenTarget.path);
+  exitWhenIdle();
 }
 
 main().catch(error => {

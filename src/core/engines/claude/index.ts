@@ -23,6 +23,7 @@ import { mailboxId, type MailboxKey } from '../../mailbox';
 import { shortPath } from '../../../utils/fsx';
 import { serveControl, requestControl } from '../control';
 import { CLI_PATH } from '../../runtime';
+import { WORKER_ENV } from '../../dispatch';
 import { engineEnvironment } from '../../connections';
 import { parseVersion } from '../../hosts';
 import { compareVersions } from '../../update-check';
@@ -44,7 +45,6 @@ import { lastClaudeUsage } from './sessions';
 const USAGE_LOG_STEP = 1000;
 
 // Tools whose file_path names a file the turn changed.
-const WRITING_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit']);
 
 const MCP_STATUS_REQUEST = 'coder-mcp-status';
 
@@ -313,14 +313,14 @@ export interface ClaudeTurnOptions {
   allowedNetworkHosts?: string[];
   /** Extra existing directories the turn may reach; writes there follow the permission mode. */
   additionalDirectories?: string[];
-  /** Extra directories sandboxed commands may write in every mode, read-only included. */
-  writableDirectories?: string[];
   /** Extra environment for the CLI and the commands it runs. */
   env?: Record<string, string>;
   /** Inspection tools for a read-only sidecar; supplying any also applies CLAUDE_SIDECAR_FLAGS. */
   readOnlyAllowedTools?: string[];
   /** Extra MCP servers (env already resolved) plus the tools the turn may call. */
   mcpServers?: McpServerSpec[];
+  /** Listed tools the turn may not call, as [server, tool]; denied in every permission mode. */
+  deniedMcpTools?: Array<[server: string, tool: string]>;
   nativeMcp?: boolean;
   /** Directory for the short-lived 0600 MCP config file. */
   taskRoot?: string;
@@ -347,6 +347,15 @@ export interface ClaudeTurnResult extends TurnResult {
   error: { message: string } | null;
 }
 
+/** Claude Code's name for an MCP server or tool: every character outside `[A-Za-z0-9_-]` becomes `_`. */
+export const claudeToolName = (server: string, tool?: string) =>
+  ['mcp', server, ...(tool === undefined ? [] : [tool])]
+    .map(part => part.replace(/[^A-Za-z0-9_-]/g, '_'))
+    .join('__');
+
+/** The approval server's name, apart from an agent's `coder` server. */
+const APPROVAL_SERVER = 'coder-approval';
+
 /** Build the native CLI invocation so every Claude caller shares one permission policy. */
 export function buildClaudeMcpConfig(
   cwd: string,
@@ -357,10 +366,11 @@ export function buildClaudeMcpConfig(
   const mcpServers: Record<string, unknown> = {};
   const approvalServer = permissions === 'auto' && options.approvalTaskId;
   if (approvalServer) {
-    mcpServers.coder = {
+    mcpServers[APPROVAL_SERVER] = {
       type: 'stdio',
       command: process.execPath,
       args: [CLI_PATH, 'task', 'mcp', options.approvalTaskId, '--cwd', cwd],
+      env: { [WORKER_ENV]: '1' },
     };
   }
   for (const server of extraServers) {
@@ -431,8 +441,11 @@ export function buildClaudeTurnArgs(
   const approvalServer = permissions === 'auto' && options.approvalTaskId;
   const mcpTools = extraServers.flatMap(server =>
     server.tools?.length
-      ? server.tools.map(tool => `mcp__${server.name}__${tool}`)
-      : [`mcp__${server.name}`],
+      ? server.tools.map(tool => claudeToolName(server.name, tool))
+      : [claudeToolName(server.name)],
+  );
+  const deniedTools = (options.deniedMcpTools ?? []).map(([server, tool]) =>
+    claudeToolName(server, tool),
   );
   const mcpConfigFlags = Object.keys(mcpServers).length
     ? ['--mcp-config', mcpConfigPath ?? path.join(options.taskRoot ?? cwd, '.claude-mcp.json')]
@@ -449,7 +462,7 @@ export function buildClaudeTurnArgs(
       'default',
       ...mcpConfigFlags,
       '--permission-prompt-tool',
-      'mcp__coder__approval_prompt',
+      claudeToolName(APPROVAL_SERVER, 'approval_prompt'),
     );
     if (mcpTools.length) {
       args.push('--allowedTools', ...mcpTools);
@@ -475,20 +488,14 @@ export function buildClaudeTurnArgs(
       args.push('--allowedTools', ...mcpTools);
     }
   }
-  const writableDirectories = options.writableDirectories ?? [];
-  for (const directory of [
-    ...additionalDirectories,
-    ...(permissions === 'read-only' ? [] : writableDirectories),
-  ]) {
-    args.push('--add-dir', directory);
-  }
+  if (deniedTools.length) args.push('--disallowedTools', ...deniedTools);
+  for (const directory of additionalDirectories) args.push('--add-dir', directory);
   // The OS sandbox enforces read-only writes when available.
   const turnSettings = claudeTurnSettings(
     permissions,
     cwd,
     options.allowedNetworkHosts ?? [],
     additionalDirectories,
-    writableDirectories,
     process.env[MACHINE_SANDBOX_ENV] !== '1',
   );
   const settings = {
@@ -682,9 +689,6 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
     let requestUsage: any = null;
     let requestId: string | undefined;
     let loggedTokens = 0;
-    // Files the turn wrote, mirroring codex's touchedFiles so both engines
-    // report what changed.
-    const touched = new Set<string>();
 
     const handleEvent = (event: any) => {
       if (!event || typeof event !== 'object') {
@@ -752,10 +756,6 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
           if (block?.type === 'tool_use' || block?.type?.endsWith('_tool_use')) {
             const name = String(block.name ?? 'Tool');
             if (block.id) openCalls.set(String(block.id), { name, at: Date.now() });
-            if (WRITING_TOOLS.has(name)) {
-              const target = String(block.input?.file_path ?? block.input?.notebook_path ?? '');
-              if (target) touched.add(path.isAbsolute(target) ? target : path.resolve(cwd, target));
-            }
             options.onProgress?.({
               kind: 'tool',
               tool: name,
@@ -952,7 +952,6 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
         threadId: resultEvent?.session_id ?? streamSessionId,
         turnId: null,
         finalMessage,
-        touchedFiles: [...touched],
         tokens,
         contextTokens,
         // modelUsage is keyed by the actual model id(s) that served the turn.

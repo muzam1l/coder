@@ -4,9 +4,9 @@ import process from 'node:process';
 import { CoderError } from '../../core/dispatch';
 import { TERMINAL_STATUSES } from '../../core/types';
 import type { RunResult } from '../../flow/runs';
-import { formatHints, formatJson, outStyle, paintStatus } from '../../tui/output';
-import { baseOptions, tailOption } from '../../utils/args';
-import { command } from '../../cli';
+import { formatJson, outStyle, paintStatus } from '../../tui/output';
+import { str, tailOption } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 import {
   gateLine,
   gateRunningLine,
@@ -20,16 +20,19 @@ import {
 } from './watch';
 
 export const commandResult = command({
-  name: 'flow result',
-  help: {
-    usage: 'coder flow result [run-id] [--tail <n|all>] [--json]',
-    summary:
-      "Show a flow run's status and result, with its tasks, gates, and token ledger.\n--tail <n> caps the step rows (0 for the result alone). Defaults to the most\nrecent run. To watch a run live, prefer `coder flow watch`.",
-    flags: [['--tail <n|all>', 'show the last n step rows (default: all; 0 hides them)']],
-    examples: [['coder flow result --tail 0', "the most recent run's result, no step rows"]],
+  name: 'result',
+  description: 'progress and result of a run',
+  usage:
+    "Show a flow run's status and result, with its tasks, gates, and token ledger.\n--tail <n> caps the step rows (0 for the result alone). Defaults to the most\nrecent run. To watch a run live, prefer `coder flow watch`.",
+  access: 'read',
+  args: {
+    'run-id': str('the run (default: the most recent)'),
+    tail: tailOption('show the last n step rows (default: all; 0 hides them)'),
   },
-  options: { ...baseOptions, tail: tailOption },
-  args: 1,
+  cli: {
+    positional: ['run-id'],
+    examples: ["coder flow result --tail 0  # the most recent run's result, no step rows"],
+  },
   async run({ options, args: [id] }) {
     const { runResult } = await import('../../flow/runs');
 
@@ -43,6 +46,19 @@ export const commandResult = command({
     return result;
   },
   json: result => result && resultJson(result),
+  next: ({ result }) =>
+    !result
+      ? []
+      : nextSteps(
+          result.status === 'running'
+            ? [
+                `Follow live: coder flow watch ${result.runId}`,
+                `Stop it: coder flow stop ${result.runId}`,
+              ]
+            : result.status === 'stopped' || result.status === 'failed'
+              ? [`Resume: coder flow resume ${result.runId}`]
+              : [],
+        ),
   print: (result, { options }) => printResult(result!, options.tail),
 });
 
@@ -169,16 +185,4 @@ function printResult(result: RunResult, tail: number | 'all' = 'all'): void {
     process.stdout.write(`\n${s.red('error:')} ${result.error}\n`);
   }
   printLedger(result.ledger);
-  const hints =
-    result.status === 'running'
-      ? [
-          `Follow live: coder flow watch ${result.runId}`,
-          `Stop it: coder flow stop ${result.runId}`,
-        ]
-      : result.status === 'stopped' || result.status === 'failed'
-        ? [`Resume: coder flow resume ${result.runId}`]
-        : [];
-  if (hints.length) {
-    process.stdout.write(`\n${formatHints(hints, s)}\n`);
-  }
 }

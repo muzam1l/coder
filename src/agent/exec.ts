@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
@@ -14,8 +14,6 @@ import {
   selectMcpServers,
   resolveTaskOptions,
   waitTask,
-  capPermissions,
-  resolveMcpServers,
   turnFallbackEngine,
   type DispatchOptions,
   type TaskResult,
@@ -31,7 +29,6 @@ import {
   writeTask,
   type TurnResultEntry,
 } from '../core/state';
-import { heldConnections, steerTask } from '../core/task/actions';
 import type { McpServerSpec, Task } from '../core/types';
 import type { Integration } from '../integrations/types';
 import type { Replies } from '../server/tasks/events';
@@ -42,20 +39,12 @@ import {
   parseAgentDefinition,
 } from './definition';
 import { loadAgents } from './load';
-import { postReview, resolveReviewTarget, REVIEW_PLATFORM } from '../flow/builtin/review';
 import { INTEGRATIONS } from '../integrations';
-import { nativeToolEnvironment, tokenEnvName, toolServerToken, type ReplyEndpoint } from './mcp';
+import { nativeToolEnvironment, tokenEnvName, type ReplyEndpoint } from './mcp';
 import type { Agent, AgentEvent, AgentTask, Preset, TaskContext, TaskSource } from './types';
-import { serveMailbox, agentMailboxDir } from '../core/mailbox';
-import {
-  developerInstructions,
-  eventPrompt,
-  historyPrompt,
-  requestPrompt,
-  type AgentPromptParts,
-} from '../core/prompts';
+import { eventPrompt, historyPrompt, replyRequired, requestPrompt } from './context/turn';
+import type { AgentPromptParts, DeveloperParts } from '../core/task/context/system';
 import { connectionEnvironment, localConnections, narrowConnections } from '../core/connections';
-import { replyRequired } from '../core/event-prompt';
 import { readJsonFile, writeJsonFileAtomic } from '../utils/fsx';
 
 /** Names the local engine task an agent task runs on, so listings can tell them apart. */
@@ -694,10 +683,16 @@ export function builtinArgs(
 }
 
 /** A repo agent's access mode, which its local Default connections follow; Read-only when it is gone. */
-export async function localAgentAccess(cwd: string, id: string): Promise<Preset> {
+/** A local agent's access and developer instructions as they are now; read access once it is gone. */
+export async function localAgentPrompt(
+  cwd: string,
+  id: string,
+): Promise<{ access: Preset; developer?: DeveloperParts }> {
   const agent = (await loadAgents(cwd, INTEGRATIONS).catch(() => [])).find(a => a.id === id);
 
-  return agent ? agentAccess(agent) : 'read';
+  return agent
+    ? { access: agentAccess(agent), developer: agentDeveloperInstructions(agent) }
+    : { access: 'read' };
 }
 
 /** Task options from a local agent definition: `coder task run --agent <id>`. */
@@ -712,7 +707,7 @@ export async function agentTaskOptions(
   model?: string;
   effort?: string;
   permissions?: string;
-  developer: string;
+  developer: DeveloperParts;
   mcp: McpServerSpec[];
   mcpBindings?: Task['mcpBindings'];
   nativeMcp: boolean;
@@ -756,12 +751,12 @@ export async function agentTaskOptions(
 const MAX_SYSTEM_CHARS = 48_000;
 
 /** The developer's part of the system prompt: what whoever built the agent wrote, plus the installation's repository instructions. */
-export function agentDeveloperInstructions(agent: Agent, context?: TaskContext): string {
-  return developerInstructions({
+export function agentDeveloperInstructions(agent: Agent, context?: TaskContext): DeveloperParts {
+  return {
     description: agent.definition.description,
     instructions: agentInstructions(agent),
     notes: context?.instructions,
-  });
+  };
 }
 
 export function agentInstructions(agent: Agent): string {
@@ -834,180 +829,4 @@ export function defaultTask(
     },
     prompt: historyPrompt(context?.messages ?? [], turn),
   };
-}
-
-export function startAgentMailbox(cwd: string, task: Task): () => void {
-  const dir = agentMailboxDir(cwd, task);
-  if (!dir) return () => {};
-  const ceiling = { agent: task.agentId!, permissions: task.permissions ?? 'auto' };
-  const launchCwd = realpathSync(cwd);
-  const authorizedMcp = new Map((task.mcp ?? []).map(server => [server.name, server] as const));
-  const connectionSource = task.connectionSource ?? (task.connections ? 'server' : undefined);
-  // Pinned to the parent's launch directory when a request picks it, so a mailbox cwd cannot swap it.
-  const pinned = (server: McpServerSpec) => {
-    if (!server.command) return server;
-    const [resolved] = resolveMcpServers([server], process.env, launchCwd);
-    if (!resolved) throw new Error(`MCP server "${server.name}" is not approved.`);
-
-    return { ...server, command: resolved!.command, args: resolved!.args };
-  };
-
-  // Canonical paths on both sides, so a symlink inside the workspace cannot point a task outside it.
-  const real = (target: string) => {
-    try {
-      return realpathSync(target);
-    } catch {
-      return null;
-    }
-  };
-  const roots = [cwd, ...(task.addDirs ?? [])].flatMap(root => real(path.resolve(root)) ?? []);
-  const inside = (target: string) =>
-    roots.some(root => target === root || target.startsWith(root + path.sep));
-  const started = new Map<string, string>();
-  const pulls = new Set<string>();
-  const auth = () => {
-    const token = toolServerToken(resolveMcpServers(task.mcp), REVIEW_PLATFORM);
-    return token ? { token } : {};
-  };
-
-  return serveMailbox(dir, {
-    async dispatch(p) {
-      const name = p.name ?? 'task';
-      if (p.mcp !== undefined && (typeof p.mcp !== 'string' || /^[\[{]/.test(p.mcp.trim())))
-        throw new CoderError('invalid-option', 'Mailbox MCP selections must be server names.');
-
-      const selection: string = p.mcp ?? '';
-      const mcp = selection
-        .split(',')
-        .map(name => name.trim())
-        .filter(Boolean)
-        .map(name => {
-          const server = name === 'all' ? undefined : authorizedMcp.get(name);
-          if (!server)
-            throw new CoderError(
-              'invalid-option',
-              `MCP server "${name}" is not authorized for agent "${ceiling.agent}".`,
-            );
-
-          return pinned(server);
-        });
-      for (const id of task.connections ?? []) {
-        const server = [...authorizedMcp.values()].find(
-          server => server.connection === id || (!server.connection && server.name === id),
-        );
-        if (server && !mcp.some(selected => selected.name === server.name))
-          mcp.push(pinned(server));
-      }
-
-      const asked = path.resolve(String(p.cwd ?? launchCwd));
-      // The flow runtime always sends its cwd; only a different directory is an override.
-      if (real(asked) !== real(launchCwd) && mcp.some(server => server.command))
-        throw new CoderError(
-          'invalid-option',
-          'Inherited stdio MCP servers do not allow a cwd override.',
-        );
-
-      const requested = [asked, ...(p.addDirs ?? []).map((d: string) => path.resolve(asked, d))];
-      const missing = requested.find(target => !real(target));
-      if (missing)
-        throw new CoderError(
-          'invalid-option',
-          `task "${name}" asks for ${missing}, which does not exist`,
-        );
-
-      const [taskCwd, ...addDirs] = requested.map(target => real(target)!) as [string, ...string[]];
-      const outside = [taskCwd, ...addDirs].find(target => !inside(target));
-      if (outside)
-        throw new CoderError(
-          'invalid-option',
-          `task "${name}" asks for ${outside}, outside the workspace of agent "${ceiling.agent}"`,
-        );
-      const dispatched = await dispatchTask(
-        {
-          prompt: String(p.prompt ?? ''),
-          outputSchema: p.outputSchema,
-          cwd: taskCwd,
-          engine: p.engine,
-          model: p.model,
-          effort: p.effort,
-          mcp,
-          connections: task.connections,
-          connectionSource,
-          permissions: capPermissions(name, p.permissions, ceiling),
-          name: p.name,
-          system: p.system,
-          addDirs,
-          flowRunId: p.flowRunId,
-          wait: true,
-        },
-        { fromMailbox: true },
-      );
-      started.set(dispatched.taskId, taskCwd);
-      return { taskId: dispatched.taskId };
-    },
-
-    async steer(p) {
-      const taskCwd = started.get(p.taskId);
-      if (!taskCwd)
-        throw new CoderError('invalid-option', `No task "${p.taskId}" started by this flow.`);
-      const current = loadTaskRecord(taskCwd, p.taskId);
-      if (!current) throw new CoderError('invalid-option', `No task "${p.taskId}".`);
-      return steerTask(taskCwd, current, String(p.text ?? ''), {
-        ...(connectionSource === 'server'
-          ? { resolveConnections: heldConnections(task.mcp, launchCwd, pinned) }
-          : {}),
-        model: p.model,
-        effort: p.effort,
-        permissions: p.permissions
-          ? capPermissions(current.name, p.permissions, ceiling)
-          : undefined,
-      });
-    },
-
-    async wait(p) {
-      const taskCwd = started.get(p.taskId);
-      if (!taskCwd)
-        throw new CoderError('invalid-option', `No task "${p.taskId}" started by this flow.`);
-      const waited = await waitTask(taskCwd, p.taskId);
-      return {
-        status: waited.status,
-        result: waited.result,
-        model: waited.task.model ?? null,
-        next: turnFallbackEngine(taskCwd, waited) ?? null,
-      };
-    },
-
-    review(p) {
-      if (p.op === 'resolveTarget') {
-        // The repository comes from the task record; without one only a number in the checkout resolves.
-        const { repo: _asked, ...input } = p.input ?? {};
-        if (!task.repo && !/^\d+$/.test(String(input.pr)))
-          throw new CoderError(
-            'invalid-option',
-            "review target must be a pull request number in this task's repository",
-          );
-
-        const target = resolveReviewTarget(
-          {
-            ...input,
-            cwd,
-            ...(task.repo ? { repo: task.repo } : {}),
-            ...(task.author ? { author: task.author } : {}),
-          },
-          auth(),
-        );
-        if (target.pr) pulls.add(`${target.pr.repo}#${target.pr.number}`);
-        return target;
-      }
-      if (p.op !== 'post')
-        throw new CoderError('invalid-option', `unknown review action "${p.op}"`);
-      // Only a pull request this task resolved from its own checkout.
-      if (!pulls.has(`${p.input?.repo}#${p.input?.pr}`))
-        throw new CoderError(
-          'invalid-option',
-          'review post: pull request was not resolved by this task',
-        );
-      return postReview({ ...p.input, cwd }, auth());
-    },
-  });
 }

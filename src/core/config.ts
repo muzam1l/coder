@@ -152,9 +152,6 @@ function claudeAllowedDomains(hosts: string[]): string[] {
  * directories"), so it is worth not depending on one of them. Read-only also
  * denies writes there; other modes let them follow the mode like cwd.
  *
- * Writable directories stay writable in every mode: read-only grants them
- * through sandbox.filesystem.allowWrite alone, the other modes as extra directories.
- *
  * Without the OS sandbox the machine is the boundary, so Bash runs unprompted as it did sandboxed.
  */
 export function claudeTurnSettings(
@@ -162,18 +159,13 @@ export function claudeTurnSettings(
   cwd: string,
   allowedNetworkHosts: string[] = [],
   additionalDirectories: string[] = [],
-  writableDirectories: string[] = [],
   osSandbox = true,
 ): string | null {
-  const granted =
-    permissions === 'read-only'
-      ? additionalDirectories
-      : [...additionalDirectories, ...writableDirectories];
-  const grant = granted.length ? { permissions: { additionalDirectories: granted } } : {};
+  const grant = additionalDirectories.length ? { permissions: { additionalDirectories } } : {};
   if (!osSandbox)
     return JSON.stringify({
       permissions: {
-        additionalDirectories: granted,
+        additionalDirectories,
         allow: ['Bash'],
         ...(permissions === 'read-only'
           ? { deny: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] }
@@ -191,7 +183,6 @@ export function claudeTurnSettings(
         network: { strictAllowlist: true },
         filesystem: {
           denyWrite: [cwd, ...additionalDirectories],
-          ...(writableDirectories.length ? { allowWrite: writableDirectories } : {}),
         },
       },
     });
@@ -310,7 +301,12 @@ export const mcpEntrySchema = z
     args: z.optional(z.array(z.string())),
     env: z.optional(z.record(z.string(), z.string())),
     url: z.optional(z.string().check(z.minLength(1))),
-    type: z.optional(z.enum(['stdio', 'http', 'sse'])),
+    type: z.optional(
+      z.enum(['stdio', 'http'], {
+        error:
+          'Use type stdio or http; legacy SSE servers are not supported, use their streamable HTTP URL',
+      }),
+    ),
     headers: z.optional(z.record(z.string(), z.string())),
     tools: z.optional(z.array(z.string())),
     description: z.optional(z.string()),

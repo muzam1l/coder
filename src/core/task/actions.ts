@@ -51,7 +51,7 @@ import { mailboxId, type MailboxKey } from '../mailbox';
 import { deleteCodexSession } from '../engines/codex/sessions';
 import { deleteClaudeSession } from '../engines/claude/sessions';
 import { conversationIds } from '../engines/history';
-import { askPrompt } from '../prompts';
+import { askPrompt } from './context/prompts';
 
 export type ConnectionResolver = (
   granted: string[],
@@ -255,16 +255,12 @@ async function resumeInPlace(
     for (const name of fs.readdirSync(resolveTaskDir(cwd, task.id)))
       if (/^resume-\d+-\d+$/.test(name) && name !== path.basename(claim))
         fs.rmSync(path.join(resolveTaskDir(cwd, task.id), name), { recursive: true, force: true });
+    const agent = task.agentId
+      ? await (await import('../../agent/exec')).localAgentPrompt(cwd, task.agentId)
+      : undefined;
     const connected = opts.resolveConnections
       ? await opts.resolveConnections(task.connections ?? [])
-      : await localConnections(
-          undefined,
-          task.connections ?? [],
-          undefined,
-          task.agentId
-            ? await (await import('../../agent/exec')).localAgentAccess(cwd, task.agentId)
-            : undefined,
-        );
+      : await localConnections(undefined, task.connections ?? [], undefined, agent?.access);
     const servers =
       task.mcp?.map(server => {
         const connection =
@@ -286,6 +282,15 @@ async function resumeInPlace(
     );
     if (task.archived) unarchiveTask(cwd, task);
     writeTask(cwd, task.id, {
+      // The agent's instructions as they are now; the notes stay this task's.
+      ...(agent?.developer && task.promptParts
+        ? {
+            promptParts: {
+              ...task.promptParts,
+              developer: { ...agent.developer, notes: task.promptParts.developer?.notes },
+            },
+          }
+        : {}),
       mcp: selected.mcp,
       mcpBindings: bindings,
       status: 'queued',
@@ -361,7 +366,11 @@ export async function askTask(
   const taskDir = resolveTaskDir(cwd, task.id);
   const prompt = askPrompt(
     task,
-    taskDir,
+    {
+      log: path.join(taskDir, 'log.jsonl'),
+      result: path.join(taskDir, 'result.json'),
+      worker: path.join(taskDir, 'worker.log'),
+    },
     question,
     opts.command ? mailboxId(opts.command) : undefined,
   );
@@ -588,6 +597,7 @@ export async function stopTask(
   }
   writeTask(cwd, task.id, {
     status: 'cancelled',
+    error: 'Stopped by user.',
     steerEndpoint: null,
     completedAt: new Date().toISOString(),
   });

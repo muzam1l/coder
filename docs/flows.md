@@ -212,12 +212,6 @@ Coder ships a few flows of its own; they resolve after the directories above, so
 
 - `review`: the `coder review` code review. Args: `pr` (number or GitHub URL), `post` (comment on the PR), `base`/`head`/`since` (as the CLI flags), `engine`/`model`/`effort`. Returns `{ findings, summary }`. `coder flow run review --args '{"pr":42,"post":true}'`
 
-### Flows run by an agent
-
-An [agent](agents/index.md) runs a flow like any script: `coder flow run <name>` from its shell, inside its sandbox. It can run any flow, including one it writes during the task.
-
-The tasks a flow starts can't exceed the agent's `permissions` (`read-only` < `workspace-write` < `auto`). A task without permissions inherits the agent's, and one asking for more fails before it starts. Platform actions, like the `review` flow's comments, run outside the sandbox, so no token enters it.
-
 ## CLI
 
 ```bash

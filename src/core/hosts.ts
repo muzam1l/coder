@@ -101,6 +101,75 @@ export function installAgentsSkill(marketplaceDir: string): PluginResult {
   }
 }
 
+/** Registers the stdio server without replacing an existing host entry. */
+export function registerCodexMcp(): PluginResult {
+  const marketplace = 'codex';
+  const existing = spawnSync('codex', ['mcp', 'get', 'coder'], { encoding: 'utf8' });
+  if (existing.status === 0)
+    return {
+      marketplace,
+      installed: true,
+      note: 'Coder MCP server already registered with Codex.',
+    };
+  const added = spawnSync('codex', ['mcp', 'add', 'coder', '--', 'coder', 'mcp'], {
+    encoding: 'utf8',
+  });
+
+  return {
+    marketplace,
+    installed: added.status === 0,
+    note:
+      added.status === 0
+        ? 'Coder MCP server registered with Codex; restart running sessions to load it.'
+        : 'MCP registration failed; run: codex mcp add coder -- coder mcp',
+  };
+}
+
+export function registerCursorMcp(): PluginResult {
+  const marketplace = path.join(os.homedir(), '.cursor', 'mcp.json');
+  try {
+    const config = fs.existsSync(marketplace)
+      ? JSON.parse(fs.readFileSync(marketplace, 'utf8'))
+      : {};
+    const object = (value: unknown): value is Record<string, unknown> =>
+      value !== null && typeof value === 'object' && !Array.isArray(value);
+    if (!object(config) || (config.mcpServers !== undefined && !object(config.mcpServers)))
+      throw new Error('Invalid MCP configuration');
+    const servers = config.mcpServers ?? {};
+    if (Object.hasOwn(servers, 'coder'))
+      return {
+        marketplace,
+        installed: true,
+        note: 'Coder MCP server already registered with Cursor.',
+      };
+    fs.mkdirSync(path.dirname(marketplace), { recursive: true });
+    fs.writeFileSync(
+      marketplace,
+      JSON.stringify(
+        {
+          ...config,
+          mcpServers: { ...servers, coder: { type: 'stdio', command: 'coder', args: ['mcp'] } },
+        },
+        null,
+        2,
+      ) + '\n',
+      { mode: 0o600 },
+    );
+
+    return {
+      marketplace,
+      installed: true,
+      note: 'Coder MCP server registered in ~/.cursor/mcp.json; restart running sessions to load it.',
+    };
+  } catch {
+    return {
+      marketplace,
+      installed: false,
+      note: 'MCP registration failed; merge a coder entry with command "coder" and args ["mcp"] into ~/.cursor/mcp.json.',
+    };
+  }
+}
+
 /** Outcome of an on-demand codex install; null when codex was already present. */
 export type CodexInstallResult = { installed: boolean; note: string } | null;
 
@@ -193,6 +262,7 @@ export interface SetupHostReport {
   runtime: string;
   claudePlugin?: PluginResult;
   agentsSkill?: PluginResult;
+  mcp: PluginResult[];
   config: CoderConfig;
   ready: boolean;
 }
@@ -206,12 +276,16 @@ export async function setupHostCore(
   onStart?: () => void,
 ): Promise<SetupHostReport> {
   const hosts = opts.hosts ?? [];
-  const unknown = hosts.find(host => !['claude', 'agents'].includes(host));
+  const unknown = hosts.find(host => !['claude', 'agents', 'codex', 'cursor'].includes(host));
   if (unknown)
-    throw new CoderError('invalid-option', `Unknown host "${unknown}". Use claude or agents.`, {
-      hint: 'Codex, Pi, OpenCode, and other Agent Skills hosts: coder setup-host agents',
-    });
-  const want = (host: 'claude' | 'agents') => hosts.includes(host);
+    throw new CoderError(
+      'invalid-option',
+      `Unknown host "${unknown}". Use claude, agents, codex or cursor.`,
+      {
+        hint: 'Codex, Pi, OpenCode, and other Agent Skills hosts: coder setup-host agents',
+      },
+    );
+  const want = (host: 'claude' | 'agents' | 'codex' | 'cursor') => hosts.includes(host);
   onStart?.();
 
   let availability = getCodexAvailability(cwd);
@@ -242,7 +316,20 @@ export async function setupHostCore(
   const marketplaceDir = resolveMarketplaceDir();
   const claudePlugin = want('claude') ? installClaudePlugin(marketplaceDir) : null;
   // Codex, Pi, OpenCode and other Agent Skills hosts read ~/.agents/skills.
-  const agentsPlugin = want('agents') ? installAgentsSkill(marketplaceDir) : null;
+  const agentsPlugin =
+    want('agents') || want('codex') || want('cursor') ? installAgentsSkill(marketplaceDir) : null;
+  const mcp: PluginResult[] = [];
+  if (want('codex') || (availability.available && (want('agents') || !hosts.length)))
+    mcp.push(registerCodexMcp());
+  if (want('cursor') || (!hosts.length && fs.existsSync(path.join(os.homedir(), '.cursor'))))
+    mcp.push(registerCursorMcp());
+  if (claudePlugin)
+    mcp.push({
+      ...claudePlugin,
+      note: claudePlugin.installed
+        ? 'Coder MCP server is declared by the Claude Code plugin.'
+        : 'Install the Claude Code plugin to register its Coder MCP server.',
+    });
 
   const config = loadConfig(cwd);
   // Ready as long as one engine is usable: installed AND logged in.
@@ -267,6 +354,7 @@ export async function setupHostCore(
     runtime: fileURLToPath(new URL('../bin/coder.mjs', import.meta.url)),
     ...(claudePlugin ? { claudePlugin } : {}),
     ...(agentsPlugin ? { agentsSkill: agentsPlugin } : {}),
+    mcp,
     config,
     ready,
   };

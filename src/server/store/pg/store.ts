@@ -26,7 +26,7 @@ import {
   type ConversationState,
   type Unseen,
 } from '../../tasks/conversation';
-import { SINCE_LIMIT } from '../../../core/prompts';
+import { SINCE_LIMIT } from '../../../agent/context/turn';
 import type { SinceMessage } from '../../../integrations/types';
 import type { AgentApp, Installation } from '../../../agent/types';
 import type { AgentVersionRecord, DeliveryLease, TaskHistory, TaskLogLine } from '../types';

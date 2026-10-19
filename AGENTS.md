@@ -3,6 +3,7 @@
 ## Code
 
 - Find where a concern lives and extend that file in its patterns. Search `src/` for an existing helper, type or interface before writing one. New file only for a new concern, named for it, in the folder that owns it. No underscore names, no single-variable files, no files named after a lane or fix.
+- `agent/` is agent-only: definitions, events, platform tools and conversations. What every task uses (its prompts, tools, review) lives in `core/task/`.
 - Related small operations share one file (`core/task/actions.ts`: steer, ask, list, stop, archive, delete). Don't split under 500 lines; 1000 is fine.
 - One blank line between groups of related statements and before the return. A read stays with its guard. Never a blank line after every statement, never a wall.
 - No type argument a call can infer; make the API generic over the literal (`store.list("runner")`).
@@ -23,5 +24,5 @@
 ## Gate
 
 - CLI tests in `../tests/<domain>/` (agent/cli/core/flow, with TUI in cli/tui), server tests in `../tests/server/` by topic, named for the behaviour; a fix starts red.
-- Help specs in `src/cmd/`, `src/tui/help.ts`, `docs/` and the CLI change together.
+- Each command is one promptx definition in `src/cmd/`; help, `docs/cli/`, the host skills and `coder mcp` come from it. `bun run emit` rewrites `docs/cli/` and the skills; commit them.
 - `bun test` in `../tests`, `npx tsc -p tsconfig.json --noEmit`, `bun run build`.

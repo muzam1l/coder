@@ -228,7 +228,7 @@ export function AgentSettingsForm({
               hint="what the runner may change in the checkout"
               value={settings.permissions}
               options={PERMISSIONS}
-              blank={defaultLabel(own?.permissions ?? 'read-only')}
+              blank={defaultLabel(own?.permissions ?? 'auto')}
             />
             <Choice
               name="access"

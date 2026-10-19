@@ -36,7 +36,7 @@ import {
   steerConversation,
   unseenAcknowledgement,
 } from './conversation';
-import { eventPrompt } from '../../core/prompts';
+import { eventPrompt } from '../../agent/context/turn';
 import { appendTaskLog, generateTaskId } from '../../core/state';
 import { generateRunId } from '../../flow/runs';
 import { connectionWarnings } from './logs';

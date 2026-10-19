@@ -3,7 +3,7 @@ import process from 'node:process';
 
 import type { agents } from '../../../agent';
 import { outStyle, renderTable } from '../../../tui/output';
-import { flag } from '../../../utils/args';
+import { str } from '../../../utils/args';
 import { command } from '../../../cli';
 
 type CatalogRow = { kind: string; name: string; does: string };
@@ -32,16 +32,17 @@ function printIntegration(detail: ReturnType<typeof agents.integrations.show>): 
 }
 
 export const commandIntegrationsShow = command({
-  name: 'agent integrations show',
+  name: 'show',
+  description: 'events and tools of one integration',
+  usage:
+    'Describe one integration: each event with what triggers it, and the tools each preset (read, write) allows.',
+  access: 'read',
+  args: { id: str('the integration') },
   globalFlags: { cwd: false },
-  help: {
-    usage: 'coder agent integrations show <id> [--json]',
-    summary:
-      'Describe one integration: each event with what triggers it, and the tools each preset (read, write) allows.',
-    examples: [['coder agent integrations show github', 'the GitHub integration in full']],
+  cli: {
+    positional: ['id'],
+    examples: ['coder agent integrations show github  # the GitHub integration in full'],
   },
-  options: { json: flag },
-  args: 1,
   run: async ({ args: [id] }) => {
     const { agents } = await import('../../../agent');
     return agents.integrations.show(id);

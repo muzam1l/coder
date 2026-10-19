@@ -9,11 +9,11 @@ import { ACTIVE_STATUSES, type Style, type Task, type TokenUsage } from '../../c
 import type { TaskLogLine, TaskStatus } from '../../server/store/types';
 import { outStyle } from '../../tui/output';
 import { termCols } from '../../tui/live';
-import { shortPath } from '../../utils/fsx';
-import { baseOptions, tailOption, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { arg, serverOptions, str, tailOption } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 import {
   finalMessageLine,
+  finishedNext,
   LogRenderer,
   OUTPUT_PREVIEW_CHARS,
   printOutcome,
@@ -38,6 +38,7 @@ async function printWatch(
   watch: TaskWatch,
   cwd: string,
   opts: { json?: boolean; trim?: number | 'none' },
+  next: (result: unknown) => void,
 ): Promise<never> {
   const trim =
     opts.trim === undefined ? OUTPUT_PREVIEW_CHARS : opts.trim === 'none' ? Infinity : opts.trim;
@@ -65,7 +66,10 @@ async function printWatch(
       if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
     }
     const status = (await watch.final()) as TaskStatus;
-    if (!opts.json) printOutcome(status, outStyle);
+    if (!opts.json) {
+      printOutcome(status, outStyle);
+      next(status);
+    }
     process.exit(0);
   }
   const task = watch.task;
@@ -148,7 +152,6 @@ async function printWatch(
     const summary = taskSummaryLines(current, {
       tokens: result?.tokens ?? liveTokens,
       tokenModel: result?.model,
-      files: result?.touchedFiles?.map((file: string) => shortPath(task.cwd ?? cwd, file)),
       statusChanged: status !== task.status,
     });
     if (summary.length) process.stderr.write(`\n${summary.join('\n')}\n`);
@@ -161,37 +164,103 @@ async function printWatch(
   process.exit(status === 'completed' ? 0 : 1);
 }
 
+/** A slice of a task's log from `--from`, and the command that continues it while the task runs. */
+type LogSlice = {
+  taskId: string;
+  status: string;
+  events: Array<TaskLogEntry | TaskLogLine>;
+  next?: string;
+};
+
+async function logSlice(
+  watch: TaskWatch,
+  from: number,
+  server: string | true | undefined,
+): Promise<LogSlice> {
+  const events: LogSlice['events'] = [];
+  for await (const event of watch.events) events.push(event);
+  const remote = 'attempts' in watch.task;
+  const task = 'attempts' in watch.task ? watch.task.task : watch.task;
+  const last = events.at(-1) as TaskLogLine | undefined;
+  const at = remote && last ? last.seq + 1 : from + events.length;
+  const flag = server === undefined ? '' : server === true ? ' --server' : ` --server ${server}`;
+
+  return {
+    taskId: task.id,
+    status: watch.task.status,
+    events,
+    ...(ACTIVE_STATUSES.includes(watch.task.status as Task['status'])
+      ? { next: `coder task watch ${task.id} --from ${at}${flag}` }
+      : {}),
+  };
+}
+
+async function printSlice(slice: LogSlice, cwd: string): Promise<void> {
+  const renderer = await LogRenderer.create({
+    cwd,
+    trim: OUTPUT_PREVIEW_CHARS,
+    explicitTrim: false,
+    width: termCols(),
+  });
+  for (const event of slice.events) {
+    if ('seq' in event) {
+      printLine(event as TaskLogLine, outStyle);
+      continue;
+    }
+    const lines = renderer.render(event);
+    if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
+  }
+}
+
 export const commandWatch = command({
-  name: 'task watch',
-  help: {
-    usage: 'coder task watch [task-id] [--server [url]]',
-    summary:
-      "Stream a running task's transcript live (for you/debugging), then print its\nfinal answer. Replays the last line first so the current step is visible;\n--tail <n> replays the last n lines (--tail all for the whole transcript).\nBlocks until it finishes; exits 0 on success, 1 otherwise. For the answer\nalone, prefer `coder result`. Alias: stream.",
-    flags: [
-      ['--tail <n|all>', 'replay the last n log lines first (default: 1)'],
-      ['--trim <n|none>', 'budget for tool output and thinking (default: 1200 chars, 12 lines)'],
-      SERVER_FLAG,
-    ],
-    examples: [['coder task watch', 'follow the most recent task to completion']],
-  },
-  options: {
-    ...baseOptions,
-    tail: tailOption,
-    trim: z.optional(
-      z.union([z.literal('none'), z.coerce.number().check(z.int(), z.positive())], {
-        error: 'expected a positive integer or "none"',
-      }),
+  name: 'watch',
+  description: "stream a task's live transcript",
+  usage:
+    "Stream a running task's transcript live (for you/debugging), then print its\nfinal answer. Replays the last line first so the current step is visible;\n--tail <n> replays the last n lines (--tail all for the whole transcript).\nBlocks until it finishes; exits 0 on success, 1 otherwise. For the answer\nalone, prefer `coder result`. Alias: stream.\n\nWith --from <n>, or as a tool, it returns the log from event n on without\nfollowing, and `next`: the command that continues it while the task runs.",
+  access: 'read',
+  args: {
+    'task-id': str('the task (default: the most recent)'),
+    tail: tailOption('replay the last n log lines first (default: 1)'),
+    trim: arg(
+      z.optional(
+        z.union([z.literal('none'), z.coerce.number().check(z.int(), z.positive())], {
+          error: 'expected a positive integer or "none"',
+        }),
+      ),
+      'budget for tool output and thinking (default: 1200 chars, 12 lines)',
+      '<n|none>',
+    ),
+    from: arg(
+      z.optional(z.coerce.number().check(z.int(), z.nonnegative())),
+      'return the log from event n on instead of following it',
+      '<n>',
     ),
     ...serverOptions,
   },
-  args: 1,
-  async run({ options, args: [id], cwd }) {
+  cli: {
+    positional: ['task-id'],
+    examples: [
+      'coder task watch  # follow the most recent task to completion',
+      'coder task watch <task-id> --from 0 --json  # the log so far, and the command that continues it',
+    ],
+  },
+  async run({ options, args: [id], cwd, tool, next }) {
     const { tasks } = await import('../../core/task');
 
-    await printWatch(
-      await tasks.watch(id, { ...options, organization: options.workspace }),
-      cwd,
-      options,
-    );
+    const from = options.from ?? (tool ? 0 : undefined);
+    const watch = await tasks.watch(id, { ...options, from, organization: options.workspace });
+    if (from !== undefined) return logSlice(watch, from, options.server);
+    await printWatch(watch, cwd, options, next);
   },
+  next({ result, args }) {
+    if (!result) return [];
+    if ('attempts' in result) {
+      const status = result as unknown as TaskStatus;
+      return ['completed', 'failed', 'cancelled'].includes(status.status)
+        ? finishedNext(status.task.id, args)
+        : [];
+    }
+    return result.next ? nextSteps([`Continue: ${result.next}`]) : [];
+  },
+  print: (slice, { cwd }) => slice && printSlice(slice, cwd),
 });

@@ -87,12 +87,10 @@ function argumentsOf(list: Argument[] = [], kind: string, fields: ArgumentInput[
 }
 
 function entryOf(server: Detail) {
-  const remote = server.remotes?.find(
-    each => each.type === 'streamable-http' || each.type === 'sse',
-  );
+  const remote = server.remotes?.find(each => each.type === 'streamable-http');
   if (remote)
     return {
-      type: remote.type === 'sse' ? 'sse' : 'http',
+      type: 'http',
       url: remote.url,
       env: [],
       headers: inputs(remote.headers),

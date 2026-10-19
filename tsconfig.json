@@ -13,15 +13,20 @@
       "node"
     ],
     "noEmit": true,
+    "jsx": "react-jsx",
     "baseUrl": ".",
     "paths": {
       "@wular/coder/flow": [
         "src/flow/index.ts"
+      ],
+      "zod": [
+        "node_modules/zod/index"
       ]
     }
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ],
   "exclude": [
     "src/server/deploy/**",

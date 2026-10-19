@@ -6,7 +6,7 @@ import { CoderError } from '../core/dispatch';
 import type { CoderConfig, EngineConfig } from '../core/types';
 import { renderCommandHelp } from '../tui/help';
 import { outStyle, printJson } from '../tui/output';
-import { baseOptions, flag } from '../utils/args';
+import { flag, str, strList } from '../utils/args';
 import { command } from '../cli';
 
 const usage = (text: string) => new CoderError('invalid-option', `Usage: ${text}`);
@@ -32,19 +32,24 @@ type ConfigResult =
 
 export const commandConfig = command({
   name: 'config',
-  help: {
-    usage: 'coder config <list|get|set|unset> [<key> [value]] [--workspace]',
-    summary:
-      'Read or write configuration. `list` prints the effective config; get/set/unset\ntarget a dotted key (e.g. engines.codex.model). Writes go to ~/.coder/config.json.',
-    flags: [['--workspace', 'target <repo>/.coder/config.json instead of the user file']],
+  description: 'read or write config',
+  usage:
+    'Read or write configuration. `list` prints the effective config; get/set/unset\ntarget a dotted key (e.g. engines.codex.model). Writes go to ~/.coder/config.json.',
+  access: 'write',
+  args: {
+    action: str('list, get, set or unset'),
+    key: str('a dotted key, such as engines.codex.model'),
+    value: strList('with set: the value; JSON, or a comma list'),
+    workspace: flag('target <repo>/.coder/config.json instead of the user file'),
+  },
+  cli: {
+    positional: ['action', 'key', 'value'],
     examples: [
-      ['coder config list', 'print the effective config'],
-      ['coder config set chain codex,claude', 'set the engine fallback chain'],
-      ['coder config get engines.codex.model', 'read one value'],
+      'coder config list  # print the effective config',
+      'coder config set chain codex,claude  # set the engine fallback chain',
+      'coder config get engines.codex.model  # read one value',
     ],
   },
-  options: { ...baseOptions, workspace: flag },
-  args: Number.POSITIVE_INFINITY,
   run({ options, args: [action, key, ...valueParts], cwd }): ConfigResult | undefined {
     if (!action || action === 'help') return undefined;
     if (action === 'list') return { action, config: config.get(undefined, { cwd }) as CoderConfig };
@@ -70,7 +75,7 @@ export const commandConfig = command({
     return r.action === 'list' ? r.config : r.action === 'get' ? (r.value ?? null) : r.set;
   },
   print(result) {
-    if (!result) return void process.stdout.write(renderCommandHelp('config', commandConfig.help)!);
+    if (!result) return void process.stdout.write(renderCommandHelp(commandConfig));
     if (result.action === 'list') return printConfigList(result.config, resolveUserConfigFile());
     if (result.action === 'get') return printConfigValue(result.value);
     printConfigSet(result.set);

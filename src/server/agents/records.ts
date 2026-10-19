@@ -217,7 +217,7 @@ function mergedUsage(
       return [id, allowedEvents ? { allowedEvents } : {}];
     }),
   );
-  const maximum = first.permissions ?? definition.permissions ?? 'read-only';
+  const maximum = first.permissions ?? definition.permissions ?? 'auto';
   const requested = second.permissions;
   const permissions =
     requested && PERMISSIONS.indexOf(requested) <= PERMISSIONS.indexOf(maximum)

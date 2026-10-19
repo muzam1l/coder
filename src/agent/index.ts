@@ -186,7 +186,7 @@ async function init(id: string | undefined, opts: AgentInitOptions = {}) {
   const definition: AgentDefinition = {
     ...(picks.name ? { name: picks.name } : {}),
     ...(opts.description ? { description: opts.description } : {}),
-    permissions: opts.permissions ?? 'read-only',
+    permissions: opts.permissions ?? 'auto',
     access: picks.access,
     integrations,
   };

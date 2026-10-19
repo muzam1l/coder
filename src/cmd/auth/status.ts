@@ -1,30 +1,26 @@
 /** `coder auth status`: the saved sessions, one per server. */
 import process from 'node:process';
 
-import { formatHints, outStyle, renderTable } from '../../tui/output';
-import { flag } from '../../utils/args';
-import { command } from '../../cli';
+import { outStyle, renderTable } from '../../tui/output';
+import { command, nextSteps } from '../../cli';
 
 export const commandStatus = command({
-  name: 'auth status',
+  name: 'status',
+  description: 'show where you are signed in',
+  usage: 'List saved sessions with their server, user, and workspace.',
+  access: 'read',
   globalFlags: { cwd: false },
-  help: {
-    usage: 'coder auth status [--json]',
-    summary: 'List saved sessions with their server, user, and workspace.',
-    env: [['CODER_SERVER', 'the server to use instead of https://coder.wular.ai']],
-  },
-  options: { json: flag },
+  cli: { env: [['CODER_SERVER', 'the server to use instead of https://coder.wular.ai']] },
   run: async () => {
     const { sessions } = await import('../../client/auth/sign-in');
     return sessions.status();
   },
+  next: ({ result }) =>
+    Object.keys(result).length ? [] : nextSteps(['Sign in: coder auth login']),
   print: status => {
     const s = outStyle;
     const logins = Object.entries(status);
-    if (!logins.length)
-      return void process.stdout.write(
-        `${s.dim('Not signed in')}\n\n${formatHints(['Sign in: coder auth login'], s)}\n`,
-      );
+    if (!logins.length) return void process.stdout.write(`${s.dim('Not signed in')}\n`);
     process.stdout.write(
       `${renderTable(
         [

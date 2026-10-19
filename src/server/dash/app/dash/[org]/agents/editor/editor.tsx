@@ -110,7 +110,7 @@ function draftOf(
     events: {},
     match: {},
     access: definition?.access ?? 'write',
-    permissions: definition?.permissions ?? 'read-only',
+    permissions: definition?.permissions ?? 'auto',
     systemPrompt: agent?.systemPrompt ?? '',
     engine: definition?.engine ?? '',
     model: definition?.model ?? '',

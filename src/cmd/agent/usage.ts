@@ -3,8 +3,8 @@ import process from 'node:process';
 
 import type { UsageTotals } from '../../server/tasks/usage';
 import { outStyle, renderTable } from '../../tui/output';
-import { baseOptions, str, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { serverOptions, str } from '../../utils/args';
+import { command } from '../../cli';
 
 function printUsage(result: UsageTotals, by?: string): void {
   const rows = Array.isArray(result.totals)
@@ -33,17 +33,14 @@ function printUsage(result: UsageTotals, by?: string): void {
 }
 
 export const commandAgentUsage = command({
-  name: 'agent usage',
-  help: {
-    usage:
-      'coder agent usage [--since 7d|24h|<ms>] [--by agent|installation|engine] [--server [url]] [--json] [--cwd <dir>]',
-    flags: [
-      ['--since <period|ms>', 'period such as 7d or 24h, or milliseconds since epoch'],
-      ['--by <group>', 'agent, installation, or engine'],
-      SERVER_FLAG,
-    ],
+  name: 'usage',
+  description: 'aggregate usage by agent, installation, or engine',
+  access: 'read',
+  args: {
+    since: str('period such as 7d or 24h, or milliseconds since epoch', '<period|ms>'),
+    by: str('agent, installation, or engine', '<group>'),
+    ...serverOptions,
   },
-  options: { ...baseOptions, ...serverOptions, since: str, by: str },
   run: async ({ options, cwd }) => {
     const { agents } = await import('../../agent');
     return agents.usage({

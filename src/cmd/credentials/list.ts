@@ -3,8 +3,8 @@ import process from 'node:process';
 
 import type { CredentialSummary } from '../../server/settings/credentials';
 import { outStyle, renderTable } from '../../tui/output';
-import { flag, serverOnly } from '../../utils/args';
-import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
+import { credentialServerOptions } from '../../utils/args';
+import { command } from '../../cli';
 
 function printCredentials(rows: CredentialSummary[]): void {
   if (!rows.length) return void process.stdout.write(`${outStyle.dim('No engine credentials.')}\n`);
@@ -38,13 +38,11 @@ function printCredentials(rows: CredentialSummary[]): void {
 }
 
 export const commandCredentialsList = command({
-  name: 'credentials list',
+  name: 'list',
+  description: 'list your keys and the workspace keys, by variable',
+  access: 'read',
+  args: credentialServerOptions,
   globalFlags: { cwd: false },
-  help: {
-    usage: 'coder credentials list [--server [url]] [--json]',
-    flags: [CREDENTIAL_SERVER_FLAG],
-  },
-  options: { json: flag, server: serverOnly, yes: flag },
   run: async ({ options }) => {
     const { credentials } = await import('../../core/remote');
     return credentials.list(options);

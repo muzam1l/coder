@@ -4,15 +4,15 @@ import process from 'node:process';
 import { command } from '../../cli';
 
 export const commandServerWorkflow = command({
-  name: 'server workflow',
+  name: 'workflow',
+  description: 'print the GitHub Actions workflow for RUNNER=github-actions',
+  usage:
+    'Print the workflow the github-actions runner dispatches. Save it as .github/workflows/coder-agent.yml in every repo the agent runs on, and set RUNNER=github-actions on the server.',
+  access: 'read',
   globalFlags: { json: false, cwd: false },
-  help: {
-    usage: 'coder server workflow',
-    summary:
-      'Print the workflow the github-actions runner dispatches. Save it as .github/workflows/coder-agent.yml in every repo the agent runs on, and set RUNNER=github-actions on the server.',
-    examples: [['coder server workflow > .github/workflows/coder-agent.yml', 'add it to a repo']],
+  cli: {
+    examples: ['coder server workflow > .github/workflows/coder-agent.yml  # add it to a repo'],
   },
-  options: {},
   run: async () => {
     const { actionsWorkflow } = await import('../../server/runners/github-actions');
     return actionsWorkflow();

@@ -2,32 +2,31 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions, str, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { serverOptions, str, strList } from '../../utils/args';
+import { command } from '../../cli';
 import { idAndText } from './steer';
 
 type Answered = { answer: string | null; error?: string; ok: boolean };
 
 export const commandAsk = command({
-  name: 'task ask',
-  help: {
-    usage: 'coder task ask <task-id> "<question>" [--server [url]]',
-    summary:
-      "Answer a question ABOUT a task without touching it: a read-only sidecar reads\nthe task's progress log, result, and workspace and answers; the task never\nsees the question and its thread is not steered. Works whether the task is\nrunning or stopped. To change what the task does, use `coder task steer`.",
-    flags: [
-      ['--model <alias|slug>', "sidecar model (default: the task's own)"],
-      ['--effort <low|medium|high>', 'sidecar reasoning effort'],
-      SERVER_FLAG,
-    ],
+  name: 'ask',
+  description: 'ask about a task without interrupting it',
+  usage:
+    "Answer a question ABOUT a task without touching it: a read-only sidecar reads\nthe task's progress log, result, and workspace and answers; the task never\nsees the question and its thread is not steered. Works whether the task is\nrunning or stopped. To change what the task does, use `coder task steer`.",
+  access: 'read',
+  args: {
+    'task-id': str('the task to ask about'),
+    question: strList('the question'),
+    model: str("sidecar model (default: the task's own)", '<alias|slug>'),
+    effort: str('sidecar reasoning effort', '<low|medium|high>'),
+    ...serverOptions,
+  },
+  cli: {
+    positional: ['task-id', 'question'],
     examples: [
-      [
-        'coder task ask task-abc "what approach did you take and why?"',
-        'probe a decision without derailing the task',
-      ],
+      'coder task ask task-abc "what approach did you take and why?"  # probe a decision without derailing the task',
     ],
   },
-  options: { ...baseOptions, model: str, effort: str, ...serverOptions },
-  args: Number.POSITIVE_INFINITY,
   async run({ options, args }) {
     const { tasks } = await import('../../core/task');
 

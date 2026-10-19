@@ -2,19 +2,22 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions, flag, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { flag, serverOptions, str } from '../../utils/args';
+import { command } from '../../cli';
 
 export const commandApprove = command({
-  name: 'task approve',
-  help: {
-    usage: 'coder task approve [task-id] <approval-id> [--deny] [--server [url]]',
-    summary:
-      'Answer an escalated permission request. Accepts by default; --deny rejects it.\nApproval ids are unique, so the task id is optional.',
-    flags: [['--deny', 'reject the request instead of accepting'], SERVER_FLAG],
+  name: 'approve',
+  description: 'answer an escalated permission',
+  usage:
+    'Answer an escalated permission request. Accepts by default; --deny rejects it.\nApproval ids are unique, so the task id is optional.',
+  access: 'write',
+  args: {
+    'task-id': str('the task, or the approval id alone'),
+    'approval-id': str('the approval to answer'),
+    deny: flag('reject the request instead of accepting'),
+    ...serverOptions,
   },
-  options: { ...baseOptions, deny: flag, ...serverOptions },
-  args: 2,
+  cli: { positional: ['task-id', 'approval-id'] },
   run: async ({ options, args: [reference, approvalId] }) => {
     const { tasks } = await import('../../core/task');
     return tasks.approve(reference, approvalId, { ...options, organization: options.workspace });

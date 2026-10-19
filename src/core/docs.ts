@@ -27,7 +27,7 @@ interface Topic {
 
 // Every docs/*.md by basename plus one level of docs/<dir>/ (index.md is the
 // folder topic, its siblings are `<dir>/<name>`), then the specials.
-function collectTopics(root: string): Topic[] {
+export function collectTopics(root = resolveMarketplaceDir()): Topic[] {
   const docsDir = path.join(root, 'docs');
   let entries: fs.Dirent[] = [];
   try {
@@ -92,7 +92,7 @@ function describeDoc(absPath: string): string {
       inFence = !inFence;
       continue;
     }
-    if (inFence || line === '') {
+    if (inFence || line === '' || line.startsWith('<!--')) {
       continue;
     }
     if (line.startsWith('#')) {

@@ -2,19 +2,22 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
-import { runnerOptions } from './remove';
+import * as z from 'zod/mini';
+
+import { credentialServerOptions } from '../../utils/args';
+import { command } from '../../cli';
 
 export const commandRunnerRename = command({
-  name: 'runner rename',
-  globalFlags: { cwd: false },
-  help: {
-    usage: 'coder runner rename <id> <name> [--server [url]] [--json]',
-    flags: [CREDENTIAL_SERVER_FLAG],
+  name: 'rename',
+  description: 'rename a runner',
+  access: 'write',
+  args: {
+    id: z.string().check(z.describe('the runner')),
+    name: z.string().check(z.describe('its new name')),
+    ...credentialServerOptions,
   },
-  options: runnerOptions,
-  args: 2,
-  required: ['<id>', '<name>'],
+  globalFlags: { cwd: false },
+  cli: { positional: ['id', 'name'] },
   async run({ options, args: [id, name] }) {
     const { runners } = await import('../../runner');
 

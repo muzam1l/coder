@@ -1,15 +1,9 @@
-/** File mailbox between a sandboxed flow and its agent task's worker, which acts outside the sandbox. */
+/** File mailbox between a runner and its task's worker. */
 import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import process from 'node:process';
 
 import { CoderError, type CoderErrorCode } from './dispatch';
-import { resolveTaskDir } from './state';
-import type { Task } from './types';
-
-/** Set in the engine's shell environment: the mailbox directory, the sandbox's one extra writable root. */
-export const MAILBOX_ENV = 'CODER_MAILBOX';
 
 const POLL_MS = 100;
 const REQUEST_RE = /^([a-f0-9-]{36})\.(?:req|applying)\.json$/;
@@ -57,10 +51,6 @@ interface MailboxReply {
   >;
 }
 
-export function mailboxDir(env: NodeJS.ProcessEnv = process.env): string | undefined {
-  return env[MAILBOX_ENV] || undefined;
-}
-
 // Exclusive tmp + rename: a planted symlink is replaced, never followed.
 function writeAtomic(file: string, value: unknown): void {
   const tmp = `${file}.${randomUUID()}.tmp`;
@@ -72,10 +62,9 @@ function writeAtomic(file: string, value: unknown): void {
 export async function askWorker<T>(
   kind: string,
   payload: unknown,
-  options: { dir?: string; id?: string; keepReply?: boolean; timeoutMs?: number } = {},
+  options: { dir: string; id?: string; keepReply?: boolean; timeoutMs?: number },
 ): Promise<T> {
-  const dir = options.dir ?? mailboxDir();
-  if (!dir) throw new Error('No mailbox: not inside an agent task.');
+  const { dir } = options;
   const id = options.id ?? randomUUID();
   const reply = path.join(dir, `${id}.res.json`);
   if (!fs.existsSync(reply)) writeAtomic(path.join(dir, `${id}.req.json`), { kind, payload });
@@ -155,10 +144,4 @@ export function serveMailbox(dir: string, handlers: MailboxHandlers): () => void
     }
   }, POLL_MS);
   return () => clearInterval(timer);
-}
-
-/** The mailbox of an agent's task: the one path its sandbox may write even when read-only. */
-export function agentMailboxDir(cwd: string, task: Task): string | null {
-  if (!task.agentId) return null;
-  return path.join(resolveTaskDir(cwd, task.id), 'mailbox');
 }

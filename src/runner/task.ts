@@ -65,6 +65,7 @@ import {
   withFileLock,
 } from '../utils/fsx';
 import { CLAUDE_PROJECT, taskHistory } from './history';
+import { pendingCall } from '../core/task/async';
 
 const exec = promisify(execFile);
 type RemoteTask = {
@@ -941,7 +942,11 @@ async function runCheckedOutTask(
             ]);
             continue;
           }
-          if ((worker?.exitCode === null && !worker.signalCode) || hasQueuedSteers(cwd, taskId)) {
+          if (
+            (worker?.exitCode === null && !worker.signalCode) ||
+            hasQueuedSteers(cwd, taskId) ||
+            pendingCall(resolveTaskDir(cwd, taskId))
+          ) {
             await Promise.race([resultSignal.wait(30000), aborted]);
             continue;
           }

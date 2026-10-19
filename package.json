@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "main": "./dist/sdk.js",
@@ -24,6 +24,7 @@
   },
   "scripts": {
     "build": "bun scripts/build.ts",
+    "emit": "bun scripts/emit.ts",
     "build:dash": "bun scripts/build.ts dash",
     "deploy:vercel": "bun scripts/deploy-vercel.ts",
     "dev:dash": "pnext dev src/server/dash",
@@ -69,6 +70,7 @@
     "@types/node": "^26.1.2",
     "@wular/pnext": "0.1.9",
     "chat": "4.41.1",
+    "contextjsx": "0.2.2",
     "drizzle-kit": "0.31.11",
     "drizzle-orm": "0.45.2",
     "jose": "6.2.12",

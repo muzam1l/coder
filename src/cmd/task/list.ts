@@ -3,19 +3,20 @@ import path from 'node:path';
 import process from 'node:process';
 
 import type { TaskRow } from '../../core/task';
+import { CoderError } from '../../core/dispatch';
+import { decodeJson, encodeJson } from '../../utils/base64url';
 import { STALL_MS } from '../../core/state';
 import type { TaskStatus } from '../../server/store/types';
 import {
   formatAge,
-  formatHints,
   outStyle,
   paintStatus,
   renderTable,
   type Column,
   type TableGroup,
 } from '../../tui/output';
-import { flag, limitOption, str, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { flag, limitOption, serverOptions, str } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 import { replyOf } from './result';
 
 // Below this, a running task's idle age isn't worth showing at all.
@@ -67,11 +68,6 @@ function printTasks(
           ? 'recently stopped tasks'
           : 'recent tasks';
     process.stdout.write(`No ${scope}.\n`);
-    // On the default (recent) view, point at the archive if it has tasks.
-    if (rows.archived)
-      process.stdout.write(
-        `\n${formatHints([`${rows.archived} archived: coder task list --archived [--limit N]`], s)}\n`,
-      );
     return;
   }
   type Row = TaskRow;
@@ -136,13 +132,6 @@ function printTasks(
       ),
     );
   }
-
-  const hints = ['Result: coder task result <task-id>'];
-  // The default view only shows recent tasks; point at the archive.
-  if (!view.archived) {
-    hints.push('Older tasks: coder task list --archived [--limit N]');
-  }
-  process.stdout.write(`\n${formatHints(hints, s)}\n`);
 }
 
 // coder list                   -> recent tasks: running + stopped in the last 2 min
@@ -150,37 +139,136 @@ function printTasks(
 // coder task list --stopped    -> only the recently stopped ones
 // coder task list --archived   -> archived tasks (everything older)
 export const commandTasks = command({
-  name: 'task list',
-  help: {
-    usage: 'coder task list [--running] [--stopped] [--archived [--limit N]] [--server [url]]',
-    summary:
-      'List recent tasks across all workspaces, most recent first: running tasks plus\nones stopped within the last 30 minutes. Older stopped tasks auto-archive and\nmove to --archived. Shortcut: `coder list`.',
-    flags: [
-      ['--running', 'show only running tasks'],
-      ['--stopped', 'show only recently stopped tasks (not yet archived)'],
-      ['--archived', 'show only archived tasks (auto-archived or via task archive)'],
-      ['--limit <n|all>', 'show at most n tasks (default all)'],
-      ['--dir <dir>', 'only tasks launched in that workspace'],
-      SERVER_FLAG,
-    ],
-  },
-  options: {
-    cwd: str,
-    dir: str,
-    limit: limitOption,
-    json: flag,
-    running: flag,
-    stopped: flag,
-    archived: flag,
+  name: 'list',
+  description: 'list recent tasks (by default running + just stopped)',
+  usage:
+    'List recent tasks across all workspaces, most recent first: running tasks plus\nones stopped within the last 30 minutes. Older stopped tasks auto-archive and\nmove to --archived. Shortcut: `coder list`.',
+  access: 'read',
+  args: {
+    running: flag('show only running tasks'),
+    stopped: flag('show only recently stopped tasks (not yet archived)'),
+    archived: flag('show only archived tasks (auto-archived or via task archive)'),
+    limit: limitOption('tasks per page (default: 50; all for every task)'),
+    cursor: str('continue from the previous page cursor'),
+    dir: str('only tasks launched in that workspace'),
     ...serverOptions,
   },
   run: async ({ options }) => {
+    const limit = options.limit ?? 50;
+    if (options.server !== undefined) {
+      const { connect } = await import('../../core/remote');
+      const api = connect({ ...options, organization: options.workspace });
+      const items: TaskStatus[] = [];
+      let cursor = options.cursor ?? '';
+      let next: string | undefined;
+      do {
+        const page = (await api.tasks.list({
+          cursor,
+          limit: limit === 'all' ? 200 : Math.min(200, limit - items.length),
+          status: options.running ? 'active' : undefined,
+          archived: options.archived,
+        })) as unknown as { items: TaskStatus[]; next?: string };
+        items.push(
+          ...page.items.filter(
+            row => !options.stopped || ['completed', 'failed', 'cancelled'].includes(row.status),
+          ),
+        );
+        next = page.next;
+        cursor = next ?? '';
+      } while (next && (limit === 'all' || items.length < limit));
+
+      return { items, ...(next ? { next } : {}) };
+    }
     const { tasks } = await import('../../core/task');
-    return tasks.list({ ...options, organization: options.workspace });
+    const rows = (await tasks.list({ ...options, limit: 'all' })) as TaskRow[] & {
+      clipped: number;
+      archived: number;
+    };
+    let after = 0;
+    if (options.cursor) {
+      let id: string;
+      try {
+        id = decodeJson<string>(options.cursor);
+        if (typeof id !== 'string') throw new Error();
+      } catch {
+        throw new CoderError('invalid-option', 'Invalid task list cursor.');
+      }
+      const index = rows.findIndex(row => row.taskId === id);
+      if (index < 0)
+        throw new CoderError(
+          'invalid-option',
+          'Task list cursor is no longer available; start a new list.',
+        );
+      after = index + 1;
+    }
+    const items = rows.slice(after, limit === 'all' ? undefined : after + limit);
+    const more = after + items.length < rows.length;
+
+    return {
+      items: Object.assign(items, { clipped: 0, archived: rows.archived }),
+      ...(more ? { next: encodeJson(items.at(-1)!.taskId) } : {}),
+    };
   },
-  async print(rows, { options }) {
-    if (options.server !== undefined) return printServerTasks(rows as TaskStatus[]);
-    const { readFlowRecord } = await import('../../flow/runs');
-    printTasks(rows as TaskRow[] & { clipped: number; archived: number }, options, readFlowRecord);
+  json: (page, { options }) =>
+    options.server === undefined
+      ? page
+      : {
+          ...page,
+          items: (page.items as TaskStatus[]).map(
+            ({ task, status, createdAt, updatedAt, startedAt, finishedAt }) => ({
+              task: {
+                id: task.id,
+                name: task.name,
+                agent: task.agent,
+                source: task.source,
+                cwd: task.cwd,
+                prompt: task.prompt?.replace(/\s+/g, ' ').trim().slice(0, 80),
+              },
+              status,
+              createdAt,
+              updatedAt,
+              startedAt,
+              finishedAt,
+            }),
+          ),
+        },
+  next({ result: page, args: options }) {
+    const rows = page.items as TaskRow[] & { archived: number };
+    const steps =
+      options.server !== undefined
+        ? []
+        : nextSteps(
+            rows.length
+              ? [
+                  'Result: coder task result <task-id>',
+                  ...(!options.archived
+                    ? ['Older tasks: coder task list --archived [--limit N]']
+                    : []),
+                ]
+              : rows.archived
+                ? [`${rows.archived} archived: coder task list --archived [--limit N]`]
+                : [],
+          );
+    if (page.next)
+      steps.push(
+        ...nextSteps(
+          [
+            `Next page: coder task list --cursor ${page.next} --limit ${options.limit ?? 50}${options.running ? ' --running' : ''}${options.stopped ? ' --stopped' : ''}${options.archived ? ' --archived' : ''}${options.dir ? ` --dir ${JSON.stringify(options.dir)}` : ''}${options.server !== undefined ? ` --server${options.server === true ? '' : ` ${JSON.stringify(options.server)}`}` : ''}${options.workspace ? ` --workspace ${JSON.stringify(options.workspace)}` : ''}`,
+          ],
+          { layout: 'plain' },
+        ),
+      );
+    return steps;
+  },
+  async print(page, { options }) {
+    if (options.server !== undefined) printServerTasks(page.items as TaskStatus[]);
+    else {
+      const { readFlowRecord } = await import('../../flow/runs');
+      printTasks(
+        page.items as TaskRow[] & { clipped: number; archived: number },
+        options,
+        readFlowRecord,
+      );
+    }
   },
 });

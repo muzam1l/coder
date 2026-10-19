@@ -1,26 +1,25 @@
 import process from 'node:process';
-import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
-import { str, strList } from '../../utils/args';
-import { runnerOptions } from './remove';
+
+import * as z from 'zod/mini';
+
+import { credentialServerOptions, str, strList } from '../../utils/args';
+import { command } from '../../cli';
 
 export const commandRunnerAdd = command({
-  name: 'runner add',
-  globalFlags: { cwd: false },
-  args: 1,
-  required: ['<kind>'],
-  help: {
-    usage:
-      'coder runner add <kind> [--name <name>] [--scope <scope>] [--field key=value …] [--server [url]] [--json]',
-    summary:
-      'Connect a runner. Secret fields read environment variables with key=env:VARIABLE. Adding local prints a pairing command.',
-    flags: [
-      ['--name <name>', 'runner display name'],
-      ['--scope <scope>', 'personal or workspace'],
-      ['--field key=value', 'repeat for each field, use env:VARIABLE for secrets'],
-      CREDENTIAL_SERVER_FLAG,
-    ],
+  name: 'add',
+  description: 'connect a runner',
+  usage:
+    'Connect a runner. Secret fields read environment variables with key=env:VARIABLE. Adding local prints a pairing command.',
+  access: 'write',
+  args: {
+    kind: z.string().check(z.describe('the runner kind, such as local or http')),
+    name: str('runner display name'),
+    scope: str('personal or workspace'),
+    field: strList('repeat for each field, use env:VARIABLE for secrets', 'key=value'),
+    ...credentialServerOptions,
   },
-  options: { ...runnerOptions, name: str, scope: str, field: strList },
+  globalFlags: { cwd: false },
+  cli: { positional: ['kind'] },
   async run({ options, args: [kind] }) {
     const { addRunnerFields } = await import('../../runner');
     return addRunnerFields(kind, options);

@@ -2,21 +2,23 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions, flag, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { flag, serverOptions, str } from '../../utils/args';
+import { command } from '../../cli';
 
 export const plural = (count: number) => (count === 1 ? '' : 's');
 
 export const commandArchive = command({
-  name: 'task archive',
-  help: {
-    usage: 'coder task archive <task-id> | coder task archive --all-stopped [--server [url]]',
-    summary:
-      'Archive a task session so it drops out of the default list (see it again with\n`coder task list --archived [--limit N]`). Pass --all-stopped to archive every\nfinished task. A running task keeps running; steering an archived task\nbrings it back.',
-    flags: [['--all-stopped', 'archive every stopped (finished) task'], SERVER_FLAG],
+  name: 'archive',
+  description: 'archive a session (or --all-stopped)',
+  usage:
+    'Archive a task session so it drops out of the default list (see it again with\n`coder task list --archived [--limit N]`). Pass --all-stopped to archive every\nfinished task. A running task keeps running; steering an archived task\nbrings it back.',
+  access: 'write',
+  args: {
+    'task-id': str('the task to archive'),
+    'all-stopped': flag('archive every stopped (finished) task'),
+    ...serverOptions,
   },
-  options: { ...baseOptions, 'all-stopped': flag, ...serverOptions },
-  args: 1,
+  cli: { positional: ['task-id'] },
   run: async ({ options, args: [id] }) => {
     const { tasks } = await import('../../core/task');
     return tasks.archive(id, {

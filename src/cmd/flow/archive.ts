@@ -2,21 +2,22 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions, flag } from '../../utils/args';
+import { flag, str } from '../../utils/args';
 import { command } from '../../cli';
 
 export const plural = (count: number) => (count === 1 ? '' : 's');
 
 export const commandArchive = command({
-  name: 'flow archive',
-  help: {
-    usage: 'coder flow archive <run-id> | coder flow archive --all-stopped',
-    summary:
-      'Archive a flow run so it drops out of the default list (see it again with\n`coder flow list --archived [--limit N]`). Pass --all-stopped to archive every\nfinished run. A running run must be stopped first.',
-    flags: [['--all-stopped', 'archive every stopped (finished) run']],
+  name: 'archive',
+  description: 'hide a run (or all stopped) from the list',
+  usage:
+    'Archive a flow run so it drops out of the default list (see it again with\n`coder flow list --archived [--limit N]`). Pass --all-stopped to archive every\nfinished run. A running run must be stopped first.',
+  access: 'write',
+  args: {
+    'run-id': str('the run to archive'),
+    'all-stopped': flag('archive every stopped (finished) run'),
   },
-  options: { ...baseOptions, 'all-stopped': flag },
-  args: 1,
+  cli: { positional: ['run-id'] },
   run: async ({ options, args: [id] }) => {
     const { archiveRuns } = await import('../../flow/runs');
     return archiveRuns(id, { allStopped: options['all-stopped'] });

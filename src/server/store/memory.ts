@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { watchChanges } from '../../utils/fsx';
 
 import type { Batch, Unseen, Conversation, ConversationState } from '../tasks/conversation';
-import { SINCE_LIMIT } from '../../core/prompts';
+import { SINCE_LIMIT } from '../../agent/context/turn';
 import type { SinceMessage } from '../../integrations/types';
 import type {
   StoreListOptions,

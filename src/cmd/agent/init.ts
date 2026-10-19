@@ -4,10 +4,10 @@ import process from 'node:process';
 
 import type { AgentPicks } from '../../agent';
 import type { AgentDefinition, Preset } from '../../agent/types';
-import { formatHints, outStyle } from '../../tui/output';
+import { outStyle } from '../../tui/output';
 import { ask, canPrompt, pick, pickDetailed } from '../../tui/prompt';
-import { baseOptions, flag, str } from '../../utils/args';
-import { command } from '../../cli';
+import { flag, str } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 
 const PRESET_LABELS: Record<Preset, string> = {
   read: 'Read-only',
@@ -20,24 +20,34 @@ function printAgentInit(
   rel: string,
 ): void {
   const s = outStyle;
-  const { id, samples, integrations: ids } = result;
   process.stdout.write(`Created ${s.cyan(rel)}.\n`);
-  const steps = ids.length
-    ? [
-        `1. Write ${rel}/system.md. Try it with no server: coder task run --agent ${id} "<task>"`,
-        `2. Run it on a server: coder dash on this machine reads it from this repo; a cloud server imports it from the dashboard or with coder agent push.`,
-        `3. On the dashboard, create the agent's app on each platform it uses (${ids.join(', ')}) from its Platforms tab, and install it.`,
-        `4. Fire an event by hand, or leave --server out to run it offline: coder agent run ${id} ${samples[0] ?? '<event.json>'} --server <url>`,
-        'Guide: https://github.com/muzam1l/coder/blob/main/docs/agents/index.md',
-        'Agents: coder docs agents',
-      ]
-    : [
-        `1. Write ${rel}/system.md. Try it with no server: coder task run --agent ${id} "<task>"`,
-        `2. Give the agent a platform under "integrations" in ${rel}/agent.json, then run init again or follow the guide: coder agent integrations list`,
-        'Guide: https://github.com/muzam1l/coder/blob/main/docs/agents/index.md',
-        'Agents: coder docs agents',
-      ];
-  process.stdout.write(`\n${formatHints(steps, s)}\n`);
+}
+
+function agentInitNext(
+  result: { id: string; samples: string[]; integrations: string[]; dir: string },
+  cwd: string,
+) {
+  const { id, samples, integrations: ids } = result;
+  const rel = path.relative(cwd, result.dir);
+  const steps = nextSteps(
+    ids.length
+      ? [
+          `1. Write ${rel}/system.md. Try it with no server: coder task run --agent ${id} "<task>"`,
+          `2. Run it on a server: coder dash on this machine reads it from this repo; a cloud server imports it from the dashboard or with coder agent push.`,
+          `3. On the dashboard, create the agent's app on each platform it uses (${ids.join(', ')}) from its Platforms tab, and install it.`,
+          `4. Fire an event by hand, or leave --server out to run it offline: coder agent run ${id} ${samples[0] ?? '<event.json>'} --server <url>`,
+          'Guide: https://github.com/muzam1l/coder/blob/main/docs/agents/index.md',
+          'Agents: coder docs agents',
+        ]
+      : [
+          `1. Write ${rel}/system.md. Try it with no server: coder task run --agent ${id} "<task>"`,
+          `2. Give the agent a platform under "integrations" in ${rel}/agent.json, then run init again or follow the guide: coder agent integrations list`,
+          'Guide: https://github.com/muzam1l/coder/blob/main/docs/agents/index.md',
+          'Agents: coder docs agents',
+        ],
+  );
+  if (ids.length) steps[1]!.usage = 'coder dash';
+  return steps;
 }
 
 /** Interactive picks when nothing was passed and a person is on the other end. */
@@ -97,51 +107,42 @@ async function askPicks(id: string): Promise<AgentPicks> {
 }
 
 export const commandAgentInit = command({
-  name: 'agent init',
-  help: {
-    usage:
-      'coder agent init [id] [--integrations a,b] [--events a,b] [--access <mode>] [--name <text>] [--description <text>] [--permissions <mode>] [--yes]',
-    summary:
-      'Create .coder/agents/<id>/ with an agent.json built from the integration catalog, a system.md to write the prompt in, and one sample event per integration for `coder agent run`. Asks for the id, integrations, events, and access when run in a terminal without them.',
-    flags: [
-      [
-        '--integrations <a,b>',
-        'platforms the agent listens to (see coder agent integrations list)',
-      ],
-      [
-        '--events <a,b>',
-        'events that start tasks, applied to each integration that has them (default: mention)',
-      ],
-      ['--access <mode>', 'read or write, on its platforms and connections (default: write)'],
-      ['--name <text>', 'display name used in replies (default: the id)'],
-      ['--description <text>', 'one line for agent list'],
-      ['--permissions <mode>', 'engine permission mode (default: read-only)'],
-      ['--yes', 'skip the questions and take the defaults'],
-    ],
+  name: 'init',
+  description: 'scaffold an agent folder in .coder/agents',
+  usage:
+    'Create .coder/agents/<id>/ with an agent.json built from the integration catalog, a system.md to write the prompt in, and one sample event per integration for `coder agent run`. Asks for the id, integrations, events, and access when run in a terminal without them.',
+  access: 'write',
+  args: {
+    id: str('the agent id: its folder under .coder/agents'),
+    integrations: str(
+      'platforms the agent listens to (see coder agent integrations list)',
+      '<a,b>',
+    ),
+    events: str(
+      'events that start tasks, applied to each integration that has them (default: mention)',
+      '<a,b>',
+    ),
+    access: str('read or write, on its platforms and connections (default: write)', '<mode>'),
+    name: str('display name used in replies (default: the id)', '<text>'),
+    description: str('one line for agent list', '<text>'),
+    permissions: str('engine permission mode (default: auto)', '<mode>'),
+    match: str(
+      'start tasks only for event text matching a regex, as event=regex pairs',
+      '<a=re,b=re>',
+    ),
+    yes: flag('skip the questions and take the defaults'),
+  },
+  cli: {
+    positional: ['id'],
     examples: [
-      ['coder agent init', 'answer the questions, id included'],
-      [
-        'coder agent init triage --integrations github --events issue,mention --access read',
-        'no questions',
-      ],
+      'coder agent init  # answer the questions, id included',
+      'coder agent init triage --integrations github --events issue,mention --access read  # no questions',
     ],
   },
-  options: {
-    ...baseOptions,
-    name: str,
-    description: str,
-    integrations: str,
-    events: str,
-    access: str,
-    permissions: str,
-    match: str,
-    yes: flag,
-  },
-  args: 1,
-  run: async ({ options, args: [id], cwd }) => {
+  run: async ({ options, args: [id], cwd, tool }) => {
     const { agents } = await import('../../agent');
 
-    const interactive = canPrompt() && !options.yes;
+    const interactive = !tool && canPrompt() && !options.yes;
     return agents.init(id, {
       ...options,
       cwd,
@@ -166,5 +167,7 @@ export const commandAgentInit = command({
     files: result.files,
     samples: result.samples,
   }),
+  next: ({ result, args }) =>
+    agentInitNext(result, args.cwd ? path.resolve(args.cwd) : process.cwd()),
   print: (result, { cwd }) => printAgentInit(result, path.relative(cwd, result.dir)),
 });

@@ -3,7 +3,8 @@
   "compilerOptions": {
     "paths": {
       "@/*": ["./*"],
-      "@coder/*": ["../../*"]
+      "@coder/*": ["../../*"],
+      "@wular/coder/flow": ["../../flow/index.ts"]
     }
   },
   "include": ["**/*.ts", "**/*.tsx", "pnext-env.d.ts", "../../../dist/dash/types/**/*.ts"]

@@ -1,19 +1,25 @@
 /** `coder model list`: built-ins, aliases and custom models, with each endpoint probed. */
 import process from 'node:process';
 
-import { models } from '../../core/models';
-import { formatHints, outStyle } from '../../tui/output';
-import { command, MODEL_HINT } from '../../cli';
-import { modelOptions } from './add';
+import type { models } from '../../core/models';
+import { outStyle } from '../../tui/output';
+import { command, nextSteps, MODEL_HINT } from '../../cli';
 
 export const commandModelList = command({
-  name: 'model list',
-  help: {
-    usage: 'coder model list [--json]',
-    summary: `List built-in aliases, configured custom models, and user aliases. Only custom\nmodels are probed.\n\n${MODEL_HINT}`,
+  name: 'list',
+  description: 'list built-ins, custom models, and aliases',
+  usage: `List built-in aliases, configured custom models, and user aliases. Only custom\nmodels are probed.\n\n${MODEL_HINT}`,
+  access: 'read',
+  run: async ({ cwd }) => {
+    const { models } = await import('../../core/models');
+    return models.list({ cwd });
   },
-  options: modelOptions,
-  run: ({ cwd }) => models.list({ cwd }),
+  next: () =>
+    nextSteps([
+      'Add a custom model: coder model add <name> --base-url <url> --model <id> [--env-key VAR]',
+      'Alias a model, e.g. fast codex:luna: coder model alias <name> <spec>',
+      'Run with a model: coder run --model <name> "<task>"',
+    ]),
   print: printModelList,
 });
 
@@ -64,17 +70,6 @@ function printModelList(data: Awaited<ReturnType<typeof models.list>>): void {
     lines.push('');
   }
 
-  lines.push(
-    ...MODEL_HINT.split('\n'),
-    '',
-    formatHints(
-      [
-        'Add a custom model: coder model add <name> --base-url <url> --model <id> [--env-key VAR]',
-        'Alias a model, e.g. fast codex:luna: coder model alias <name> <spec>',
-        'Run with a model: coder run --model <name> "<task>"',
-      ],
-      s,
-    ),
-  );
+  lines.push(...MODEL_HINT.split('\n'));
   process.stdout.write(`${lines.join('\n')}\n`);
 }

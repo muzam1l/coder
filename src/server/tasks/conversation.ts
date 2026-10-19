@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type { SerializedThread } from 'chat';
 
 import { definitionEvents } from '../../agent/definition';
-import { eventPrompt, reactionsPrompt, SINCE_LIMIT } from '../../core/prompts';
+import { eventPrompt, reactionsPrompt, SINCE_LIMIT } from '../../agent/context/turn';
 import type { Agent, AgentApp, AgentEvent, TaskContext } from '../../agent/types';
 import type { ConversationFacts, Integration, SinceMessage } from '../../integrations/types';
 import type { ServerContext } from '../context';

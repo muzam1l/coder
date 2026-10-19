@@ -2,29 +2,31 @@
 import process from 'node:process';
 
 import { openUrl } from '../../../tui/prompt';
-import { flag, str } from '../../../utils/args';
+import * as z from 'zod/mini';
+
+import { str } from '../../../utils/args';
 import { command } from '../../../cli';
 
 export const commandServerAppCreate = command({
-  name: 'server app create',
+  name: 'create',
+  description: "create the built-in agent's public app",
+  usage:
+    "Open the page that creates the built-in agent's public app on a platform, once per server. Every workspace then connects it from its dashboard with one click. Run it where the server's environment is set.",
+  access: 'write',
+  args: {
+    integration: z.string().check(z.describe('the platform, such as github')),
+    org: str('create it under this organization instead of your own account'),
+    name: str("the app's name and handle (default Coder)"),
+  },
   globalFlags: { cwd: false },
-  help: {
-    usage: 'coder server app create <integration> [--org <org>] [--name <name>] [--json]',
-    summary:
-      "Open the page that creates the built-in agent's public app on a platform, once per server. Every workspace then connects it from its dashboard with one click. Run it where the server's environment is set.",
-    flags: [
-      ['--org <org>', 'create it under this organization instead of your own account'],
-      ['--name <name>', "the app's name and handle (default Coder)"],
-    ],
+  cli: {
+    positional: ['integration'],
     env: [
       ['DATABASE_URL', "the server's Postgres"],
       ['PUBLIC_URL', "the server's address, which goes into the app"],
     ],
-    examples: [['coder server app create github --name wular-coder', 'the hosted GitHub App']],
+    examples: ['coder server app create github --name wular-coder  # the hosted GitHub App'],
   },
-  options: { org: str, name: str, json: flag },
-  args: 1,
-  required: ['<integration>'],
   async run({ options, args: [integration] }) {
     const { serverAppLink } = await import('../../../server/agents/apps');
 

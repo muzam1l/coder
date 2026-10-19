@@ -2,21 +2,18 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { flag, serverOnly } from '../../utils/args';
-import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
+import * as z from 'zod/mini';
 
-export const runnerOptions = { json: flag, server: serverOnly, yes: flag };
+import { credentialServerOptions } from '../../utils/args';
+import { command } from '../../cli';
 
 export const commandRunnerRemove = command({
-  name: 'runner remove',
+  name: 'remove',
+  description: 'remove a runner',
+  access: 'write',
+  args: { id: z.string().check(z.describe('the runner')), ...credentialServerOptions },
   globalFlags: { cwd: false },
-  help: {
-    usage: 'coder runner remove <id> [--server [url]] [--json]',
-    flags: [CREDENTIAL_SERVER_FLAG],
-  },
-  options: runnerOptions,
-  args: 1,
-  required: ['<id>'],
+  cli: { positional: ['id'] },
   async run({ options, args: [id] }) {
     const { removeRunner } = await import('../../runner');
 

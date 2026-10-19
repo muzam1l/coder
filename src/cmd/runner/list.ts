@@ -3,8 +3,8 @@ import process from 'node:process';
 
 import type { RunnerRow } from '../../client/types';
 import { outStyle, renderTable } from '../../tui/output';
-import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
-import { runnerOptions } from './remove';
+import { credentialServerOptions } from '../../utils/args';
+import { command } from '../../cli';
 
 function printRunners({ items: rows }: { items: RunnerRow[] }): void {
   if (!rows.length) return void process.stdout.write(`${outStyle.dim('No runners.')}\n`);
@@ -25,13 +25,11 @@ function printRunners({ items: rows }: { items: RunnerRow[] }): void {
 }
 
 export const commandRunnerList = command({
-  name: 'runner list',
+  name: 'list',
+  description: "list your runners and the workspace's",
+  access: 'read',
+  args: credentialServerOptions,
   globalFlags: { cwd: false },
-  help: {
-    usage: 'coder runner list [--server [url]] [--json]',
-    flags: [CREDENTIAL_SERVER_FLAG],
-  },
-  options: runnerOptions,
   run: async ({ options }) => {
     const { listRunners } = await import('../../runner');
     return listRunners(options);

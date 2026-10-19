@@ -2,21 +2,23 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { flag, serverOnly } from '../../utils/args';
-import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
+import * as z from 'zod/mini';
 
-export const credentialOptions = { json: flag, server: serverOnly, workspace: flag, yes: flag };
+import { credentialServerOptions, flag } from '../../utils/args';
+import { command } from '../../cli';
 
 export const commandCredentialsRemove = command({
-  name: 'credentials remove',
-  globalFlags: { cwd: false },
-  help: {
-    usage: 'coder credentials remove <NAME> [--workspace] [--server [url]] [--json]',
-    flags: [['--workspace', 'the workspace key of that variable'], CREDENTIAL_SERVER_FLAG],
+  name: 'remove',
+  description: 'remove the key of one variable',
+  usage: 'Remove the key of one environment variable.',
+  access: 'write',
+  args: {
+    NAME: z.string().check(z.describe('the variable')),
+    workspace: flag('the workspace key of that variable'),
+    ...credentialServerOptions,
   },
-  options: credentialOptions,
-  args: 1,
-  required: ['<NAME>'],
+  globalFlags: { cwd: false },
+  cli: { positional: ['NAME'] },
   async run({ options, args: [name] }) {
     const { credentials } = await import('../../core/remote');
 

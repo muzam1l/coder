@@ -3,22 +3,31 @@ import process from 'node:process';
 
 import type { TokenUsage } from '../../core/types';
 import type { TaskStatus } from '../../server/store/types';
-import { keyRows, section } from '../../tui/help';
-import { errStyle, formatHints, formatTokens, outStyle } from '../../tui/output';
-import { baseOptions, flag, optStr, str, strList } from '../../utils/args';
-import { TASK_FLAGS } from '.';
+import { errStyle, formatTokens, outStyle } from '../../tui/output';
+import { flag, optStr, str, strList } from '../../utils/args';
 import { command, MODEL_HINT } from '../../cli';
-import { finalMessageLine, finishedHints, printOutcome } from './result';
+import {
+  finalMessageLine,
+  finishedNext,
+  printOutcome,
+  serverTaskJson,
+  waitingNext,
+} from './result';
 import { printLine } from './watch';
 
-export function taskRunNextSteps(taskId: string): string {
-  const rows = keyRows(
-    [
-      {
-        usage: `coder task result ${taskId} --wait`,
-        blurb:
-          'run this in its own background shell, one per task (never wait on several tasks in one call). Returns with the answer or a pending approval.',
-      },
+export function taskRunNext(
+  taskId: string,
+  args: { server?: string | true; workspace?: string } = {},
+) {
+  const wait = waitingNext(
+    taskId,
+    args,
+    'run this in its own background shell, one per task (never wait on several tasks in one call). Returns with the answer or a pending approval.',
+  );
+  wait.cli = { ...wait.cli, layout: 'rows', title: 'Next step' };
+  return [
+    wait,
+    ...[
       {
         usage: `coder task steer ${taskId} "<follow-up>"`,
         blurb: "steer the task with a message (use 'ask' without interrupting main thread)",
@@ -26,14 +35,8 @@ export function taskRunNextSteps(taskId: string): string {
       { usage: `coder task stop ${taskId}`, blurb: 'stop the task' },
       { usage: 'coder task list', blurb: 'recent tasks' },
       { usage: 'coder task --help', blurb: 'all task commands' },
-    ],
-    outStyle,
-    outStyle.blue,
-  );
-  return [
-    ...section('Next step', rows.slice(0, 1), outStyle),
-    ...section('Related', rows.slice(1), outStyle),
-  ].join('\n');
+    ].map(step => ({ ...step, cli: { layout: 'rows' as const, title: 'Related' } })),
+  ];
 }
 
 /** Without --wait: the id and the commands to manage it. */
@@ -41,7 +44,6 @@ function printStarted(taskId: string, status: string): void {
   process.stdout.write(
     `${outStyle.dim('[coder]')} task ${outStyle.blue(taskId)} started in the background (${status}).\n`,
   );
-  process.stdout.write(`${taskRunNextSteps(taskId)}\n`);
 }
 
 /** With --wait: the banner before blocking, and what Ctrl-C leaves running. */
@@ -49,13 +51,10 @@ function printWaiting(taskId: string): void {
   process.stderr.write(
     `${outStyle.dim('[coder]')} Task ${outStyle.cyan(taskId)} started and is waiting to finish. Press Ctrl-C to detach. It keeps running.\n`,
   );
-  process.stderr.write(`${taskRunNextSteps(taskId)}\n`);
 }
 
 function printDetached(taskId: string): void {
-  process.stderr.write(
-    `\n${outStyle.dim('[coder] Detached. The task is still running.')}\n\n${formatHints([`Wait in its own background shell, one per task: coder task result ${taskId} --wait`], errStyle)}\n`,
-  );
+  process.stderr.write(`\n${outStyle.dim('[coder] Detached. The task is still running.')}\n`);
 }
 
 /** A finished --wait run: the answer, then its status line. */
@@ -73,91 +72,92 @@ function printFinished(done: {
   );
   const tokensNote = done.tokens ? ` tokens=${formatTokens(done.tokens, done.model)}` : '';
   process.stderr.write(
-    `${outStyle.dim(`[coder] task=${done.taskId} status=${done.status}${tokensNote}`)}\n\n${finishedHints(done.taskId, errStyle)}\n`,
+    `${outStyle.dim(`[coder] task=${done.taskId} status=${done.status}${tokensNote}`)}\n`,
   );
 }
 
 export const commandTask = command({
-  name: 'task run',
-  help: {
-    usage: 'coder task run "<task text>"',
-    summary: `Dispatch a coding task to the configured engine. Backgrounds by default and\nprints a task id; --wait runs in the foreground and prints the answer.\nShortcut: \`coder run "<text>"\`.\n\nWriting a task: one task per focused goal, independent goals as parallel runs.\nThe worker starts with nothing but the text, so include the goal, file paths,\nconstraints and any context only you have. Delegate rather than doing the work\nyourself first, however small it looks.\n\nWaiting: run \`coder task result <task-id> --wait\` in its own background shell, one\nper task. Never wait on several tasks in one call, or their approvals and answers\nnever reach you one by one.\n\n${MODEL_HINT}`,
-    flags: [
-      ['--output-schema <json>', 'JSON Schema for the task answer'],
-      ['--name <name>', 'label the task (shown in list/result)'],
-      [
-        '--agent <id>',
-        'run as that agent: its system.md, engine settings, MCP servers and flows; flags override them',
-      ],
-      [
-        '--system <text>',
-        'standing instructions prepended to the task (kept out of prompt previews)',
-      ],
-      ...TASK_FLAGS,
-      [
-        '--server [url] [--workspace <slug>]',
-        'run the task on your Coder server and follow it here (--background prints its id)',
-      ],
-      ['--repo <owner/name>', "with --server: check out a repo from the workspace's installs"],
-      ['--runner <name>', 'with --server: where it runs (a runner kind or a registered runner)'],
-    ],
-    exitCodes: [
-      ['0', 'The task started, or --wait printed a successful answer.'],
-      ['1', 'Dispatch or the task failed.'],
-      ['3', 'No engine could start; follow fallback.instructions in the JSON payload.'],
-      ['4', 'An approval is pending; answer it, then run result --wait again.'],
-      ['130', 'The foreground wait was detached and the task is still running.'],
+  name: 'run',
+  description: 'run a task (background; --wait blocks)',
+  usage: `Dispatch a coding task to the configured engine. Backgrounds by default and\nprints a task id; --wait runs in the foreground and prints the answer.\nShortcut: \`coder run "<text>"\`.\n\nWriting a task: one task per focused goal, independent goals as parallel runs.\nThe worker starts with nothing but the text, so include the goal, file paths,\nconstraints and any context only you have. Delegate rather than doing the work\nyourself first, however small it looks.\n\nWaiting: run \`coder task result <task-id> --wait\` in its own background shell, one\nper task. Never wait on several tasks in one call, or their approvals and answers\nnever reach you one by one.\n\n${MODEL_HINT}`,
+  access: 'write',
+  args: {
+    prompt: strList('the task text'),
+    'output-schema': str('JSON Schema for the task answer', '<json>'),
+    name: str('label the task (shown in list/result)'),
+    agent: str(
+      'run as that agent: its system.md, engine settings, MCP servers and flows; flags override them',
+      '<id>',
+    ),
+    system: str(
+      'standing instructions prepended to the task (kept out of prompt previews)',
+      '<text>',
+    ),
+    wait: flag('run in the foreground and block until the answer is ready'),
+    engine: str(
+      'engine to use; custom runs your configured custom models (default: first in the chain)',
+      '<codex|claude|custom>',
+    ),
+    model: str(
+      'luna/sol/astra (codex) · sonnet/opus/fable (claude) · a custom model (coder model list)',
+      '<alias|slug>',
+    ),
+    effort: str('reasoning effort', '<low|medium|high>'),
+    permissions: str('read-only · workspace-write · auto (default: auto)', '<mode>'),
+    mcp: str(
+      'attach MCP servers from `mcp` in .coder/config.json by name (or all), or an inline JSON array [{"name","command","args","env","tools"}]; none by default, all adds your engine\'s own MCP servers',
+      '<names|all|json>',
+    ),
+    connections: str(
+      "use only these connections (coder connection list), within the agent's",
+      '<ids>',
+    ),
+    'add-dir': strList(
+      'give the task another directory beyond --cwd (repeatable); read-only can only read it, other modes can also write',
+      '<dir>',
+    ),
+    server: optStr(
+      'run the task on your Coder server and follow it here (--background prints its id)',
+      '[url]',
+    ),
+    workspace: str('with --server: the workspace to run in (default: the saved one)', '<slug>'),
+    yes: flag('with --server: connect to a server used for the first time without asking'),
+    background: flag('with --server: print the task id instead of following it'),
+    repo: str("with --server: check out a repo from the workspace's installs", '<owner/name>'),
+    runner: str('with --server: where it runs (a runner kind or a registered runner)'),
+    'simulate-approval': flag('test only: raise a fake approval request'),
+  },
+  cli: {
+    positional: ['prompt'],
+    exit: [
+      [0, 'The task started, or --wait printed a successful answer.'],
+      [1, 'Dispatch or the task failed.'],
+      [3, 'No engine could start; follow fallback.instructions in the JSON payload.'],
+      [4, 'An approval is pending; answer it, then run result --wait again.'],
+      [130, 'The foreground wait was detached and the task is still running.'],
     ],
     examples: [
-      ['coder run "add a /health endpoint"', 'dispatch in the background, print a task id'],
-      ['coder result <task-id> --wait', 'then block until it finishes and print the answer'],
-      ['coder run --wait "fix the failing test"', 'or block on the run itself'],
-      [
-        'coder task run --model luna --system "tests live in test/, don\'t touch anything outside of it" "rename foo to bar"',
-        'pick an engine via its model alias; --system adds standing instructions',
-      ],
-      [
-        'coder task run --agent reviewer "review the last commit"',
-        'run a repo agent from .coder/agents/reviewer',
-      ],
-      [
-        'coder run --add-dir ../api --add-dir ../shared "update the client for the new endpoint"',
-        'let the task reach sibling repos too',
-      ],
+      'coder run "add a /health endpoint"  # dispatch in the background, print a task id',
+      'coder result <task-id> --wait  # then block until it finishes and print the answer',
+      'coder run --wait "fix the failing test"  # or block on the run itself',
+      'coder task run --model luna --system "tests live in test/, don\'t touch anything outside of it" "rename foo to bar"  # pick an engine via its model alias; --system adds standing instructions',
+      'coder task run --agent reviewer "review the last commit"  # run a repo agent from .coder/agents/reviewer',
+      'coder run --add-dir ../api --add-dir ../shared "update the client for the new endpoint"  # let the task reach sibling repos too',
     ],
   },
-  options: {
-    ...baseOptions,
-    agent: str,
-    'output-schema': str,
-    engine: str,
-    model: str,
-    effort: str,
-    permissions: str,
-    name: str,
-    system: str,
-    mcp: str,
-    connections: str,
-    'add-dir': strList,
-    background: flag,
-    wait: flag,
-    'simulate-approval': flag,
-    server: optStr,
-    workspace: str,
-    yes: flag,
-    repo: str,
-    runner: str,
-  },
-  args: Number.POSITIVE_INFINITY,
-  async run({ options, args }) {
+  async run({ options, args, tool, next }) {
     const { tasks } = await import('../../core/task');
 
     const json = options.json;
     let waiting: string | undefined;
-    process.on('SIGINT', () => {
-      if (waiting) printDetached(waiting);
-      process.exit(130);
-    });
+    if (!tool)
+      process.on('SIGINT', () => {
+        if (waiting) {
+          printDetached(waiting);
+          next({ taskId: waiting, phase: 'detached' }, { stream: 'stderr', force: true });
+        }
+        process.exit(130);
+      });
     return tasks.run(args.join(' ').trim(), {
       cwd: options.cwd,
       agent: options.agent,
@@ -189,13 +189,44 @@ export const commandTask = command({
       onNote: note => process.stderr.write(`[coder] ${note}\n`),
       onWaiting: taskId => {
         waiting = taskId;
-        if (!json) printWaiting(taskId);
+        if (!json && !tool) {
+          printWaiting(taskId);
+          next({ taskId, phase: 'waiting' }, { stream: 'stderr', style: 'stdout' });
+        }
       },
+      // A tool's stdout is the MCP stream.
       onLog: line =>
-        json
-          ? process.stdout.write(`${JSON.stringify(line, null, 2)}\n`)
-          : printLine(line, outStyle),
+        tool
+          ? undefined
+          : json
+            ? process.stdout.write(`${JSON.stringify(line, null, 2)}\n`)
+            : printLine(line, outStyle),
     });
+  },
+  json: done => ('attempts' in done ? serverTaskJson(done) : done),
+  next({ result: done, args }) {
+    const phase = (done as { phase?: string }).phase;
+    const taskId = 'task' in done ? done.task.id : done.taskId;
+    if (phase === 'detached')
+      return [
+        waitingNext(
+          taskId,
+          args,
+          `Wait in its own background shell, one per task: coder task result ${taskId} --wait`,
+        ),
+      ];
+    if (phase === 'waiting') return taskRunNext(taskId, args);
+    if ('attempts' in done) {
+      if (['completed', 'failed', 'cancelled'].includes(done.status))
+        return args.background ? [] : finishedNext(taskId, args);
+      return [{ ...waitingNext(taskId, args, ''), cli: { hidden: true } }];
+    }
+    if (args.wait)
+      return finishedNext(taskId).map(step => ({
+        ...step,
+        cli: { ...step.cli, stream: 'stderr' as const },
+      }));
+    return taskRunNext(taskId, args);
   },
   print(done, { options }) {
     if ('attempts' in done) {

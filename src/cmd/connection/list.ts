@@ -2,9 +2,9 @@
 import process from 'node:process';
 
 import type { connection } from '../../core/connection';
-import { formatHints, outStyle, renderTable } from '../../tui/output';
-import { baseOptions, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { outStyle, renderTable } from '../../tui/output';
+import { serverOptions } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 import { describe } from './add';
 
 type Listed = Awaited<ReturnType<typeof connection.list>>;
@@ -46,26 +46,25 @@ function printConnections({ connections, declared }: Listed): void {
         s,
       )}`,
     );
-  const pending = declared.filter(row => !row.approved);
-  const hints = [
-    ...pending.map(row => `Approve: coder connection approve ${row.name}`),
-    ...(connections.length ? [] : ['Add one: coder connection add <name> --env <NAME>']),
-  ];
-  if (hints.length) process.stdout.write(`\n${formatHints(hints, s)}\n`);
 }
 
 export const commandConnectionList = command({
-  name: 'connection list',
-  help: {
-    usage: 'coder connection list [--server [url]] [--json] [--cwd <dir>]',
-    summary:
-      'Your connections, and the MCP servers this repository and its agents declare with whether each is approved on this machine.',
-    flags: [SERVER_FLAG],
-  },
-  options: { ...baseOptions, ...serverOptions },
+  name: 'list',
+  description: 'list connections and the MCP servers this repository declares',
+  usage:
+    'Your connections, and the MCP servers this repository and its agents declare with whether each is approved on this machine.',
+  access: 'read',
+  args: serverOptions,
   run: async ({ options, cwd }) => {
     const { connection } = await import('../../core/connection');
     return connection.list({ ...options, cwd });
   },
+  next: ({ result: { connections, declared } }) =>
+    nextSteps([
+      ...declared
+        .filter(row => !row.approved)
+        .map(row => `Approve: coder connection approve ${row.name}`),
+      ...(connections.length ? [] : ['Add one: coder connection add <name> --env <NAME>']),
+    ]),
   print: printConnections,
 });

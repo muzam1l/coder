@@ -16,13 +16,12 @@ import {
   turnFallbackEngine,
   waitTask,
 } from '../core/dispatch';
-import { mailboxDir, askWorker } from '../core/mailbox';
 import { formatEngineSpec, loadTask } from '../core/state';
 import { steerTask } from '../core/task/actions';
 import type { TokenUsage, TurnResult, McpServerSpec } from '../core/types';
 import { addTokens } from '../core/task/log-view';
 import { loadConfig } from '../core/config';
-import { jsonReplyPrompt, jsonRetryPrompt } from '../core/prompts';
+import { jsonReplyPrompt, jsonRetryPrompt } from '../core/task/context/prompts';
 import { Journal, defined, fingerprint } from './journal';
 import { resolveFlow } from './discover';
 import type {
@@ -250,7 +249,6 @@ function turnOutcome(taskId: string, waited: WorkerWait): TurnOutcome {
 async function waitTurn(cwd: string, taskId: string, ctx?: RunContext): Promise<WorkerWait> {
   ctx?.running.add(taskId);
   try {
-    if (mailboxDir()) return await askWorker<WorkerWait>('wait', { taskId });
     const done = await waitTask(cwd, taskId);
     return {
       status: done.status,
@@ -271,30 +269,27 @@ async function steerOnce(
   ctx: RunContext | undefined,
 ): Promise<TurnOutcome> {
   const cwd = ctx?.cwd ?? process.cwd();
-  if (mailboxDir()) await askWorker('steer', { taskId, text, ...opts });
-  else {
-    const current = loadTask(cwd, taskId);
-    if (!current) throw new CoderError('invalid-option', `No task "${taskId}".`);
-    await steerTask(current.cwd ?? cwd, current, text, {
-      ...(ctx?.connections
-        ? {
-            resolveConnections: async granted => ({
-              mcp: Object.fromEntries(
-                Object.entries(ctx.connections!.mcp).filter(([id]) => granted.includes(id)),
-              ),
-              env: ctx.connections!.env,
-              warnings: [],
-            }),
-          }
-        : {}),
-      model: opts.model,
-      effort: opts.effort,
-      permissions:
-        ctx?.ceiling && opts.permissions
-          ? capPermissions(current.name, opts.permissions, ctx.ceiling)
-          : opts.permissions,
-    });
-  }
+  const current = loadTask(cwd, taskId);
+  if (!current) throw new CoderError('invalid-option', `No task "${taskId}".`);
+  await steerTask(current.cwd ?? cwd, current, text, {
+    ...(ctx?.connections
+      ? {
+          resolveConnections: async granted => ({
+            mcp: Object.fromEntries(
+              Object.entries(ctx.connections!.mcp).filter(([id]) => granted.includes(id)),
+            ),
+            env: ctx.connections!.env,
+            warnings: [],
+          }),
+        }
+      : {}),
+    model: opts.model,
+    effort: opts.effort,
+    permissions:
+      ctx?.ceiling && opts.permissions
+        ? capPermissions(current.name, opts.permissions, ctx.ceiling)
+        : opts.permissions,
+  });
   return turnOutcome(taskId, await waitTurn(cwd, taskId, ctx));
 }
 
@@ -320,8 +315,6 @@ async function runOneTask(
       ...(outputSchema ? { outputSchema } : {}),
       ...(chainEngine ? { engine: chainEngine, model: undefined, effort: undefined } : {}),
     };
-    // Inside an agent's sandbox the worker starts the task; here it only asks.
-    const mailbox = Boolean(mailboxDir());
     const selected = ctx?.connections
       ? selectMcpServers(request.mcp, loadConfig(cwd).mcp, {}, ctx.connections.mcp)
       : undefined;
@@ -337,28 +330,25 @@ async function runOneTask(
         depth: currentDepth(),
       });
     };
-    const dispatch = mailbox
-      ? await askWorker<{ taskId: string }>('dispatch', request)
-      : await dispatchTask({
-          ...request,
-          onWorker: started,
-          ...(ctx?.connections
-            ? {
-                ...selected,
-                mcpWarnings: selected?.warnings,
-                connectionEnv: ctx.connections.env,
-                connections: ctx.connections.ids,
-                connectionSource: 'server' as const,
-              }
-            : {}),
-          // Surface the gate's silent chain walk. Otherwise the user stares at
-          // nothing for the failed engine's whole startup window.
-          onFallback: f =>
-            log(
-              `${f.engine} failed to start. Falling back to ${f.next}. ${f.detail.replace(/\s+/g, ' ').slice(0, 140)}`,
-            ),
-        });
-    if (mailbox) started(dispatch.taskId);
+    const dispatch = await dispatchTask({
+      ...request,
+      onWorker: started,
+      ...(ctx?.connections
+        ? {
+            ...selected,
+            mcpWarnings: selected?.warnings,
+            connectionEnv: ctx.connections.env,
+            connections: ctx.connections.ids,
+            connectionSource: 'server' as const,
+          }
+        : {}),
+      // Surface the gate's silent chain walk. Otherwise the user stares at
+      // nothing for the failed engine's whole startup window.
+      onFallback: f =>
+        log(
+          `${f.engine} failed to start. Falling back to ${f.next}. ${f.detail.replace(/\s+/g, ' ').slice(0, 140)}`,
+        ),
+    });
     const waited = await waitTurn(cwd, dispatch.taskId, ctx);
 
     if (waited.next) {
@@ -377,7 +367,7 @@ async function runOneTask(
   }
 }
 
-/** What the worker answers a mailbox wait with; local waits take the same shape. */
+/** A task's turn as a flow waits for it. */
 interface WorkerWait {
   status: string;
   result: TurnResult | null;

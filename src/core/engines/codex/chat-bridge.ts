@@ -16,7 +16,7 @@ import process from 'node:process';
 
 import { endpointCandidates } from '../../config';
 import type { CustomModelConfig } from '../../types';
-import { jsonReplyPrompt } from '../../prompts';
+import { jsonReplyPrompt } from '../../task/context/prompts';
 
 export interface ChatBridge {
   /** Loopback base URL to hand codex as the provider base_url (ends in /v1). */

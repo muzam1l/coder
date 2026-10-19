@@ -3,9 +3,9 @@ import process from 'node:process';
 
 import type { Agent } from '../../agent/types';
 import type { ServerAgent } from '../../server/store/types';
-import { formatHints, outStyle, renderTable } from '../../tui/output';
-import { baseOptions, serverOptions } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { outStyle, renderTable } from '../../tui/output';
+import { serverOptions } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 
 export const isLocal = (agent: Agent | ServerAgent): agent is Agent => 'builtin' in agent;
 
@@ -46,31 +46,26 @@ function printAgents(rows: ReturnType<typeof agentRows>, server: boolean): void 
       s,
     ),
   );
-  if (server) return;
-  process.stdout.write(
-    `\n${formatHints(
-      [
-        "An agent's settings, events, and tools: coder agent show <id>",
-        'Scaffold a new agent in this repo: coder agent init <id>',
-      ],
-      s,
-    )}\n`,
-  );
 }
 
 export const commandAgentList = command({
-  name: 'agent list',
-  help: {
-    usage: 'coder agent list [--server [url]] [--json] [--cwd <dir>]',
-    summary:
-      'Without --server, one row per built-in and workspace agent. With --server, list the agent records and current versions owned by that Coder server.',
-    flags: [SERVER_FLAG],
-  },
-  options: { ...baseOptions, ...serverOptions },
+  name: 'list',
+  description: 'list local or server-owned agents',
+  usage:
+    'Without --server, one row per built-in and workspace agent. With --server, list the agent records and current versions owned by that Coder server.',
+  access: 'read',
+  args: serverOptions,
   run: async ({ options, cwd }) => {
     const { agents } = await import('../../agent');
     return agents.list({ ...options, cwd, organization: options.workspace });
   },
   json: list => agentRows(list),
+  next: ({ result, args }) =>
+    args.server !== undefined || !result.length
+      ? []
+      : nextSteps([
+          "An agent's settings, events, and tools: coder agent show <id>",
+          'Scaffold a new agent in this repo: coder agent init <id>',
+        ]),
   print: (list, { options }) => printAgents(agentRows(list), options.server !== undefined),
 });

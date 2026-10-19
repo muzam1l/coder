@@ -4,7 +4,10 @@ import { refreshUpdateCache } from '../../core/update-check';
 import { command } from '../../cli';
 
 export const commandRefreshUpdate = command({
-  name: 'upgrade refresh',
-  options: {},
+  name: 'refresh',
+  description: 'refresh the cached latest version, detached',
+  access: 'write',
+  globalFlags: { json: false, cwd: false },
+  mcp: false,
   run: () => refreshUpdateCache(readVersion()),
 });

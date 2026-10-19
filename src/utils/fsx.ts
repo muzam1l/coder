@@ -28,16 +28,20 @@ export function readJsonFile<T>(file: string): T | null {
   }
 }
 
-/** Write JSON via a sibling tmp file + rename so readers never see a partial file. */
-export function writeJsonFileAtomic(file: string, value: unknown): void {
+/** Write via a sibling tmp file + rename so readers never see a partial file. */
+export function writeFileAtomic(file: string, text: string): void {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    fs.writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+    fs.writeFileSync(tmp, text, { encoding: 'utf8', flag: 'wx' });
     fs.renameSync(tmp, file);
   } finally {
     fs.rmSync(tmp, { force: true });
   }
+}
+
+export function writeJsonFileAtomic(file: string, value: unknown): void {
+  writeFileAtomic(file, `${JSON.stringify(value, null, 2)}\n`);
 }
 
 /** Move a complete directory, staging a copy when the destination is on another device. */

@@ -1,18 +1,18 @@
 import process from 'node:process';
-import { command, CREDENTIAL_SERVER_FLAG } from '../../cli';
-import { runnerOptions } from './remove';
+
+import * as z from 'zod/mini';
+
+import { credentialServerOptions } from '../../utils/args';
+import { command } from '../../cli';
 
 export const commandRunnerTest = command({
-  name: 'runner test',
+  name: 'test',
+  description: 'check a runner connection',
+  usage: 'Check the runner connection.',
+  access: 'read',
+  args: { id: z.string().check(z.describe('the runner')), ...credentialServerOptions },
   globalFlags: { cwd: false },
-  args: 1,
-  required: ['<id>'],
-  help: {
-    usage: 'coder runner test <id> [--server [url]] [--json]',
-    summary: 'Check the runner connection.',
-    flags: [CREDENTIAL_SERVER_FLAG],
-  },
-  options: runnerOptions,
+  cli: { positional: ['id'] },
   async run({ options, args: [id] }) {
     const { testRunner } = await import('../../runner');
     return testRunner(id, options);

@@ -1,6 +1,6 @@
 import type { TaskRow } from '@coder/client/types';
 import { byListKey, listRank } from '@coder/core/defaults';
-import { eventJsons, replyRequired as turnReplyRequired } from '@coder/core/event-prompt';
+import { eventJsons, replyRequired as turnReplyRequired } from '@coder/agent/context/turn';
 
 /** A task page's tabs, the loading frame's too. */
 export const TASK_TABS = ['Conversation', 'Activity'];

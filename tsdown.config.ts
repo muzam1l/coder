@@ -37,6 +37,8 @@ export default defineConfig({
       alwaysBundle: [/^drizzle-orm(?:\/|$)/],
     },
   },
+  // A built-in flow file keeps its own code, so flow discovery reads its description.
+  inputOptions: { preserveEntrySignatures: 'allow-extension' },
   outDir: OUT,
   // The dashboard build swaps dist/dash in whole; a CLI build leaves it serving.
   clean: [`${OUT}/*`, `!${OUT}/dash`],

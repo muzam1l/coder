@@ -329,126 +329,6 @@ export class LocalConnections {
   }
 }
 
-async function sseConnection(spec: McpServerSpec, request: typeof fetch, signal: AbortSignal) {
-  const response = await request(spec.url!, {
-    redirect: 'manual',
-    signal,
-    headers: { ...spec.headers, accept: 'text/event-stream' },
-  });
-  if (!response.ok || !response.body) {
-    await response.body?.cancel();
-    checkResponse(response);
-    throw new Error('MCP did not answer');
-  }
-  const reader = response.body.getReader();
-  const pending = new Map<
-    number,
-    { resolve(value: unknown): void; reject(error: unknown): void }
-  >();
-  let opened!: (url: string) => void;
-  let failed!: (error: unknown) => void;
-  const endpoint = new Promise<string>((resolve, reject) => {
-    opened = resolve;
-    failed = reject;
-  });
-  void endpoint.catch(() => {});
-  let streamError: unknown;
-  const fail = (error: unknown) => {
-    streamError = error;
-    failed(error);
-    for (const waiting of pending.values()) waiting.reject(error);
-    pending.clear();
-  };
-  const abort = () => {
-    fail(signal.reason);
-    void reader.cancel().catch(() => {});
-  };
-  signal.addEventListener('abort', abort, { once: true });
-  if (signal.aborted) abort();
-  const pump = (async () => {
-    const decoder = new TextDecoder();
-    let buffered = '';
-    for (;;) {
-      const chunk = await reader.read();
-      if (chunk.done) throw new Error('MCP stream closed');
-      buffered = (buffered + decoder.decode(chunk.value, { stream: true })).replaceAll(
-        '\r\n',
-        '\n',
-      );
-      let end: number;
-      while ((end = buffered.indexOf('\n\n')) >= 0) {
-        const lines = buffered.slice(0, end).split('\n');
-        buffered = buffered.slice(end + 2);
-        const kind = lines
-          .find(line => line.startsWith('event:'))
-          ?.slice(6)
-          .trim();
-        const data = lines
-          .filter(line => line.startsWith('data:'))
-          .map(line => line.slice(5).trimStart())
-          .join('\n');
-        if (kind === 'endpoint') {
-          const url = new URL(data, spec.url);
-          if (url.origin !== new URL(spec.url!).origin || url.username || url.password)
-            throw new Error('MCP endpoint changed origin');
-          opened(url.href);
-        } else if (data) {
-          const message = JSON.parse(data);
-          const waiting = pending.get(message.id);
-          if (!waiting) continue;
-          pending.delete(message.id);
-          if (message.error || !message.result) waiting.reject(new Error('Invalid MCP response'));
-          else waiting.resolve(message.result);
-        }
-      }
-    }
-  })().catch(fail);
-
-  return {
-    async rpc(method: string, params?: unknown, id?: number, _signal?: AbortSignal): Promise<any> {
-      const url = await endpoint;
-      signal.throwIfAborted();
-      if (streamError) throw streamError;
-      const answer =
-        id === undefined
-          ? undefined
-          : new Promise((resolve, reject) => {
-              pending.set(id, { resolve, reject });
-            });
-      void answer?.catch(() => {});
-      try {
-        const response = await request(url, {
-          method: 'POST',
-          redirect: 'manual',
-          signal,
-          headers: { ...spec.headers, 'content-type': 'application/json' },
-          body: JSON.stringify({
-            jsonrpc: '2.0',
-            method,
-            ...(id === undefined ? {} : { id }),
-            ...(params ? { params } : {}),
-          }),
-        });
-        checkResponse(response);
-        await response.body?.cancel();
-
-        return await answer;
-      } catch (error) {
-        if (id !== undefined) {
-          pending.get(id)?.reject(error);
-          pending.delete(id);
-        }
-        throw error;
-      }
-    },
-    async close() {
-      await reader.cancel().catch(() => {});
-      await pump;
-      signal.removeEventListener('abort', abort);
-    },
-  };
-}
-
 /** One tool as a server lists it. */
 export interface McpToolInfo {
   name: string;
@@ -457,23 +337,20 @@ export interface McpToolInfo {
   annotations?: { readOnlyHint?: boolean };
 }
 
-export interface McpClient {
-  /** One request with the next id; the answer's result. */
-  rpc(method: string, params?: unknown): Promise<any>;
+interface McpClient {
   initialize(): Promise<void>;
   /** Every tool, page by page; initializes first when needed. */
   tools(): Promise<McpToolInfo[]>;
   close(): Promise<void>;
 }
 
-/** A client for one server spec: stdio, streamable HTTP or legacy SSE. `startup` bounds connecting, initialize and the tool list only; the session then lives until `close`. */
+/** A client for one server spec, stdio or streamable HTTP. `startup` bounds connecting, initialize and the tool list only; the session then lives until `close`. */
 export async function mcpClient(
   spec: McpServerSpec,
   request: typeof fetch = fetch,
   startup?: AbortSignal,
 ): Promise<McpClient> {
-  let version = spec.type === 'sse' ? '2024-11-05' : '2025-11-25';
-  const life = new AbortController();
+  let version = '2025-11-25';
   const within = <T>(work: Promise<T>): Promise<T> =>
     startup
       ? Promise.race([
@@ -485,19 +362,12 @@ export async function mcpClient(
           }),
         ])
       : work;
-  const base = await within(
-    spec.command
-      ? stdioRpc(spec)
-      : spec.type === 'sse'
-        ? sseConnection(spec, request, life.signal)
-        : httpRpc(spec, request, () => version),
-  );
+  const base = await within(spec.command ? stdioRpc(spec) : httpRpc(spec, request, () => version));
   let next = 1;
   const call = (method: string, params?: unknown, signal?: AbortSignal) =>
     base.rpc(method, params, next++, signal);
   let initialized: Promise<void> | undefined;
   const client: McpClient = {
-    rpc: (method, params) => call(method, params),
     initialize: () =>
       (initialized ??= within(
         call(
@@ -534,10 +404,7 @@ export async function mcpClient(
 
       return tools;
     },
-    async close() {
-      life.abort();
-      await base.close();
-    },
+    close: () => base.close(),
   };
 
   return client;
@@ -566,6 +433,7 @@ async function stdioRpc(spec: McpServerSpec) {
   child.once('close', code =>
     fail(new Error(`MCP server ${spec.name} exited with status ${code}`)),
   );
+  child.stdin.on('error', fail);
   readline.createInterface({ input: child.stdout, terminal: false }).on('line', line => {
     let message: { id?: number; result?: unknown; error?: { message?: string } };
     try {
@@ -581,7 +449,7 @@ async function stdioRpc(spec: McpServerSpec) {
   });
 
   return {
-    rpc(method: string, params?: unknown, id?: number, _signal?: AbortSignal) {
+    rpc(method: string, params?: unknown, id?: number, _signal?: AbortSignal): Promise<any> {
       if (exited) return Promise.reject(exited);
       const answer =
         id === undefined

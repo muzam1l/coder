@@ -2,20 +2,17 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { baseOptions, flag, optStr, str } from '../../utils/args';
-import { command, SERVER_FLAG } from '../../cli';
+import { serverOptions, str } from '../../utils/args';
+import { command } from '../../cli';
 
 export const commandAgentPush = command({
-  name: 'agent push',
-  help: {
-    usage: 'coder agent push [id] [--server [url]] [--json] [--cwd <dir>]',
-    summary:
-      'Upload one workspace agent, or every agent in .coder/agents when no id is given. The server creates a new immutable version only when its definition, prompt, or files changed.',
-    flags: [SERVER_FLAG],
-    examples: [['coder agent push helper', 'upload helper']],
-  },
-  options: { ...baseOptions, server: optStr, workspace: str, yes: flag },
-  args: 1,
+  name: 'push',
+  description: 'upload workspace agents to a Coder server',
+  usage:
+    'Upload one workspace agent, or every agent in .coder/agents when no id is given. The server creates a new immutable version only when its definition, prompt, or files changed.',
+  access: 'write',
+  args: { id: str('the agent (default: every workspace agent)'), ...serverOptions },
+  cli: { positional: ['id'], examples: ['coder agent push helper  # upload helper'] },
   run: async ({ options, args: [id], cwd }) => {
     const { agents } = await import('../../agent');
     return agents.push(id, { ...options, cwd, organization: options.workspace });

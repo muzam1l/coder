@@ -1,4 +1,4 @@
-// Builds the CLI beside dist and moves it in file by file, so a running `coder` never misses a file, then builds the dashboard.
+// Emits docs/cli and the host skills, builds the CLI beside dist and moves it in file by file, so a running `coder` never misses a file, then builds the dashboard.
 // `bun scripts/build.ts dash` rebuilds the dashboard alone, keeping the previous build's assets for open pages.
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -140,7 +140,8 @@ function buildCli(root: string): number {
   const stage = `dist.next-${process.pid}`;
   rmSync(path.join(root, stage), { recursive: true, force: true });
   try {
-    let status = run(root, ['bunx', 'tsdown'], { CODER_DIST: stage });
+    let status = run(root, ['bun', 'scripts/emit.ts']);
+    if (status === 0) status = run(root, ['bunx', 'tsdown'], { CODER_DIST: stage });
     if (status === 0)
       status = run(root, [
         'bunx',

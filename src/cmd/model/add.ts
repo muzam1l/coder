@@ -1,19 +1,13 @@
 /** `coder model add`: a custom endpoint model, run on the codex engine pointed at its URL. */
 import process from 'node:process';
 
-import { models, type PersistedModel } from '../../core/models';
+import type { PersistedModel } from '../../core/models';
 import { outStyle } from '../../tui/output';
-import { baseOptions, flag, str } from '../../utils/args';
-import { command } from '../../cli';
+import { flag, str } from '../../utils/args';
+import { command, nextSteps, type CommandNext } from '../../cli';
 
-// Flags every model subcommand takes.
-export const modelOptions = {
-  ...baseOptions,
-  'base-url': str,
-  model: str,
-  'env-key': str,
-  workspace: flag,
-};
+/** `--workspace` on the model commands that write config. */
+export const workspaceFlag = flag('target <repo>/.coder/config.json instead of the user file');
 
 export const writeOptions = (options: {
   'base-url'?: string;
@@ -28,34 +22,34 @@ export const writeOptions = (options: {
 });
 
 export const commandModelAdd = command({
-  name: 'model add',
-  help: {
-    usage: 'coder model add <name> --base-url <url> --model <id> [--env-key VAR]',
-    summary:
-      'Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,\nvLLM, OpenRouter, ...). It currently runs on the codex engine pointed at your\nURL and is usable anywhere a model is: --model <name>, --engine custom, or as an\nagent default in config. Alias: `coder model setup`.',
-    flags: [
-      ['--base-url <url>', 'OpenAI-compatible API base (e.g. http://localhost:11434/v1)'],
-      ['--model <id>', "the provider's model id (e.g. qwen2.5-coder:32b)"],
-      ['--env-key <VAR>', 'env var holding the API key (omit for keyless local endpoints)'],
-      ['--workspace', 'write to <repo>/.coder/config.json instead of the user file'],
-    ],
+  name: 'add',
+  description: 'connect a model',
+  usage:
+    'Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,\nvLLM, OpenRouter, ...). It currently runs on the codex engine pointed at your\nURL and is usable anywhere a model is: --model <name>, --engine custom, or as an\nagent default in config. Alias: `coder model setup`.',
+  access: 'write',
+  args: {
+    name: str('the name to dispatch it by'),
+    'base-url': str('OpenAI-compatible API base (e.g. http://localhost:11434/v1)', '<url>'),
+    model: str("the provider's model id (e.g. qwen2.5-coder:32b)", '<id>'),
+    'env-key': str('env var holding the API key (omit for keyless local endpoints)', '<VAR>'),
+    workspace: flag('write to <repo>/.coder/config.json instead of the user file'),
+  },
+  cli: {
+    positional: ['name'],
     examples: [
-      [
-        'coder model add qwen --base-url http://localhost:11434/v1 --model qwen2.5-coder:32b',
-        'local Ollama model, no key',
-      ],
-      [
-        'coder model add kimi --base-url https://openrouter.ai/api/v1 --model moonshotai/kimi-k2 --env-key OPENROUTER_API_KEY',
-        'third-party provider via OpenRouter',
-      ],
-      ['coder run --model qwen "explain this repo"', 'dispatch a task on it'],
+      'coder model add qwen --base-url http://localhost:11434/v1 --model qwen2.5-coder:32b  # local Ollama model, no key',
+      'coder model add kimi --base-url https://openrouter.ai/api/v1 --model moonshotai/kimi-k2 --env-key OPENROUTER_API_KEY  # third-party provider via OpenRouter',
+      'coder run --model qwen "explain this repo"  # dispatch a task on it',
     ],
   },
-  options: modelOptions,
-  args: 1,
-  run: ({ options, args: [name], cwd }) => models.add(name, { ...writeOptions(options), cwd }),
+  run: async ({ options, args: [name], cwd }) => {
+    const { models } = await import('../../core/models');
+    return models.add(name, { ...writeOptions(options), cwd });
+  },
   json: modelSavedJson,
-  print: result => printModelSaved(result, 'saved'),
+  next: ({ result }) => modelSavedNext(result),
+  print: (result, { next }) =>
+    printModelSaved(result, 'saved', () => next(result, { slot: 'codex' })),
 });
 
 /** What `model add|update --json` prints. */
@@ -82,6 +76,7 @@ export function modelSavedJson({
 export function printModelSaved(
   { name, entry, file, probe, codex, install, nativeResponses, keyMissing }: PersistedModel,
   verb: 'saved' | 'updated',
+  next: () => void,
 ): void {
   const s = outStyle;
   const good = (text: string) => `  ${s.green('✔')} ${text}`;
@@ -100,17 +95,44 @@ export function printModelSaved(
             ? `${install.note} ${s.dim(`(${codex.detail})`)}`
             : `codex engine ${s.dim(`(${codex.detail})`)}`,
         )
-      : bad(install?.note ?? 'codex CLI not installed - run: npm install -g @openai/codex'),
+      : install?.note
+        ? bad(install.note)
+        : null,
   ];
+  if (lines.at(-1) === null) {
+    lines.pop();
+    process.stdout.write(`${lines.join('\n')}\n`);
+    lines.length = 0;
+    next();
+  }
   if (keyMissing) lines.push(bad(`env var ${entry.envKey} is not set in this shell`));
-  lines.push(
-    '',
-    s.dim(
+  if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
+}
+
+export function modelSavedNext({ name, codex, install }: PersistedModel) {
+  const steps: CommandNext[] =
+    !codex.available && !install?.note
+      ? [
+          {
+            usage: 'npm install -g @openai/codex',
+            blurb: 'codex CLI not installed',
+            cli: {
+              text: `  ${outStyle.red('✘')} codex CLI not installed - run: npm install -g @openai/codex`,
+              layout: 'plain',
+              prefix: '',
+              slot: 'codex',
+            },
+          },
+        ]
+      : [];
+  return [
+    ...steps,
+    ...nextSteps(
       [
         `Use it:       coder run --model ${name} "<task>"`,
         `Make default: coder config set engines.custom.model ${name}`,
-      ].join('\n'),
+      ],
+      { layout: 'plain', dim: true },
     ),
-  );
-  process.stdout.write(`${lines.join('\n')}\n`);
+  ];
 }

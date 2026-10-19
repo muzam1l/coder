@@ -3,14 +3,15 @@ import process from 'node:process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import * as z from 'zod/mini';
+
 import { readTaskLog, resolveTaskDir } from '../../core/state';
 import type { FlowWatch, RunResult } from '../../flow/runs';
 import type { RunSummary } from '../../flow/executor';
-import type { FlowEvent } from '../../flow/types';
+import type { FlowRecord, FlowEvent } from '../../flow/types';
 import {
   clipPad,
   formatAge,
-  formatHints,
   formatJson,
   formatTokenCount,
   formatTokens,
@@ -19,24 +20,56 @@ import {
 } from '../../tui/output';
 import { LiveRegion, muteKeys, termCols, termRows, type LiveStream } from '../../tui/live';
 import { createJsonlTail, watchChanges } from '../../utils/fsx';
-import { baseOptions, tailOption } from '../../utils/args';
-import { command } from '../../cli';
+import { arg, str, tailOption } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 
 // Replay the run's full event stream then track it live, with --wait's exit semantics.
 export const commandWatch = command({
-  name: 'flow watch',
-  help: {
-    usage: 'coder flow watch [run-id] [--tail <n|all>] [--json]',
-    summary:
-      'Watch a flow run live: replay its progress lines from the start, then keep\nfollowing while it runs (Ctrl-C detaches; it keeps running). Blocks until it\nfinishes; exits 0 on success, 1 otherwise. Defaults to the most recent run.\nFor the result alone, prefer `coder flow result`. Alias: stream.',
-    flags: [['--tail <n|all>', 'replay only the last n events first (default: all)']],
-    examples: [['coder flow watch', 'follow the most recent run to completion']],
+  name: 'watch',
+  description: 'watch a run live (replay + follow)',
+  usage:
+    'Watch a flow run live: replay its progress lines from the start, then keep\nfollowing while it runs (Ctrl-C detaches; it keeps running). Blocks until it\nfinishes; exits 0 on success, 1 otherwise. Defaults to the most recent run.\nFor the result alone, prefer `coder flow result`. Alias: stream.\n\nWith --from <n>, or as a tool, it returns the events from event n on without\nfollowing, and `next`: the command that continues them while the run goes on.',
+  access: 'read',
+  args: {
+    'run-id': str('the run (default: the most recent)'),
+    tail: tailOption('replay only the last n events first (default: all)'),
+    from: arg(
+      z.optional(z.coerce.number().check(z.int(), z.nonnegative())),
+      'return the events from event n on instead of following them',
+      '<n>',
+    ),
   },
-  options: { ...baseOptions, tail: tailOption },
-  args: 1,
-  run: async ({ options, args: [id] }) => {
+  cli: {
+    positional: ['run-id'],
+    examples: [
+      'coder flow watch  # follow the most recent run to completion',
+      'coder flow watch <run-id> --from 0 --json  # the events so far, and the command that continues them',
+    ],
+  },
+  async run({ options, args: [id], tool, next }) {
     const { watchRun } = await import('../../flow/runs');
-    return printFollow(watchRun(id, { tail: options.tail }), { json: options.json, stream: true });
+
+    const from = options.from ?? (tool ? 0 : undefined);
+    const watch = watchRun(id, { tail: options.tail, from });
+    if (from === undefined) return printFollow(watch, { json: options.json, stream: true }, next);
+    const events: FlowEvent[] = [];
+    for await (const event of watch.events) events.push(event);
+    const { runId, status } = watch.record;
+
+    return {
+      runId,
+      status,
+      events,
+      ...(status === 'running'
+        ? { next: `coder flow watch ${runId} --from ${from + events.length}` }
+        : {}),
+    };
+  },
+  next: ({ result }) => flowNext(result),
+  print(slice) {
+    const renderer = new FlowStepRenderer();
+    for (const event of slice.events) renderer.emit(event);
+    renderer.done();
   },
 });
 
@@ -416,6 +449,10 @@ export function printRunSummary(summary: RunSummary, json?: boolean): void {
 export async function printFollow(
   watch: FlowWatch,
   options: { json?: boolean; stream?: boolean },
+  next: (
+    result: unknown,
+    display?: { stream?: 'stderr'; style?: 'stdout'; force?: boolean },
+  ) => void,
 ): Promise<never> {
   const { runId } = watch.record;
   const streamJson = Boolean(options.stream && options.json);
@@ -431,8 +468,9 @@ export async function printFollow(
     restoreKeys();
     if (!streamJson) {
       process.stderr.write(`\n${outStyle.dim('[flow] Detached. The run is still going.')}\n`);
-      process.stderr.write(
-        `\n${formatHints([`Result: coder flow result ${runId}`, `Stop it: coder flow stop ${runId}`], outStyle)}\n`,
+      next(
+        { runId, status: 'running', phase: 'detached' },
+        { stream: 'stderr', style: 'stdout', force: true },
       );
     }
     process.exit(130);
@@ -475,15 +513,14 @@ export async function printFollow(
     if (options.json) {
       printJson({ runId, name: record.name, status: 'stopped', taskCount: record.taskCount });
     } else {
-      process.stdout.write(
-        `\n${outStyle.dim(`[flow] Run ${runId} stopped.`)}\n\n${formatHints([`Resume: coder flow resume ${runId}`], outStyle)}\n`,
-      );
+      process.stdout.write(`\n${outStyle.dim(`[flow] Run ${runId} stopped.`)}\n`);
     }
+    next(record);
     process.exit(1);
   }
   // Match `flow result`'s failure block: blank line, red `error:` prefix, plain message.
   process.stdout.write(`\n${outStyle.red('error:')} ${record.error ?? 'unknown error'}\n`);
-  process.stdout.write(`\n${formatHints([`Resume: coder flow resume ${runId}`], outStyle)}\n`);
+  next(record, { force: true });
   process.exit(1);
 }
 
@@ -498,8 +535,47 @@ export function printLedger(
   }
 }
 
-/** The `flow result --json` object: the record plus its trimmed journal. */
+/** Summary fields shared by flow lists and result envelopes. */
+export function flowSummaryJson(result: FlowRecord) {
+  const {
+    runId,
+    name,
+    status,
+    startedAt,
+    endedAt,
+    taskCount,
+    ledger,
+    error,
+    archived,
+    archivedAt,
+  } = result;
+  return {
+    runId,
+    name,
+    status,
+    startedAt,
+    endedAt,
+    taskCount,
+    ledger,
+    error,
+    archived,
+    archivedAt,
+  };
+}
+
 export function resultJson(result: RunResult) {
-  const { steps, events, ...snapshot } = result;
-  return snapshot;
+  return { ...flowSummaryJson(result), result: result.result };
+}
+
+export function flowNext(result: { runId: string; status: string; next?: string; phase?: string }) {
+  if (result.next) return nextSteps([`Continue: ${result.next}`]);
+  if (result.status === 'running')
+    return nextSteps(
+      result.phase === 'detached'
+        ? [`Result: coder flow result ${result.runId}`, `Stop it: coder flow stop ${result.runId}`]
+        : [`Result: coder flow result ${result.runId}`, 'Runs: coder flow list'],
+    );
+  return result.status === 'stopped' || result.status === 'failed'
+    ? nextSteps([`Resume: coder flow resume ${result.runId}`])
+    : [];
 }

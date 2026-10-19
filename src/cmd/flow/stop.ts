@@ -2,24 +2,26 @@
 import process from 'node:process';
 
 import type { StopSummary } from '../../flow/executor';
-import { formatHints, outStyle, paintStatus } from '../../tui/output';
-import { baseOptions, flag } from '../../utils/args';
-import { command } from '../../cli';
+import { outStyle, paintStatus } from '../../tui/output';
+import { flag, str } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 
 export const commandStop = command({
-  name: 'flow stop',
-  help: {
-    usage: 'coder flow stop [run-id] [--keep-tasks] [--json]',
-    summary:
-      'Stop a running flow: signal the orchestrator so it stops dispatching, stamp the\nrun stopped, and stop its still-running tasks. Defaults to the most recent run;\nthe journal stays ready for `coder flow resume`.',
-    flags: [['--keep-tasks', "leave the run's still-running tasks running"]],
+  name: 'stop',
+  description: 'stop a run and its still-running tasks',
+  usage:
+    'Stop a running flow: signal the orchestrator so it stops dispatching, stamp the\nrun stopped, and stop its still-running tasks. Defaults to the most recent run;\nthe journal stays ready for `coder flow resume`.',
+  access: 'write',
+  args: {
+    'run-id': str('the run (default: the most recent)'),
+    'keep-tasks': flag("leave the run's still-running tasks running"),
   },
-  options: { ...baseOptions, 'keep-tasks': flag },
-  args: 1,
+  cli: { positional: ['run-id'] },
   run: async ({ options, args: [id] }) => {
     const { stopRun } = await import('../../flow/executor');
     return stopRun(id, { keepTasks: options['keep-tasks'] });
   },
+  next: ({ result }) => nextSteps([`Resume: coder flow resume ${result.runId}`]),
   print: printStop,
 });
 
@@ -42,5 +44,4 @@ function printStop(summary: StopSummary): void {
   if (summary.keptTasks.length) {
     process.stdout.write(`${s.dim('[flow]')} left running: ${summary.keptTasks.join(', ')}\n`);
   }
-  process.stdout.write(`\n${formatHints([`Resume: coder flow resume ${summary.runId}`], s)}\n`);
 }

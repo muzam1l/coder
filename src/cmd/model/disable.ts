@@ -1,25 +1,28 @@
 /** `coder model disable`: turn off any model name. */
-import type { CommandHelpSpec } from '../../core/types';
-import { models } from '../../core/models';
+import { str } from '../../utils/args';
 import { command } from '../../cli';
-import { modelOptions } from './add';
+import { workspaceFlag } from './add';
 import { printModelChange } from './remove';
 
 // Any name is a valid target - a built-in, a configured entry, or a raw engine slug.
-export const toggle = (disable: boolean, help: CommandHelpSpec) =>
+export const toggle = (disable: boolean, description: string, usage?: string) =>
   command({
-    name: `model ${disable ? 'disable' : 'enable'}`,
-    help,
-    options: modelOptions,
-    args: 1,
-    run: ({ options, args: [name], cwd }) =>
-      models[disable ? 'disable' : 'enable'](name, { ...options, cwd }),
+    name: disable ? 'disable' : 'enable',
+    description,
+    usage,
+    access: 'write',
+    args: { name: str('a built-in, custom model, or alias'), workspace: workspaceFlag },
+    cli: { positional: ['name'] },
+    run: async ({ options, args: [name], cwd }) => {
+      const { models } = await import('../../core/models');
+      return models[disable ? 'disable' : 'enable'](name, { ...options, cwd });
+    },
     json: ({ name, file }) => ({ [disable ? 'disabled' : 'enabled']: name, file }),
     print: ({ name, file }) => printModelChange(disable ? 'disabled' : 'enabled', name, file),
   });
 
-export const commandModelDisable = toggle(true, {
-  usage: 'coder model disable <name> [--workspace]',
-  summary: 'Disable a model - built-in, custom, or alias. Requests for it fail until re-enabled.',
-  flags: [['--workspace', 'target <repo>/.coder/config.json instead of the user file']],
-});
+export const commandModelDisable = toggle(
+  true,
+  'turn off a model (built-in, custom, or alias)',
+  'Disable a model - built-in, custom, or alias. Requests for it fail until re-enabled.',
+);

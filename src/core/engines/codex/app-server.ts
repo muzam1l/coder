@@ -27,7 +27,8 @@ function defaultClientInfo() {
 }
 
 const DEFAULT_CAPABILITIES = {
-  experimentalApi: false,
+  // thread/backgroundTerminals/clean, which task stop needs, is experimental.
+  experimentalApi: true,
   requestAttestation: false,
   optOutNotificationMethods: [
     'item/agentMessage/delta',

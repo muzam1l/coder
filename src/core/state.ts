@@ -4,7 +4,13 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { moveDirectory, readJsonFile, watchChanges, withFileLock } from '../utils/fsx';
+import {
+  moveDirectory,
+  readJsonFile,
+  watchChanges,
+  withFileLock,
+  writeFileAtomic,
+} from '../utils/fsx';
 import { archiveCodexSession } from './engines/codex/sessions';
 import { type Task, type TurnResult, ACTIVE_STATUSES, TERMINAL_STATUSES } from './types';
 import type { TaskLogEntry } from './task/log-view';
@@ -52,8 +58,8 @@ export function coderCache(...parts: string[]): string {
   return path.join(path.resolve(root), ...parts);
 }
 
-export function resolveFlowsDir(mailbox?: string): string {
-  return mailbox ? path.join(mailbox, 'flows') : coderHome('state', 'global', 'flows');
+export function resolveFlowsDir(): string {
+  return coderHome('state', 'global', 'flows');
 }
 
 export function resolveFlowsArchiveDir(): string {
@@ -190,7 +196,7 @@ export function writeTask(
     ...patch,
     updatedAt: opts.touch === false ? existing.updatedAt : new Date().toISOString(),
   };
-  fs.writeFileSync(taskFile, `${redactConnectionSecrets(next)}\n`, 'utf8');
+  writeFileAtomic(taskFile, `${redactConnectionSecrets(next)}\n`);
   return next;
 }
 

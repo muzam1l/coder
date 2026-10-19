@@ -196,7 +196,7 @@ export function effectiveSettings(agent: Agent): {
     engine: agent.usage?.engine ?? agent.definition.engine,
     model: agent.usage?.model ?? agent.definition.model,
     effort: agent.usage?.effort ?? agent.definition.effort,
-    permissions: agent.usage?.permissions ?? agent.definition.permissions ?? 'read-only',
+    permissions: agent.usage?.permissions ?? agent.definition.permissions ?? 'auto',
   };
 }
 

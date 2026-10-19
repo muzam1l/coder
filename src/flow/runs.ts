@@ -23,7 +23,6 @@ import {
   drivePreparedRun,
 } from './executor';
 import type { FlowEvent, FlowRecord, FlowStep, JournalEntry } from './types';
-import { mailboxDir } from '../core/mailbox';
 import {
   AUTO_ARCHIVE_MS,
   assertValidId,
@@ -132,18 +131,23 @@ export async function driveRun(runId: string, cwd: string): Promise<void> {
   }
 }
 
-function detachRun(record: FlowRecord, cwd: string, wait?: boolean): DetachedRun {
+/** Hand a prepared run to a detached orchestrator; `drive` adds its flags, `env` replaces this process's. */
+export function detachRun(
+  record: FlowRecord,
+  cwd: string,
+  options: { wait?: boolean; env?: NodeJS.ProcessEnv; drive?: string[] } = {},
+): DetachedRun {
   const needsBun =
     record.script.endsWith('.ts') && !process.versions.bun && !process.features.typescript;
   if (needsBun && !bunAvailable()) throw new Error('TypeScript flows need bun or Node 23.6+.');
   const logFd = fs.openSync(path.join(runDirFor(record.runId), 'flow.log'), 'a');
   const child = spawn(
     needsBun ? 'bun' : process.execPath,
-    [CLI_PATH, 'flow', 'drive', record.runId, '--cwd', cwd],
+    [CLI_PATH, 'flow', 'drive', record.runId, '--cwd', cwd, ...(options.drive ?? [])],
     {
       detached: true,
       stdio: ['ignore', logFd, logFd],
-      env: process.env,
+      env: options.env ?? process.env,
     },
   );
   child.unref();
@@ -152,7 +156,7 @@ function detachRun(record: FlowRecord, cwd: string, wait?: boolean): DetachedRun
   return {
     runId: record.runId,
     status: 'running',
-    ...(wait ? { watch: watchRun(record.runId, { bootPid: child.pid }) } : {}),
+    ...(options.wait ? { watch: watchRun(record.runId, { bootPid: child.pid }) } : {}),
   };
 }
 
@@ -198,11 +202,9 @@ export async function startRun(
 ): Promise<RunSummary | DetachedRun> {
   if (opts.detached) {
     if (!opts.dryRun)
-      return detachRun(
-        prepareRun(ref, opts),
-        opts.cwd ? path.resolve(opts.cwd) : process.cwd(),
-        opts.wait,
-      );
+      return detachRun(prepareRun(ref, opts), opts.cwd ? path.resolve(opts.cwd) : process.cwd(), {
+        wait: opts.wait,
+      });
     ensureTsRuntime(
       resolveFlow(ref, opts.cwd ? path.resolve(opts.cwd) : process.cwd()).path,
       process.argv.slice(2),
@@ -223,7 +225,7 @@ export async function resumeRun(
       return detachRun(
         prepareRun('', opts, record.runId),
         opts.cwd ? path.resolve(opts.cwd) : process.cwd(),
-        opts.wait,
+        { wait: opts.wait },
       );
     ensureTsRuntime(record.script, process.argv.slice(2));
   }
@@ -262,15 +264,21 @@ export function runResult(runId?: string, opts: { tail?: number | 'all' } = {}):
   };
 }
 
-/** Follow a run (the most recent without an id): replay its events, then tail them until it ends. `bootPid` is a just-spawned orchestrator. */
+/** Follow a run (the most recent without an id): replay its events, then tail them until it ends. `bootPid` is a just-spawned orchestrator; `from` lists the events from that one on without following. */
 export function watchRun(
   runId?: string,
-  opts: { tail?: number | 'all'; bootPid?: number } = {},
+  opts: { tail?: number | 'all'; bootPid?: number; from?: number } = {},
 ): FlowWatch {
   const record = findRun(runId, 'No flow runs yet.');
+  const from = opts.from;
   return {
     record,
-    events: streamFlowCore(record.runId, opts.bootPid, { tail: opts.tail }),
+    events:
+      from === undefined
+        ? streamFlowCore(record.runId, opts.bootPid, { tail: opts.tail })
+        : (async function* () {
+            yield* readEvents(record.runId).slice(from);
+          })(),
     final() {
       const result = runResult(record.runId, { tail: 0 });
       if (!result) {
@@ -373,17 +381,11 @@ export function generateRunId(): string {
   return `flow-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function flowsStateDir(): string {
-  // Inside an agent's sandbox the mailbox is the only place a run can write.
-  const mailbox = mailboxDir();
-  return resolveFlowsDir(mailbox);
-}
-
 // Resolves to whichever bin holds the run (live wins); a fresh run id falls
 // through to the live bin.
 export function runDirFor(runId: string): string {
   assertValidId(runId, 'flow run id');
-  const live = path.join(flowsStateDir(), runId);
+  const live = path.join(resolveFlowsDir(), runId);
   if (fs.existsSync(path.join(live, 'flow.json'))) return live;
   const archived = path.join(resolveFlowsArchiveDir(), runId);
   if (fs.existsSync(path.join(archived, 'flow.json'))) return archived;
@@ -408,7 +410,7 @@ export function archiveRun(record: FlowRecord): FlowRecord {
 // bin and clear the flag.
 export function unarchiveRun(record: FlowRecord): FlowRecord {
   const from = runDirFor(record.runId);
-  const to = path.join(flowsStateDir(), record.runId);
+  const to = path.join(resolveFlowsDir(), record.runId);
   if (from !== to) moveDirectory(from, to);
   const next: FlowRecord = { ...record, archived: undefined, archivedAt: undefined };
   writeFlowRecord(runDirFor(record.runId), next);
@@ -484,7 +486,7 @@ const byStart = (a: FlowRecord, b: FlowRecord) =>
 
 /** Live runs newest-first. */
 export function listRuns(): FlowRecord[] {
-  return scanRuns(flowsStateDir()).sort(byStart);
+  return scanRuns(resolveFlowsDir()).sort(byStart);
 }
 
 export function listArchivedRuns(): FlowRecord[] {
