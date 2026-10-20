@@ -25,7 +25,7 @@
   --bg: light-dark(#ffffff, #0b0c10);
   --panel: light-dark(#f8f7f8, #13141a);
   --tile: light-dark(#f4f4f5, #16171c);
-  --fg: light-dark(#0b0c10, #f3f4f6);
+  --fg: light-dark(#000000, #ffffff);
   --muted: light-dark(#4f5664, #a9b0bd);
   --dim: light-dark(#7a808b, #7c828e);
   --line: light-dark(rgba(11, 12, 16, 0.08), rgba(255, 255, 255, 0.08));

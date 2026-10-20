@@ -13,8 +13,20 @@ import { defaultAgent } from '../../agent/load';
 import { pendingCall } from '../../core/task/async';
 import type { TaskTurn } from '../../client/types';
 import type { TaskLogLine, TaskStatus, UsageRecord } from '../store/types';
-import { deleteTask, stopTask, askTask, steerTask, recentTasks } from '../../core/task/actions';
-import { answerApproval, listPendingApprovals } from '../../core/approvals';
+import {
+  answerTaskApproval,
+  deleteTask,
+  stopTask,
+  askTask,
+  steerTask,
+  recentTasks,
+} from '../../core/task/actions';
+import {
+  listApprovals,
+  pendingApprovals,
+  stoppedMessage,
+  withDecisions,
+} from '../../core/approvals';
 import { loadConfig } from '../../core/config';
 import { logEntry } from '../../core/task/log-view';
 import {
@@ -37,6 +49,7 @@ import {
   pidIsOurWorker,
   processStarts,
   reconcileTask,
+  turnPending,
   resolveArchiveDir,
   resolveUsageFile,
   resolveUsageTempFile,
@@ -47,9 +60,14 @@ import {
   watchTask,
   writeTask,
 } from '../../core/state';
-import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Task, type Availability } from '../../core/types';
+import {
+  ACTIVE_STATUSES,
+  TERMINAL_STATUSES,
+  type Approval,
+  type Task,
+  type Availability,
+} from '../../core/types';
 import { SKIPPED } from '../../core/defaults';
-import { eventJsons } from '../../agent/context/turn';
 import { readFlowRecord } from '../../flow/runs';
 import { stopRun, stopFlowTasks } from '../../flow/executor';
 import { applyTaskMessage } from '../../runner/task';
@@ -60,9 +78,17 @@ import { connectionGrants } from '../connections/grants';
 import { resolveConnections, taskConnectionSecrets } from '../connections/resolve';
 import { connectionEnvironment, narrowConnections } from '../../core/connections';
 import { nativeToolEnvironment, type ReplyEndpoint } from '../../agent/mcp';
-import { connectionWarnings } from './logs';
-import { assertEnabled, check, refreshedTask, TaskInputError, taskCwd, type NewTask } from './create';
+import { taskWarnings } from './logs';
+import {
+  assertEnabled,
+  check,
+  refreshedTask,
+  TaskInputError,
+  taskCwd,
+  type NewTask,
+} from './create';
 import { rememberPost } from './conversation';
+import { askOpenAgain, syncApprovals, type ApprovalPost } from './approvals';
 import {
   sessionKey,
   pushInbox,
@@ -84,12 +110,10 @@ const at = (value?: string | null) => (value ? Date.parse(value) : undefined);
 function row(cwd: string, task: Task, detail = false): TaskStatus {
   const createdAt = at(task.createdAt) ?? 0;
   const answers = readJsonFile<unknown[]>(path.join(resolveTaskDir(cwd, task.id), 'answers.json'));
-  const approval =
-    task.status === 'running'
-      ? listPendingApprovals(resolveTaskDir(cwd, task.id)).find(entry => !entry.response)
-      : undefined;
-  const result =
-    detail && !ACTIVE_STATUSES.includes(task.status) ? readResultJson(cwd, task.id) : null;
+  // A pending escalation shows whatever the task is doing; the task answers it when told.
+  const approvals = listApprovals(resolveTaskDir(cwd, task.id));
+  const approval = approvals.find(entry => !entry.response);
+  const result = detail ? readResultJson(cwd, task.id, task) : null;
   const turns: TaskTurn[] = detail
     ? readTurnResults(cwd, task.id)
         .filter(
@@ -144,12 +168,8 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
       runner: 'local',
       ...(task.cwd ? { cwd: task.cwd } : {}),
       ...(task.permissions ? { permissions: task.permissions } : {}),
-      // A platform task is titled by its first message, so its row keeps the first turn's event.
-      ...(task.prompt
-        ? {
-            prompt: eventJsons(task.prompt) ? task.prompt : (task.currentPrompt ?? task.prompt),
-          }
-        : {}),
+      // The row keeps the first turn's prompt, which titles the task.
+      ...(task.prompt ? { prompt: task.prompt } : {}),
       definition: { integrations: {} },
       ...(task.engine
         ? {
@@ -162,9 +182,15 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
         : {}),
       tools: {},
     },
-    status: approval ? 'waiting' : task.status,
+    status:
+      approval && task.status === 'running'
+        ? 'waiting'
+        : turnPending(cwd, task)
+          ? 'running'
+          : task.status,
     attempts: 1,
     ...(approval ? { approval } : {}),
+    ...(approvals.length ? { approvals } : {}),
     ...(answers ? { answer: answers } : {}),
     ...(result
       ? {
@@ -189,7 +215,7 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
       : {}),
     updatedAt: at(task.updatedAt) ?? createdAt,
     local: true,
-    ...(detail ? { turns } : {}),
+    ...(detail ? { turns: withDecisions(turns, approvals) } : {}),
   };
 
   return { ...status, ...taskTimes(status) };
@@ -215,6 +241,51 @@ export async function sweepLocalQueue(ctx: ServerContext, cwd: string): Promise<
     .map(row => row.task.id);
 
   if (ids.length) await ctx.queue.archiveStopped(ctx.organizationId, now, ids);
+}
+
+/** The sweep over tasks with a posted approval: posts and decisions not yet shown, and answers the task has not heard; a running task's watch does this sooner. */
+export async function syncLocalApprovals(ctx: ServerContext): Promise<void> {
+  const rows = await ctx.store.list<ApprovalPost>('delivery', { prefix: 'approval:' });
+  for (const taskId of new Set(rows.map(row => row.value.notice.task))) {
+    const status = await ctx.store.get('task', taskId);
+    if (!status) continue;
+    const cwd = status.task.cwd ?? ctx.local!.cwd;
+    const approvals = listApprovals(resolveTaskDir(cwd, taskId));
+
+    await redeliverAnswers(ctx, cwd, taskId, approvals);
+    await syncApprovals(ctx, status.task, approvals);
+  }
+}
+
+/** How long an answer's own delivery gets before the sweep delivers it again. */
+const REDELIVER_AFTER_MS = 60_000;
+
+/** Answers recorded in the task's folder that never reached it (a steer or resume that failed) are delivered again; the sweep's job, since a resume waits for the task's watch to end. */
+async function redeliverAnswers(
+  ctx: ServerContext,
+  cwd: string,
+  id: string,
+  approvals: Approval[],
+): Promise<void> {
+  const now = (ctx.now ?? Date.now)();
+  for (const approval of approvals) {
+    if (
+      !approval.response ||
+      approval.response.deliveredAt ||
+      approval.response.decision === 'closed'
+    )
+      continue;
+    // A fresh answer is still being delivered by whoever recorded it.
+    if (now - Date.parse(approval.response.answeredAt ?? '') < REDELIVER_AFTER_MS) continue;
+    const task = loadTask(cwd, id);
+    if (!task) return;
+    await answerTaskApproval(cwd, task, approval.id, approval.response.decision, {
+      ...(approval.response.reason ? { reason: approval.response.reason } : {}),
+      resume: text => resumeLocalTask(ctx, cwd, id, text),
+    }).catch(error =>
+      console.error(`coder server: could not deliver the answer to approval ${approval.id}`, error),
+    );
+  }
 }
 
 /** Spawn a dashboard task; its worker records startup failures on the task. */
@@ -254,6 +325,7 @@ export async function startLocalTask(
       flow: 'default',
       runner: 'local',
       cwd,
+      ...(input.name ? { name: input.name } : {}),
       prompt: input.prompt,
       definition: version?.definition ?? { integrations: {} },
       ...(record?.settings ? { usage: record.settings } : {}),
@@ -305,6 +377,9 @@ export async function startLocalTask(
         prompt: input.prompt ?? '',
         outputSchema: input.outputSchema,
         cwd,
+        name: input.name,
+        appendSystem: input.appendSystem,
+        addDirs: input.addDirs,
         engine: input.engine ?? agent?.engine,
         model: input.model ?? (input.engine ? undefined : agent?.model),
         effort: input.effort ?? (input.engine ? undefined : agent?.effort),
@@ -448,13 +523,18 @@ export async function startQueuedLocalTask(
       else void inbox;
     }
   } catch (error) {
-    await ctx.queue.finish(
-      ctx.organizationId,
-      status.task.id,
-      { status: 'failed', error: error instanceof Error ? error.message : String(error) },
-      (ctx.now ?? Date.now)(),
-      { attempts: status.attempts, tokenHash: status.tokenHash },
-    );
+    if (
+      await ctx.queue.finish(
+        ctx.organizationId,
+        status.task.id,
+        { status: 'failed', error: error instanceof Error ? error.message : String(error) },
+        (ctx.now ?? Date.now)(),
+        { attempts: status.attempts, tokenHash: status.tokenHash },
+      )
+    ) {
+      const { reportTaskFailure } = await import('./failures');
+      await reportTaskFailure(ctx, status.task, error);
+    }
   }
   return true;
 }
@@ -624,6 +704,7 @@ function watchCompletion(
     const startMs = processStarts();
     const resultSignal = watchTask(saved.cwd, id, worker);
     let pollMs = 100;
+    const synced = new Map<string, string>();
     try {
       for (let attempt = 0; attempt < 5; attempt++) {
         try {
@@ -658,9 +739,26 @@ function watchCompletion(
               const next = receipt.turns + 1;
               receipt = { ...receipt, posting: sending ? receipt.turns : undefined };
               if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
+              const before = (ctx.now ?? Date.now)();
               await reply(result, false, turn);
+              if (sending) await askOpenAgain(ctx, { ...saved.task, id }, before);
               receipt = { ...receipt, turns: next, posting: undefined };
               if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
+            }
+            // Each approval syncs when it appears or its answer changes; a failed call waits for the sweep.
+            const approvals = listApprovals(resolveTaskDir(saved.cwd, id));
+            const changed = approvals.filter(
+              entry =>
+                synced.get(entry.id) !==
+                `${entry.response?.answeredAt ?? ''}:${entry.response?.deliveredAt ?? ''}`,
+            );
+            if (changed.length) {
+              await syncApprovals(ctx, { ...saved.task, id }, changed);
+              for (const entry of listApprovals(resolveTaskDir(saved.cwd, id)))
+                synced.set(
+                  entry.id,
+                  `${entry.response?.answeredAt ?? ''}:${entry.response?.deliveredAt ?? ''}`,
+                );
             }
             const task = reconcileTask(saved.cwd, found, startMs);
             // A completed turn's worker may still run queued steers, a summary or a review's result.
@@ -822,7 +920,7 @@ export async function runLocalTask(
 
   const handles = task.event ? await eventTokens(ctx, task) : {};
   const resolved = await resolveConnections(ctx, task, handles);
-  await connectionWarnings(ctx, taskId ?? task.id, resolved.warnings);
+  await taskWarnings(ctx, taskId ?? task.id, resolved.warnings);
   await taskConnectionSecrets(ctx, taskId ?? task.id, [
     ...resolved.secrets,
     ...Object.values(resolved.tokens),
@@ -1200,20 +1298,54 @@ export async function localTaskAction(
     writeJsonFileAtomic(file, [...(readJsonFile<unknown[]>(file) ?? []), answer]);
     return Response.json({ ok: true, answer });
   }
-  if (action === 'approve') {
-    const pending = listPendingApprovals(resolveTaskDir(cwd, id)).filter(entry => !entry.response);
-    const approvalId = String(body.approvalId ?? body.id ?? pending[0]?.id ?? '');
-    if (!pending.some(entry => entry.id === approvalId))
-      return refuse(`Task "${id}" has no pending approval`);
-    answerApproval(
-      resolveTaskDir(cwd, id),
-      approvalId,
-      body.decision === 'deny' || body.decision === 'decline' ? 'decline' : 'accept',
-    );
-    return Response.json({ ok: true });
-  }
+  if (action === 'approve') return answerLocalApproval(cwd, id, body, ctx);
 
   return new Response('Not found', { status: 404 });
+}
+
+/** Answers a CLI task's approval; on a server, a finished task resumes through it, so its conversation hears the next turn. */
+export async function answerLocalApproval(
+  cwd: string,
+  id: string,
+  body: Record<string, unknown>,
+  ctx?: ServerContext,
+): Promise<Response> {
+  const found = loadTask(cwd, id);
+  if (!found || !own(found)) return Response.json({ error: `No task "${id}"` }, { status: 404 });
+  const task = reconcileTask(cwd, found);
+  const approvals = listApprovals(resolveTaskDir(cwd, id));
+  const answerable = approvals.filter(
+    entry => entry.response?.decision !== 'accept' && entry.response?.decision !== 'closed',
+  );
+  const approvalId = String(
+    body.approvalId ?? body.id ?? pendingApprovals(resolveTaskDir(cwd, id))[0]?.id ?? '',
+  );
+  if (approvals.some(entry => entry.id === approvalId && entry.response?.decision === 'closed'))
+    return Response.json({ error: stoppedMessage(approvalId) }, { status: 409 });
+  if (!answerable.some(entry => entry.id === approvalId))
+    return Response.json(
+      { error: `Task "${id}" has no approval "${approvalId}" to answer` },
+      { status: 409 },
+    );
+  try {
+    await answerTaskApproval(
+      cwd,
+      task,
+      approvalId,
+      body.decision === 'deny' || body.decision === 'decline' ? 'decline' : 'accept',
+      {
+        ...(typeof body.reason === 'string' ? { reason: body.reason } : {}),
+        ...(typeof body.by === 'string' && body.by ? { by: body.by } : {}),
+        ...(ctx ? { resume: (text: string) => resumeLocalTask(ctx, cwd, id, text) } : {}),
+      },
+    );
+  } catch (error) {
+    if (error instanceof CoderError)
+      return Response.json({ error: error.message }, { status: 400 });
+    throw error;
+  }
+
+  return Response.json({ ok: true });
 }
 
 /** Finished CLI turns as usage rows, skipping completion keys already known. */

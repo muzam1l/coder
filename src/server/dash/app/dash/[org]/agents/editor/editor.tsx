@@ -1,6 +1,7 @@
 'use client';
 
 import './editor.css';
+import type { ComponentChildren } from 'preact';
 // The preview is the same card the agents list draws.
 import '@/app/dash/[org]/agents/(list)/page.css';
 
@@ -47,11 +48,22 @@ import {
 } from '@/app/dash/[org]/settings/model-options';
 import { suggestName } from './names';
 
+const NEVER_ASKS = 'never asks you; anything outside its sandbox fails';
 const PERMISSION_HINTS: Record<string, string> = {
-  'read-only': 'reads the repository and changes nothing',
-  'workspace-write': 'edits files inside the repository',
-  auto: 'edits files, reaches the network, and asks when it needs more',
+  'read-only': `reads the repository and changes nothing; ${NEVER_ASKS}`,
+  'workspace-write': `edits files inside the repository; ${NEVER_ASKS}`,
+  auto: 'edits files, reaches the network, and asks you when it needs more',
 };
+const PERMISSION_OPTIONS = PERMISSIONS.map(([key, label]): [string, ComponentChildren] =>
+  key === 'auto'
+    ? [
+        key,
+        <>
+          {label} <Badge tone="acc">escalates</Badge>
+        </>,
+      ]
+    : [key, label],
+);
 const ACCESS: Array<[string, string]> = [
   ['read', 'Read-only'],
   ['write', 'Read-write'],
@@ -708,10 +720,13 @@ export function AgentEditor({
                   />
                 </Field>
               </div>
-              <Field label="Repository access" hint={PERMISSION_HINTS[draft.permissions]} group>
+              <Field label="Repository access" group>
+                <p class={draft.permissions === 'auto' ? 'access-note' : 'access-note warn-hint'}>
+                  {PERMISSION_HINTS[draft.permissions]}
+                </p>
                 <Segmented
                   label="Repository access"
-                  options={PERMISSIONS}
+                  options={PERMISSION_OPTIONS}
                   value={draft.permissions}
                   onChange={value => set('permissions', value)}
                 />

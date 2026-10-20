@@ -1,16 +1,17 @@
-/** Platform events Coder failed to handle: kept a day for the agent's Usage page, and told to their thread once. */
+/** Platform events Coder failed to handle: kept a day for the agent's Usage page, and told to their thread once when asked directly. */
 import { randomUUID } from 'node:crypto';
 import { AgentLoadError } from '../../agent/load';
 
-import type { AgentApp, AgentEvent } from '../../agent/types';
+import type { AgentApp, AgentEvent, AgentTask } from '../../agent/types';
 import { forInstallation, type ServerContext } from '../context';
+import { directAsk } from './conversation';
 import type { FailedDelivery, Store } from '../store/types';
 import { DELIVERY_TTL_MS, type Replies } from './events';
 
 /** Most failures an agent read lists; the count covers them all. */
 const LISTED = 50;
 
-/** Keeps the failure in the workspace the installation is bound to, and tells the event's thread the first time. */
+/** Keeps the failure in the workspace the installation is bound to, and tells the event's thread the first time if someone asked directly. */
 export async function recordFailure(
   ctx: ServerContext,
   app: AgentApp,
@@ -43,7 +44,7 @@ export async function recordFailure(
   } catch (cause) {
     console.error(`coder server: could not record a failed delivery for ${app.id}`, cause);
   }
-  if (!first || !replies) return;
+  if (!first || !replies || !integration || !event || !directAsk(integration, event)) return;
 
   try {
     await (
@@ -56,6 +57,25 @@ export async function recordFailure(
   } catch (cause) {
     console.error(`coder server: could not tell ${app.id}'s thread about a failed delivery`, cause);
   }
+}
+
+/** A platform task that ended before its agent answered: a direct ask's thread gets the failure reply once. */
+export async function reportTaskFailure(
+  ctx: ServerContext,
+  task: AgentTask,
+  error: unknown,
+): Promise<void> {
+  const event = task.event;
+  if (!event || task.source !== event.integration) return;
+  const app = await ctx.store.get('app', event.appId).catch(cause => {
+    console.error(`coder server: could not report the failure of task ${task.id}`, cause);
+  });
+  if (!app) return;
+  const { eventReplies } = await import('../chat');
+
+  await recordFailure(ctx, app, error, event.installationId, event, () =>
+    eventReplies(ctx, app, event),
+  );
 }
 
 /** An agent's failed deliveries of the last day: how many, and the newest. */

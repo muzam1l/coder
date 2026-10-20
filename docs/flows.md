@@ -59,7 +59,7 @@ const r = await task('Explain the auth module', {
 r.output; // final message text
 ```
 
-Options are the same as the `coder run` flags (`engine`, `model`, `effort`, `permissions`, `name`, `system`, `cwd`, and `addDirs` for `--add-dir` - see `coder run --help`), plus one of its own:
+Options are the same as the `coder run` flags (`engine`, `model`, `effort`, `permissions`, `name`, `appendSystem`, `cwd`, and `addDirs` for `--add-dir` - see `coder run --help`), plus one of its own:
 
 - `returns` - a zod schema for structured output instead of prose. The runtime passes the schema natively, validates the reply (one corrective retry on mismatch), and the parsed value lands on `r.data`:
 

@@ -25,9 +25,11 @@ import {
 } from './tokens';
 import type { AgentApp, Installation } from '../../agent/types';
 import type { StoredCredential } from '../settings/credentials';
-import { BATCH_LEASE_MS, InstallationBoundError } from './types';
+import { agentOrderKey, BATCH_LEASE_MS, InstallationBoundError } from './types';
 import type { CredentialScope, CredentialWork, DeliveryLease, TaskStatus } from './types';
 import type { Store, StoreKind, StoreRecords, LoginPatch, LoginFence } from './types';
+import type { ApprovalPost } from '../tasks/approvals';
+import { postDue } from './types';
 import { type EngineLogin } from '../settings/logins';
 
 export function matchesStoreRow(
@@ -52,7 +54,9 @@ export function matchesStoreRow(
     (!options.ids || options.ids.includes(id)) &&
     (!options.agent || (agent ?? row.agent) === options.agent) &&
     (!Object.hasOwn(options, 'visibleTo') || !row.owner || row.owner === options.visibleTo) &&
-    (!options.active || row.deletedAt === undefined || Boolean(options.includeUninstalled && row.uninstalled)) &&
+    (!options.active ||
+      row.deletedAt === undefined ||
+      Boolean(options.includeUninstalled && row.uninstalled)) &&
     (!options.installation || row.installationId === options.installation) &&
     (!options.apps || (!!row.app && options.apps.includes(row.app)))
   );
@@ -308,7 +312,7 @@ export class MemoryStore implements Store {
     return (await this.listAgentsWithVersions(options.slug))
       .filter(
         ({ record, version }) =>
-          (!options.after || record.id > options.after) &&
+          (!options.after || agentOrderKey(record) > options.after) &&
           (!options.source || record.source === options.source) &&
           (!options.platform || Boolean(version?.definition.integrations?.[options.platform])) &&
           (!options.q ||
@@ -316,6 +320,7 @@ export class MemoryStore implements Store {
               value?.toLowerCase().includes(options.q!.toLowerCase()),
             )),
       )
+      .sort((a, b) => (agentOrderKey(a.record) < agentOrderKey(b.record) ? -1 : 1))
       .slice(0, options.limit)
       .map(({ record, version }) => {
         if (!version) return { record };
@@ -646,6 +651,13 @@ export class MemoryStore implements Store {
       .sort(([left], [right]) => left.localeCompare(right))
       .slice(0, options.limit)
       .map(([id, entry]) => ({ id, value: this.read(kind, entry.value) }));
+  }
+
+  async approvalPostsDue(now: number, staleMs: number) {
+    return [...this.live('delivery').entries()]
+      .filter(([id]) => id.startsWith('approval:'))
+      .map(([id, entry]) => ({ id, value: entry.value as ApprovalPost }))
+      .filter(({ value }) => postDue(value, now, staleMs));
   }
 
   async delete(kind: StoreKind, id: string): Promise<void> {

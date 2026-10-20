@@ -57,7 +57,7 @@ export interface TaskDisplayRow {
 }
 
 export const isApproval = (kind: string) =>
-  kind.includes('approval') || kind === 'sidecar-decision' || kind === 'auto-review';
+  ['approval-escalated', 'approval-answered', 'approval-decision', 'auto-review'].includes(kind);
 
 const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
 
@@ -93,7 +93,6 @@ export class LogView {
   private openCalls: TaskDisplayRow[] = [];
   // Engine invocation ids, so concurrent calls of one tool close with their own results.
   private callIds = new WeakMap<TaskDisplayRow, string>();
-  private approval: TaskDisplayRow | undefined;
   private approvals = new Map<string, TaskDisplayRow>();
   private lastUsageTotal = 0;
 
@@ -114,8 +113,8 @@ export class LogView {
       ? undefined
       : sourceKind === 'tool-result'
         ? this.close(record, entry)
-        : isApproval(sourceKind)
-          ? this.decide(record, entry, sourceKind)
+        : sourceKind === 'approval-answered'
+          ? this.decide(record, entry)
           : undefined;
     if (earlier) {
       this.prevKind = sourceKind;
@@ -146,40 +145,46 @@ export class LogView {
       this.lastUsageTotal = tokens.total;
       row.kind = 'usage';
       row.tokens = tokens;
-      row.title = `ctx ${tokenCount(tokens.input + tokens.cachedInput)} · out ${tokenCount(tokens.output)}`;
-    } else if (
-      (sourceKind === 'approval-decision' && entry.decision === 'escalate') ||
-      sourceKind === 'approval-escalated'
-    ) {
-      const summary = stripCwd(entry.summary ? String(entry.summary) : '', this.cwd);
-      const target =
-        /^(?:run command: |Run command\. |Apply file changes\. |\w+: )?([\s\S]*)$/.exec(
-          summary,
-        )![1]!;
-      const method = String(entry.method ?? '');
-      const name = method && !method.includes('/') ? method : this.openCalls.at(-1)?.tool;
-      const word = target.startsWith('{') ? '' : target.split(/\s+/)[0];
+      // The engine's last request is the context; the turn's summed input overstates it (codex counts cached input twice over).
+      const context =
+        typeof entry.context === 'number' ? entry.context : tokens.input + tokens.cachedInput;
+      row.title = `ctx ${tokenCount(context)} · out ${tokenCount(tokens.output)}`;
+    } else if (sourceKind === 'approval-escalated') {
+      const actions = Array.isArray(entry.actions) ? entry.actions.map(String) : [];
       const reason = stripCwd(entry.reason ? String(entry.reason) : '', this.cwd);
       row.kind = 'approval';
-      row.title = ['Approval', [name, word].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
-      row.detail = [target, reason && `Policy · ${reason}`].filter(Boolean).join('\n');
-      row.state = sourceKind === 'approval-escalated' ? 'waiting' : 'escalated';
-      if (sourceKind === 'approval-escalated') this.approvals.set(String(entry.approvalId), row);
-      else this.approval = row;
-    } else if (isApproval(sourceKind) && (entry.decision || !entry.message)) {
+      row.title = [
+        'Approval needed',
+        reason,
+        `${actions.length} action${actions.length === 1 ? '' : 's'}`,
+      ].filter(Boolean).join(' · ');
+      row.detail = stripCwd(
+        actions.map((action, index) => `${index + 1}. ${action.replaceAll('\n', '\n   ')}`).join('\n'),
+        this.cwd,
+      );
+      row.state = 'waiting';
+      this.approvals.set(String(entry.approvalId), row);
+    } else if (sourceKind === 'approval-answered') {
       row.kind = 'approval';
-      const label =
-        sourceKind === 'sidecar-decision'
-          ? 'sidecar'
-          : sourceKind === 'auto-review'
-            ? 'auto-review'
-            : 'approval';
+      row.title = 'Approval';
+      Object.assign(row, settle(row, record, entry));
+    } else if (sourceKind === 'approval-decision') {
+      const summary = stripCwd(entry.summary ? String(entry.summary) : '', this.cwd);
+      const allowed = entry.decision === 'accept';
+      row.kind = 'approval';
+      row.title = [allowed ? 'Allowed as approved' : 'Refused by the reviewer', summary]
+        .filter(Boolean)
+        .join(' · ');
+      row.detail = stripCwd(entry.reason ? String(entry.reason) : '', this.cwd);
+      if (!allowed) row.tone = 'error';
+    } else if (sourceKind === 'auto-review') {
+      row.kind = 'approval';
       const risk = entry.riskLevel ? `(${String(entry.riskLevel)} risk)` : '';
       const summary = stripCwd(entry.summary ? String(entry.summary) : '', this.cwd);
       const target = summary.slice(summary.indexOf(': ') + 2);
       const shown = summary && target && this.lastToolText.includes(target) ? '' : summary;
       const method = shown ? '' : String(entry.method ?? '');
-      row.title = `${[label, String(entry.decision ?? ''), risk, method].filter(Boolean).join(' ')}${shown ? ` · ${shown}` : ''}`;
+      row.title = `${['auto-review', String(entry.decision ?? ''), risk, method].filter(Boolean).join(' ')}${shown ? ` · ${shown}` : ''}`;
       row.detail = stripCwd(entry.reason ? String(entry.reason) : '', this.cwd);
     } else {
       const raw = entry.message
@@ -234,12 +239,11 @@ export class LogView {
     const byId = entry.callId
       ? this.openCalls.findIndex(call => this.callIds.get(call) === String(entry.callId))
       : -1;
-    const index =
-      entry.callId
-        ? byId
-        : tool
-          ? this.openCalls.findIndex(call => call.tool === tool)
-          : this.openCalls.length - 1;
+    const index = entry.callId
+      ? byId
+      : tool
+        ? this.openCalls.findIndex(call => call.tool === tool)
+        : this.openCalls.length - 1;
     if (index < 0) return undefined;
 
     const [call] = this.openCalls.splice(index, 1);
@@ -258,33 +262,10 @@ export class LogView {
     };
   }
 
-  // Sidecar verdicts and escalations follow the policy verdict before them; answers carry the approval id.
-  private decide(record: TaskLog, entry: TaskLogEntry, kind: string): TaskDisplayRow | undefined {
-    const id = String(entry.approvalId ?? '');
-    const accepted = entry.decision === 'accept';
-    if (kind === 'sidecar-decision' && this.approval) {
-      const reason = stripCwd(entry.reason ? String(entry.reason) : '', this.cwd);
-      const row = {
-        ...this.approval,
-        detail: [this.approval.detail, reason && `Sidecar · ${reason}`].filter(Boolean).join('\n'),
-      };
-      if (entry.decision === 'escalate') return (this.approval = row);
-      this.approval = undefined;
-      return settle(row, record, `${accepted ? 'accepted' : 'denied'} by sidecar`, accepted);
-    }
-    if (kind === 'approval-escalated' && this.approval) {
-      const row = { ...this.approval, state: 'waiting' };
-      this.approval = undefined;
-      this.approvals.set(id, row);
-      return row;
-    }
-    const open = this.approvals.get(id);
-    if (!open || (kind !== 'approval-answered' && kind !== 'approval-timeout')) return undefined;
+  private decide(record: TaskLog, entry: TaskLogEntry): TaskDisplayRow | undefined {
+    const open = this.approvals.get(String(entry.approvalId));
 
-    this.approvals.delete(id);
-    return kind === 'approval-timeout'
-      ? settle(open, record, 'timed out', false)
-      : settle(open, record, `${accepted ? 'accepted' : 'denied'} by reviewer`, accepted);
+    return open ? settle(open, record, entry) : undefined;
   }
 
   private output(text: string): string {
@@ -292,11 +273,17 @@ export class LogView {
   }
 }
 
-function settle(row: TaskDisplayRow, record: TaskLog, state: string, ok: boolean): TaskDisplayRow {
+function settle(row: TaskDisplayRow, record: TaskLog, entry: TaskLogEntry): TaskDisplayRow {
+  const ok = entry.decision === 'accept';
+
   return {
     ...row,
-    state,
-    result: { ok, durationMs: Math.max(0, record.at - row.at || 0), detail: '' },
+    state: `${ok ? 'approved' : 'denied'} ${entry.by ? `by ${String(entry.by)}` : 'in Coder'}`,
+    result: {
+      ok,
+      durationMs: Math.max(0, record.at - row.at || 0),
+      detail: !ok && entry.reason ? String(entry.reason) : '',
+    },
   };
 }
 

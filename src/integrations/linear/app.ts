@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { freshToken, postedFields, tokenGrant } from '../setup';
 import {
   IntegrationError,
-  type Installation,
+  type PlatformInstallation,
   type IntegrationApp,
   type IntegrationUserAuth,
 } from '../types';
@@ -70,8 +70,10 @@ function exchange(req: Request, credentials: unknown, redirect: string, request:
 }
 
 /** Linear's prefilled OAuth application form: name, callback URLs and the agent session webhook. */
-function creationLink(publicUrl: string, key: string, name?: string): string {
+function creationLink(publicUrl: string, key: string, name?: string, isPublic?: boolean): string {
   const params = new URLSearchParams(name ? { 'oauth.client_name': name } : {});
+  // Public: installable by other Linear workspaces.
+  if (isPublic) params.set('distribution', 'public');
   params.set('developer.name', base(publicUrl).replace(/^https?:\/\//, ''));
   params.set('oauth.client_uri', base(publicUrl));
   params.append('oauth.redirect_uris', `${base(publicUrl)}/install/linear/callback`);
@@ -83,10 +85,10 @@ function creationLink(publicUrl: string, key: string, name?: string): string {
 }
 
 export const linearApp: IntegrationApp = {
-  builtin: 'shared',
-  createStep: (publicUrl, { name } = {}, key = randomUUID()) => ({
+  shareable: true,
+  createStep: (publicUrl, { name, public: isPublic } = {}, key = randomUUID()) => ({
     intro: 'Linear runs the agent as an app of your own OAuth application.',
-    link: creationLink(publicUrl, key, name),
+    link: creationLink(publicUrl, key, name, isPublic),
     steps: [
       { text: 'Open the link signed in to Linear, check the form and click **Create**.' },
       {
@@ -94,8 +96,12 @@ export const linearApp: IntegrationApp = {
       },
     ],
     notes: [
-      'The link fills in the name, the callback URLs and the webhook.',
-      'To install the app in other Linear workspaces, make it public in its Linear settings.',
+      `The link fills in the name, the callback URLs and the webhook${isPublic ? ', and makes the app public so other Linear workspaces can install it' : ''}.`,
+      ...(isPublic
+        ? []
+        : [
+            'To install the app in other Linear workspaces, make it public in its Linear settings.',
+          ]),
     ],
     hidden: { key },
     fields: [
@@ -125,11 +131,11 @@ export const linearApp: IntegrationApp = {
   // Linear's app pages use its own app id, not the client ID; the API page lists them in the current workspace.
   settingsUrl: () => 'https://linear.app/settings/api',
   // Linear has no API to read or change an OAuth application.
-  values: (app, { publicUrl, definition }) => ({
+  values: (app, { publicUrl, spec }) => ({
     url: 'https://linear.app/settings/api',
     label: 'Open application',
     lines: [
-      { text: 'Application name', copy: definition.name ?? app.agent },
+      { text: 'Application name', copy: spec.name },
       { text: 'Callback URL', copy: `${base(publicUrl)}/install/linear/callback` },
       { text: 'Callback URL', copy: `${base(publicUrl)}/connect/linear/callback` },
       {
@@ -139,13 +145,13 @@ export const linearApp: IntegrationApp = {
       { text: 'Webhook resource types', copy: 'AgentSessionEvent' },
     ],
   }),
-  async createCallback(req, { state, definition }) {
+  async createCallback(req, { spec }) {
     const { key, ...credentials }: LinearAppCredentials & { key: string } = await postedFields(
       req,
       [...FIELDS, 'key'],
     );
     if (!/^[0-9a-f-]{36}$/.test(key)) throw new IntegrationError('invalid-field', 'key');
-    return { platformAppId: key, name: definition.name ?? state.agent, credentials };
+    return { platformAppId: key, name: spec.name, credentials };
   },
   accountUrl: ({ login }) => `https://linear.app/${encodeURIComponent(login)}`,
   installUrl(_app, credentials, { publicUrl, state }) {
@@ -223,7 +229,7 @@ export const linearUserAuth: IntegrationUserAuth = {
 
 /** The workspace's app token; Linear rotates the refresh token, so each refresh is saved. */
 export function linearToken(
-  installation: Installation,
+  installation: PlatformInstallation,
   credentials: unknown,
   save?: (token: string) => Promise<string | void>,
   request?: typeof fetch,

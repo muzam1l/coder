@@ -4,11 +4,25 @@ import process from 'node:process';
 import type { agents } from '../../agent';
 import type { TaskStatus } from '../../server/store/types';
 import { validateServer } from '../../client/auth/session';
-import { outStyle } from '../../tui/output';
+import { formatAge, outStyle, paintStatus } from '../../tui/output';
 import { flag, optStr, str } from '../../utils/args';
 import { command, nextSteps } from '../../cli';
-import { finishedNext, printOutcome, serverTaskJson } from '../task/result';
+import type { RemoteAnswer } from '../../core/task/remote';
+import { finishedNext } from '../task/result';
 import { printLine } from '../task/watch';
+
+function printOutcome(status: TaskStatus, { finalMessage, error }: RemoteAnswer): void {
+  const s = outStyle;
+  const took =
+    status.startedAt === undefined
+      ? ''
+      : formatAge((status.finishedAt ?? Date.now()) - status.startedAt);
+  process.stdout.write(
+    `${s.bold(status.task.id)}  ${paintStatus(status.status)}${error ? `  ${s.red(error)}` : ''}${took ? `  ${s.dim(`took ${took}`)}` : ''}\n`,
+  );
+  if (status.credential) process.stdout.write(`${s.dim('credential')}  ${status.credential}\n`);
+  if (finalMessage) process.stdout.write(`\n${s.bold('Reply')}\n${finalMessage.trim()}\n`);
+}
 
 export const commandAgentRun = command({
   name: 'run',
@@ -35,9 +49,10 @@ export const commandAgentRun = command({
   },
   run: async ({ options, args: [name, file], cwd, tool, next }) => {
     const { agents } = await import('../../agent');
+    const { remoteAnswer } = await import('../../core/task/remote');
 
     if (options.task) return agents.runTask(options.task, { cwd });
-    return agents.run(name, file, {
+    const result = await agents.run(name, file, {
       ...options,
       cwd,
       organization: options.workspace,
@@ -46,25 +61,22 @@ export const commandAgentRun = command({
         : {
             onLog: line => printLine(line, outStyle),
             onDone: status => {
-              printOutcome(status, outStyle);
+              printOutcome(status, remoteAnswer(status));
               next(status);
             },
           }),
     });
+    return Array.isArray(result) ? result.map(remoteAnswer) : result;
   },
-  json(result) {
-    if (!Array.isArray(result)) return result;
-    const rows = (result as TaskStatus[]).map(serverTaskJson);
-    return rows.length === 1 ? rows[0] : rows;
-  },
+  json: result => (Array.isArray(result) && result.length === 1 ? result[0] : result),
   next({ result, args }) {
     if (args.task) return [];
-    const done = result as Awaited<ReturnType<typeof agents.run>> | TaskStatus;
+    const done = result as Awaited<ReturnType<typeof agents.run>> | TaskStatus | RemoteAnswer[];
     if (Array.isArray(done))
       return args.wait
-        ? done.flatMap(status =>
-            ['completed', 'failed', 'cancelled'].includes(status.status)
-              ? finishedNext(status.task.id, args).map(step => ({
+        ? (done as RemoteAnswer[]).flatMap(row =>
+            ['completed', 'failed', 'cancelled'].includes(row.status)
+              ? finishedNext(row.taskId, args).map(step => ({
                   ...step,
                   cli: { ...step.cli, hidden: true },
                 }))

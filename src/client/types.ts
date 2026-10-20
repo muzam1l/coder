@@ -1,5 +1,6 @@
 import type { SerializedMessage, SerializedThread } from 'chat';
 import type { TaskLogEntry } from '../core/task/log-view';
+import type { Approval } from '../core/types';
 import type {
   AppDrift,
   CreateStep,
@@ -36,7 +37,9 @@ export interface TaskRow {
   credential?: string;
   result?: { ok?: boolean; output?: string; diff?: string } | string;
   error?: string;
-  approval?: unknown;
+  approval?: Approval;
+  /** Every escalation of the task, answers included. */
+  approvals?: Approval[];
   answer?: unknown[];
   archivedAt?: number;
   createdAt: number;
@@ -267,7 +270,7 @@ export interface UsagePage {
 export type TaskEvent =
   | (Pick<
       TaskRow,
-      'status' | 'approval' | 'archivedAt' | 'createdAt' | 'startedAt' | 'finishedAt'
+      'status' | 'approval' | 'approvals' | 'archivedAt' | 'createdAt' | 'startedAt' | 'finishedAt'
     > & {
       id: string;
       agent: string;
@@ -437,6 +440,7 @@ export type ModelEntry = {
   model?: string;
   envKey?: string;
   effort?: string;
+  contextWindow?: number;
   disabled?: boolean;
 };
 export type McpEntry = {
@@ -452,7 +456,7 @@ export type Config = {
   chain?: string[];
   engines?: Record<string, EngineEntry | undefined>;
   models?: Record<string, ModelEntry>;
-  approvals?: { escalationTimeoutMs?: number; allowedNetworkHosts?: string[] };
+  approvals?: { allowedNetworkHosts?: string[] };
 };
 export type RunnerKind = 'local' | 'local-docker' | 'vercel-sandbox' | 'github-actions' | 'http';
 export interface RunnerSpec {
@@ -522,6 +526,8 @@ export interface ProbeResult {
   modelListed: boolean | null;
   /** Model ids the endpoint lists, or null when it has no list. */
   models: string[] | null;
+  /** Context window in tokens per model id, where the provider reports one. */
+  contextWindows?: Record<string, number>;
   detail: string;
 }
 export type McpRows = Record<string, McpEntry>;
@@ -752,4 +758,6 @@ export interface TaskTurn {
   finishedAt?: number;
   /** First log sequence after this turn. */
   logSeq?: number;
+  /** The approval whose decision this turn's prompt is: it shows as that decision, not as a prompt. */
+  approval?: string;
 }

@@ -67,18 +67,30 @@ export async function probeEndpoint(
               };
         continue;
       }
-      const body = (await response.json().catch(() => null)) as { data?: { id?: string }[] } | null;
+      const body = (await response.json().catch(() => null)) as { data?: ListedModel[] } | null;
       const ids = Array.isArray(body?.data)
         ? body.data.map(m => m.id).filter((id): id is string => typeof id === 'string')
         : null;
       if (!ids) {
         return { reachable: true, modelListed: null, models: null, detail: 'endpoint reachable' };
       }
+
+      const listedWindows = Object.fromEntries(
+        body!.data!.flatMap(m => {
+          const tokens = tokenCount(m.context_window ?? m.context_length ?? m.max_model_len);
+          return typeof m.id === 'string' && tokens ? [[m.id, tokens]] : [];
+        }),
+      );
+      const windows = Object.keys(listedWindows).length
+        ? listedWindows
+        : await showContextWindows(entry.baseUrl, entry.model ? [entry.model] : ids, key, request);
+      const contextWindows = Object.keys(windows).length ? { contextWindows: windows } : {};
       if (!entry.model) {
         return {
           reachable: true,
           modelListed: null,
           models: ids,
+          ...contextWindows,
           detail: `endpoint reachable; ${ids.length} models listed`,
         };
       }
@@ -87,6 +99,7 @@ export async function probeEndpoint(
         reachable: true,
         modelListed: listed,
         models: ids,
+        ...contextWindows,
         detail: listed
           ? `endpoint reachable; model "${entry.model}" listed`
           : `endpoint reachable, but "${entry.model}" is not in its model list`,
@@ -102,6 +115,57 @@ export async function probeEndpoint(
     }
   }
   return lastFailure!;
+}
+
+/** A `/models` row; the window field differs by provider (AI Gateway, OpenRouter, vLLM). */
+interface ListedModel {
+  id?: string;
+  context_window?: unknown;
+  context_length?: unknown;
+  max_model_len?: unknown;
+}
+
+const tokenCount = (value: unknown) =>
+  Number.isInteger(value) && (value as number) > 0 ? (value as number) : undefined;
+
+/** Ollama lists no windows; its native `/api/show` reports each model's. Stops when the first model gets none. */
+async function showContextWindows(
+  baseUrl: string,
+  ids: string[],
+  key: string | undefined,
+  request: typeof fetch,
+): Promise<Record<string, number>> {
+  const url = `${normalizeBaseUrl(baseUrl).replace(/\/v1$/, '')}/api/show`;
+  const show = async (model: string) => {
+    const response = await request(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        ...(key ? { Authorization: `Bearer ${key}` } : {}),
+      },
+      body: JSON.stringify({ model }),
+      signal: AbortSignal.timeout(5_000),
+    }).catch(() => null);
+    const body = response?.ok
+      ? ((await response.json().catch(() => null)) as {
+          model_info?: Record<string, unknown>;
+        } | null)
+      : null;
+    const info = body?.model_info ?? {};
+    const field = Object.keys(info).find(name => name.endsWith('.context_length'));
+    return field ? tokenCount(info[field]) : undefined;
+  };
+
+  const [first, ...rest] = ids;
+  const firstWindow = first ? await show(first) : undefined;
+  if (!firstWindow) return {};
+
+  const windows = await Promise.all(rest.map(async id => [id, await show(id)] as const));
+  return Object.fromEntries(
+    [[first!, firstWindow] as const, ...windows].filter((pair): pair is readonly [string, number] =>
+      Boolean(pair[1]),
+    ),
+  );
 }
 
 function writeModels(targetFile: string, mutate: (models: Record<string, ModelEntry>) => void) {
@@ -229,11 +293,14 @@ export async function persistModel(
     delete entry.wireApi;
   }
 
+  const probe = await probeEndpoint(entry);
+  const reported = probe.contextWindows?.[entry.model];
+  if (!entry.contextWindow && reported) entry.contextWindow = reported;
+
   writeModels(targetFile, models => {
     models[name] = entry;
   });
 
-  const probe = await probeEndpoint(entry);
   // Custom models run on the codex engine; install it on the spot if missing
   // (no codex login is needed for third-party endpoints).
   const install = ensureCodexInstalled(getCodexAvailability(cwd));
@@ -252,9 +319,10 @@ export async function persistModel(
   };
 }
 
-const ADD_USAGE = 'Usage: coder model add <name> --base-url <url> --model <id> [--env-key VAR]';
+const ADD_USAGE =
+  'Usage: coder model add <name> --base-url <url> --model <id> [--env-key VAR] [--context-window <tokens>]';
 const UPDATE_USAGE =
-  'Usage: coder model update <name> [--base-url <url>] [--model <id>] [--env-key VAR]';
+  'Usage: coder model update <name> [--base-url <url>] [--model <id>] [--env-key VAR] [--context-window <tokens>]';
 const ALIAS_USAGE =
   'Usage: coder model alias <name> <spec>   (e.g. coder model alias fast codex:luna)';
 const LIST_HINT = 'List them: coder model list';
@@ -278,6 +346,7 @@ export interface ModelWriteOptions {
   baseUrl?: string;
   model?: string;
   envKey?: string;
+  contextWindow?: number;
   workspace?: boolean;
 }
 
@@ -306,6 +375,7 @@ export async function modelAddCore(
     baseUrl: normalizeBaseUrl(opts.baseUrl),
     model: opts.model,
     ...(opts.envKey ? { envKey: opts.envKey } : {}),
+    ...(opts.contextWindow ? { contextWindow: opts.contextWindow } : {}),
   };
   return persistModel(name, entry, configTargetFile(cwd, opts.workspace), cwd);
 }
@@ -327,10 +397,10 @@ export async function modelUpdateCore(
       },
     );
   }
-  if (!opts.baseUrl && !opts.model && !opts.envKey)
+  if (!opts.baseUrl && !opts.model && !opts.envKey && !opts.contextWindow)
     throw new CoderError(
       'invalid-option',
-      'Nothing to update: pass --base-url, --model, or --env-key.',
+      'Nothing to update: pass --base-url, --model, --env-key, or --context-window.',
       {
         hint: UPDATE_USAGE,
       },
@@ -341,6 +411,10 @@ export async function modelUpdateCore(
     ...(opts.model ? { model: opts.model } : {}),
     ...(opts.envKey ? { envKey: opts.envKey } : {}),
   };
+  // Another model or endpoint has its own window; refill it unless one is given.
+  if (opts.contextWindow) entry.contextWindow = opts.contextWindow;
+  else if (entry.model !== existing.model || entry.baseUrl !== existing.baseUrl)
+    delete entry.contextWindow;
   return persistModel(name, entry, configTargetFile(cwd, opts.workspace), cwd);
 }
 

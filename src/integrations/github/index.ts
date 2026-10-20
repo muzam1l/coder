@@ -3,7 +3,14 @@ import { createHash, createHmac } from 'node:crypto';
 import { safeEqual } from '../../utils/crypto';
 import type { SerializedThread } from 'chat';
 
-import type { AgentApp, AgentEvent, Installation, Integration, Pushed, TokenBound } from '../types';
+import type {
+  PlatformApp,
+  PlatformEvent,
+  PlatformInstallation,
+  Integration,
+  Push,
+  TokenBound,
+} from '../types';
 import {
   canWriteGithub,
   githubCommit,
@@ -105,7 +112,7 @@ export function verifyGithubWebhook(
 }
 function event(
   req: Request,
-  app: AgentApp,
+  app: PlatformApp,
   payload: Payload,
   type: string,
   input: {
@@ -114,7 +121,7 @@ function event(
     number?: number;
     kind?: 'pull' | 'issue';
   },
-): AgentEvent | undefined {
+): PlatformEvent | undefined {
   const id = payload.installation?.id;
   const repo = checkout(payload);
   const user = input.user ?? payload.sender;
@@ -141,7 +148,7 @@ function event(
 }
 
 /** The payload's repository as a task checks it out, at its default branch. */
-function checkout(payload: Payload): NonNullable<AgentEvent['repo']> | undefined {
+function checkout(payload: Payload): NonNullable<PlatformEvent['repo']> | undefined {
   const repo = payload.repository;
   return repo?.owner?.login && repo.name && repo.clone_url && repo.default_branch
     ? {
@@ -167,9 +174,9 @@ export function githubThread(repo: string, number: number, pull: boolean): Seria
 export function parseGithubEvent(
   req: Request,
   body: unknown,
-  app: AgentApp,
+  app: PlatformApp,
   credentials: Pick<GithubAppCredentials, 'slug'>,
-): AgentEvent[] {
+): PlatformEvent[] {
   const payload = value(body);
   const name = req.headers.get('x-github-event');
   if (name === 'pull_request') {
@@ -262,11 +269,11 @@ const LIFECYCLE: Record<string, string[]> = {
 export function githubInstallation(
   name: string | null,
   body: unknown,
-  app: AgentApp,
+  app: PlatformApp,
 ):
   | {
       op: 'upsert' | 'delete';
-      installation: Installation;
+      installation: PlatformInstallation;
       repos?: { add: string[]; remove: string[]; refresh?: true };
     }
   | undefined {
@@ -330,55 +337,30 @@ export function githubInstallation(
   };
 }
 
-export function githubChanges(
-  body: unknown,
-  app: AgentApp,
-): { repo: string; ref: string; branch: string; paths?: string[] } | undefined {
-  const payload = value(body);
-  const repo = payload.repository?.full_name;
-  const branch = app.branch ?? payload.repository?.default_branch;
-  if (
-    !repo ||
-    repo !== app.agentsRepo ||
-    !branch ||
-    payload.ref !== `refs/heads/${branch}` ||
-    !payload.after ||
-    !payload.commits
-  )
-    return undefined;
-  const paths = [
-    ...new Set(
-      payload.commits.flatMap(commit => [
-        ...(commit.added ?? []),
-        ...(commit.modified ?? []),
-        ...(commit.removed ?? []),
-      ]),
-    ),
-  ].filter(file => file.startsWith('.coder/agents/'));
-  return paths.length ? { repo, ref: payload.after, branch, paths } : undefined;
-}
-/** A push to a branch that may change `.coder/` files; a payload listing no commits (a force push, a new or deleted branch, or one cut at GitHub's 2048) counts. */
-export function githubPush(body: unknown, app: AgentApp): Pushed | undefined {
+/** A push to a branch, with every path its listed commits touched; GitHub lists at most 2048 commits. */
+export function githubPush(body: unknown, app: PlatformApp): Push | undefined {
   const payload = value(body);
   const repo = payload.repository?.full_name;
   const branch = payload.ref?.startsWith('refs/heads/') && payload.ref.slice('refs/heads/'.length);
+  if (!repo || !branch) return undefined;
   const id = payload.installation?.id;
-  if (!repo || !branch || id === undefined) return undefined;
   const commits = payload.commits ?? [];
   const paths = commits.flatMap(commit => [
     ...(commit.added ?? []),
     ...(commit.modified ?? []),
     ...(commit.removed ?? []),
   ]);
-  if (commits.length && commits.length < 2048 && !paths.some(file => file.startsWith('.coder/')))
-    return undefined;
+
   return {
-    installation: `${app.id}:${id}`,
+    ...(id !== undefined ? { installation: `${app.id}:${id}` } : {}),
     repo,
     branch,
+    ...(payload.after ? { commit: payload.after } : {}),
     ...(payload.repository?.default_branch
       ? { defaultBranch: payload.repository.default_branch }
       : {}),
+    paths: [...new Set(paths)],
+    ...(!commits.length || commits.length >= 2048 ? { partial: true as const } : {}),
   };
 }
 /** The narrowest token for a bound: the permissions its tools need, on every repository of the installation. */
@@ -405,7 +387,6 @@ export const github: Integration = {
   prompt: [
     'A conversation is an issue or pull request with its comments, or one inline review comment thread.',
     'issue_read reads an issue and its comments. pull_request_read reads a pull request: get, get_diff and get_files for the change, get_comments for its conversation, get_reviews and get_review_comments for reviews and inline comments.',
-    'Review findings are inline review comments marked coder-review:fp.',
     "A task starts on the default branch; a pull request's changes are read with pull_request_read. Check out and push a pull request's branch only when it is in this repository and the request asks for changes; a fork pull request gets reads and comments only.",
     'Replies are GitHub Markdown. Cite repository file paths when discussing code; link the pull request after making changes.',
   ].join('\n'),
@@ -433,6 +414,8 @@ export const github: Integration = {
     installHosts: ['github.com', 'release-assets.githubusercontent.com'],
   },
   hosts: ['github.com', 'api.github.com', 'codeload.github.com'],
+  collapsed: (summary, markdown) =>
+    `<details><summary>${summary}</summary>\n\n${markdown}\n\n</details>`,
   get app() {
     return githubApp;
   },
@@ -516,10 +499,8 @@ export const github: Integration = {
     const body = json(raw);
     const installation = githubInstallation(name, body, app);
     if (installation) return { installation };
-    const changes = githubChanges(body, app);
-    const pushed = name === 'push' ? githubPush(body, app) : undefined;
-    if (changes) return { changes, ...(pushed ? { pushed } : {}) };
-    if (pushed) return { pushed };
+    const push = name === 'push' ? githubPush(body, app) : undefined;
+    if (push) return { push };
     return { events: parseGithubEvent(req, body, app, { slug }) };
   },
   event(type, _thread, message) {

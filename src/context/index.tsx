@@ -1,21 +1,43 @@
 /** @jsxImportSource contextjsx */
 
 /** Model-facing commands and guides, sharing the CLI arguments and finite command handlers. */
-import { defineApp, type Command, type Namespace } from 'contextjsx';
+import { defineApp, type Command, type Namespace, type Shape } from 'contextjsx';
+import * as z from 'zod/mini';
 
 import { cli } from '../cmd';
 import { GUIDES, SKILLS } from './skills';
 
+/** CLI flag spellings as MCP argument names: `--wait` is `wait`; an array needs no "(repeatable)". */
+const mcpText = (text: string) =>
+  text.replace(/\s*\(repeatable\)/g, '').replace(/--([a-z][\w-]*)/g, '$1');
+
+/** A command's arguments over MCP: no `json`, since a tool always returns the JSON payload. */
+function mcpArgs(args: Shape = {}): Shape {
+  return Object.fromEntries(
+    Object.entries(args).flatMap(([name, schema]) => {
+      if (name === 'json') return [];
+      const meta = z.globalRegistry.get(schema as z.ZodMiniType);
+      if (!meta?.description || mcpText(meta.description) === meta.description)
+        return [[name, schema]];
+      const copy = (schema as z.ZodMiniType).clone();
+      z.globalRegistry.add(copy, { ...meta, description: mcpText(meta.description) });
+
+      return [[name, copy]];
+    }),
+  );
+}
+
 function commandForMcp(command: Command, at: string[]): Command {
   const id = [...at, command.name].join('/');
-  const mapped: Command = {
-    ...command,
-    ...(command.name === 'watch' || ['docs', 'auth/login', 'setup-host', 'upgrade'].includes(id)
-      ? { mcp: false as const }
-      : {}),
-  };
+  if (command.name === 'watch' || ['docs', 'auth/login', 'setup-host', 'upgrade'].includes(id))
+    return { ...command, mcp: false };
+  if (command.mcp === false) return command;
 
-  return mapped;
+  return {
+    ...command,
+    args: mcpArgs(command.args),
+    mcp: { ...command.mcp, description: mcpText(command.description) },
+  };
 }
 
 function namespaceForMcp(namespace: Namespace, at: string[] = []): Namespace {

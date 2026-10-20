@@ -55,7 +55,7 @@ function printModelList(data: Awaited<ReturnType<typeof models.list>>): void {
   for (const { name, probe, ...entry } of data.custom) {
     const reach = entry.disabled ? s.dim('∅') : probe.reachable ? s.green('✔') : s.red('✘');
     lines.push(
-      `  ${reach} ${name.padEnd(14)} ${entry.model} ${s.dim(`@ ${entry.baseUrl}. ${probe.detail}`)}${suffix(entry.disabled)}`,
+      `  ${reach} ${name.padEnd(14)} ${entry.model} ${s.dim(`@ ${entry.baseUrl}${entry.contextWindow ? `, ${entry.contextWindow} tokens` : ''}. ${probe.detail}`)}${suffix(entry.disabled)}`,
     );
   }
   lines.push('');

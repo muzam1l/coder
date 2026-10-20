@@ -17,7 +17,7 @@ Run the Coder server on Bun: the address platforms deliver events to, the dashbo
 - `--memory` a throwaway test server: everything in memory, no sign-in, admin token only
 - `--runner <runner>` local, local-docker, vercel-sandbox, github-actions, or http
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 Environment:
 
@@ -31,7 +31,7 @@ Environment:
 - `MAX_TASKS, TASK_TIMEOUT, TASK_STALL, TASK_ATTEMPTS` runner capacity and lifecycle limits
 - `ADMIN_TOKEN` local and memory servers: the dashboard and CLI key; minted and shown when unset
 - `CODER_CACHE_HOME` archived tasks, flows and usage (default OS cache directory/wular-coder)
-- `WORK_DIR` where tasks check out repositories
+- `WORK_DIR` where the local runner keeps task work folders
 - `SERVER_NAME` what the dashboard calls this server (default Coder)
 
 ```sh

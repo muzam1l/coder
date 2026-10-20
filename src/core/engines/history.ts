@@ -16,10 +16,6 @@ interface TranscriptMessage {
   speaker: string;
   time: string;
   text: string;
-  startsExchange: boolean;
-  reply: boolean;
-  calls: string[];
-  results: string[];
 }
 
 export function conversationIds(task: Pick<Task, 'threadId' | 'previousThreadIds'>): string[] {
@@ -77,13 +73,12 @@ function transcriptMessage(record: any, claude: boolean): TranscriptMessage | un
   const content = item.content;
   const blocks = Array.isArray(content) ? content : [];
   const speaker = item.role ?? (item.type?.endsWith('_output') ? 'tool' : 'assistant');
-  const calls = blocks.filter(block => block.type === 'tool_use').map(block => String(block.id));
-  const results = blocks
-    .filter(block => block.type === 'tool_result')
-    .map(block => String(block.tool_use_id));
-  if (['function_call', 'custom_tool_call'].includes(item.type)) calls.push(String(item.call_id));
-  if (['function_call_output', 'custom_tool_call_output'].includes(item.type))
-    results.push(String(item.call_id));
+  const calls =
+    blocks.some(block => block.type === 'tool_use') ||
+    ['function_call', 'custom_tool_call'].includes(item.type);
+  const results =
+    blocks.some(block => block.type === 'tool_result') ||
+    ['function_call_output', 'custom_tool_call_output'].includes(item.type);
   const text =
     typeof content === 'string'
       ? content
@@ -94,17 +89,9 @@ function transcriptMessage(record: any, claude: boolean): TranscriptMessage | un
         : JSON.stringify(item);
 
   return {
-    speaker: results.length && !calls.length ? 'tool' : speaker,
+    speaker: results && !calls ? 'tool' : speaker,
     time: String(record.timestamp ?? ''),
     text,
-    calls,
-    results,
-    startsExchange: speaker === 'user' && !results.length,
-    reply:
-      speaker === 'assistant' &&
-      (claude
-        ? blocks.some(block => block.type === 'text') || typeof content === 'string'
-        : item.type === 'message'),
   };
 }
 
@@ -128,45 +115,6 @@ async function* transcript(task: HistoryTask, id: string) {
       input.destroy();
     }
   }
-}
-
-export async function recentExchanges(
-  task: HistoryTask & Pick<Task, 'threadId'>,
-  { exchanges = 6, maxBytes = 20_000 }: { exchanges?: number; maxBytes?: number } = {},
-): Promise<{ text: string; exchanges: number }> {
-  if (!task.threadId) return { text: '', exchanges: 0 };
-  const recent: string[] = [];
-  let current = '';
-  let bytes = 0;
-  let answered = false;
-  const open = new Set<string>();
-  const finish = () => {
-    if (bytes > maxBytes) recent.length = 0;
-    else if (current && answered && !open.size) {
-      recent.push(current);
-      while (recent.length > exchanges || Buffer.byteLength(recent.join('\n\n')) > maxBytes)
-        recent.shift();
-    }
-    current = '';
-    bytes = 0;
-    answered = false;
-    open.clear();
-  };
-  for await (const message of transcript(task, task.threadId)) {
-    if (message.startsExchange && !open.size) finish();
-    if (!current && !message.startsExchange) continue;
-    for (const call of message.calls) open.add(call);
-    for (const result of message.results) open.delete(result);
-    if (message.reply) answered = true;
-    const text = `[${message.time}] ${message.speaker}\n${message.text}`;
-    bytes += Buffer.byteLength(text) + 2;
-    if (bytes <= maxBytes) current += `${current ? '\n\n' : ''}${text}`;
-    else current = '[exchange exceeds the recent history budget]';
-  }
-  if (bytes > maxBytes) current = '';
-  finish();
-
-  return { text: recent.join('\n\n'), exchanges: recent.length };
 }
 
 export async function history(

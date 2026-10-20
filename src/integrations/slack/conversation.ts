@@ -1,5 +1,5 @@
 /** Where a Slack message sits in its thread, and what was said there since the agent's last turn, through one `conversations.replies` call each. */
-import type { AgentEvent, ConversationAccess, ConversationFacts } from '../types';
+import type { PlatformEvent, ConversationAccess, ConversationFacts } from '../types';
 
 interface Reply {
   ts?: string;
@@ -36,7 +36,7 @@ async function replies(
 const sentAt = (ts: string) => new Date(Number(ts) * 1000).toISOString();
 
 export async function slackConversation(
-  event: AgentEvent,
+  event: PlatformEvent,
   access: ConversationAccess,
 ): Promise<ConversationFacts> {
   const thread = /^slack:([^:]+):(\d+\.\d+)$/.exec(event.chat?.thread.id ?? '');

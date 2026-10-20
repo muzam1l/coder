@@ -95,13 +95,7 @@ function lineOf(live: Live): string {
   const text = (value: unknown) => (typeof value === 'string' ? value.trim().split('\n')[0]! : '');
   const approval = (live.approval ?? {}) as Record<string, unknown>;
   const result = typeof live.result === 'object' ? live.result?.output : live.result;
-  if (live.status === 'waiting')
-    return (
-      text(approval.summary) ||
-      text(approval.reason) ||
-      text(approval.kind) ||
-      'It is waiting for your approval.'
-    );
+  if (live.status === 'waiting') return text(approval.reason) || 'It is waiting for your approval.';
   if (live.status === 'completed') return text(result) || 'It finished.';
   return text(live.error) || (live.status === 'failed' ? 'It failed.' : 'It was stopped.');
 }

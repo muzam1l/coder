@@ -23,7 +23,7 @@ import {
   readTaskConnectionSecrets,
 } from '../connections/resolve';
 import type { McpServerSpec } from '../../core/types';
-import { connectionWarnings } from './logs';
+import { taskWarnings } from './logs';
 import { LocalStore } from '../store/local';
 import { mcpSecretValue } from '../../core/mcp';
 import { findConnection, nativeCredential, nativeApp } from '../connections/records';
@@ -228,10 +228,9 @@ export function dispatchTokens(
       })),
   };
 
-  return Object.assign(
-    async (id: string) => (id === event.integration ? access : undefined),
-    { minted },
-  );
+  return Object.assign(async (id: string) => (id === event.integration ? access : undefined), {
+    minted,
+  });
 }
 
 /** The live installations of the agent's apps, read once per task start and shared by its readers for a minute. */
@@ -406,7 +405,7 @@ export async function taskContext(
     ...credentialSecrets(credential.env),
     ...(engineCredentials?.flatMap(row => credentialSecrets(row.credential.env)) ?? []),
   ]);
-  await connectionWarnings(ctx, task.id, warnings);
+  await taskWarnings(ctx, task.id, warnings);
   const common = {
     task: safeTask,
     tokens: { ...resolved.tokens, ...tokens },
@@ -520,7 +519,7 @@ export function brokeredKeys(
   return [...BROKERED, ...custom];
 }
 
-/** Hosts a task below `auto` may reach from its machine: engine, integrations, connections, MCP. */
+/** Hosts a task below `auto` may reach from its machine: engine, integrations, connections, MCP, the allowlist. */
 export async function taskHosts(
   ctx: ServerContext,
   task: TaskStatus['task'],
@@ -551,6 +550,30 @@ export async function taskHosts(
   }
 
   return [...new Set(hosts)];
+}
+
+/** A brokering runner's firewall for the task's machine: the credential its firewall injects, the
+ * only hosts it reaches (undefined: all) and the keys it brokers; undefined without a credential. */
+export async function machineFirewall(ctx: ServerContext, task: TaskStatus['task']) {
+  const credential = await taskCredential(ctx, task);
+  if (!credential) return undefined;
+  const credentials = [
+    credential,
+    ...(await taskEngineCredentials(ctx, task)).map(row => row.credential),
+  ];
+  const hosts = await Promise.all(credentials.map(value => taskHosts(ctx, task, value)));
+  const config = await taskConfig(ctx.store);
+
+  return {
+    credential: Object.assign({}, ...credentials.map(value => value.env).reverse()) as Record<
+      string,
+      string
+    >,
+    hosts: hosts.some(value => value === undefined)
+      ? undefined
+      : [...new Set(hosts.flatMap(value => value ?? []))],
+    brokered: credentials.flatMap(value => brokeredKeys(config, task, value)),
+  };
 }
 
 function credentialSecrets(env: Record<string, string>): string[] {
@@ -594,7 +617,8 @@ export async function taskLogSecrets(ctx: ServerContext, status: TaskStatus): Pr
     await Promise.all([
       readTaskConnectionSecrets(ctx, status.task),
       taskCredential(ctx, status.task).catch(error => {
-        if (error instanceof Error && error.message === 'no-credential') return { engine: 'codex' as const, env: {} };
+        if (error instanceof Error && error.message === 'no-credential')
+          return { engine: 'codex' as const, env: {} };
         throw error;
       }),
       storedPlatformSecrets(ctx, status.task),

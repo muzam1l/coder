@@ -263,3 +263,14 @@
 .form-part .semi {
   font-weight: 600;
 }
+
+/* what the access mode does, on its own line; a mode that never asks says so */
+.access-note {
+  /* room for the pill that sits on a choice's top edge */
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.access-note.warn-hint {
+  color: var(--warn);
+}

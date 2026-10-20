@@ -100,6 +100,11 @@ export function resolveTasksDir(cwd: string): string {
   return path.join(resolveStateDir(cwd), 'jobs');
 }
 
+/** Where this machine keeps the server tasks it runs, one folder per server task id with its `work` folder inside. */
+export function serverTasksDir(): string {
+  return coderHome('state', GLOBAL_STATE_SLUG, 'server-tasks');
+}
+
 // Stopped tasks (and flow runs) linger in the recent view this long, then move
 // to the archived view. Shared by `coder list` and `coder flow list`.
 export const AUTO_ARCHIVE_MS = 30 * 60_000;
@@ -112,6 +117,12 @@ export const archiveDue = (stoppedAt: number, now = Date.now()) =>
 // the (tiny) active bin instead of every task ever run.
 export function resolveArchiveDir(_cwd: string): string {
   return coderCache('archive');
+}
+
+/** The task's scratch folder on the machine it runs on: clones, builds and experiments, git writes included. */
+export function scratchDir(taskId: string): string {
+  assertValidId(taskId, 'task id');
+  return path.join(fs.realpathSync(os.tmpdir()), 'coder', taskId);
 }
 
 export function resolveTaskDir(cwd: string, taskId: string): string {
@@ -222,6 +233,7 @@ export function removeTaskDir(cwd: string, taskId: string): boolean {
     return false;
   }
   fs.rmSync(taskDir, { recursive: true, force: true });
+  fs.rmSync(scratchDir(taskId), { recursive: true, force: true });
   return true;
 }
 
@@ -283,11 +295,18 @@ const STALE_NO_PID_MS = 60_000;
 // failed. Detect it through a dead pid or through staleness for tasks with no pid.
 export function reconcileTask(cwd: string, task: Task, startMs = processStartMs): Task {
   const active = task.status === 'running' || task.status === 'queued';
-  if (!active && !task.rollingOver) {
+  const pending = task.status === 'completed' && hasPendingSteers(cwd, task.id);
+  if (!active && !pending) {
     return task;
   }
   let dead: boolean;
-  if (task.pid) {
+  if (pending && (task.steerClosed || (!task.pid && !task.resumeOwner))) {
+    dead = true;
+  } else if (task.resumeOwner) {
+    const ts = Date.parse(task.resumedAt ?? task.updatedAt ?? task.createdAt);
+    dead =
+      !isPidAlive(task.resumeOwner) || (Number.isFinite(ts) && Date.now() - ts > STALE_NO_PID_MS);
+  } else if (task.pid) {
     dead = !pidIsOurWorker(task.pid, task, startMs);
   } else {
     const ts = Date.parse(task.updatedAt ?? task.createdAt ?? '');
@@ -298,15 +317,15 @@ export function reconcileTask(cwd: string, task: Task, startMs = processStartMs)
     const latest = loadTask(cwd, task.id);
     if (latest && (latest.status !== task.status || latest.updatedAt !== task.updatedAt))
       return reconcileTask(cwd, latest, startMs);
-    if (!active) return writeTask(cwd, task.id, { rollingOver: false }, { touch: false });
     return writeTask(cwd, task.id, {
       status: 'failed',
-      rollingOver: false,
+      steerClosed: true,
+      resumeOwner: undefined,
       error: 'worker exited without finishing',
       completedAt: new Date().toISOString(),
     });
   }
-  return task;
+  return pending ? { ...task, status: 'running' } : task;
 }
 
 function taskIds(dir: string): string[] {
@@ -536,24 +555,81 @@ export function lastActivityAt(cwd: string, task: Task): string | undefined {
 // The worker that owns the task
 // drains it when its turn finishes, running each as a resumed turn.
 const STEER_QUEUE_FILE = 'steer-queue.jsonl';
+const STEER_PENDING_FILE = 'steer-pending';
 
 export function withTaskAdmission<T>(cwd: string, taskId: string, work: () => T) {
   assertValidId(taskId, 'task id');
   return withFileLock(path.join(resolveStateDir(cwd), 'steer', `${taskId}.lock`), work);
 }
 
-export function enqueueSteer(cwd: string, taskId: string, text: string): void {
+const STEER_CLAIMED_FILE = 'steer-claimed.jsonl';
+
+const steerKeys = (file: string): string[] =>
+  fs.existsSync(file)
+    ? fs
+        .readFileSync(file, 'utf8')
+        .split(/\r?\n/)
+        .filter(Boolean)
+        .flatMap(line => {
+          try {
+            const key = (JSON.parse(line) as { key?: unknown }).key;
+            return typeof key === 'string' ? [key] : [];
+          } catch {
+            return [];
+          }
+        })
+    : [];
+
+/** Whether a keyed steer was queued or already claimed by the worker, so a retry never queues it twice. */
+export function steerKnown(cwd: string, taskId: string, key: string): boolean {
+  const taskDir = resolveTaskDir(cwd, taskId);
+
+  return [STEER_QUEUE_FILE, STEER_CLAIMED_FILE].some(name =>
+    steerKeys(path.join(taskDir, name)).includes(key),
+  );
+}
+
+/** Queues a follow-up; with `key`, once only. Returns whether it was added. */
+export function enqueueSteer(cwd: string, taskId: string, text: string, key?: string): boolean {
+  if (key && steerKnown(cwd, taskId, key)) return false;
   const taskDir = resolveTaskDir(cwd, taskId);
   fs.mkdirSync(taskDir, { recursive: true });
   fs.appendFileSync(
     path.join(taskDir, STEER_QUEUE_FILE),
-    `${JSON.stringify({ at: new Date().toISOString(), text })}\n`,
+    `${JSON.stringify({ at: new Date().toISOString(), text, ...(key ? { key } : {}) })}\n`,
     'utf8',
+  );
+  fs.writeFileSync(path.join(taskDir, STEER_PENDING_FILE), '');
+
+  return true;
+}
+
+/** A live worker owns accepted follow-ups even while the claimed queue runs. */
+export function turnPending(cwd: string, task: Task): boolean {
+  return (
+    task.status === 'completed' &&
+    task.steerClosed === false &&
+    Boolean(task.pid) &&
+    pidIsOurWorker(task.pid!, task) &&
+    hasPendingSteers(cwd, task.id)
   );
 }
 
 export function hasQueuedSteers(cwd: string, taskId: string): boolean {
   return fs.existsSync(path.join(resolveTaskDir(cwd, taskId), STEER_QUEUE_FILE));
+}
+
+/** Accepted work survives a queue claim and concurrent writes to the task record. */
+export function hasPendingSteers(cwd: string, taskId: string): boolean {
+  return (
+    hasQueuedSteers(cwd, taskId) ||
+    fs.existsSync(path.join(resolveTaskDir(cwd, taskId), STEER_PENDING_FILE))
+  );
+}
+
+/** The worker clears pending work only after its last follow-up finishes, under admission. */
+export function clearPendingSteers(cwd: string, taskId: string): void {
+  fs.rmSync(path.join(resolveTaskDir(cwd, taskId), STEER_PENDING_FILE), { force: true });
 }
 
 // Atomically claim every queued follow-up, oldest first. Renames the queue file
@@ -563,6 +639,8 @@ export function hasQueuedSteers(cwd: string, taskId: string): boolean {
 export function claimSteers(cwd: string, taskId: string): string[] {
   const taskDir = resolveTaskDir(cwd, taskId);
   const queueFile = path.join(taskDir, STEER_QUEUE_FILE);
+  if (!fs.existsSync(queueFile)) return [];
+  fs.writeFileSync(path.join(taskDir, STEER_PENDING_FILE), '');
   const claimFile = path.join(taskDir, `steer-claim-${process.pid}-${Date.now()}.tmp`);
   try {
     fs.renameSync(queueFile, claimFile);
@@ -570,18 +648,26 @@ export function claimSteers(cwd: string, taskId: string): string[] {
     return []; // nothing queued
   }
   try {
-    return fs
+    const entries = fs
       .readFileSync(claimFile, 'utf8')
       .split(/\r?\n/)
       .filter(Boolean)
-      .map(line => {
+      .flatMap(line => {
         try {
-          return String((JSON.parse(line) as { text?: unknown }).text ?? '');
+          return [JSON.parse(line) as { text?: unknown; key?: unknown }];
         } catch {
-          return '';
+          return [];
         }
-      })
-      .filter(Boolean);
+      });
+    const keyed = entries.filter(entry => typeof entry.key === 'string');
+    if (keyed.length)
+      fs.appendFileSync(
+        path.join(taskDir, STEER_CLAIMED_FILE),
+        keyed.map(entry => `${JSON.stringify({ key: entry.key })}\n`).join(''),
+        'utf8',
+      );
+
+    return entries.map(entry => String(entry.text ?? '')).filter(Boolean);
   } finally {
     try {
       fs.unlinkSync(claimFile);

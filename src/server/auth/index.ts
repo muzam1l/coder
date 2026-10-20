@@ -17,8 +17,8 @@ import type { Db } from '../store/pg/client';
 import type { Store } from '../store/types';
 import { DrizzleStore } from '../store/pg/store';
 import { platformLink } from '../store/pg/schema';
-import {sameOriginProof} from '../routes/guards';
-import {forbidden,notFound} from '../routes/http';
+import { sameOriginProof } from '../routes/guards';
+import { forbidden, notFound } from '../routes/http';
 import { authKeys } from './keys';
 import { CALLBACK_PATH, SCOPE, WEB_CLIENT_PATH } from './metadata';
 import { COOKIE_PREFIX, safeReturnPath } from './sign-in';
@@ -385,10 +385,13 @@ export async function createAuth(db: Db, config: ServerConfig): Promise<AuthApi>
     const now = epoch();
     const fresh = typeof authTime === 'number' && now - authTime <= PRIVILEGED_FRESHNESS_S;
     const allowed = fresh && session?.sub === sub && config.operators?.includes(sub);
+    if (!allowed)
+      console.error(
+        `coder server: operator sign-in refused: ${fresh ? 'not this session or not an operator' : `auth_time ${typeof authTime === 'number' ? `${now - authTime}s old` : 'missing'}`}`,
+      );
+    // `entered` tells the page this sign-in just happened, so a failure there shows instead of signing in again.
     const headers = new Headers({
-      location: allowed
-        ? operatorPath(session)
-        : `${operatorPath(session)}?error=${fresh ? 'denied' : 'stale'}`,
+      location: `${operatorPath(session)}?${allowed ? 'entered=1' : `error=${fresh ? 'denied' : 'stale'}`}`,
     });
     headers.append('set-cookie', cookie(FLOW_COOKIE, '', 0));
     if (allowed)

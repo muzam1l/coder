@@ -32,13 +32,14 @@ import {
   replyRequired,
   sourceLabel,
   taskActive,
+  taskModel,
   taskTitle,
   TASK_TABS,
   type EventMessage,
 } from '@/app/dash/[org]/tasks/list/task';
 import { useAction } from '@/utils/action';
 import { useZone } from '@/app/zone';
-import { Approval, TaskActions } from './task-actions';
+import { Approval, ApprovalEntry, DecisionTurn, TaskActions, raisedIn } from './task-actions';
 import { Activity, RunPreview, runSummary } from './activity';
 import { toastError, useTaskEvents, watchTask } from '@/comps/frame/task-toasts';
 
@@ -155,7 +156,7 @@ function TaskBack() {
 function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
   const org = useOrg();
   const live = taskActive(task);
-  const { engine, model, effort } = { ...task.task.definition, ...task.task.usage };
+  const model = taskModel(task);
   const source = task.task.event?.integration ?? task.task.source;
   const kind = task.task.event?.type ?? (task.task.flow !== 'default' ? task.task.flow : undefined);
 
@@ -167,7 +168,7 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
       title={title}
       meta={
         <>
-          <Status status={task.status} />
+          <Status status={task.status} approvals={task.approvals} />
           {task.archivedAt ? <Badge>archived</Badge> : null}
         </>
       }
@@ -200,9 +201,9 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
               <Icon d={iAgent} />
               {task.task.agent}
             </Link>
-            {engine ? (
+            {model ? (
               <span class="fact-dim" title="Engine, model and effort">
-                {[engine, model, effort].filter(Boolean).join('/')}
+                {model}
               </span>
             ) : null}
           </span>
@@ -355,6 +356,7 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
         ...current,
         status: event.status,
         approval: event.approval ?? undefined,
+        approvals: event.approvals ?? undefined,
         archivedAt: event.archivedAt,
         startedAt: event.startedAt,
         finishedAt: event.finishedAt,
@@ -425,6 +427,7 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
     turn => !caughtUp && (!lines.length || within(turn, lines.at(-1)!)),
   );
   const shown = loaded < 0 ? turns : turns.slice(0, loaded);
+  const answered = (task.approvals ?? []).filter(approval => approval.response);
 
   const send = async () => {
     const text = input.current?.value.trim();
@@ -525,92 +528,103 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
           );
         })}
       </nav>
-      {task.approval ? <Approval task={task} /> : null}
       {tab === 'activity' ? (
         <Activity rows={rows} live={live} tz={tz} at={at} />
       ) : (
-        <div class="convo">
-          {shown.map((turn, index) => {
-            const last = index === turns.length - 1;
-            const posts = replied[index]!;
-            // A turn that posted with the reply tool and ended empty posted nothing more.
-            const body =
-              posts.length > 0 && isEmpty(messageOf(turn.result, '')) ? null : (
-                <ResultBody value={turn.result} required={parsed[index]!.required} />
+        <>
+          <Approval task={task} />
+          <div class="convo">
+            {shown.map((turn, index) => {
+              const last = index === turns.length - 1;
+              const posts = replied[index]!;
+              // A turn that posted with the reply tool and ended empty posted nothing more.
+              const body =
+                posts.length > 0 && isEmpty(messageOf(turn.result, '')) ? null : (
+                  <ResultBody value={turn.result} required={parsed[index]!.required} />
+                );
+              const decision = turn.approval
+                ? task.approvals?.find(approval => approval.id === turn.approval)
+                : undefined;
+              return (
+                <Fragment key={index}>
+                  {decision ? <DecisionTurn approval={decision} /> : null}
+                  {(decision ? [] : parsed[index]!.messages).map((message, index) => (
+                    <div key={`p${index}`} class="turn prompt">
+                      <p class="who">{message.author}</p>
+                      <Collapse class="prose">{message.text}</Collapse>
+                    </div>
+                  ))}
+                  {last
+                    ? (task.answer ?? []).slice(0, knownAnswers.current).map((answer, index) => (
+                        <div key={`a${index}`} class="turn answer">
+                          <p class="who">Answer</p>
+                          <div class="prose">{messageOf(answer, 'Answer received.')}</div>
+                        </div>
+                      ))
+                    : null}
+                  {posts.map((text, index) => (
+                    <div key={`r${index}`} class="turn reply">
+                      <p class="who">{task.task.agent}</p>
+                      <div class="prose md">{markdown(text)}</div>
+                    </div>
+                  ))}
+                  {sent
+                    .filter(message => message.turn === index)
+                    .map((message, index) => {
+                      const asked =
+                        message.kind === 'ask'
+                          ? sent.filter(each => each.kind === 'ask').indexOf(message)
+                          : -1;
+                      const answer =
+                        asked < 0 ? undefined : task.answer?.[knownAnswers.current + asked];
+                      return (
+                        <div key={index} class={asked < 0 ? 'turn you' : 'turn you qa'}>
+                          <p class="who">{message.kind === 'ask' ? 'You asked' : 'You steered'}</p>
+                          <div class="prose">{message.text}</div>
+                          {asked < 0 ? null : (
+                            <div class="answer">
+                              <p class="who">Answer</p>
+                              {answer === undefined ? (
+                                <Loading
+                                  inline
+                                  dots
+                                  label="Answering without interrupting the run."
+                                />
+                              ) : (
+                                <div class="prose">{messageOf(answer, 'Answer received.')}</div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  {answered
+                    .filter(approval => raisedIn(turns, approval) === index)
+                    .map(approval => (
+                      <ApprovalEntry key={approval.id} approval={approval} />
+                    ))}
+                  {turn.result && (body || (last && foot)) ? (
+                    <Card title="Result">
+                      {body}
+                      {last ? foot : null}
+                    </Card>
+                  ) : last && live ? (
+                    <Card title="Result" actions={activityLink}>
+                      <RunPreview rows={run} startedAt={task.startedAt} onOpen={openActivity} />
+                    </Card>
+                  ) : null}
+                  {turn.error ? (
+                    <Card tone="danger" title="Error">
+                      <div class="body prose">{turn.error}</div>
+                      {last && !turn.result ? foot : null}
+                    </Card>
+                  ) : null}
+                </Fragment>
               );
-            return (
-              <Fragment key={index}>
-                {parsed[index]!.messages.map((message, index) => (
-                  <div key={`p${index}`} class="turn prompt">
-                    <p class="who">{message.author}</p>
-                    <Collapse class="prose">{message.text}</Collapse>
-                  </div>
-                ))}
-                {last
-                  ? (task.answer ?? []).slice(0, knownAnswers.current).map((answer, index) => (
-                      <div key={`a${index}`} class="turn answer">
-                        <p class="who">Answer</p>
-                        <div class="prose">{messageOf(answer, 'Answer received.')}</div>
-                      </div>
-                    ))
-                  : null}
-                {posts.map((text, index) => (
-                  <div key={`r${index}`} class="turn reply">
-                    <p class="who">{task.task.agent}</p>
-                    <div class="prose md">{markdown(text)}</div>
-                  </div>
-                ))}
-                {sent
-                  .filter(message => message.turn === index)
-                  .map((message, index) => {
-                    const asked =
-                      message.kind === 'ask'
-                        ? sent.filter(each => each.kind === 'ask').indexOf(message)
-                        : -1;
-                    const answer =
-                      asked < 0 ? undefined : task.answer?.[knownAnswers.current + asked];
-                    return (
-                      <div key={index} class={asked < 0 ? 'turn you' : 'turn you qa'}>
-                        <p class="who">{message.kind === 'ask' ? 'You asked' : 'You steered'}</p>
-                        <div class="prose">{message.text}</div>
-                        {asked < 0 ? null : (
-                          <div class="answer">
-                            <p class="who">Answer</p>
-                            {answer === undefined ? (
-                              <Loading
-                                inline
-                                dots
-                                label="Answering without interrupting the run."
-                              />
-                            ) : (
-                              <div class="prose">{messageOf(answer, 'Answer received.')}</div>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                {turn.result && (body || (last && foot)) ? (
-                  <Card title="Result">
-                    {body}
-                    {last ? foot : null}
-                  </Card>
-                ) : last && live ? (
-                  <Card title="Result" actions={activityLink}>
-                    <RunPreview rows={run} startedAt={task.startedAt} onOpen={openActivity} />
-                  </Card>
-                ) : null}
-                {turn.error ? (
-                  <Card tone="danger" title="Error">
-                    <div class="body prose">{turn.error}</div>
-                    {last && !turn.result ? foot : null}
-                  </Card>
-                ) : null}
-              </Fragment>
-            );
-          })}
-          {shown.length < turns.length ? <Loading label="Loading the conversation." /> : null}
-        </div>
+            })}
+            {shown.length < turns.length ? <Loading label="Loading the conversation." /> : null}
+          </div>
+        </>
       )}
       {replies ? (
         <form

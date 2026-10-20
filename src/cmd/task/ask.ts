@@ -6,8 +6,6 @@ import { serverOptions, str, strList } from '../../utils/args';
 import { command } from '../../cli';
 import { idAndText } from './steer';
 
-type Answered = { answer: string | null; error?: string; ok: boolean };
-
 export const commandAsk = command({
   name: 'ask',
   description: 'ask about a task without interrupting it',
@@ -45,16 +43,12 @@ export const commandAsk = command({
     });
   },
   json: ({ ok: _ok, ...answer }) => answer,
-  print(result, { options, args: [id] }) {
-    if (options.server !== undefined)
-      return void process.stdout.write(`Asked server task ${outStyle.cyan(id!)}.\n`);
-    const { answer, error } = result as Answered;
+  print({ answer, error }) {
     if (answer) process.stdout.write(`\n${answer}\n`);
     else
       process.stdout.write(
         `${outStyle.dim('(no answer)')}${error ? ` ${outStyle.red(error)}` : ''}\n`,
       );
   },
-  exit: (result, { options }) =>
-    options.server === undefined ? ((result as Answered).ok ? 0 : 1) : undefined,
+  exit: result => (result.ok ? 0 : 1),
 });

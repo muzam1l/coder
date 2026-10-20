@@ -13,6 +13,7 @@ import { ensureBrokerSession, loadBrokerSession } from '../../broker/session';
 import { processTiming } from '../../../utils/process';
 import { readVersion } from '../../runtime';
 import { connectionEnvironmentKey, engineEnvironment } from '../../connections';
+import { startChatBridge, type ChatBridge } from './chat-bridge';
 
 export const BROKER_ENDPOINT_ENV = 'CODER_APP_SERVER_ENDPOINT';
 export const BROKER_BUSY_RPC_CODE = -32001;
@@ -51,6 +52,8 @@ export interface ClientOptions {
   nativeMcp?: boolean;
   brokerEndpoint?: string | null;
   disableBroker?: boolean;
+  /** A bridge the caller owns (the broker's); otherwise a private app-server starts its own. */
+  bridgeUrl?: string;
   reuseExistingBroker?: boolean;
 }
 
@@ -86,6 +89,8 @@ export class AppServerClientBase {
   noticeHandler: NoticeHandler | null;
   lineBuffer: string;
   transport: string;
+  /** The custom-model bridge that lives as long as this client's app-server. */
+  bridgeUrl?: string;
   exitPromise: Promise<void>;
   exitResolved?: boolean;
   resolveExit!: (value?: void) => void;
@@ -267,14 +272,18 @@ export class AppServerClientBase {
 class SpawnedCodexAppServerClient extends AppServerClientBase {
   proc?: import('node:child_process').ChildProcess;
   readline?: import('node:readline').Interface;
+  bridge?: ChatBridge;
 
   constructor(cwd: string, options: ClientOptions = {}) {
     super(cwd, options);
     this.transport = 'direct';
+    this.exitPromise = this.exitPromise.then(() => this.bridge?.close());
   }
 
   async initialize() {
     const networkAccess = this.options.networkAccess ?? false;
+    this.bridge = this.options.bridgeUrl ? undefined : await startChatBridge();
+    this.bridgeUrl = this.options.bridgeUrl ?? this.bridge!.url;
     processTiming('codex.spawn');
     this.proc = spawn('codex', codexAppServerArgs(networkAccess, this.options.nativeMcp), {
       cwd: this.cwd,
@@ -410,10 +419,11 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
       });
     });
 
-    await this.request('initialize', {
+    const initialized = await this.request('initialize', {
       clientInfo: this.options.clientInfo ?? defaultClientInfo(),
       capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES,
     });
+    this.bridgeUrl = initialized.bridgeUrl;
     this.notify('initialized', {});
     processTiming('codex.initialized');
   }

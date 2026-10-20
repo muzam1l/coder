@@ -9,6 +9,7 @@ import {
   appendTaskLog,
   watchTask,
   enqueueSteer,
+  steerKnown,
   withTaskAdmission,
   loadTask,
   unarchiveTask,
@@ -33,21 +34,28 @@ import { steerTurn, runTurn, interruptTurn } from '../engines/codex';
 import { steerClaudeTurn, runClaudeTurn, type ClaudeTurnOptions } from '../engines/claude';
 import {
   ACTIVE_STATUSES,
+  type Approval,
   type McpServerSpec,
   type Task,
   type Effort,
   type TurnResult,
+  STOPPED_BY_USER,
   TERMINAL_STATUSES,
 } from '../types';
 import { byListKey, listRank } from '../defaults';
 import { CoderError, resolveMcpServers, selectMcpServers, spawnWorker } from '../dispatch';
 import { connectionEnvironment, localConnections } from '../connections';
-import { isEndpointModel, loadConfig, resolveCodexModel, resolveCustomModel } from '../config';
-import { startChatBridge } from '../engines/codex/chat-bridge';
-import { listPendingApprovals } from '../approvals';
+import { isEndpointModel, loadConfig, resolveCodexModel } from '../config';
+import {
+  answerApproval,
+  approvalMessage,
+  closeApprovals,
+  listApprovals,
+  markDelivered,
+} from '../approvals';
 import { createJsonlTail } from '../../utils/fsx';
 import { removeCodexControlEndpoint } from '../engines/codex/control';
-import { mailboxId, type MailboxKey } from '../mailbox';
+import { mailboxId, namedCommand, type MailboxKey } from '../mailbox';
 import { deleteCodexSession } from '../engines/codex/sessions';
 import { deleteClaudeSession } from '../engines/claude/sessions';
 import { conversationIds } from '../engines/history';
@@ -124,9 +132,9 @@ async function trySteerRunning(
   return null;
 }
 
-function queueSteer(cwd: string, id: string, text: string): void {
-  enqueueSteer(cwd, id, text);
-  appendTaskLog(cwd, id, { kind: 'steer', message: `Steer queued for the next turn:\n${text}` });
+function queueSteer(cwd: string, id: string, text: string, key?: string): void {
+  if (enqueueSteer(cwd, id, text, key))
+    appendTaskLog(cwd, id, { kind: 'steer', message: `Steer queued for the next turn:\n${text}` });
 }
 
 // Print-free core (SDK `task.steer`).
@@ -148,8 +156,7 @@ export async function steerTask(
     claude?: typeof steerClaudeTurn;
   } = {},
 ): Promise<{ taskId: string; steered: SteerOutcome }> {
-  const current = loadTask(cwd, task.id) ?? task;
-  task = current.rollingOver ? reconcileTask(cwd, current) : current;
+  task = loadTask(cwd, task.id) ?? task;
   if (!task.threadId) {
     throw new CoderError(
       'invalid-option',
@@ -231,26 +238,39 @@ async function resumeInPlace(
     throw new Error('Server connection resolver is required to resume this task');
   // One resume per finished turn: a steer racing it, or reaching it before it runs, waits for the next turn.
   const admission = await withTaskAdmission(cwd, task.id, () => {
-    const fresh = loadTask(cwd, task.id) ?? task;
+    const stored = loadTask(cwd, task.id) ?? task;
+    const fresh =
+      stored.resumeOwner && !isPidAlive(stored.resumeOwner) ? reconcileTask(cwd, stored) : stored;
     const turn = [fresh?.completedAt, fresh?.resumedAt].map(at => Date.parse(at ?? '') || 0);
     const claim = path.join(resolveTaskDir(cwd, task.id), `resume-${turn.join('-')}`);
     const owning =
       fresh &&
       !fresh.steerClosed &&
       (ACTIVE_STATUSES.includes(fresh.status) ||
-        (fresh.rollingOver && reconcileTask(cwd, fresh).rollingOver) ||
         (fresh.status === 'completed' && fresh.steerClosed === false && isPidAlive(fresh.pid)));
     if (owning || !claimResume(claim)) {
       if (fresh.archived) unarchiveTask(cwd, fresh);
       queueSteer(cwd, task.id, text);
       return undefined;
     }
-    return { fresh, claim };
+    if (fresh.archived) unarchiveTask(cwd, fresh);
+    const preparing = writeTask(cwd, task.id, {
+      status: 'queued',
+      pid: null,
+      resumeOwner: process.pid,
+      dispatchId: randomUUID(),
+      resumedAt: new Date().toISOString(),
+      currentPrompt: text,
+      resumeThreadId: fresh.threadId,
+      steerClosed: false,
+      steerEndpoint: null,
+      error: undefined,
+    });
+    return { fresh, claim, preparing };
   });
   if (!admission) return 'queued';
-  const { fresh, claim } = admission;
+  const { fresh, claim, preparing } = admission;
   task = fresh ?? task;
-  let published = false;
   try {
     for (const name of fs.readdirSync(resolveTaskDir(cwd, task.id)))
       if (/^resume-\d+-\d+$/.test(name) && name !== path.basename(claim))
@@ -281,48 +301,61 @@ async function resumeInPlace(
       connected.mcp,
     );
     if (task.archived) unarchiveTask(cwd, task);
-    writeTask(cwd, task.id, {
-      // The agent's instructions as they are now; the notes stay this task's.
-      ...(agent?.developer && task.promptParts
-        ? {
-            promptParts: {
-              ...task.promptParts,
-              developer: { ...agent.developer, notes: task.promptParts.developer?.notes },
-            },
-          }
-        : {}),
-      mcp: selected.mcp,
-      mcpBindings: bindings,
-      status: 'queued',
-      pid: null,
-      steerClosed: false,
-      resumedAt: new Date().toISOString(),
-      currentPrompt: text,
-      ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
-      resumeThreadId: task.threadId,
-      steerEndpoint: null,
-      model: (opts.model ?? task.model ?? null) as Task['model'],
-      effort: (opts.effort ?? task.effort ?? null) as Task['effort'],
-      permissions: (opts.permissions ?? task.permissions) as Task['permissions'],
-      error: undefined,
-    });
-    published = true;
-    appendTaskLog(cwd, task.id, {
-      kind: 'steer',
-      message: `Resuming with steer:\n${text}`,
-    });
-    for (const warning of [...connected.warnings, ...(selected.warnings ?? [])])
-      appendTaskLog(cwd, task.id, { kind: 'status', message: warning });
-    const worker = spawnWorker(task.cwd ?? cwd, task.id, connected.env);
-    opts.onWorker?.(worker);
-  } catch (error) {
-    if (published)
+    await withTaskAdmission(cwd, task.id, () => {
+      const current = loadTask(cwd, task.id);
+      if (
+        current?.status !== 'queued' ||
+        current.dispatchId !== preparing.dispatchId ||
+        current.resumeOwner !== process.pid
+      )
+        throw new Error('Task changed while preparing its resumed turn');
       writeTask(cwd, task.id, {
-        status: fresh?.status ?? task.status,
-        resumedAt: fresh?.resumedAt,
-        currentPrompt: fresh?.currentPrompt ?? null,
-        resumeThreadId: fresh?.resumeThreadId ?? null,
-        error: fresh?.error,
+        // The agent's instructions as they are now; the notes stay this task's.
+        ...(agent?.developer && task.promptParts
+          ? {
+              promptParts: {
+                ...task.promptParts,
+                developer: { ...agent.developer, notes: task.promptParts.developer?.notes },
+              },
+            }
+          : {}),
+        mcp: selected.mcp,
+        mcpBindings: bindings,
+        status: 'queued',
+        pid: null,
+        steerClosed: false,
+        resumeOwner: undefined,
+        currentPrompt: text,
+        ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
+        resumeThreadId: task.threadId,
+        steerEndpoint: null,
+        model: (opts.model ?? task.model ?? null) as Task['model'],
+        effort: (opts.effort ?? task.effort ?? null) as Task['effort'],
+        permissions: (opts.permissions ?? task.permissions) as Task['permissions'],
+        error: undefined,
+      });
+      appendTaskLog(cwd, task.id, {
+        kind: 'steer',
+        message: `Resuming with steer:\n${text}`,
+      });
+      for (const warning of [...connected.warnings, ...(selected.warnings ?? [])])
+        appendTaskLog(cwd, task.id, { kind: 'status', message: warning });
+      const worker = spawnWorker(task.cwd ?? cwd, task.id, connected.env);
+      opts.onWorker?.(worker);
+    });
+  } catch (error) {
+    const current = loadTask(cwd, task.id);
+    if (
+      current &&
+      current.dispatchId === preparing.dispatchId &&
+      ACTIVE_STATUSES.includes(current.status)
+    )
+      writeTask(cwd, task.id, {
+        status: 'failed',
+        resumeOwner: undefined,
+        steerClosed: true,
+        completedAt: new Date().toISOString(),
+        error: error instanceof Error ? error.message : String(error),
       });
     fs.rmSync(path.join(resolveTaskDir(cwd, task.id), path.basename(claim)), {
       recursive: true,
@@ -398,52 +431,107 @@ export async function askTask(
   const config = loadConfig(cwd);
   const name = opts.model ?? task.model;
   const entry = name ? config.models?.[name] : undefined;
-  const customEntry = entry && isEndpointModel(entry) ? entry : undefined;
-  if (customEntry?.envKey && !process.env[customEntry.envKey]) {
-    throw new Error(`Missing environment variable: \`${customEntry.envKey}\`.`);
-  }
-  const bridge = customEntry
-    ? await startChatBridge(customEntry, customEntry.wireApi ?? 'chat')
-    : null;
-  const custom = resolveCustomModel(config, name, bridge ?? undefined);
-  try {
-    return await runTurn(task.cwd ?? cwd, {
-      prompt,
-      model: custom?.model ?? resolveCodexModel(name ?? null),
-      modelProvider: custom?.modelProvider ?? null,
-      configOverrides: custom?.configOverrides ?? null,
-      effort,
-      sandbox: 'read-only',
-      approvalPolicy: 'never',
-      ephemeral: true,
-      onResult,
-    });
-  } finally {
-    await bridge?.close();
-  }
+  return runTurn(task.cwd ?? cwd, {
+    prompt,
+    model: resolveCodexModel(name ?? null),
+    ...(entry && name && isEndpointModel(entry) ? { customModel: { alias: name, entry } } : {}),
+    effort,
+    sandbox: 'read-only',
+    approvalPolicy: 'never',
+    ephemeral: true,
+    onResult,
+  });
 }
 
-export interface PendingRow {
-  taskId: string;
-  id: string;
-  summary: string;
-  createdAt?: string;
-}
-
-// Unanswered approvals across every active task.
-export function collectPending(cwd: string): PendingRow[] {
+/** Approvals across every active task (or every task), picked from each task's by `pick`. */
+export function collectApprovals(
+  cwd: string,
+  pick: (taskDir: string) => Approval[],
+  tasks: 'active' | 'all' = 'active',
+): Array<Approval & { taskId: string }> {
   return listTasks(cwd)
-    .filter(task => ACTIVE_STATUSES.includes(task.status))
+    .filter(task => tasks === 'all' || ACTIVE_STATUSES.includes(task.status))
     .flatMap(task =>
-      listPendingApprovals(resolveTaskDir(cwd, task.id))
-        .filter(a => !a.response)
-        .map(a => ({
-          taskId: task.id,
-          id: a.id,
-          summary: String(a.summary ?? ''),
-          createdAt: a.createdAt ? String(a.createdAt) : undefined,
-        })),
+      pick(resolveTaskDir(cwd, task.id)).map(approval => ({ ...approval, taskId: task.id })),
     );
+}
+
+/** Answer a task's approval and tell the task: a steer, which resumes it if its turn ended.
+ * The answer is recorded first and marked delivered last; a retry with the same decision only delivers, never records twice. */
+export async function answerTaskApproval(
+  cwd: string,
+  task: Task,
+  approvalId: string,
+  decision: 'accept' | 'decline',
+  opts: {
+    reason?: string;
+    /** Who answered, as the task's conversation shows it. */
+    by?: string;
+    command?: MailboxKey;
+    resolveConnections?: ConnectionResolver;
+    /** Runs a finished task's next turn instead of resuming it here; false when it is active again. */
+    resume?: (text: string) => Promise<boolean>;
+  } = {},
+): Promise<Approval> {
+  const taskDir = resolveTaskDir(cwd, task.id);
+  const requested = listApprovals(taskDir).find(entry => entry.id === approvalId);
+  // The same decision again while undelivered (a failed steer, an inbox replay, an answer restored with the task) finishes delivering it.
+  const recorded =
+    requested?.response?.decision === decision && !requested.response.deliveredAt
+      ? requested
+      : null;
+  const approval = recorded ?? answerApproval(taskDir, approvalId, decision, opts.reason, opts.by);
+  if (!recorded)
+    appendTaskLog(cwd, task.id, {
+      kind: 'approval-answered',
+      approvalId,
+      decision,
+      summary: approval.actions.join('\n'),
+      ...(opts.reason ? { reason: opts.reason } : {}),
+      ...(approval.response?.by ? { by: approval.response.by } : {}),
+      message: approvalMessage(approval),
+    } as TaskLogEntry);
+  await deliverAnswer(cwd, task, approval, opts);
+
+  return markDelivered(taskDir, approval);
+}
+
+/** Tells the task its decision once: the steer is keyed by the answer, so a retry after a crash never steers twice. */
+async function deliverAnswer(
+  cwd: string,
+  task: Task,
+  approval: Approval,
+  opts: {
+    command?: MailboxKey;
+    resolveConnections?: ConnectionResolver;
+    resume?: (text: string) => Promise<boolean>;
+  },
+): Promise<void> {
+  const text = approvalMessage(approval);
+  const key = `${approval.id}:${approval.response!.answeredAt}`;
+  const command = opts.command ?? namedCommand(task.id, key);
+  const current = loadTask(cwd, task.id) ?? task;
+  // A resumed turn already carries the decision as its prompt.
+  if (
+    (current.currentPrompt ?? current.prompt) === text &&
+    ACTIVE_STATUSES.includes(current.status)
+  )
+    return;
+  // A task that has not opened its conversation yet gets the answer as its next turn.
+  const queued = await withTaskAdmission(cwd, task.id, () => {
+    const fresh = loadTask(cwd, task.id) ?? current;
+    if (steerKnown(cwd, task.id, key)) return true;
+    if (fresh.steerClosed || !ACTIVE_STATUSES.includes(fresh.status)) return false;
+    if (fresh.threadId) return false;
+    queueSteer(cwd, task.id, text, key);
+    return true;
+  });
+  const finished = !ACTIVE_STATUSES.includes((loadTask(cwd, task.id) ?? current).status);
+  if (!queued && !(finished && (await opts.resume?.(text))))
+    await steerTask(cwd, current, text, {
+      command,
+      ...(opts.resolveConnections ? { resolveConnections: opts.resolveConnections } : {}),
+    });
 }
 
 /** Filters for the task list, mirroring the CLI flags. */
@@ -569,7 +657,7 @@ export async function* streamTask(
 }
 
 // Print-free core: interrupt the live turn (if any), kill the worker, mark the
-// task cancelled. Returns the interrupt detail for the caller to report.
+// task cancelled and close its open approvals. Returns the interrupt detail for the caller to report.
 export async function stopTask(
   cwd: string,
   task: Task,
@@ -597,10 +685,11 @@ export async function stopTask(
   }
   writeTask(cwd, task.id, {
     status: 'cancelled',
-    error: 'Stopped by user.',
+    error: STOPPED_BY_USER,
     steerEndpoint: null,
     completedAt: new Date().toISOString(),
   });
+  closeApprovals(resolveTaskDir(cwd, task.id));
   return { taskId: task.id, status: 'cancelled', interrupt: interrupt.detail };
 }
 

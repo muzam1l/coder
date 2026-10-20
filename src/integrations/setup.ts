@@ -64,8 +64,7 @@ export async function freshToken(
   save?: (token: string) => Promise<string | void>,
   now = Date.now(),
 ): Promise<string> {
-  if (!stored)
-    throw new Error('The installation has no token; connect it again from the dashboard');
+  if (!stored) throw new Error('The installation has no token; connect it again');
   const token = JSON.parse(stored) as StoredToken;
   if (!token.refreshToken || (token.expiresAt ?? Infinity) - 5 * 60_000 > now)
     return token.accessToken;

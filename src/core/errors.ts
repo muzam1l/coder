@@ -7,7 +7,7 @@ export interface FallbackPayload {
     permissions: string;
     instructions: string;
     note: string;
-    system?: string;
+    appendSystem?: string;
     task: string;
   };
 }
@@ -34,12 +34,7 @@ export class CoderError extends Error {
   /** chain-exhausted: the run-native-subagent payload the CLI prints on exit 3. */
   payload?: FallbackPayload;
   /** approval-pending: the approval to answer. */
-  approval?: {
-    id: string;
-    summary: string;
-    cwd?: string | null;
-    networkHost?: string | null;
-  };
+  approval?: { id: string; reason: string; actions: string[] };
   /** task-failed (flow task()): the failed task's result. */
   result?: unknown;
   /** flow-failed: the run to resume. */

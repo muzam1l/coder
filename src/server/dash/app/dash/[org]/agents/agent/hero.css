@@ -28,7 +28,8 @@
 .hero .handles .more-list .handles {
   text-align: left;
 }
-.hero.stuck .handles {
+.hero.stuck .handles,
+.hero.stuck .lead {
   display: none;
 }
 /* stuck: the back arrow, then the mark, then the title, on one line */

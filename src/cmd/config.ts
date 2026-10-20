@@ -91,7 +91,7 @@ function printConfigList(cfg: CoderConfig, file: string): void {
       `${s.dim('chain')}      ${cfg.chain.join(' -> ')}`,
       `${s.dim('codex')}      ${summary(cfg.engines.codex)}`,
       `${s.dim('claude')}     ${summary(cfg.engines.claude)}`,
-      `${s.dim('approvals')}  timeout=${cfg.approvals.escalationTimeoutMs}ms  hosts=[${cfg.approvals.allowedNetworkHosts.join(', ')}]`,
+      `${s.dim('approvals')}  hosts=[${cfg.approvals.allowedNetworkHosts.join(', ')}]`,
       `${s.dim('file')}       ${file}`,
     ].join('\n') + '\n',
   );

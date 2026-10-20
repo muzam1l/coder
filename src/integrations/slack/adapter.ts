@@ -1,4 +1,4 @@
-/** Slack through Chat SDK: the app's signing secret verifies, Coder's bound installations hold the bot tokens. */
+/** Slack through Chat SDK: the app's signing secret verifies, the host's bound installations hold the bot tokens. */
 import { SlackAdapter, type SlackAdapterConfig, type SlackEvent } from '@chat-adapter/slack';
 import {
   type Adapter,
@@ -15,7 +15,7 @@ import { messageEvent } from './index';
 /** Stands in for a workspace's bot token until a Web API call needs it, so a webhook is answered before any token lookup. */
 const PENDING = 'coder-pending:';
 
-/** An axios adapter for Slack's Web API client on Coder's `fetch`, so hosts and tests see every call; it mints pending tokens. */
+/** An axios adapter for Slack's Web API client on the host's `fetch`, so hosts and tests see every call; it mints pending tokens. */
 function viaFetch(request: typeof fetch, mint: (teamId: string) => Promise<string>) {
   return async (config: {
     url?: string;
@@ -64,10 +64,10 @@ class BoundSlackAdapter extends SlackAdapter {
     super(config);
   }
 
-  /** Set for a thread reply outside Coder's conversations: its users are named by id, never looked up. */
+  /** Set for a thread reply outside the host's conversations: its users are named by id, never looked up. */
   private unnamed = false;
 
-  // A reaction on a message Coder does not know is dropped before the thread lookup Chat would spend on it.
+  // A reaction on a message the host does not know is dropped before the thread lookup Chat would spend on it.
   protected override async handleReactionEvent(
     event: Parameters<SlackAdapter['handleReactionEvent']>[0],
     options?: WebhookOptions,
@@ -78,7 +78,7 @@ class BoundSlackAdapter extends SlackAdapter {
     return super.handleReactionEvent(event, options);
   }
 
-  // Filtered before Chat looks up the author and mentions: a plain message Coder does not take is dropped.
+  // Filtered before Chat looks up the author and mentions: a plain message the host does not take is dropped.
   protected override handleMessageEvent(event: SlackEvent, options?: WebhookOptions): void {
     const plain =
       event.type === 'message' &&

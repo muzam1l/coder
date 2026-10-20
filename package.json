@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.4.12",
+  "version": "0.4.13",
   "description": "Delegating coding-agent runtime",
   "type": "module",
   "main": "./dist/sdk.js",
@@ -70,7 +70,7 @@
     "@types/node": "^26.1.2",
     "@wular/pnext": "0.1.9",
     "chat": "4.41.1",
-    "contextjsx": "0.2.2",
+    "contextjsx": "0.2.3",
     "drizzle-kit": "0.31.11",
     "drizzle-orm": "0.45.2",
     "jose": "6.2.12",

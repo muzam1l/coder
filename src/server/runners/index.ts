@@ -16,6 +16,7 @@ import { HttpRunner } from './http';
 import { LocalRunner } from './local';
 import {
   VercelSandboxRunner,
+  SNAPSHOT_TTL_MS,
   type BrokerRule,
   type VercelSandboxOptions,
   type SnapshotStore,
@@ -118,12 +119,14 @@ export const RUNNER_KINDS: RunnerKind[] = [
 export function runnerSnapshots(store: Store, prefix = ''): SnapshotStore {
   return {
     get: key => store.get('snapshot', `${prefix}${key}`),
-    put: (key, value) => store.put('snapshot', `${prefix}${key}`, value),
+    put: (key, value) =>
+      store.put('snapshot', `${prefix}${key}`, value, { ttlMs: SNAPSHOT_TTL_MS }),
     withLock: (key, work) =>
       store.withAppLock(`snapshot:${prefix}${key}`, locked =>
         work({
           get: key => locked.get('snapshot', `${prefix}${key}`),
-          put: (key, value) => locked.put('snapshot', `${prefix}${key}`, value),
+          put: (key, value) =>
+            locked.put('snapshot', `${prefix}${key}`, value, { ttlMs: SNAPSHOT_TTL_MS }),
         }),
       ),
   };
@@ -244,6 +247,42 @@ export async function taskRunner(
   }
 
   return instance!.runner;
+}
+
+export const deletedKey = (runnerId: string) => `runner-deleted:${runnerId}`;
+
+/** A deleted task's work folder goes now where the server runs it; a registered runner hears of it at its next registration. */
+export async function removeTaskWork(
+  ctx: ServerContext,
+  task: Pick<AgentTask, 'id' | 'runner' | 'runnerId'>,
+  handle?: string,
+): Promise<void> {
+  if (task.runner !== 'http' || !task.runnerId) {
+    await (await taskRunner(ctx, task))?.remove?.(task.id, handle);
+    return;
+  }
+  const runnerId = task.runnerId;
+  await ctx.store.withAppLock(`runners:${ctx.organizationId}`, async store => {
+    const pending = await store.get<{ deletedTasks: string[] }>('snapshot', deletedKey(runnerId));
+    await store.put('snapshot', deletedKey(runnerId), {
+      deletedTasks: [...(pending?.deletedTasks ?? []), task.id],
+    });
+  });
+}
+
+/** The tasks deleted since a runner's last registration, less those it reports removed; call under the runners lock. */
+export async function deletedRunnerTasks(
+  store: Store,
+  runnerId: string,
+  removed: string[] = [],
+): Promise<string[]> {
+  const pending = await store.get<{ deletedTasks: string[] }>('snapshot', deletedKey(runnerId));
+  const left = (pending?.deletedTasks ?? []).filter(id => !removed.includes(id));
+  if (!pending || left.length === pending.deletedTasks.length) return left;
+  if (left.length) await store.put('snapshot', deletedKey(runnerId), { deletedTasks: left });
+  else await store.delete('snapshot', deletedKey(runnerId));
+
+  return left;
 }
 
 export function validateRunnerConfig(spec: RunnerSpec, config: Record<string, string>): void {
@@ -381,4 +420,6 @@ export interface Runner {
   status(handle: string): Promise<RunnerStatus>;
   stop(handle: string): Promise<void>;
   push?(handle: string, entries: InboxEntry[]): Promise<InboxAck>;
+  /** Delete a deleted task's work folder on runners that keep one across turns. */
+  remove?(taskId: string, handle?: string): Promise<void>;
 }

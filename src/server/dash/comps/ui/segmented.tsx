@@ -16,7 +16,7 @@ export function Segmented({
   children,
 }: {
   label: string;
-  options: Option[];
+  options: Array<[value: Option[0], label: ComponentChildren]>;
   value: string;
   /** Without it, `link` makes each choice a page link, or with neither they only show, for a loading page. */
   onChange?: (value: string) => void;

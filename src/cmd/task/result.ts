@@ -1,6 +1,7 @@
 /** `coder task result` (also `coder result`): a task's status and final answer. */
 import process from 'node:process';
 
+import { actionLines } from '../../core/approvals';
 import type { TaskInspection } from '../../core/task';
 import { ageMs, formatEngineSpec, type TaskLogEntry } from '../../core/state';
 import {
@@ -11,7 +12,6 @@ import {
   type TokenUsage,
   type TurnResult,
 } from '../../core/types';
-import type { TaskStatus } from '../../server/store/types';
 import {
   formatAge,
   formatElapsed,
@@ -22,7 +22,7 @@ import {
 } from '../../tui/output';
 import type { LogView } from '../../core/task/log-view';
 import { termCols, visibleWidth, wrapAnsi } from '../../tui/live';
-import { flag, serverOptions, str, tailOption } from '../../utils/args';
+import { flag, serverOptions, serverSuffix, str, tailOption } from '../../utils/args';
 import { command, nextSteps, type CommandNext } from '../../cli';
 
 /**
@@ -337,16 +337,23 @@ export class LogRenderer {
 
     if (row.kind === 'usage') return this.compose(kind, s.dim(text), false);
     if (row.kind === 'approval' && row.state) {
-      // Later verdicts print under the approval as its state changes.
-      const strip = (value: unknown) =>
-        this.presentation.stripCwd(String(value ?? ''), this.opts.cwd);
-      const summary = strip(entry.summary);
-      const target = summary.slice(summary.indexOf(': ') + 2);
-      const shown = summary && !this.lastCall.includes(target) ? ` · ${summary}` : '';
+      if (row.seq === seq && !row.result) {
+        const body = [
+          this.clip(`${text} · ${row.state}`, STATUS_ROWS, s.light),
+          this.clip(capBody(row.detail ?? '', trim, lineCap, s), lineCap, s.dim),
+        ].filter(Boolean).join('\n');
+
+        return this.compose(kind, body, false);
+      }
       const took =
         row.result && row.result.durationMs >= 1000 ? ` · ${formatAge(row.result.durationMs)}` : '';
-      const head = row.seq === seq ? `${text} ${row.state}${shown}` : `${row.state}${took}`;
-      return this.compose(kind, this.approval(head, strip(entry.reason ?? entry.message)), false);
+      const head = row.seq === seq ? `${text} · ${row.state}` : `${row.state}${took}`;
+      const detail = row.result?.detail ?? row.detail ?? '';
+      return this.compose(
+        kind,
+        this.approval(head, this.presentation.stripCwd(detail, this.opts.cwd)),
+        false,
+      );
     }
     if (row.kind === 'approval')
       return this.compose(kind, this.approval(text, row.detail ?? ''), false);
@@ -469,38 +476,6 @@ export class LogRenderer {
   }
 }
 
-function took(status: TaskStatus): string {
-  if (status.startedAt === undefined) return '';
-  return formatAge((status.finishedAt ?? Date.now()) - status.startedAt);
-}
-
-/** The agent's reply from a finished default-flow task, if its output ended in the JSON result line. */
-export function replyOf(status: TaskStatus): string | undefined {
-  const lines = (status.result?.output ?? '').trim().split('\n');
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    const line = lines[i]!.trim();
-    if (!line.startsWith('{')) continue;
-    try {
-      const reply = (JSON.parse(line) as { reply?: unknown }).reply;
-      return typeof reply === 'string' ? reply : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-  return undefined;
-}
-
-/** Once a task has finished, steer continues it on the same id. */
-export function serverSuffix(args: { server?: string | true; workspace?: string }) {
-  return (
-    (args.server === true
-      ? ' --server'
-      : typeof args.server === 'string'
-        ? ` --server ${JSON.stringify(args.server)}`
-        : '') + (args.workspace ? ` --workspace ${JSON.stringify(args.workspace)}` : '')
-  );
-}
-
 export function waitingNext(
   taskId: string,
   args: { server?: string | true; workspace?: string },
@@ -513,27 +488,15 @@ export function waitingNext(
   };
 }
 
+/** Once a task has finished, steer continues it on the same id. */
 export function finishedNext(
   taskId: string,
   args: { server?: string | true; workspace?: string } = {},
 ) {
-  const steps = nextSteps([
-    `Continue on the same task: coder task steer ${taskId} "<follow-up>"${args.server !== undefined ? ' --server' : ''}`,
+  return nextSteps([
+    `Continue on the same task: coder task steer ${taskId} "<follow-up>"${serverSuffix(args)}`,
   ]);
-  steps[0]!.usage = `coder task steer ${taskId} "<follow-up>"${serverSuffix(args)}`;
-  return steps;
 }
-
-export function printOutcome(status: TaskStatus, s: Style): void {
-  process.stdout.write(
-    `${s.bold(status.task.id)}  ${paintStatus(status.status)}${status.error ? `  ${s.red(status.error)}` : ''}${took(status) ? `  ${s.dim(`took ${took(status)}`)}` : ''}\n`,
-  );
-  if (status.credential) process.stdout.write(`${s.dim('credential')}  ${status.credential}\n`);
-  const reply = replyOf(status);
-  if (reply) process.stdout.write(`\n${s.bold('Reply')}\n${reply.trim()}\n`);
-}
-
-type RemoteInspection = TaskStatus & { steps?: TaskLogEntry[] };
 
 type ResultOptions = {
   turns?: boolean;
@@ -550,47 +513,9 @@ function turnJson(result: Partial<TurnResult> | null | undefined) {
   };
 }
 
-function serverApprovals(status: TaskStatus) {
-  const approval = status.approval as { id?: string; summary?: string; cwd?: string } | undefined;
-  return approval?.id
-    ? [{ id: approval.id, summary: approval.summary ?? '', cwd: approval.cwd ?? null }]
-    : [];
-}
-
-/** Server output is an answer or a transcript ending in the agent's reply. */
-export function serverTaskJson(status: TaskStatus) {
-  let turn: Partial<TurnResult> | undefined;
-  const output = status.result?.output;
-  if (output?.trimStart().startsWith('{')) {
-    try {
-      const parsed = JSON.parse(output);
-      if (parsed && typeof parsed.status === 'number' && 'threadId' in parsed) turn = parsed;
-    } catch {}
-  }
-
-  return {
-    taskId: status.task.id,
-    name: status.task.name ?? null,
-    status: status.status,
-    engine: status.task.usage?.engine ?? status.task.definition?.engine ?? null,
-    model: turn?.model ?? status.task.usage?.model ?? status.task.definition?.model ?? null,
-    ...turnJson(turn),
-    finalMessage: turn ? (turn.finalMessage ?? null) : (replyOf(status) ?? output ?? null),
-    error: turn?.error?.message ?? status.error ?? null,
-    tokens: turn?.tokens ?? status.tokens ?? null,
-    pendingApprovals: serverApprovals(status),
-  };
-}
-
 /** Command projections leave stored engine results and SDK inspections intact. */
-function resultJson(inspection: TaskInspection | RemoteInspection, options: ResultOptions) {
+function resultJson(inspection: TaskInspection, options: ResultOptions) {
   const next = taskResultNext(inspection, options).map(({ usage, blurb }) => ({ usage, blurb }));
-  if ('attempts' in inspection)
-    return {
-      ...serverTaskJson(inspection),
-      next,
-      ...(inspection.steps?.length ? { steps: inspection.steps } : {}),
-    };
   const { task, result, steps, turns } = inspection;
 
   return {
@@ -602,11 +527,7 @@ function resultJson(inspection: TaskInspection | RemoteInspection, options: Resu
     ...turnJson(result),
     error: result?.error?.message ?? task.error ?? null,
     tokens: result?.tokens ?? inspection.liveTokens ?? null,
-    pendingApprovals: inspection.pendingApprovals.map(({ id, summary, cwd }) => ({
-      id,
-      summary,
-      cwd,
-    })),
+    pendingApprovals: inspection.pendingApprovals,
     next,
     ...(steps.length ? { steps } : {}),
     ...(options.turns
@@ -646,8 +567,7 @@ async function printResult(
   if (pending.length) {
     lines.push('', s.dim('pending approvals:'));
     for (const a of pending) {
-      lines.push(`  ${s.cyan(a.id)}  ${a.summary}`);
-      if (a.cwd) lines.push(`  ${s.dim(`runs in ${a.cwd}`)}`);
+      lines.push(`  ${s.cyan(a.id)}  ${a.reason}`, actionLines(a.actions).replace(/^/gm, '  '));
       process.stdout.write(`${lines.join('\n')}\n`);
       lines.length = 0;
       next(inspection, { slot: `approval:${a.id}` });
@@ -749,58 +669,20 @@ export const commandResult = command({
           `${outStyle.dim(`[coder] waiting for task ${taskId} to finish...`)}\n`,
         ),
     });
-    if ('attempts' in result && options.server !== undefined && options.tail) {
-      const { connect } = await import('../../core/remote');
-      const { logEntry } = await import('../../core/task/log-view');
-      const logs = await connect({ ...options, organization: options.workspace }).tasks.logs(
-        result.task.id,
-      );
-      const shown = options.tail === 'all' ? logs : logs.slice(-options.tail);
-      return {
-        ...result,
-        steps: shown.map(line => ({
-          ...(line.entry ??
-            logEntry(line.line) ?? {
-              kind: line.level === 'err' ? 'error' : 'info',
-              message: line.line,
-            }),
-          at: line.entry?.at ?? new Date(line.at).toISOString(),
-        })),
-      };
-    }
     return result;
   },
   json: (result, { options }) => resultJson(result, options),
   next: ({ result, args }) => taskResultNext(result, args),
-  print: (result, { options, cwd, next }) =>
-    'attempts' in result
-      ? printOutcome(result as TaskStatus, outStyle)
-      : printResult(result as TaskInspection, cwd, options, next),
+  print: (result, { options, cwd, next }) => printResult(result, cwd, options, next),
   exit: (result, { options }) =>
-    options.wait && !('attempts' in result)
-      ? result.task.status === 'completed'
-        ? 0
-        : 1
-      : undefined,
+    options.wait ? (result.task.status === 'completed' ? 0 : 1) : undefined,
 });
 
-function taskResultNext(result: TaskInspection | TaskStatus, args: ResultOptions): CommandNext[] {
-  if ('attempts' in result) {
-    const steps: CommandNext[] = serverApprovals(result).map(approval => ({
-      usage: `coder task approve ${result.task.id} ${approval.id}${serverSuffix(args)}`,
-      blurb: 'Answer the pending approval (--deny to reject)',
-      cli: { hidden: true },
-    }));
-    return [
-      ...steps,
-      ...(['completed', 'failed', 'cancelled'].includes(result.status)
-        ? finishedNext(result.task.id, args)
-        : [{ ...waitingNext(result.task.id, args, ''), cli: { hidden: true } }]),
-    ];
-  }
+function taskResultNext(result: TaskInspection, args: ResultOptions): CommandNext[] {
   const { task } = result;
+  const flags = serverSuffix(args);
   const steps: CommandNext[] = (result.pendingApprovals ?? []).map(approval => ({
-    usage: `coder task approve ${task.id} ${approval.id}`,
+    usage: `coder task approve ${task.id} ${approval.id}${flags}`,
     blurb: '(--deny to reject)',
     cli: { layout: 'inline', prefix: '  ', slot: `approval:${approval.id}` },
   }));
@@ -811,9 +693,9 @@ function taskResultNext(result: TaskInspection | TaskStatus, args: ResultOptions
           `Turn ${result.turns.length} of ${result.turns.length}. All answers are in coder task result ${task.id} --turns.`,
         ],
         { layout: 'plain', dim: true, prefix: '', slot: 'turns' },
-      ).map(step => ({ ...step, usage: `coder task result ${task.id} --turns` })),
+      ).map(step => ({ ...step, usage: `coder task result ${task.id} --turns${flags}` })),
     );
-  if (!ACTIVE_STATUSES.includes(task.status)) return [...steps, ...finishedNext(task.id)];
+  if (!ACTIVE_STATUSES.includes(task.status)) return [...steps, ...finishedNext(task.id, args)];
   if (args.wait) return steps;
   return [
     ...steps,
@@ -823,8 +705,10 @@ function taskResultNext(result: TaskInspection | TaskStatus, args: ResultOptions
       `Wait in its own background shell, one per task; do not poll: coder task result ${task.id} --wait`,
     ),
     ...nextSteps([
-      `Follow live: coder task watch ${task.id}`,
-      ...(result.stalled ? [`Check the transcript: coder task result ${task.id} --tail all`] : []),
+      `Follow live: coder task watch ${task.id}${flags}`,
+      ...(result.stalled
+        ? [`Check the transcript: coder task result ${task.id} --tail all${flags}`]
+        : []),
     ]),
   ];
 }

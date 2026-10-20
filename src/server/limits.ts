@@ -1,7 +1,7 @@
 import type { ServerContext } from './context';
-import {authorize} from './routes/guards';
-import {json} from './routes/http';
-import {runnerPrincipal} from './routes/guards';
+import { authorize } from './routes/guards';
+import { json } from './routes/http';
+import { runnerPrincipal } from './routes/guards';
 
 export interface LimitsConfig {
   principalPerMinute?: number;

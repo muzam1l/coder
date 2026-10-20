@@ -141,7 +141,6 @@ export function taskEvents(req: Request, ctx: ServerContext, params: Params, url
         from,
         text => controller.enqueue(encoder.encode(text)),
         () => controller.close(),
-        known,
       );
       // A client that left gets no more reads, and its body ends.
       const leave = () => {
@@ -174,6 +173,7 @@ function eventState(status: TaskStatus, asked: boolean) {
     agent: task.agent,
     status: status.status,
     approval: approval ?? null,
+    approvals: status.approvals ?? task.context?.approvals ?? null,
     // A list hears nothing of an auto-archive; it takes it up on its next read.
     archivedAt: status.autoArchived && !asked ? undefined : archivedAt,
     createdAt,
@@ -201,8 +201,8 @@ type Watch = {
   from: number;
   fresh: boolean;
   active?: number;
-  /** The runners this stream last saw; unset on a new stream, which the page's own read is current for. */
-  runners?: string;
+  /** The runners this stream last sent. */
+  runners: string;
   /** This server's generation in each event id, when its delete history is in memory. */
   tag: string;
   beat: number;
@@ -253,7 +253,6 @@ export class TaskWatcher {
     from: number,
     send: (text: string) => void,
     close: () => void,
-    resumed = false,
   ): () => void {
     if (this.closed) {
       queueMicrotask(close);
@@ -268,8 +267,7 @@ export class TaskWatcher {
       gone: new Set(),
       from,
       fresh: true,
-      // A resumed stream may have missed a runner change, so its first read sends them.
-      ...(resumed ? { runners: '' } : {}),
+      runners: '',
       tag: this.tag(ctx),
       beat: now,
       marked: now,
@@ -406,9 +404,17 @@ export class TaskWatcher {
             at - (this.runners.get(organizationId)?.at ?? -Infinity) >= RUNNER_SCAN_MS,
         )
         .map(async ([organizationId, { ctx }]) => {
+          const previous = this.runners.get(organizationId);
+          const scan = { at, records: previous?.records ?? [] };
+          this.runners.set(organizationId, scan);
           try {
-            this.runners.set(organizationId, { at, records: await ctx.store.list('runner') });
+            const records = await ctx.store.list('runner');
+            if (this.runners.get(organizationId) === scan) scan.records = records;
           } catch (error) {
+            if (this.runners.get(organizationId) === scan) {
+              if (previous) this.runners.set(organizationId, previous);
+              else this.runners.delete(organizationId);
+            }
             console.error('coder server: runner events failed', error);
           }
         }),
@@ -435,7 +441,7 @@ export class TaskWatcher {
     }
   }
 
-  /** The runners event when what the stream's requester sees changed, online dots included; a new stream only notes them. */
+  /** The runners event when what the stream's requester sees changed, online dots included. */
   private runnerNews(watch: Watch, at: number): string[] {
     const scan = this.runners.get(watch.ctx.organizationId);
     if (!scan) return [];
@@ -447,7 +453,7 @@ export class TaskWatcher {
     const known = watch.runners;
     watch.runners = seen;
 
-    return known === undefined || known === seen
+    return known === seen
       ? []
       : [`id: ${at}${watch.tag}\nevent: runners\ndata: ${JSON.stringify({ items })}\n\n`];
   }
@@ -477,9 +483,14 @@ export class TaskWatcher {
       const queued = [...(rows.get(organizationId)?.values() ?? [])];
       let scan = this.scans.get(ctx.local.cwd);
       // A queue change since the last scan rescans, so an older CLI row never wins over it.
-      if (!scan || at - scan.at >= (this.options.localScanMs ?? LOCAL_SCAN_MS) || queued.some(row => row.updatedAt > scan!.at)) {
+      if (
+        !scan ||
+        at - scan.at >= (this.options.localScanMs ?? LOCAL_SCAN_MS) ||
+        queued.some(row => row.updatedAt > scan!.at)
+      ) {
         // Archived tasks too, so an archive list hears a running one finish.
-        const fresh = !scan || at - scan.archivedAt >= (this.options.archiveScanMs ?? ARCHIVE_SCAN_MS);
+        const fresh =
+          !scan || at - scan.archivedAt >= (this.options.archiveScanMs ?? ARCHIVE_SCAN_MS);
         await sweepLocalQueue(ctx, ctx.local.cwd);
         const shelf = fresh ? localTasks(ctx.local.cwd, true) : scan!.archived;
         const active = localTasks(ctx.local.cwd, false);
@@ -604,6 +615,8 @@ type LogWatch = {
   cursor: number;
   /** A read has reached the log's end for this stream, which says so once with `caught-up`. */
   caught?: boolean;
+  /** The pending approval this stream announced with `approval`. */
+  approval?: string;
   feed: LogFeed;
   timers: Array<ReturnType<typeof setTimeout>>;
   send: (text: string) => void;
@@ -745,11 +758,17 @@ export class LogWatcher {
       );
       feed.head = Math.max(from, lines.at(-1)?.seq ?? from);
       if (full) next = 0;
+      const approval =
+        status.status === 'waiting' ? (status.approval as { id?: string } | undefined) : undefined;
       for (const watch of current) {
         let text = events.flatMap(([seq, text]) => (seq > watch.cursor ? [text] : [])).join('');
         if (!full && !done && !watch.caught) {
           watch.caught = true;
           text += 'event: caught-up\ndata: {}\n\n';
+        }
+        if (!full && approval?.id && watch.approval !== approval.id) {
+          watch.approval = approval.id;
+          text += `event: approval\ndata: ${JSON.stringify(approval)}\n\n`;
         }
         watch.cursor = Math.max(watch.cursor, lines.at(-1)?.seq ?? -1);
         if (done) this.end(watch, `${text}event: end\ndata: {}\n\n`);
@@ -762,7 +781,7 @@ export class LogWatcher {
   }
 }
 
-/** `log` events past `after`, then `end` once the task is done and its logs and result are in. */
+/** `log` events past `after`, `approval` when the task waits on one, then `end` once the task is done and its logs and result are in. */
 export function streamTask(
   req: Request,
   ctx: ServerContext,

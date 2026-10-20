@@ -38,7 +38,7 @@ Related: `coder flow watch`, `coder docs review`.
 - `--model <model>` model for the review task
 - `--effort <effort>` reasoning effort and review depth (default: medium depth)
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder review  # review the branch plus uncommitted work
@@ -59,7 +59,7 @@ target a dotted key (e.g. engines.codex.model). Writes go to ~/.coder/config.jso
 - `<value>` with set: the value; JSON, or a comma list
 - `--workspace` target <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder config list  # print the effective config
@@ -84,7 +84,7 @@ add coder -- coder mcp, or for Cursor "coder": { "command": "coder", "args":
 
 - `<hosts>` claude, agents, codex, cursor (one or more)
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder setup-host claude  # install the Claude Code plugin

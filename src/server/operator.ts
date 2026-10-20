@@ -37,7 +37,7 @@ export async function audit(ctx: ServerContext, action: string, target: string) 
 export async function operatorApps(req: Request, ctx: ServerContext): Promise<Response> {
   const apps = await serverScope(ctx).store.list('app');
   const platforms: OperatorAppRow[] = Object.values(ctx.integrations)
-    .filter(integration => integration.app.builtin === 'shared')
+    .filter(integration => integration.app.shareable)
     .map(integration => {
       const app = apps.find(
         ({ value }) => value.builtin && value.integration === integration.id,
@@ -61,7 +61,7 @@ export async function operatorApps(req: Request, ctx: ServerContext): Promise<Re
 export async function setUpApp(req: Request, ctx: ServerContext, params: Params) {
   const integration = ctx.integrations[params.integration!];
   if (!integration) return json({ error: `Unknown integration "${params.integration}".` }, 404);
-  if (integration.app.builtin !== 'shared')
+  if (!integration.app.shareable)
     return json(
       {
         error: `Create ${integration.name} apps in your workspace from the agent's Platforms tab.`,

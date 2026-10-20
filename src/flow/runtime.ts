@@ -221,7 +221,7 @@ function dispatchOptsFrom(opts: FlowTaskOptions, cwd: string, ctx?: RunContext) 
       ? capPermissions(opts.name, opts.permissions, ctx.ceiling)
       : opts.permissions,
     name: opts.name,
-    system: opts.system,
+    appendSystem: opts.appendSystem,
     addDirs: opts.addDirs,
     wait: true,
     flowRunId: ctx?.runId,
@@ -300,10 +300,10 @@ async function runOneTask(
   outputSchema: object | null,
 ): Promise<TurnOutcome> {
   const cwd = opts.cwd ? path.resolve(opts.cwd) : (ctx?.cwd ?? process.cwd());
-  const system =
+  const appendSystem =
     opts.returns && !outputSchema
-      ? [opts.system, jsonReplyPrompt(null)].filter(Boolean).join('\n\n')
-      : opts.system;
+      ? [opts.appendSystem, jsonReplyPrompt(null)].filter(Boolean).join('\n\n')
+      : opts.appendSystem;
   // Chain engine override for mid-turn fallback attempts; mirrors dispatch's
   // own startup fallback (next engine runs on its config defaults).
   let chainEngine: string | undefined;
@@ -311,8 +311,9 @@ async function runOneTask(
     const request = {
       prompt,
       ...dispatchOptsFrom(opts, cwd, ctx),
-      system,
+      appendSystem,
       ...(outputSchema ? { outputSchema } : {}),
+      ...(opts.returns ? { structured: true } : {}),
       ...(chainEngine ? { engine: chainEngine, model: undefined, effort: undefined } : {}),
     };
     const selected = ctx?.connections

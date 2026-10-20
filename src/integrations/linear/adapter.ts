@@ -1,4 +1,4 @@
-/** Linear agent sessions through Chat SDK: Coder verifies the webhook signature, then mints the workspace's app token. */
+/** Linear agent sessions through Chat SDK: the host verifies the webhook signature, then mints the workspace's app token. */
 import { LinearAdapter } from '@chat-adapter/linear';
 import {
   type Adapter,
@@ -74,6 +74,30 @@ class BoundLinearAdapter extends LinearAdapter {
       });
       const activity = await result.agentActivity;
       if (!result.success || !activity) throw new Error('Linear progress activity failed');
+
+      return { id: activity.id };
+    });
+  }
+
+  /** A `select` elicitation whose pick comes back as a prompt holding the option's value; outside a session, a comment. */
+  postElicitation(
+    threadId: string,
+    body: string,
+    options: Array<{ label: string; value: string }>,
+  ): Promise<{ id?: string }> {
+    const { agentSessionId } = this.decodeThreadId(threadId);
+    if (!agentSessionId) return this.postMessage(threadId, { markdown: body });
+
+    return this.bound(async () => {
+      await this.ensureValidToken();
+      const result = await this.getClient().createAgentActivity({
+        agentSessionId,
+        content: { type: 'elicitation' as never, body },
+        signal: 'select' as never,
+        signalMetadata: { options },
+      });
+      const activity = await result.agentActivity;
+      if (!result.success || !activity) throw new Error('Linear elicitation activity failed');
 
       return { id: activity.id };
     });

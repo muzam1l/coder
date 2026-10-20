@@ -3,6 +3,7 @@
  * defaults -> ~/.coder/config.json -> <workspace>/coder.config.json -> CLI flags.
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
 
@@ -18,6 +19,7 @@ export interface PermissionMode {
   sandbox: 'read-only' | 'workspace-write';
   approvalPolicy: 'never' | 'on-request' | 'on-failure' | 'untrusted';
   approvalMode: 'auto' | null;
+  approvalsReviewer: 'auto_review' | null;
 }
 
 // Model aliases per engine. Values map alias -> concrete identifier.
@@ -39,40 +41,52 @@ export const CLAUDE_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'hi
 /**
  * The one permission surface, mapped per engine.
  *
- * Codex (OS-enforced sandbox + approval policy; network is denied in the
- * workspace-write sandbox, so it is escalated/refused rather than silent):
- * - read-only:       sandbox read-only,       approvals never (read-only; no writes, no network)
- * - workspace-write: sandbox workspace-write, approvals never (edits stay in the project;
- *                    sandbox escapes such as out-of-workspace writes and network are refused, not asked)
- * - auto:            sandbox workspace-write, approvals on-request; there is no command
- *                    allowlist, so every sandbox escape escalates to the caller (the
- *                    orchestrating main thread, which approves it or delegates to a human).
- *                    Hard-deny patterns and git writes are still declined outright.
+ * Codex (OS-enforced sandbox + approval policy):
+ * - read-only:       sandbox read-only,       approvals never
+ * - workspace-write: sandbox workspace-write, approvals never (escapes fail, not asked)
+ * - auto:            sandbox workspace-write, approvals on-request, reviewed by Codex's auto review
+ *                    (`approvalsReviewer`); what it refuses the task may escalate (core/approvals).
  */
 export const PERMISSION_MODES: Record<Permission, PermissionMode> = {
-  'read-only': { sandbox: 'read-only', approvalPolicy: 'never', approvalMode: null },
-  'workspace-write': { sandbox: 'workspace-write', approvalPolicy: 'never', approvalMode: null },
-  // on-request: codex decides when to ask. The app-server's only plain-string
-  // policies are untrusted / on-request / never (no "on-failure"; "granular"
-  // needs a struct we don't model). With network + out-of-workspace writes now
-  // blocked by the sandbox, escapes that codex doesn't ask about simply FAIL
-  // (the engine adapts) rather than succeed silently; the ones codex does ask
-  // about escalate through decideCommand to the main thread.
-  // TODO(escape escalation): to make *every* sandbox escape escalate (not just
-  // fail), either model the `granular` struct variant, or accept `untrusted`'s
-  // friction, or drive approvals ourselves.
-  auto: { sandbox: 'workspace-write', approvalPolicy: 'on-request', approvalMode: 'auto' },
+  'read-only': {
+    sandbox: 'read-only',
+    approvalPolicy: 'never',
+    approvalMode: null,
+    approvalsReviewer: null,
+  },
+  'workspace-write': {
+    sandbox: 'workspace-write',
+    approvalPolicy: 'never',
+    approvalMode: null,
+    approvalsReviewer: null,
+  },
+  auto: {
+    sandbox: 'workspace-write',
+    approvalPolicy: 'on-request',
+    approvalMode: 'auto',
+    approvalsReviewer: 'auto_review',
+  },
 };
 
+/** The hosts npm, PyPI, crates.io and Go module installs touch, open on every `auto` task. */
+export const PUBLIC_REGISTRY_HOSTS = [
+  'registry.npmjs.org',
+  'registry.yarnpkg.com',
+  'pypi.org',
+  'files.pythonhosted.org',
+  'index.crates.io',
+  'static.crates.io',
+  'proxy.golang.org',
+  'sum.golang.org',
+];
+
 /**
- * Claude (claude CLI print mode; unanswered permission requests are denied,
- * so every mode is deny-by-default beyond what it grants):
- * - read-only:       edit/write tools disallowed; Bash runs inside the native
- *                    OS sandbox (see claudeTurnSettings) so reads and
- *                    inspection pipelines work while workspace writes are
- *                    blocked at the kernel level
+ * Claude (claude CLI print mode):
+ * - read-only:       edit/write tools disallowed; Bash runs inside the native OS sandbox
+ *                    (see claudeTurnSettings), so reads work while writes are blocked
  * - workspace-write: edits auto-accepted, everything else denied
- * - auto:            claude's own safe/unsafe judgment; unresolved asks denied
+ * - auto:            Claude's own classifier reviews actions, unsandboxed retries included; what
+ *                    still prompts goes to Coder's prompt tool, which denies and points at `escalate`
  */
 export const CLAUDE_PERMISSION_FLAGS: Record<Permission, string[]> = {
   'read-only': [
@@ -89,7 +103,7 @@ export const CLAUDE_PERMISSION_FLAGS: Record<Permission, string[]> = {
 };
 
 /**
- * Sidecars (`task ask`, approval review) answer ABOUT a task from its on-disk
+ * Sidecars (`task ask`) answer ABOUT a task from its on-disk
  * state, so their reach is narrower than a read-only task turn: the caller's
  * --allowedTools plus an --add-dir scope, nothing else. Bash is denied outright
  * rather than left to the sandbox. --allowedTools only *grants*. It never
@@ -136,6 +150,25 @@ function claudeAllowedDomains(hosts: string[]): string[] {
   });
 }
 
+/** What auto mode's classifier is told about where the task runs and what network use is routine. */
+export function claudeAutoMode(local: boolean, allowedNetworkHosts: string[]) {
+  return {
+    environment: [
+      '$defaults',
+      local
+        ? "Host containment: an automated coding task on the user's own developer machine with open internet; the working directory is the user's workspace, the task has its own scratch folder under the temp directory, and nothing else on the machine is the task's."
+        : 'Host containment: an automated coding task on a throwaway cloud machine with open internet and no neighbours; nothing on it is the user’s, it holds no cloud identity, and instance-metadata credentials are never task credentials.',
+      ...(allowedNetworkHosts.length
+        ? [`Trusted internal domains: ${allowedNetworkHosts.join(', ')}`]
+        : []),
+    ],
+    allow: [
+      '$defaults',
+      'Public Network Reads: fetching public web pages, documentation, search results and downloads, reading package registries, installing packages, and cloning or fetching public repositories into the workspace or the scratch folder are routine, whatever the host, as long as nothing leaves the machine beyond the request itself: no repository content, secrets, environment or user data in the request body, query or headers.',
+    ],
+  };
+}
+
 /**
  * Read-only Bash is enforced by Claude Code's native OS sandbox (Seatbelt on
  * macOS, bubblewrap + socat on Linux/WSL2) rather than a command allowlist: the
@@ -153,6 +186,12 @@ function claudeAllowedDomains(hosts: string[]): string[] {
  * denies writes there; other modes let them follow the mode like cwd.
  *
  * Without the OS sandbox the machine is the boundary, so Bash runs unprompted as it did sandboxed.
+ *
+ * The scratch folder is writable in the writing modes, and git writes work only there: the
+ * checkout's and the extra directories' `.git` are write-denied, and the rest of the temp directory
+ * is not writable by default (a deny there would also close the scratch inside it). In auto a
+ * command may still leave the sandbox when auto mode's classifier approves the retry, or when the
+ * approval hook finds it among the task's approved actions.
  */
 export function claudeTurnSettings(
   permissions: Permission,
@@ -160,8 +199,11 @@ export function claudeTurnSettings(
   allowedNetworkHosts: string[] = [],
   additionalDirectories: string[] = [],
   osSandbox = true,
+  scratch?: string,
+  local = true,
+  approvalHook?: string,
 ): string | null {
-  const grant = additionalDirectories.length ? { permissions: { additionalDirectories } } : {};
+  const directories = additionalDirectories;
   if (!osSandbox)
     return JSON.stringify({
       permissions: {
@@ -174,43 +216,59 @@ export function claudeTurnSettings(
       sandbox: { enabled: false },
     });
   if (permissions === 'read-only') {
+    const domains = claudeAllowedDomains(allowedNetworkHosts);
+
     return JSON.stringify({
-      ...grant,
+      ...(directories.length ? { permissions: { additionalDirectories: directories } } : {}),
       sandbox: {
         enabled: true,
         failIfUnavailable: true,
+        allowUnsandboxedCommands: false,
         autoAllowBashIfSandboxed: true,
-        network: { strictAllowlist: true },
+        // Configured hosts only: read-only gets no allowlist of its own.
+        network: { strictAllowlist: true, ...(domains.length ? { allowedDomains: domains } : {}) },
         filesystem: {
           denyWrite: [cwd, ...additionalDirectories],
         },
       },
     });
   }
-  // auto/workspace-write: sandboxed commands skip the permission prompt; only
-  // escapes hit the permission layer, which alone still gates safely.
-  // In auto mode, approvals.allowedNetworkHosts are reachable inside the
-  // sandbox with no escape or ask. The same hosts the Codex approval policy.
-  // auto-accepts network escalations for.
+  // auto/workspace-write: sandboxed commands skip the permission prompt; only escapes reach the
+  // permission layer. The allowlist is reachable with no review. In auto, other hosts Claude names
+  // on the command for its classifier, which also reviews unsandboxed retries; workspace-write refuses both.
+  const domains = [
+    ...claudeAllowedDomains(allowedNetworkHosts),
+    ...(permissions === 'auto' ? PUBLIC_REGISTRY_HOSTS : []),
+  ];
+
   return JSON.stringify({
-    ...grant,
+    ...(directories.length ? { permissions: { additionalDirectories: directories } } : {}),
     sandbox: {
       enabled: true,
+      allowUnsandboxedCommands: permissions === 'auto',
       autoAllowBashIfSandboxed: true,
-      // Headless, nobody answers the proxy's host prompt; refuse at once so the retry reaches the permission prompt tool.
       network: {
-        strictAllowlist: true,
-        ...(permissions === 'auto' && allowedNetworkHosts.length
-          ? {
-              allowedDomains: claudeAllowedDomains(allowedNetworkHosts),
-              // An allowlisted loopback host also lets commands serve on it (macOS only), so a local dev server runs sandboxed.
-              ...(allowedNetworkHosts.some(host => LOOPBACK_HOSTS.has(host))
-                ? { allowLocalBinding: true }
-                : {}),
-            }
+        ...(permissions === 'auto' ? {} : { strictAllowlist: true }),
+        ...(domains.length ? { allowedDomains: domains } : {}),
+        // An allowlisted loopback host also lets commands serve on it (macOS only), so a local dev server runs sandboxed.
+        ...(allowedNetworkHosts.some(host => LOOPBACK_HOSTS.has(host))
+          ? { allowLocalBinding: true }
           : {}),
       },
+      filesystem: {
+        ...(scratch ? { allowWrite: [scratch] } : {}),
+        denyWrite: [cwd, ...directories].map(directory => path.join(directory, '.git')),
+      },
     },
+    ...(permissions === 'auto' ? { autoMode: claudeAutoMode(local, allowedNetworkHosts) } : {}),
+    // Allows only a call that exactly matches an approved action; silent otherwise, so the classifier judges.
+    ...(permissions === 'auto' && approvalHook
+      ? {
+          hooks: {
+            PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: approvalHook }] }],
+          },
+        }
+      : {}),
   });
 }
 
@@ -255,6 +313,8 @@ const customModelSchema = z.strictObject({
   // responses->chat bridge; 'responses' passes straight through. `coder model`
   // detects this automatically; the field remains as a manual override.
   wireApi: z.optional(z.enum(['chat', 'responses'])),
+  // Tokens; Codex compacts at 90% of it.
+  contextWindow: z.optional(z.number().check(z.int(), z.positive())),
   disabled: z.optional(z.boolean()),
 });
 const aliasModelSchema = z.strictObject({
@@ -268,7 +328,6 @@ const toggleModelSchema = z.strictObject({
 });
 const modelEntrySchema = z.union([customModelSchema, aliasModelSchema, toggleModelSchema]);
 const approvalsSchema = z.strictObject({
-  escalationTimeoutMs: z.number().check(z.positive()),
   allowedNetworkHosts: z.array(z.string()),
 });
 const agentPresetSchema = z.enum(['read', 'write']);
@@ -323,7 +382,6 @@ export const mcpEntrySchema = z
     ),
   );
 const effectiveConfigSchema = z.strictObject({
-  conversationCompactTokens: z.number().check(z.int(), z.positive()),
   chain: z.array(engineSchema).check(z.minLength(1)),
   engines: z.partial(
     z.strictObject({
@@ -376,6 +434,30 @@ export type CoderConfig = z.infer<typeof effectiveConfigSchema>;
 /** Codex network access: the explicit `engines.codex.network` override, else `auto` only. */
 export function resolveCodexNetworkAccess(permissions: Permission, override?: boolean): boolean {
   return override ?? permissions === 'auto';
+}
+
+/** A Codex turn's network: its mode's, or, when that is off, on behind Codex's
+ * network proxy with only the given hosts allowed (subdomains too; loopback and IPs exact). */
+export function codexTurnNetwork(
+  permissions: Permission,
+  override: boolean | undefined,
+  hosts: string[],
+) {
+  const networkAccess = resolveCodexNetworkAccess(permissions, override);
+  if (networkAccess || !hosts.length) return { networkAccess, configOverrides: {} };
+  const domains = hosts.map(host => {
+    const name = host.replace(/^\[(.*)\](?::\d+)?$/, '$1').replace(/^([^:]+):\d+$/, '$1');
+
+    return [net.isIP(name) || LOOPBACK_HOSTS.has(name) ? name : `**.${name}`, 'allow'];
+  });
+
+  return {
+    networkAccess: true,
+    configOverrides: {
+      'features.network_proxy.enabled': true,
+      'features.network_proxy.domains': Object.fromEntries(domains),
+    },
+  };
 }
 
 const HOST_NAME = /^(?!-)[a-z0-9-]{1,63}(?<!-)(?:\.(?!-)[a-z0-9-]{1,63}(?<!-))*(?::\d{1,5})?$/i;
@@ -611,44 +693,48 @@ export function endpointCandidates(baseUrl: string, route: string): string[] {
   return [`${base}/${route}`, `${base}/v1/${route}`];
 }
 
-/** Codex-engine overrides for one custom model: model id, provider id, config. */
+/** Provider headers that tell the chat bridge where a custom model's thread goes. */
+export const BRIDGE_HEADERS = {
+  baseUrl: 'x-coder-base-url',
+  wireApi: 'x-coder-wire-api',
+};
+
+/** Codex-engine overrides for one custom model: provider id and config. */
 export interface CustomModelResolution {
-  model: string;
   modelProvider: string;
   configOverrides: Record<string, unknown>;
 }
 
 /**
- * Resolve a custom (user-configured, OpenAI-compatible) model alias to codex
- * engine overrides, or null when the alias is not a custom model. The provider
- * is injected per-thread via app-server config overrides, so the user's
- * ~/.codex/config.toml is never touched.
+ * Codex engine overrides for a custom (user-configured, OpenAI-compatible)
+ * model alias, served through the app-server's bridge. The provider is
+ * injected per-thread, with the upstream and key as its headers, so neither
+ * the bridge nor the user's ~/.codex/config.toml holds them.
  */
 export function resolveCustomModel(
-  config: CoderConfig,
-  alias?: string | null,
-  // When the entry speaks chat completions, codex talks to the local
-  // responses->chat bridge instead of the endpoint; the bridge injects the API
-  // key itself, so no env_key is configured on the provider.
-  bridge?: { url: string },
-): CustomModelResolution | null {
-  const entry = alias ? config.models?.[alias] : undefined;
-  if (!alias || !entry || !isEndpointModel(entry)) {
-    return null;
-  }
+  alias: string,
+  entry: CustomModelConfig,
+  bridgeUrl: string,
+): CustomModelResolution {
+  const key = entry.envKey ? process.env[entry.envKey] : undefined;
+  if (entry.envKey && !key) throw new Error(`Missing environment variable: \`${entry.envKey}\`.`);
   const providerId = `coder-${alias}`;
   return {
-    model: entry.model,
     modelProvider: providerId,
     configOverrides: {
       [`model_providers.${providerId}`]: {
         name: alias,
-        base_url: bridge?.url ?? normalizeBaseUrl(entry.baseUrl),
-        ...(entry.envKey && !bridge ? { env_key: entry.envKey } : {}),
+        base_url: `${bridgeUrl}/v1`,
         // codex itself always speaks the Responses API (>= 0.144 dropped
         // 'chat'); chat-only endpoints are translated by the bridge.
         wire_api: 'responses',
+        http_headers: {
+          [BRIDGE_HEADERS.baseUrl]: entry.baseUrl,
+          [BRIDGE_HEADERS.wireApi]: entry.wireApi ?? 'chat',
+          ...(key ? { authorization: `Bearer ${key}` } : {}),
+        },
       },
+      ...(entry.contextWindow ? { model_context_window: entry.contextWindow } : {}),
     },
   };
 }

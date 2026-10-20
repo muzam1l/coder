@@ -24,6 +24,7 @@ import { Link } from '@wular/pnext/link';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { usePaged } from '@/utils/paged';
 import { useZone } from '@/app/zone';
+import { pendingApproval } from '@/app/dash/[org]/tasks/[id]/task-actions';
 import type {
   IntegrationInfo,
   TaskCounts,
@@ -36,7 +37,6 @@ import { Button } from '@/comps/ui/button';
 import { Card, Empty } from '@/comps/ui/card';
 import { Badge, Id } from '@/comps/ui/badge';
 import { ConfirmDialog } from '@/comps/ui/confirm';
-import { approvalParts } from '@/app/dash/[org]/tasks/[id]/task-actions';
 import { Status } from './status';
 import { Icon } from '@/comps/ui/icon';
 import { Filter, type Facet } from '@/comps/ui/filter';
@@ -47,7 +47,7 @@ import {
   withAdded,
   type DeltaCursor,
 } from '@/app/dash/[org]/tasks/list/task';
-import { taskTitle } from '@/app/dash/[org]/tasks/list/task';
+import { taskModel, taskTitle } from '@/app/dash/[org]/tasks/list/task';
 import { LIST_PAGE } from '@/utils/paged';
 import { Search, Toolbar, queryOf, useFilters } from '@/comps/ui/toolbar';
 import { Tail } from '@/comps/ui/tail';
@@ -153,7 +153,10 @@ function TaskRowView({
         </span>
       </td>
       <td>
-        <Status status={task.status} />
+        <Status status={task.status} approvals={task.approvals} />
+      </td>
+      <td class="model" title={taskModel(task)}>
+        {taskModel(task)}
       </td>
       <td class="when" title={formatDate(task.lastActivityAt, tz)}>
         {ago(task.lastActivityAt, now, tz)}
@@ -178,15 +181,12 @@ type RowAction = 'cancel' | 'archive' | 'delete' | 'approve';
 function RowActions({ task, onDone }: { task: TaskRow; onDone: (what: RowAction) => void }) {
   const action = useAction();
   const [confirming, setConfirming] = useState(false);
+  const approval = pendingApproval(task);
   const act = (what: RowAction, decision?: 'accept' | 'decline') =>
     void action
       .run(what, () =>
         what === 'approve'
-          ? client.tasks.approve(
-              task.task.id,
-              approvalParts(task.approval).id ?? '',
-              decision ?? 'decline',
-            )
+          ? client.tasks.approve(task.task.id, approval?.id ?? '', decision ?? 'decline')
           : what === 'delete'
             ? client.tasks.delete(task.task.id)
             : client.tasks[what](task.task.id),
@@ -198,10 +198,8 @@ function RowActions({ task, onDone }: { task: TaskRow; onDone: (what: RowAction)
   return (
     <>
       <Menu summary={<Icon d={iDots} />} button="icon" label="Task actions" align="right">
-        {task.approval ? (
-          <MenuItem title="Approve" onClick={() => act('approve', 'accept')} />
-        ) : null}
-        {task.approval ? <MenuItem title="Deny" onClick={() => act('approve', 'decline')} /> : null}
+        {approval ? <MenuItem title="Approve" onClick={() => act('approve', 'accept')} /> : null}
+        {approval ? <MenuItem title="Deny" onClick={() => act('approve', 'decline')} /> : null}
         {taskActive(task) ? <MenuItem title="Stop" onClick={() => act('cancel')} /> : null}
         {task.archivedAt ? null : <MenuItem title="Archive" onClick={() => act('archive')} />}
         <MenuItem title="Delete" danger onClick={() => setConfirming(true)} />
@@ -430,6 +428,7 @@ export function TasksList({
             ...was,
             status: event.status,
             approval: event.approval ?? undefined,
+            approvals: event.approvals ?? undefined,
             archivedAt: event.archivedAt,
             startedAt: event.startedAt,
             finishedAt: event.finishedAt,
@@ -465,6 +464,7 @@ export function TasksList({
             agent: row.task.agent,
             status: row.status,
             approval: row.approval,
+            approvals: row.approvals,
             archivedAt: row.archivedAt,
             createdAt: row.createdAt,
             startedAt: row.startedAt,
@@ -511,6 +511,7 @@ export function TasksList({
                 <tr>
                   <th>Task</th>
                   <th>Status</th>
+                  <th class="model">Model</th>
                   <th>Last activity</th>
                   <th class="num">Duration</th>
                   <th>Source</th>
@@ -525,7 +526,7 @@ export function TasksList({
                     back={back}
                     scoped={Boolean(agent)}
                     tz={tz}
-                    now={now}
+                    now={Date.now()}
                     onDone={what => {
                       // An archived row leaves every view but the archive; a stopped one just refreshes.
                       if (what === 'delete' || (what === 'archive' && values.status !== 'archived'))

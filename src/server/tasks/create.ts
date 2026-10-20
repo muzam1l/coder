@@ -6,6 +6,7 @@ import { getApps } from '../store';
 import { dashPath, sessionSlug } from '../auth/account';
 /** Tasks started from the dashboard, the CLI, or a schedule: a prompt or a flow, optionally on a workspace repo. */
 import { randomBytes } from 'node:crypto';
+import path from 'node:path';
 
 import { effectiveSettings } from '../../agent/definition';
 import { declaredTools, matchAgent } from '../../agent/match';
@@ -31,6 +32,8 @@ import { credentialFix, resolveEngine } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { dispatchTokens, installationToken } from './context';
 import { chooseRunner } from '../runners';
+import { CoderError, ignoredAddDirs, resolveAddDirs } from '../../core/dispatch';
+import { taskWarnings } from './logs';
 
 export interface NewTask {
   cwd?: string;
@@ -51,6 +54,11 @@ export interface NewTask {
   mcp?: string[];
   /** Narrows the connections the task is granted. */
   connections?: string[];
+  name?: string;
+  /** Standing instructions appended to the task's system prompt. */
+  appendSystem?: string;
+  /** Absolute directories beyond cwd, for runners on the caller's machine. */
+  addDirs?: string[];
 }
 
 /** A request the server refuses; `fix` is the one-click link that resolves it. */
@@ -126,6 +134,19 @@ export function check(input: NewTask): void {
     throw new TaskInputError('outputSchema must be an object');
   if (input.args !== undefined && (typeof input.args !== 'object' || Array.isArray(input.args)))
     throw new TaskInputError('args must be an object');
+  if (input.name !== undefined && (typeof input.name !== 'string' || input.name.length > 200))
+    throw new TaskInputError('name must be text of at most 200 characters');
+  if (
+    input.appendSystem !== undefined &&
+    (typeof input.appendSystem !== 'string' || input.appendSystem.length > MAX_PROMPT_CHARS)
+  )
+    throw new TaskInputError('appendSystem must be text of at most 64 KB');
+  if (
+    input.addDirs !== undefined &&
+    (!Array.isArray(input.addDirs) ||
+      !input.addDirs.every(dir => typeof dir === 'string' && path.isAbsolute(dir)))
+  )
+    throw new TaskInputError('addDirs must list absolute paths');
 }
 
 /** The first install of the workspace that reaches `repo`, with a token for it. */
@@ -245,8 +266,18 @@ export async function createTask(
 
   const id = `${now.toString(36)}-${randomBytes(4).toString('hex')}`;
   const repo = input.repo ? await repoEvent(ctx, id, input, requester) : undefined;
+  const ignored = input.addDirs?.length ? ignoredAddDirs(chosen.runner) : undefined;
+  // A local server shares the caller's machine, so missing directories fail here rather than on the runner.
+  if (ctx.local && input.addDirs?.length && !ignored)
+    try {
+      resolveAddDirs(cwd ?? ctx.local.cwd, input.addDirs);
+    } catch (error) {
+      if (error instanceof CoderError) throw new TaskInputError(error.message);
+      throw error;
+    }
   const task: AgentTask = {
     id,
+    ...(input.name ? { name: input.name } : {}),
     source,
     agent: agent.id,
     flow: input.flow ?? 'default',
@@ -257,6 +288,8 @@ export async function createTask(
     ...(input.prompt ? { prompt: input.prompt } : {}),
     ...(input.args ? { args: input.args } : {}),
     ...(input.mcp?.length ? { mcp: input.mcp } : {}),
+    ...(input.appendSystem ? { appendSystem: input.appendSystem } : {}),
+    ...(input.addDirs?.length && !ignored ? { addDirs: input.addDirs } : {}),
     definition: agent.definition,
     engineChain: chain,
     engineCredentials: credentials,
@@ -283,6 +316,7 @@ export async function createTask(
   };
   if (ctx.local && chosen.runner === 'local' && !chosen.runnerId) return runLocalTask(ctx, task);
   await ctx.queue.enqueue(ctx.organizationId, task, now, undefined, ctx.config.maxQueued ?? 1000);
+  if (ignored) await taskWarnings(ctx, id, [ignored]);
   return { task, status: 'queued', attempts: 0, createdAt: now, updatedAt: now };
 }
 

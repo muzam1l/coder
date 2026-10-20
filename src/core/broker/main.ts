@@ -27,6 +27,7 @@ import {
   ProtocolError,
 } from '../engines/codex/app-server';
 import { codexAuthFingerprint, errorText } from '../engines/codex/errors';
+import { startChatBridge } from '../engines/codex/chat-bridge';
 import { parseBrokerEndpoint } from './endpoint';
 import { clearBrokerSession, loadBrokerSession } from './session';
 import { connectionEnvironmentKey, redactConnectionSecrets } from '../connections';
@@ -62,6 +63,13 @@ function buildStreamThreadIds(
     threadIds.add(result.reviewThreadId);
   }
   return threadIds;
+}
+
+/** What Codex fixes when it loads a thread: every thread/start or thread/resume field but the ids. */
+function threadSettings(params: Record<string, any> = {}) {
+  const { threadId, serviceName, ephemeral, ...settings } = params;
+
+  return JSON.stringify(settings);
 }
 
 function buildJsonRpcError(code: number, message: string, data?: unknown) {
@@ -145,6 +153,10 @@ async function main() {
   let activeStreamSocket: Socket | null = null;
   let activeStreamThreadIds: Set<string> | null = null;
   const sockets = new Set<Socket>();
+  // Each loaded thread's settings, per app-server.
+  const loadedThreads = new WeakMap<AppClient, Map<string, string>>();
+  // Custom-model keys pass through as provider headers; broker.log never shows them.
+  const headerSecrets = new Set<string>();
   // Server-request id -> socket that must answer it, and the app-server that asked.
   const pendingServerRequests = new Map<
     JsonRpcMessage['id'],
@@ -152,7 +164,9 @@ async function main() {
   >();
 
   function log(line: string) {
-    process.stderr.write(`[coder broker] ${JSON.parse(redactConnectionSecrets(line))}\n`);
+    process.stderr.write(
+      `[coder broker] ${JSON.parse(redactConnectionSecrets(line, [...headerSecrets]))}\n`,
+    );
   }
 
   function failPendingServerRequests(socket: Socket) {
@@ -210,7 +224,11 @@ async function main() {
 
   async function startAppClient(): Promise<AppClient> {
     const auth = codexAuthFingerprint(process.env, authState);
-    const connecting = CodexAppServerClient.connect(cwd, { disableBroker: true, networkAccess });
+    const connecting = CodexAppServerClient.connect(cwd, {
+      disableBroker: true,
+      networkAccess,
+      bridgeUrl: bridge.url,
+    });
     let timer: NodeJS.Timeout | undefined;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(
@@ -311,12 +329,15 @@ async function main() {
       socket.end();
     }
     await appClient?.close().catch(() => {});
+    await bridge.close();
     await closed;
     if (pidFile && fs.existsSync(pidFile)) {
       fs.unlinkSync(pidFile);
     }
   }
 
+  // Outlives app-server recycles, so threads loaded on any of them reach a live port.
+  const bridge = await startChatBridge();
   appClient = await startAppClient();
 
   // Every live task holds a socket for its turn, so no sockets means no live tasks.
@@ -382,6 +403,7 @@ async function main() {
             id: message.id,
             result: {
               userAgent: 'coder-broker',
+              bridgeUrl: bridge.url,
             },
           });
           continue;
@@ -400,6 +422,10 @@ async function main() {
         if (message.id === undefined || !message.method) {
           continue;
         }
+
+        for (const [key, value] of Object.entries<any>(message.params?.config ?? {}))
+          if (key.startsWith('model_providers.') && value?.http_headers?.authorization)
+            headerSecrets.add(String(value.http_headers.authorization).replace(/^Bearer /, ''));
 
         const busy =
           (activeRequestSocket && activeRequestSocket !== socket) ||
@@ -460,7 +486,20 @@ async function main() {
 
         try {
           const client = await ensureAppClient(socket);
+          const loaded = loadedThreads.get(client) ?? new Map<string, string>();
+          loadedThreads.set(client, loaded);
+          const settings =
+            message.method === 'thread/start' || message.method === 'thread/resume'
+              ? threadSettings(message.params)
+              : null;
+          // A loaded thread keeps its first settings while this connection subscribes; unsubscribed, a resume reloads it with the new ones.
+          if (
+            message.method === 'thread/resume' &&
+            loaded.get(message.params?.threadId) !== settings
+          )
+            await client.request('thread/unsubscribe', { threadId: message.params?.threadId });
           const result = await client.request(message.method, message.params ?? {});
+          if (settings && result?.thread?.id) loaded.set(result.thread.id, settings);
           send(socket, { id: message.id, result });
           if (isStreaming) {
             activeStreamThreadIds = buildStreamThreadIds(

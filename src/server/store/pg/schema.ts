@@ -22,6 +22,7 @@ import type {
   TaskContext,
   TaskSource,
 } from '../../../agent/types';
+import type { Approval } from '../../../core/types';
 import type { AgentRecord, TaskHistory, TaskLogLine, TaskOutcome, TaskState } from '../types';
 
 /** Everything Coder owns lives in its own Postgres schema, so a database can be shared. */
@@ -136,7 +137,10 @@ export const integrationApp = pgTable(
   },
   t => [
     uniqueIndex('integration_app_organizationId_key_unique').on(t.organizationId, t.key),
-    uniqueIndex('integration_app_integration_platformAppId_unique').on(t.integration, t.platformAppId),
+    uniqueIndex('integration_app_integration_platformAppId_unique').on(
+      t.integration,
+      t.platformAppId,
+    ),
   ],
 );
 
@@ -183,9 +187,11 @@ export const engineCredential = pgTable(
   },
   t => [
     uniqueIndex('engine_credential_workspace_label_unique')
-      .on(t.organizationId, t.label).where(sql`${t.owner} is null`),
+      .on(t.organizationId, t.label)
+      .where(sql`${t.owner} is null`),
     uniqueIndex('engine_credential_owner_label_unique')
-      .on(t.organizationId, t.owner, t.label).where(sql`${t.owner} is not null`),
+      .on(t.organizationId, t.owner, t.label)
+      .where(sql`${t.owner} is not null`),
   ],
 );
 
@@ -249,11 +255,15 @@ export const task = pgTable(
     logSeq: integer(),
     logBytes: integer(),
     archivedAt: at(),
-    approval: jsonb(),
+    approval: jsonb().$type<Approval>(),
     answer: jsonb(),
     attempts: integer().notNull().default(0),
-    inboxSeq: integer().notNull().default(sql`'-1'`),
-    inboxAck: integer().notNull().default(sql`'-1'`),
+    inboxSeq: integer()
+      .notNull()
+      .default(sql`'-1'`),
+    inboxAck: integer()
+      .notNull()
+      .default(sql`'-1'`),
     generation: integer().notNull().default(0),
     lockedAt: at(),
     startedAt: at(),

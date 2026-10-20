@@ -1,10 +1,8 @@
 /**
- * Loopback bridge for custom models, alive for the duration of one turn.
- * Codex (>= 0.144) only speaks the OpenAI Responses API, and resolves a
- * provider env_key in its own process env. Under the shared broker,
- * is frozen from whenever the broker was first spawned. So every custom model
- * goes through the bridge: it runs in the worker (whose env is the caller's,
- * doppler and friends included) and injects the API key itself.
+ * Loopback bridge for custom models, alive as long as the Codex app-server
+ * whose threads point at it. Reads no config and holds no secret: each
+ * request names its upstream in the thread's provider headers, and the key
+ * arrives as its authorization header, forwarded as-is.
  *
  * Chat endpoints (Ollama, llama.cpp, vLLM, OpenRouter, ...) get a translated
  * /chat/completions request with the reply streamed back as Responses SSE
@@ -12,14 +10,13 @@
  */
 import crypto from 'node:crypto';
 import http from 'node:http';
-import process from 'node:process';
 
-import { endpointCandidates } from '../../config';
+import { BRIDGE_HEADERS, endpointCandidates } from '../../config';
 import type { CustomModelConfig } from '../../types';
 import { jsonReplyPrompt } from '../../task/context/prompts';
 
 export interface ChatBridge {
-  /** Loopback base URL to hand codex as the provider base_url (ends in /v1). */
+  /** Loopback base URL; a custom model's provider base_url is `<url>/v1`. */
   url: string;
   close: () => Promise<void>;
 }
@@ -29,6 +26,28 @@ interface ChatMessage {
   content: string | null;
   tool_calls?: { id: string; type: 'function'; function: { name: string; arguments: string } }[];
   tool_call_id?: string;
+}
+
+/** Chat has no namespaces: a namespaced tool is the function `<namespace>__<tool>`. */
+const flatName = (item: { name: string; namespace?: string }) =>
+  item.namespace ? `${item.namespace}__${item.name}` : item.name;
+
+/** Every function the request offers, namespaced ones flattened, by its chat name. */
+function requestFunctions(body: any): Map<string, { name: string; namespace?: string; tool: any }> {
+  const functions = new Map<string, { name: string; namespace?: string; tool: any }>();
+  for (const tool of Array.isArray(body.tools) ? body.tools : []) {
+    if (tool?.type === 'function') functions.set(tool.name, { name: tool.name, tool });
+    if (tool?.type === 'namespace' && Array.isArray(tool.tools))
+      for (const inner of tool.tools)
+        if (inner?.type === 'function')
+          functions.set(flatName({ name: inner.name, namespace: tool.name }), {
+            name: inner.name,
+            namespace: tool.name,
+            tool: inner,
+          });
+  }
+
+  return functions;
 }
 
 /** Responses-request input items -> chat messages. */
@@ -51,7 +70,7 @@ function toChatMessages(body: any): ChatMessage[] {
         const call = {
           id: item.call_id,
           type: 'function' as const,
-          function: { name: item.name, arguments: item.arguments ?? '{}' },
+          function: { name: flatName(item), arguments: item.arguments ?? '{}' },
         };
         // Merge consecutive calls into one assistant message (parallel calls).
         const last = messages.at(-1);
@@ -81,16 +100,14 @@ function toChatMessages(body: any): ChatMessage[] {
 
 /** Full Responses request body -> chat completions request body. */
 function toChatRequest(body: any): Record<string, unknown> {
-  const tools = (Array.isArray(body.tools) ? body.tools : [])
-    .filter((tool: any) => tool?.type === 'function')
-    .map((tool: any) => ({
-      type: 'function',
-      function: {
-        name: tool.name,
-        description: tool.description ?? '',
-        parameters: tool.parameters ?? { type: 'object', properties: {} },
-      },
-    }));
+  const tools = [...requestFunctions(body)].map(([name, { tool }]) => ({
+    type: 'function',
+    function: {
+      name,
+      description: tool.description ?? '',
+      parameters: tool.parameters ?? { type: 'object', properties: {} },
+    },
+  }));
   const schema = body.text?.format;
   return {
     model: body.model,
@@ -120,6 +137,7 @@ function toChatRequest(body: any): Record<string, unknown> {
 class StreamTranslator {
   private readonly send: (event: Record<string, unknown>) => void;
   private readonly model: string;
+  private readonly functions: ReturnType<typeof requestFunctions>;
   private readonly responseId = `resp_bridge_${crypto.randomUUID()}`;
   private text = '';
   private textOpen = false;
@@ -127,8 +145,13 @@ class StreamTranslator {
   private usage: any = null;
   private buffer = '';
 
-  constructor(model: string, send: (event: Record<string, unknown>) => void) {
+  constructor(
+    model: string,
+    functions: ReturnType<typeof requestFunctions>,
+    send: (event: Record<string, unknown>) => void,
+  ) {
     this.model = model;
+    this.functions = functions;
     this.send = send;
     this.send({
       type: 'response.created',
@@ -219,11 +242,13 @@ class StreamTranslator {
     }
     let index = output.length;
     for (const call of this.toolCalls.values()) {
+      const target = this.functions.get(call.name);
       const item = {
         type: 'function_call',
         id: `fc_bridge_${index}`,
         call_id: call.id || `call_bridge_${index}`,
-        name: call.name,
+        name: target?.name ?? call.name,
+        ...(target?.namespace ? { namespace: target.namespace } : {}),
         arguments: call.args || '{}',
         status: 'completed',
       };
@@ -256,55 +281,60 @@ class StreamTranslator {
 }
 
 /**
- * Start a bridge for one custom model. Listens on an ephemeral loopback port;
- * accepts POSTs to any path ending in /responses (providers and codex versions
- * vary the prefix) and rejects everything else.
+ * Start the bridge for one app-server. Listens on an ephemeral loopback port;
+ * accepts Responses POSTs for any upstream its callers name.
  */
-export async function startChatBridge(
-  entry: CustomModelConfig,
-  wireApi: 'chat' | 'responses' = 'chat',
-): Promise<ChatBridge> {
+export async function startChatBridge(): Promise<ChatBridge> {
   // A bare-host baseUrl may serve the API under /v1 (endpointCandidates yields
   // both); a 404 on one candidate falls through to the next, and the first
-  // candidate that responds with anything else is locked in for the turn.
-  const passthrough = wireApi === 'responses';
-  const targets = endpointCandidates(entry.baseUrl, passthrough ? 'responses' : 'chat/completions');
-  let resolvedTarget: string | null = null;
-  let schemaSupported = true;
-  const apiKey = entry.envKey ? process.env[entry.envKey] : undefined;
+  // candidate that responds with anything else is locked in for the upstream.
+  const routes = new Map<string, { resolvedTarget: string | null; schemaSupported: boolean }>();
 
-  async function postUpstream(payload: string): Promise<Response> {
-    const candidates = resolvedTarget ? [resolvedTarget] : targets;
-    let last: Response | null = null;
-    for (const url of candidates) {
-      last = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
-        },
-        body: payload,
-      });
-      if (last.status !== 404) {
-        resolvedTarget = url;
-        return last;
+  async function forward(
+    entry: Pick<CustomModelConfig, 'baseUrl' | 'wireApi'>,
+    request: any,
+    authorization?: string,
+  ): Promise<Response> {
+    const passthrough = entry.wireApi === 'responses';
+    const targets = endpointCandidates(
+      entry.baseUrl,
+      passthrough ? 'responses' : 'chat/completions',
+    );
+    const key = `${entry.wireApi} ${entry.baseUrl}`;
+    const route = routes.get(key) ?? { resolvedTarget: null, schemaSupported: true };
+    routes.set(key, route);
+
+    async function postUpstream(payload: string): Promise<Response> {
+      const candidates = route.resolvedTarget ? [route.resolvedTarget] : targets;
+      let last: Response | null = null;
+      for (const url of candidates) {
+        last = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            ...(authorization ? { authorization } : {}),
+          },
+          body: payload,
+        });
+        if (last.status !== 404) {
+          route.resolvedTarget = url;
+          return last;
+        }
       }
+      return last!;
     }
-    return last!;
-  }
 
-  async function postStructured(parsed: any): Promise<Response> {
-    const format = parsed.text?.format;
-    const native = passthrough ? parsed : toChatRequest(parsed);
+    const format = request.text?.format;
+    const native = passthrough ? request : toChatRequest(request);
     const fallback = () => {
       const instructions = jsonReplyPrompt(format.schema);
       if (passthrough) {
-        const { format: ignored, ...text } = parsed.text;
+        const { format: ignored, ...text } = request.text;
         return {
-          ...parsed,
+          ...request,
           text,
           input: [
-            ...(parsed.input ?? []),
+            ...(request.input ?? []),
             {
               type: 'message',
               role: 'user',
@@ -313,14 +343,14 @@ export async function startChatBridge(
           ],
         };
       }
-      const { response_format: ignored, ...request } = native;
+      const { response_format: ignored, ...chat } = native;
       return {
-        ...request,
-        messages: [...toChatMessages(parsed), { role: 'user', content: instructions }],
+        ...chat,
+        messages: [...toChatMessages(request), { role: 'user', content: instructions }],
       };
     };
     if (format?.type !== 'json_schema') return postUpstream(JSON.stringify(native));
-    if (!schemaSupported) return postUpstream(JSON.stringify(fallback()));
+    if (!route.schemaSupported) return postUpstream(JSON.stringify(fallback()));
     const response = await postUpstream(JSON.stringify(native));
     if (![400, 422, 501].includes(response.status)) return response;
     const detail = await response.clone().text();
@@ -332,30 +362,36 @@ export async function startChatBridge(
       !/(not supported|unsupported|unknown parameter|unrecognized|not available)/i.test(detail)
     )
       return response;
-    schemaSupported = false;
+    route.schemaSupported = false;
     await response.body?.cancel();
     return postUpstream(JSON.stringify(fallback()));
   }
 
   // Loopback is not an auth boundary: any local process could otherwise spend
-  // the upstream key during the turn. The bridge URL embeds a per-turn secret
-  // path segment and requests without it are rejected.
+  // the upstream key. The bridge URL embeds a per-bridge secret path segment
+  // and requests without it are rejected.
   const token = crypto.randomBytes(16).toString('hex');
 
   const server = http.createServer((req, res) => {
+    const header = (name: string) => [req.headers[name]].flat()[0];
+    const baseUrl = header(BRIDGE_HEADERS.baseUrl);
+    const wireApi = header(BRIDGE_HEADERS.wireApi) === 'responses' ? 'responses' : 'chat';
     if (
       req.method !== 'POST' ||
-      !req.url?.startsWith(`/${token}/`) ||
-      !req.url.replace(/\/+$/, '').endsWith('/responses')
+      !new RegExp(`^/${token}/v1/responses/*$`).test(req.url ?? '') ||
+      !baseUrl
     ) {
       res.writeHead(404, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
-          error: { message: 'coder chat bridge: only POST /responses is supported' },
+          error: {
+            message: `coder chat bridge: only POST /v1/responses with ${BRIDGE_HEADERS.baseUrl} is supported`,
+          },
         }),
       );
       return;
     }
+    const entry = { baseUrl, wireApi } as const;
     let body = '';
     req.on('data', chunk => (body += chunk));
     req.on('end', async () => {
@@ -368,10 +404,9 @@ export async function startChatBridge(
         return;
       }
       try {
-        // Passthrough (native Responses endpoint): forward verbatim, relay the
-        // reply bytes and status as-is. The bridge only adds auth.
-        if (passthrough) {
-          const upstream = await postStructured(parsed);
+        const upstream = await forward(entry, parsed, req.headers.authorization);
+        // Passthrough (native Responses endpoint): relay the reply bytes and status as-is.
+        if (entry.wireApi === 'responses') {
           res.writeHead(upstream.status, {
             'content-type': upstream.headers.get('content-type') ?? 'application/json',
             'cache-control': 'no-store',
@@ -384,7 +419,6 @@ export async function startChatBridge(
           res.end();
           return;
         }
-        const upstream = await postStructured(parsed);
         if (!upstream.ok || !upstream.body) {
           const detail = await upstream.text().catch(() => '');
           res.writeHead(upstream.status, { 'content-type': 'application/json' });
@@ -394,7 +428,7 @@ export async function startChatBridge(
           return;
         }
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-store' });
-        const translator = new StreamTranslator(parsed.model, event =>
+        const translator = new StreamTranslator(parsed.model, requestFunctions(parsed), event =>
           res.write(`data: ${JSON.stringify(event)}\n\n`),
         );
         const decoder = new TextDecoder();
@@ -415,7 +449,7 @@ export async function startChatBridge(
   const address = server.address();
   const port = typeof address === 'object' && address ? address.port : 0;
   return {
-    url: `http://127.0.0.1:${port}/${token}/v1`,
+    url: `http://127.0.0.1:${port}/${token}`,
     close: () =>
       new Promise<void>(resolve => {
         server.close(() => resolve());

@@ -3,10 +3,6 @@
   height: 0;
   margin-bottom: -20px;
 }
-.page .head.stuck,
-.page .hero.stuck {
-  padding-top: 10px;
-}
 .stuck {
   border-bottom: 1px solid var(--line2);
   align-items: center;

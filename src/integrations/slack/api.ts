@@ -1,4 +1,4 @@
-import type { AgentEvent } from '../types';
+import type { PlatformEvent } from '../types';
 
 export function slackFetch(request: typeof fetch, installation?: string): typeof fetch {
   const users = new Map<string, Promise<Response>>();
@@ -37,7 +37,7 @@ export function slackFetch(request: typeof fetch, installation?: string): typeof
 }
 
 export async function canWriteSlack(
-  event: AgentEvent,
+  event: PlatformEvent,
   token: string,
   request: typeof fetch = fetch,
 ): Promise<boolean> {

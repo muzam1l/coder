@@ -1,5 +1,5 @@
-/** GitHub REST: request headers for Coder's own calls, and repository reads through the Chat SDK adapter's Octokit. */
-import type { AgentEvent, PullRequestSummary } from '../types';
+/** GitHub REST: request headers for direct API calls, and repository reads through the Chat SDK adapter's Octokit. */
+import type { PlatformEvent, PullRequestSummary } from '../types';
 
 export const API = 'https://api.github.com';
 
@@ -206,7 +206,7 @@ export async function listGithubPullRequests(
 export async function githubRepository(
   repo: string,
   token: string,
-): Promise<NonNullable<AgentEvent['repo']>> {
+): Promise<NonNullable<PlatformEvent['repo']>> {
   const { data } = await (await octokit(token)).repos.get(split(repo));
   return {
     owner: data.owner.login,

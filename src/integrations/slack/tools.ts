@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentEvent, McpServerSpec, Preset } from '../types';
+import type { PlatformEvent, ToolServer, Preset } from '../types';
 
 export const SLACK_PRESETS: Record<Preset, string[]> = {
   read: ['read'],
@@ -11,9 +11,9 @@ export const SLACK_MCP_SERVER_INSTALL =
 
 export function slackToolServer(
   tools: string[],
-  _event: AgentEvent | undefined,
+  _event: PlatformEvent | undefined,
   token: string,
-): McpServerSpec & { readOnly?: boolean } {
+): ToolServer {
   const readOnly = !tools.includes('write');
   const cache = `/tmp/coder-slack-${randomUUID()}`;
 

@@ -23,7 +23,6 @@ import { INTEGRATIONS } from '../integrations';
 import { tokenEnvName } from '../agent/mcp';
 import type { AgentTask } from '../agent/types';
 import type { EngineCredential } from '../server/store/types';
-import { answerApproval } from '../core/approvals';
 import {
   loadConfig,
   MACHINE_SANDBOX_ENV,
@@ -39,10 +38,15 @@ import {
   withTaskAdmission,
   readTurnResults,
   hasQueuedSteers,
+  claimSteers,
+  isPidAlive,
   appendTaskLog,
   watchTask,
+  writeTask,
 } from '../core/state';
+import { listApprovals } from '../core/approvals';
 import {
+  answerTaskApproval,
   askTask,
   heldConnections,
   steerTask,
@@ -141,8 +145,18 @@ export async function checkout(
   signal?: AbortSignal,
 ): Promise<string> {
   const repo = task.event?.repo;
-  if (!repo) return root;
-  const cwd = path.join(root, 'repo');
+  const cwd = path.join(root, 'work');
+  if (!repo) {
+    await fs.mkdir(cwd, { recursive: true });
+    return cwd;
+  }
+  // A later turn keeps the checkout as the earlier turns left it; a snapshot's clone still moves to the default branch.
+  const present = (file: string) => fs.stat(file).then(Boolean, () => false);
+  if (
+    (await present(path.join(cwd, '.git'))) &&
+    (cache || (await present(path.join(root, '.runner-task.json'))))
+  )
+    return cwd;
   if (!validRef(repo.defaultBranch)) throw new Error('Invalid repository ref');
   const clone = new URL(repo.cloneUrl);
   const hosts = INTEGRATIONS[task.event!.integration]?.repos?.cloneHosts ?? [];
@@ -199,11 +213,8 @@ export async function checkout(
       return cwd;
     }
     // A sandbox snapshot already holds the clone.
-    const cloned = await fs
-      .stat(path.join(cwd, '.git'))
-      .then(() => true)
-      .catch(() => false);
-    if (!cloned) await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
+    if (!(await present(path.join(cwd, '.git'))))
+      await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
     await exec(
       'git',
       ['-C', cwd, 'fetch', '--depth', '50', 'origin', repo.defaultBranch],
@@ -474,12 +485,29 @@ export async function applyTaskMessage(
         command,
       });
       return result.finalMessage ?? result.error?.message ?? '';
-    } else if (entry.kind === 'approve')
-      answerApproval(
-        resolveTaskDir(cwd, task.id),
-        String(value?.approvalId ?? value?.id ?? ''),
-        value?.decision === 'deny' || value?.decision === 'decline' ? 'decline' : 'accept',
-      );
+    } else if (entry.kind === 'approve') {
+      const approvalId = String(value?.approvalId ?? value?.id ?? '');
+      try {
+        await answerTaskApproval(
+          cwd,
+          task,
+          approvalId,
+          value?.decision === 'deny' || value?.decision === 'decline' ? 'decline' : 'accept',
+          {
+            ...(typeof value?.reason === 'string' ? { reason: value.reason } : {}),
+            command,
+            resolveConnections,
+          },
+        );
+      } catch (error) {
+        // An answer the record refuses (approved, then a late deny) is consumed, so the inbox moves on.
+        if (!(error instanceof Error && error.message.includes('already approved'))) throw error;
+        appendTaskLog(cwd, task.id, {
+          kind: 'status',
+          message: `Ignored an answer to approval ${approvalId}: ${error.message}`,
+        });
+      }
+    }
     await fs.mkdir(path.dirname(transcript), { recursive: true });
     await fs.appendFile(transcript, JSON.stringify({ command, result: null }) + '\n');
   });
@@ -644,19 +672,16 @@ export async function runTask(id: string, root: string): Promise<unknown> {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
         ...(remote.task.event && INTEGRATIONS[remote.task.event.integration]?.isUninstalled?.(error)
-          ? { installationRevoked: true } : {}),
+          ? { installationRevoked: true }
+          : {}),
       }).catch(failure => console.error('coder runner: result delivery failed', failure));
     throw error;
   } finally {
     clearTimeout(timer);
     clearInterval(heartbeat);
-    try {
-      if (cwd) await releaseCheckout(cwd);
-    } finally {
-      delete process.env[WORKSPACE_CONFIG_ENV];
-      delete process.env.CODER_MCP_MODE;
-      delete process.env.CODER_MCP_CONNECTION_ENV;
-    }
+    delete process.env[WORKSPACE_CONFIG_ENV];
+    delete process.env.CODER_MCP_MODE;
+    delete process.env.CODER_MCP_CONNECTION_ENV;
   }
 }
 
@@ -809,10 +834,11 @@ async function runCheckedOutTask(
       problem,
       progress,
     );
+  const approvals = () => (taskId ? listApprovals(resolveTaskDir(cwd, taskId)) : []);
   const onApproval = async (approval: unknown) => {
     await taskRequest(auth.server, auth.token, id, '/result', {
       method: 'POST',
-      body: JSON.stringify({ status: 'waiting', approval }),
+      body: JSON.stringify({ status: 'waiting', approval, approvals: approvals() }),
     });
   };
   try {
@@ -928,19 +954,35 @@ async function runCheckedOutTask(
           const current = loadTask(cwd, taskId);
           if (current?.status === 'running' || current?.status === 'queued') {
             await Promise.race([
-              waitForAgentTask(cwd, taskId, onApproval, (cwd, id) =>
-                waitTask(cwd, id, { turn: deliveredTurns, worker, signal: timeout }),
+              waitForAgentTask(cwd, taskId, onApproval, (cwd, id, opts) =>
+                waitTask(cwd, id, { ...opts, turn: deliveredTurns, worker, signal: timeout }),
               ),
               aborted,
             ]);
             continue;
           }
-          if (current?.rollingOver) {
-            await Promise.race([
-              waitTask(cwd, taskId, { rollover: true, worker, signal: timeout }),
-              aborted,
-            ]);
-            continue;
+          // Follow-ups queued while a worker was finishing, with no worker left to run them, start their own turn.
+          // A task that ended cancelled or failed keeps nothing: its queued follow-ups are dropped.
+          if (current && !isPidAlive(current.pid) && hasQueuedSteers(cwd, taskId)) {
+            if (current.status !== 'completed') {
+              const dropped = claimSteers(cwd, taskId).length;
+              appendTaskLog(cwd, taskId, {
+                kind: 'status',
+                message: `Discarded ${dropped} queued follow-up${dropped === 1 ? '' : 's'}: the task is ${current.status}.`,
+              });
+              continue;
+            }
+            const [first, ...rest] = claimSteers(cwd, taskId);
+            for (const text of rest) enqueueSteer(cwd, taskId, text);
+            if (first) {
+              await steerTask(cwd, current, first, {
+                resolveConnections: heldConnections(current.mcp),
+                onWorker: child => {
+                  worker = child;
+                },
+              });
+              continue;
+            }
           }
           if (
             (worker?.exitCode === null && !worker.signalCode) ||
@@ -980,8 +1022,9 @@ async function runCheckedOutTask(
       status: cancelled ? 'cancelled' : result.ok ? 'completed' : 'failed',
       result: result.reply ?? result.result,
       tokens: result.tokens,
+      ...(approvals().length ? { approvals: approvals() } : {}),
       ...(result.postedMessages?.length ? { postedMessages: result.postedMessages } : {}),
-      ...(cwd !== root ? { diff: await changes(cwd).catch(() => undefined) } : {}),
+      ...(event?.repo ? { diff: await changes(cwd).catch(() => undefined) } : {}),
     });
     return result;
   } catch (error) {

@@ -14,12 +14,13 @@ coder model add kimi --base-url https://openrouter.ai/api/v1 --env-key OPENROUTE
 
 `model add` saves the entry, probes the endpoint, and reports anything missing (unreachable URL, unset key env var, no codex). Change one later with `coder model update <name>`, drop it with `coder model remove <name>`. Flags:
 
-| Flag               | Meaning                                                                                  |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| `--base-url <url>` | OpenAI-compatible API base (e.g. `http://localhost:11434/v1`)                            |
-| `--model <id>`     | the provider's model id (e.g. `qwen2.5-coder:32b`)                                       |
-| `--env-key <VAR>`  | env var holding the API key; omit for keyless local endpoints                            |
-| `--workspace`      | write to `<repo>/.coder/config.json` instead of the user file                            |
+| Flag               | Meaning                                                       |
+| ------------------ | ------------------------------------------------------------- |
+| `--base-url <url>` | OpenAI-compatible API base (e.g. `http://localhost:11434/v1`) |
+| `--model <id>`     | the provider's model id (e.g. `qwen2.5-coder:32b`)            |
+| `--env-key <VAR>`  | env var holding the API key; omit for keyless local endpoints |
+| `--context-window <tokens>` | the model's context window, filled when the provider reports it; Codex compacts at 90% of it |
+| `--workspace`      | write to `<repo>/.coder/config.json` instead of the user file |
 
 ## Use it
 

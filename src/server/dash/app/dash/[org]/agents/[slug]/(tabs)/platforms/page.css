@@ -29,9 +29,16 @@
   display: inline-block;
   margin-top: 8px;
 }
+/* the other installs open under "+n more", away from the app column */
+@supports (anchor-scope: --menu) {
+  .where .more > .more-list {
+    inset: anchor(bottom) auto auto anchor(left);
+  }
+}
 .plat .acts {
   width: 1%;
   white-space: nowrap;
+  vertical-align: top;
 }
 .plat .acts > .badge {
   margin-right: 10px;

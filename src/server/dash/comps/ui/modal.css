@@ -3,18 +3,17 @@ dialog.modal {
   max-height: calc(100dvh - 48px);
   margin: auto;
   padding: 0;
-  border: 1px solid var(--line2);
+  border: 3px solid light-dark(rgba(11, 12, 16, 0.3), rgba(255, 255, 255, 0.15));
   background: var(--tile);
   color: inherit;
   text-align: left;
   white-space: normal;
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
 }
 dialog.modal:focus-visible {
   outline: none;
 }
 dialog.modal::backdrop {
-  background: light-dark(rgba(0, 0, 0, 0.45), rgba(0, 0, 0, 0.72));
+  background: light-dark(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.45));
 }
 .modal form {
   display: grid;

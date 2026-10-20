@@ -5,7 +5,7 @@ import { authorizeTask } from '../tasks/callbacks';
 import { OPERATOR, type AppsContext } from '../agents/platform';
 import { isLoginEngine, LOCAL_LOGINS } from '../tasks/local';
 import { type Guard, type Params } from './match';
-import { type CreateState } from '../../integrations/types';
+import { type CreateState } from '../agents/platform';
 import { nonceOrganization, nonceUser } from '../auth/nonce';
 import { taskClaims, taskTokenHash } from '../tasks/token';
 import { decryptSecret } from '../store/secrets';
@@ -305,8 +305,7 @@ export async function operatorTransaction(req: Request, url: URL): Promise<strin
 }
 
 export async function createAllowed(req: Request, ctx: AppsContext, params: Params, url: URL) {
-  if (!/^[a-z0-9_-]+$/.test(params.integration ?? params.id ?? ''))
-    return dashboard(req, ctx);
+  if (!/^[a-z0-9_-]+$/.test(params.integration ?? params.id ?? '')) return dashboard(req, ctx);
   const tx = await operatorTransaction(req, url);
   const server = ctx.serverOrganizationId ?? ctx.organizationId;
   if (tx && nonceUser(ctx, tx) === OPERATOR && nonceOrganization(ctx, tx) === server)
@@ -316,8 +315,7 @@ export async function createAllowed(req: Request, ctx: AppsContext, params: Para
 }
 
 export function installAllowed(req: Request, ctx: AppsContext, params: Params, url: URL) {
-  if (!/^[a-z0-9_-]+$/.test(params.integration ?? params.id ?? ''))
-    return dashboard(req, ctx);
+  if (!/^[a-z0-9_-]+$/.test(params.integration ?? params.id ?? '')) return dashboard(req, ctx);
   return provisioningAdmin(req, ctx);
 }
 
@@ -467,7 +465,9 @@ export async function dashboardAllowed(req: Request, ctx: ServerContext, params:
     if (await dashPage(target, ctx.dashboardHosts)) return redirect(`${target}${url.search}`);
 
     // Another workspace's page, or one that does not exist: the active one says so and offers another account.
-    return ctx.auth && req.method === 'GET' && (await dashPage(`${home}${page}`, ctx.dashboardHosts))
+    return ctx.auth &&
+      req.method === 'GET' &&
+      (await dashPage(`${home}${page}`, ctx.dashboardHosts))
       ? redirect(`${home}/agents?${new URLSearchParams({ link: url.pathname + url.search })}`)
       : notFound();
   }

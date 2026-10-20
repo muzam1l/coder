@@ -1,91 +1,87 @@
-/** `coder task approvals [id]`: pending approvals across tasks or for one task. */
+/** `coder task approvals [id]`: pending (or denied) approvals across tasks, or every approval of one task. */
 import process from 'node:process';
 
+import { actionLines } from '../../core/approvals';
 import { ageMs } from '../../core/state';
-import type { ApprovalRow } from '../../core/task';
-import { formatAge, outStyle, renderTable } from '../../tui/output';
-import { serverOptions, str } from '../../utils/args';
+import { formatAge, outStyle } from '../../tui/output';
+import { flag, serverOptions, serverSuffix, str } from '../../utils/args';
 import { command, nextSteps } from '../../cli';
 
-/** One task's pending approvals. */
-function printTaskApprovals(
-  taskId: string,
-  items: Array<{ id: string; summary: string; answered?: string | null }>,
-): void {
+interface Row {
+  id: string;
+  taskId: string;
+  reason: string;
+  actions: string[];
+  createdAt?: string;
+  answered?: 'accept' | 'decline' | 'closed' | null;
+  deniedReason?: string | null;
+}
+
+const STATES = { accept: 'approved', decline: 'denied', closed: 'stopped' } as const;
+
+const state = (row: Row) => (row.answered ? STATES[row.answered] : 'pending');
+
+/** One task's approvals. */
+function printTaskApprovals(taskId: string, items: Row[]): void {
   const s = outStyle;
   if (!items.length)
-    return void process.stdout.write(`${s.dim(`No pending approvals for task ${taskId}.`)}\n`);
+    return void process.stdout.write(`${s.dim(`No approvals for task ${taskId}.`)}\n`);
   for (const item of items) {
-    const state = item.answered ?? 'pending';
+    const why = item.deniedReason ? `  ${s.dim(`denied: ${item.deniedReason}`)}` : '';
     process.stdout.write(
-      `${s.cyan(item.id)}  ${state.padEnd(8)} ${s.dim(String(item.summary ?? ''))}\n`,
+      `${s.cyan(item.id)}  ${state(item).padEnd(8)} ${s.light(item.reason)}${why}\n${actionLines(item.actions)}\n`,
     );
   }
 }
 
-/** Every pending approval of running tasks. */
-function printPendingApprovals(
-  rows: Array<{ id: string; taskId: string; summary: string; createdAt?: string }>,
-): void {
+/** Approvals across active tasks. */
+function printApprovals(rows: Row[], denied: boolean): void {
   const s = outStyle;
-  if (!rows.length) return void process.stdout.write(`${s.dim('No pending approvals.')}\n`);
-  process.stdout.write(
-    `${renderTable(
-      [
-        {
-          header: 'approval-id',
-          value: (r: (typeof rows)[number]) => r.id,
-          paint: cell => s.cyan(cell),
-        },
-        { header: 'task-id', value: r => r.taskId, paint: cell => s.cyan(cell) },
-        { header: 'age', value: r => (r.createdAt ? formatAge(ageMs(r.createdAt)) : '-') },
-        { header: 'summary', value: r => r.summary, paint: cell => s.light(cell) },
-      ],
-      rows,
-      s,
-    )}\n`,
-  );
+  if (!rows.length)
+    return void process.stdout.write(
+      `${s.dim(denied ? 'No denied approvals.' : 'No pending approvals.')}\n`,
+    );
+  // A terminal cannot fold, so each approval lists its exact actions, as `task result --wait` does.
+  for (const row of rows) {
+    const age = row.createdAt ? `  ${s.dim(formatAge(ageMs(row.createdAt)))}` : '';
+    process.stdout.write(
+      `${s.cyan(row.id)}  task ${s.cyan(row.taskId)}${age}  ${s.light(row.reason)}\n${actionLines(row.actions)}\n`,
+    );
+  }
 }
 
 export const commandApprovals = command({
   name: 'approvals',
   description: 'pending approvals (all tasks, or one)',
   usage:
-    'List only pending approvals across all tasks, or for one task. Answered approvals stay in the task log.',
+    'List pending approvals across all tasks, --denied the denied ones (still answerable), or every approval of one task.',
   access: 'read',
-  args: { 'task-id': str('one task (default: pending approvals of every task)'), ...serverOptions },
+  args: {
+    'task-id': str('one task (default: approvals of every task)'),
+    denied: flag('denied approvals instead of pending ones'),
+    ...serverOptions,
+  },
   cli: { positional: ['task-id'] },
   run: async ({ options, args: [id] }) => {
     const { tasks } = await import('../../core/task');
-    const rows = await tasks.approvals(id, { ...options, organization: options.workspace });
-    return rows.filter(row => row.answered == null);
+    return tasks.approvals(id, { ...options, organization: options.workspace });
   },
-  json: (rows, { options, args: [id] }) =>
-    options.server === undefined && id
-      ? (rows as ApprovalRow[]).map(({ taskId: _taskId, ...item }) => item)
-      : options.server === undefined
-        ? (rows as ApprovalRow[]).map(({ taskId, id, summary, createdAt }) => ({
-            taskId,
-            id,
-            summary,
-            createdAt,
-          }))
-        : rows,
+  json: (rows, { args: [id] }) => (id ? rows.map(({ taskId: _taskId, ...item }) => item) : rows),
   next({ result: rows, args }) {
-    if (args.server !== undefined)
-      return rows.length ? [] : nextSteps(['Check tasks: coder task list']);
-    const pending = rows;
-    if (!pending.length) return args['task-id'] ? [] : nextSteps(['Check tasks: coder task list']);
-    const ref = pending.length === 1 ? pending[0]!.id : '<approval-id>';
-    return nextSteps([`Answer: coder task approve ${ref} [--deny]`]);
-  },
-  print(rows, { options, args: [id] }) {
-    if (options.server === undefined)
-      return id
-        ? printTaskApprovals(id, rows as ApprovalRow[])
-        : printPendingApprovals(rows as ApprovalRow[]);
+    const flags = serverSuffix(args);
     if (!rows.length)
-      return void process.stdout.write(`${outStyle.dim('No pending approvals.')}\n`);
-    for (const row of rows) process.stdout.write(`${row.taskId}  ${JSON.stringify(row)}\n`);
+      return args['task-id'] ? [] : nextSteps([`Check tasks: coder task list${flags}`]);
+    // A server needs the task id with the approval id.
+    const ref =
+      rows.length === 1
+        ? args.server !== undefined
+          ? `${rows[0]!.taskId} ${rows[0]!.id}`
+          : rows[0]!.id
+        : args.server !== undefined
+          ? '<task-id> <approval-id>'
+          : '<approval-id>';
+    return nextSteps([`Answer: coder task approve ${ref} [--deny --reason "<why>"]${flags}`]);
   },
+  print: (rows, { args: [id], options }) =>
+    id ? printTaskApprovals(id, rows) : printApprovals(rows, Boolean(options.denied)),
 });

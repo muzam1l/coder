@@ -4,7 +4,7 @@
 
 run, follow and steer coding tasks
 
-## `task run [prompt] [--output-schema <output-schema>] [--name <name>] [--agent <agent>] [--system <system>] [--wait] [--engine <engine>] [--model <model>] [--effort <effort>] [--permissions <permissions>] [--mcp <mcp>] [--connections <connections>] [--add-dir <add-dir>] [--server <server>] [--workspace <workspace>] [--yes] [--background] [--repo <repo>] [--runner <runner>] [--simulate-approval] [--json] [--cwd <cwd>]`
+## `task run [prompt] [--output-schema <output-schema>] [--name <name>] [--agent <agent>] [--append-system <append-system>] [--wait] [--engine <engine>] [--model <model>] [--effort <effort>] [--permissions <permissions>] [--mcp <mcp>] [--connections <connections>] [--add-dir <add-dir>] [--server <server>] [--workspace <workspace>] [--yes] [--background] [--repo <repo>] [--runner <runner>] [--json] [--cwd <cwd>]`
 
 run a task (background; --wait blocks)
 
@@ -28,7 +28,7 @@ Use astra or fable for the hardest work; they cost the most.
 - `--output-schema <output-schema>` JSON Schema for the task answer
 - `--name <name>` label the task (shown in list/result)
 - `--agent <agent>` run as that agent: its system.md, engine settings, MCP servers and flows; flags override them
-- `--system <system>` standing instructions prepended to the task (kept out of prompt previews)
+- `--append-system <append-system>` standing instructions appended to Coder's system prompt (kept out of prompt previews)
 - `--wait` run in the foreground and block until the answer is ready
 - `--engine <engine>` engine to use; custom runs your configured custom models (default: first in the chain)
 - `--model <model>` luna/sol/astra (codex) · sonnet/opus/fable (claude) · a custom model (coder model list)
@@ -43,9 +43,8 @@ Use astra or fable for the hardest work; they cost the most.
 - `--background` with --server: print the task id instead of following it
 - `--repo <repo>` with --server: check out a repo from the workspace's installs
 - `--runner <runner>` with --server: where it runs (a runner kind or a registered runner)
-- `--simulate-approval` test only: raise a fake approval request
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 Exit codes:
 
@@ -59,7 +58,7 @@ Exit codes:
 coder run "add a /health endpoint"  # dispatch in the background, print a task id
 coder result <task-id> --wait  # then block until it finishes and print the answer
 coder run --wait "fix the failing test"  # or block on the run itself
-coder task run --model luna --system "tests live in test/, don't touch anything outside of it" "rename foo to bar"  # pick an engine via its model alias; --system adds standing instructions
+coder task run --model luna --append-system "tests live in test/, don't touch anything outside of it" "rename foo to bar"  # pick an engine via its model alias; --append-system adds standing instructions
 coder task run --agent reviewer "review the last commit"  # run a repo agent from .coder/agents/reviewer
 coder run --add-dir ../api --add-dir ../shared "update the client for the new endpoint"  # let the task reach sibling repos too
 ```
@@ -82,7 +81,7 @@ move to --archived. Shortcut: `coder list`.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `task result [task-id] [--wait] [--turns] [--tail <tail>] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
@@ -107,7 +106,7 @@ tasks in one call, or their approvals and answers never reach you one by one.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 Exit codes:
 
@@ -141,7 +140,7 @@ following, and `next`: the command that continues it while the task runs.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder task watch  # follow the most recent task to completion
@@ -167,7 +166,7 @@ task's engine, model, and permissions unless overridden.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder task steer task-abc "now add tests"  # continue that task with a follow-up
@@ -190,7 +189,7 @@ running or stopped. To change what the task does, use `coder task steer`.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder task ask task-abc "what approach did you take and why?"  # probe a decision without derailing the task
@@ -207,7 +206,7 @@ Interrupt a running task and mark it cancelled.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `task archive [task-id] [--all-stopped] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
@@ -224,7 +223,7 @@ brings it back.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `task delete [task-id] [--all-archived] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
@@ -239,33 +238,36 @@ delete every archived task at once. A running task must be stopped first.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
-## `task approvals [task-id] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
+## `task approvals [task-id] [--denied] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
 pending approvals (all tasks, or one)
 
-List only pending approvals across all tasks, or for one task. Answered approvals stay in the task log.
+List pending approvals across all tasks, --denied the denied ones (still answerable), or every approval of one task.
 
-- `<task-id>` one task (default: pending approvals of every task)
+- `<task-id>` one task (default: approvals of every task)
+- `--denied` denied approvals instead of pending ones
 - `--server <server>` act on your Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
-## `task approve [task-id] [approval-id] [--deny] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
+## `task approve [task-id] [approval-id] [--deny] [--reason <reason>] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
-answer an escalated permission
+answer an escalation
 
-Answer an escalated permission request. Accepts by default; --deny rejects it.
+Answer an escalation the task raised. Accepts by default; --deny rejects it, --reason says why.
+Works any time, also after a deny: the task gets the decision as a message.
 Approval ids are unique, so the task id is optional.
 
 - `<task-id>` the task, or the approval id alone
 - `<approval-id>` the approval to answer
 - `--deny` reject the request instead of accepting
+- `--reason <reason>` why it is denied; the task reads it
 - `--server <server>` act on your Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current

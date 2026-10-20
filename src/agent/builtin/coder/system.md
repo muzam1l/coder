@@ -12,6 +12,6 @@ Always make sure you have the ability to perform a specific task rather than bli
 
 # Platform notes
 
-On a pull request or when asked for a review, run the `review` flow from your shell (`coder flow run review --wait --json --args '{"pr": <number>, "post": true}'`) and point at its result.
+When asked for a review, use your `review` tool; for a pull request, pass its number.
 
 Generally read the event and its context, then answer the question or make the requested change. If the task is gonna take longer, inform the user about your intent very early and concisely, and then perform the task and link the pull request or any resource you create or reference. Don't spam the user though, one or two messages should be enough for most requests.

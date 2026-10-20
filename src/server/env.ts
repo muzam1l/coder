@@ -1,9 +1,9 @@
 import os from 'node:os';
-import path from 'node:path';
 import process from 'node:process';
 import * as z from 'zod/mini';
 
 import { CoderError } from '../core/dispatch';
+import { serverTasksDir } from '../core/state';
 import { rerunWith } from '../utils/process';
 import type { ServerConfig } from './context';
 
@@ -135,7 +135,7 @@ export function loadServerConfig(
   return {
     runner: values.RUNNER ?? (host === 'vercel' || values.VERCEL ? 'vercel-sandbox' : 'local'),
     store,
-    workDir: values.WORK_DIR ?? path.join(os.tmpdir(), 'coder'),
+    workDir: values.WORK_DIR ?? serverTasksDir(),
     ...(values.SERVER_ENCRYPTION_KEY ? { encryptionKey: values.SERVER_ENCRYPTION_KEY } : {}),
     ...(values.SERVER_ENCRYPTION_KEY_PREVIOUS
       ? { previousEncryptionKey: values.SERVER_ENCRYPTION_KEY_PREVIOUS }

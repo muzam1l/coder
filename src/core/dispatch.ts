@@ -21,11 +21,14 @@ import {
   readTurnResults,
   watchTask,
   resolveTaskDir,
+  scratchDir,
   tailSteps,
   writeTask,
   type TaskLogEntry,
   type TurnResultEntry,
   reconcileTask,
+  turnPending,
+  hasPendingSteers,
   processStarts,
 } from './state';
 import { createJsonlTail, readJsonFile } from '../utils/fsx';
@@ -59,14 +62,16 @@ import {
   type TaskStatus,
   type McpServerSpec,
   type ResolvedTaskOptions,
+  type Approval,
   type TurnResult,
   ACTIVE_STATUSES,
   HISTORY_LOST,
   TERMINAL_STATUSES,
 } from './types';
-import { listPendingApprovals } from './approvals';
+import { pendingApprovals, restoreApprovals } from './approvals';
 import { mcpApproved, mcpWarnings } from './mcp';
 import type { AgentPromptParts } from './task/context/system';
+import type { RunnerKind } from '../client/types';
 
 const STARTUP_ERROR_PATTERN =
   /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|not available|\bat capacity\b|ENOENT/i;
@@ -479,6 +484,13 @@ export function resolveAddDirs(cwd: string, dirs: string[] = []): string[] {
   return resolved;
 }
 
+/** Why a task's `--add-dir` paths go unused: its runner is not on the caller's machine. */
+export function ignoredAddDirs(runner: RunnerKind): string | undefined {
+  return runner === 'local' || runner === 'http'
+    ? undefined
+    : `--add-dir ignored: this task runs on a ${runner} machine`;
+}
+
 function isSandboxFailure(permissions: string, detail: string): boolean {
   return permissions === 'read-only' && CLAUDE_SANDBOX_UNAVAILABLE_PATTERN.test(detail ?? '');
 }
@@ -490,21 +502,24 @@ function isSandboxFailure(permissions: string, detail: string): boolean {
 export interface DispatchOptions {
   prompt: string;
   outputSchema?: object;
+  /** The final message is JSON, by `outputSchema` or by the prompt. */
+  structured?: boolean;
+  /** A resumed server task's escalations, answers included, restored into its record here. */
+  approvals?: Approval[];
   cwd: string;
   engine?: string;
   model?: string;
   effort?: string;
   permissions?: string;
   name?: string | null;
-  system?: string | null;
+  appendSystem?: string | null;
   /** The agent's part of the engine's system prompt. */
   agentPrompt?: AgentPromptParts;
   wait?: boolean;
-  simulateApproval?: boolean;
   /** Tags the created task as belonging to a flow run (for `coder list` grouping). */
   flowRunId?: string;
   agentId?: string;
-  /** A conversation's task, whose history rolls over past the context budget. */
+  /** A conversation's task (an agent's default flow). */
   conversation?: boolean;
   source?: string;
   /** Handle an agent task posts as. */
@@ -530,7 +545,7 @@ export interface DispatchOptions {
   /** A durable local delivery retries the same task. */
   taskId?: string;
   /** An engine conversation and its chain to continue, used only when the task runs on that engine. */
-  resume?: Pick<Task, 'previousThreadIds' | 'pendingRollover'> & {
+  resume?: Pick<Task, 'previousThreadIds'> & {
     engine: string;
     threadId: string;
   };
@@ -572,22 +587,52 @@ export function spawnWorker(
   const taskDir = resolveTaskDir(cwd, taskId);
   const logFd = fs.openSync(path.join(taskDir, 'worker.log'), 'a');
   const env = { ...process.env, ...connectionEnv };
+  const task = loadTask(cwd, taskId);
   processTiming('worker.spawn', { taskId });
-  const child = spawn(process.execPath, [CLI_PATH, 'task', 'worker', taskId, '--cwd', cwd], {
-    cwd,
-    detached: true,
-    stdio: ['ignore', logFd, logFd, 'ipc'],
-    env: {
-      ...env,
-      ...claudeVersionEnvironment(env, cwd),
-      [WORKER_ENV]: '1',
-      CODER_ENGINE_CHECKED: checked ? '1' : undefined,
-    },
-  });
-  child.on('error', () => {});
+  let child: ChildProcess;
+  try {
+    child = spawn(process.execPath, [CLI_PATH, 'task', 'worker', taskId, '--cwd', cwd], {
+      cwd,
+      detached: true,
+      stdio: ['ignore', logFd, logFd, 'ipc'],
+      env: {
+        ...env,
+        ...claudeVersionEnvironment(env, cwd),
+        [WORKER_ENV]: '1',
+        CODER_ENGINE_CHECKED: checked ? '1' : undefined,
+      },
+    });
+  } finally {
+    fs.closeSync(logFd);
+  }
+  const failed = (detail: string) => {
+    const current = loadTask(cwd, taskId);
+    if (
+      !current ||
+      current.dispatchId !== task?.dispatchId ||
+      current.resumedAt !== task?.resumedAt ||
+      current.pid !== (child.pid ?? null)
+    )
+      return;
+    if (
+      !ACTIVE_STATUSES.includes(current.status) &&
+      !(current.status === 'completed' && hasPendingSteers(cwd, taskId))
+    )
+      return;
+    const message = `Task worker exited without finishing: ${detail}`;
+    writeTask(cwd, taskId, {
+      status: 'failed',
+      error: message,
+      completedAt: new Date().toISOString(),
+      steerClosed: true,
+      resumeOwner: undefined,
+    });
+    appendTaskLog(cwd, taskId, { kind: 'error', message });
+  };
+  child.on('error', error => failed(error.message));
+  child.on('exit', (code, signal) => failed(signal ? `signal ${signal}` : `exit ${code}`));
   child.unref();
   child.channel?.unref?.();
-  fs.closeSync(logFd);
   writeTask(cwd, taskId, { pid: child.pid ?? null });
 
   return child;
@@ -600,7 +645,6 @@ async function attemptOnce(
   opts: DispatchOptions & { mcp?: McpServerSpec[] },
   taskExtras: {
     name?: string | null;
-    simulateApproval?: boolean;
   },
   waitForStartup: boolean,
 ): Promise<DispatchResult> {
@@ -632,17 +676,23 @@ async function attemptOnce(
 
   const taskId = opts.taskId ?? generateTaskId();
   const resume = opts.resume?.engine === resolved.engine ? opts.resume : undefined;
+  const scratch = scratchDir(taskId);
+  fs.mkdirSync(scratch, { recursive: true });
+  restoreApprovals(resolveTaskDir(cwd, taskId), opts.approvals ?? []);
   const task = writeTask(cwd, taskId, {
     status: 'queued',
     ...(opts.taskId ? { dispatchId: randomUUID() } : {}),
     name: taskExtras.name ?? null,
-    system: opts.system ?? null,
+    appendSystem: opts.appendSystem ?? null,
     promptParts: {
       cwd,
       ...opts.agentPrompt,
-      instructions: opts.system ?? undefined,
+      appendSystem: opts.appendSystem ?? undefined,
       conversation: opts.conversation,
       local: process.env.CODER_MCP_MODE !== 'cloud',
+      scratch,
+      writes: resolved.permissions !== 'read-only',
+      ...(opts.structured || opts.outputSchema ? { structured: true } : {}),
     },
     engine: resolved.engine,
     prompt: opts.prompt,
@@ -655,11 +705,9 @@ async function attemptOnce(
       ? {
           threadId: resume.threadId,
           ...(resume.previousThreadIds ? { previousThreadIds: resume.previousThreadIds } : {}),
-          ...(resume.pendingRollover ? { pendingRollover: resume.pendingRollover } : {}),
         }
       : {}),
     cwd,
-    ...(taskExtras.simulateApproval ? { simulateApproval: true } : {}),
     ...(opts.flowRunId ? { flowRunId: opts.flowRunId } : {}),
     ...(opts.agentId ? { agentId: opts.agentId } : {}),
     ...(opts.conversation ? { conversation: true } : {}),
@@ -722,8 +770,7 @@ async function attemptOnce(
         readTurnResults(cwd, taskId).at(-1)?.status === 0
       )
         break;
-      if (listPendingApprovals(resolveTaskDir(cwd, taskId)).some(approval => !approval.response))
-        break;
+      if (pendingApprovals(resolveTaskDir(cwd, taskId)).length) break;
       worked = working() || worked;
       if (current.threadId) {
         readyAt ??= Date.now();
@@ -769,7 +816,7 @@ export function buildFallbackPayload(
   engine: Engine,
   detail: string,
   permissions: string,
-  system: string | null | undefined,
+  appendSystem: string | null | undefined,
   task: string,
 ): FallbackPayload {
   return {
@@ -781,7 +828,7 @@ export function buildFallbackPayload(
       instructions:
         'Mention the engine failure to the user, including any limit reset time. If your harness has a native subagent facility, spawn one subagent with fallback.task verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If fallback.permissions is "read-only", append: "Investigate and report without modifying anything." If it is "workspace-write", append: "Never touch anything outside the workspace." Relay its output when it completes. If your harness has no native subagent facility, report the failure and stop; do not implement the task yourself.',
       note: 'Every coder engine failed to start. Spawn your own native subagent and forward the task verbatim; tell it to never run git write operations (commit, checkout, stash, reset, push, ...) and to honor the permissions.',
-      ...(system ? { system } : {}),
+      ...(appendSystem ? { appendSystem } : {}),
       task,
     },
   };
@@ -826,7 +873,7 @@ export async function dispatchTask(
     nativeMcp: opts.nativeMcp ?? mcp.nativeMcp,
   };
 
-  // First attempt uses the full request (model/effort/name/simulate).
+  // First attempt uses the full request (model/effort/name).
   // A chain fallback re-resolves fresh for the next engine, deliberately dropping
   // model, effort, and name. The next engine uses its own config default.
   let resolveInput: Record<string, any> = {
@@ -837,7 +884,6 @@ export async function dispatchTask(
   };
   let taskExtras = {
     name: opts.name,
-    simulateApproval: opts.simulateApproval,
   };
 
   for (;;) {
@@ -860,7 +906,7 @@ export async function dispatchTask(
           error.engine,
           error.detail,
           resolved.permissions,
-          opts.system,
+          opts.appendSystem,
           opts.prompt,
         );
         throw new CoderError('chain-exhausted', payload.error, { payload });
@@ -869,7 +915,6 @@ export async function dispatchTask(
       resolveInput = { engine: next, permissions: opts.permissions };
       taskExtras = {
         name: undefined,
-        simulateApproval: undefined,
       };
     }
   }
@@ -926,7 +971,10 @@ export function turnFallbackEngine(
   return nextFallbackEngine(waited.task.engine as Engine, config ?? loadConfig(cwd)) ?? null;
 }
 
-export function readResultJson(cwd: string, taskId: string): TurnResult | null {
+export function readResultJson(cwd: string, taskId: string, task?: Task): TurnResult | null {
+  // A task-level failure has no engine result; the file still belongs to the previous turn.
+  if (task && (ACTIVE_STATUSES.includes(task.status) || (task.status === 'failed' && task.error)))
+    return null;
   // Tolerates a missing or truncated file (worker crash mid-write).
   return readJsonFile<TurnResult>(path.join(resolveTaskDir(cwd, taskId), 'result.json'));
 }
@@ -938,13 +986,13 @@ function readSteps(cwd: string, taskId: string, tail: number | 'all' = 0): TaskL
   return tail === 'all' ? all : tailSteps(all, tail);
 }
 
-/** Read a task's current state and result.json without waiting. `tail` fills `steps`. */
+/** Read a task's state and result.json without waiting. `tail` fills `steps`; `task` is the snapshot to judge by (a wait's), so a next turn starting meanwhile does not hide the finished one's result. */
 export function readTask(
   cwd: string,
   taskId: string,
-  opts: { tail?: number | 'all' } = {},
+  opts: { tail?: number | 'all'; task?: Task } = {},
 ): TaskResult {
-  const task = loadTask(cwd, taskId);
+  const task = opts.task ?? loadTask(cwd, taskId);
   if (!task) {
     throw new Error(`No task found for "${taskId}".`);
   }
@@ -952,7 +1000,7 @@ export function readTask(
     taskId,
     status: task.status,
     // A running task's result.json is a previous turn's (a resumed task).
-    result: ACTIVE_STATUSES.includes(task.status) ? null : readResultJson(cwd, taskId),
+    result: readResultJson(cwd, taskId, task),
     steps: readSteps(cwd, taskId, opts.tail),
     turns: readTurnResults(cwd, taskId),
     task,
@@ -962,8 +1010,9 @@ export function readTask(
 interface WaitOptions {
   turn?: number;
   worker?: ChildProcess;
-  rollover?: boolean;
   signal?: AbortSignal;
+  /** Approvals the caller already surfaced; a task with only these pending reads terminal. */
+  seen?: string[];
 }
 
 /**
@@ -984,7 +1033,7 @@ export async function waitTask(
     const approval = outcome.approval!;
     throw new CoderError(
       'approval-pending',
-      `Approval needed for task ${taskId}: ${approval.summary}`,
+      `Approval needed for task ${taskId}: ${approval.reason}`,
       {
         taskId,
         approval,
@@ -996,7 +1045,7 @@ export async function waitTask(
   return {
     taskId,
     status: final.status,
-    result: readResultJson(cwd, taskId),
+    result: readResultJson(cwd, taskId, final),
     steps: readSteps(cwd, taskId, opts.tail),
     turns: readTurnResults(cwd, taskId),
     task: final,
@@ -1005,23 +1054,29 @@ export async function waitTask(
 
 export { isStartupError, isSandboxFailure };
 
+/** A pending approval as a wait surfaces it. */
+export interface PendingApproval {
+  id: string;
+  reason: string;
+  actions: string[];
+}
+
 export interface WaitOutcome {
   task: Task;
   reason: 'terminal' | 'approval';
-  approval?: { id: string; summary: string; cwd?: string | null; networkHost?: string | null };
+  approval?: PendingApproval;
 }
 
 /**
- * Blocking wait shared by `run --wait` and `result --wait`. Returns when the
- * task finishes OR a pending approval appears, so a --wait surfaces the approval
- * (which is answered out of band with `coder task approve`) instead of blocking
- * silently through it until the worker's 120s auto-decline.
+ * Blocking wait shared by `run --wait` and `result --wait`. Returns when the task finishes OR
+ * a pending approval appears, so a --wait surfaces the approval (answered out of band with
+ * `coder task approve`) while the task keeps working.
  */
 export async function waitForTaskAttention(
   cwd: string,
   task: Task,
   pollMs = 1000,
-  { turn, worker, rollover = false, signal: abort }: WaitOptions = {},
+  { turn, worker, signal: abort, seen = [] }: WaitOptions = {},
 ): Promise<WaitOutcome> {
   let current = task;
   const signal = watchTask(cwd, task.id, worker);
@@ -1033,24 +1088,22 @@ export async function waitForTaskAttention(
       const result = turn === undefined ? undefined : readTurnResults(cwd, current.id)[turn];
       if (result) current = { ...current, status: result.status === 0 ? 'completed' : 'failed' };
       else current = reconcileTask(cwd, current, startMs);
-      if (rollover ? !current.rollingOver : TERMINAL_STATUSES.includes(current.status)) {
-        return { task: current, reason: 'terminal' };
-      }
-      const pending = listPendingApprovals(resolveTaskDir(cwd, current.id)).find(a => !a.response);
+      // Before a terminal return: a task can escalate and end its turn between two polls.
+      const pending = pendingApprovals(resolveTaskDir(cwd, current.id)).find(
+        approval => !seen.includes(approval.id),
+      );
       if (pending) {
-        const params = pending.params as
-          { networkApprovalContext?: { host?: string | null } | null } | undefined;
         return {
           task: current,
           reason: 'approval',
-          approval: {
-            id: pending.id,
-            summary: String(pending.summary ?? ''),
-            cwd: typeof pending.cwd === 'string' ? pending.cwd : null,
-            networkHost: params?.networkApprovalContext?.host ?? null,
-          },
+          approval: { id: pending.id, reason: pending.reason, actions: pending.actions },
         };
       }
+      if (
+        TERMINAL_STATUSES.includes(current.status) &&
+        (turn !== undefined || !turnPending(cwd, current))
+      )
+        return { task: current, reason: 'terminal' };
       await signal.wait(pollMs, abort);
     }
   } finally {

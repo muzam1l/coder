@@ -102,7 +102,6 @@ export async function publishAgent(
       createdAt: now,
     },
   );
-
 }
 
 export async function publishVersion(
@@ -251,11 +250,16 @@ export function agentProblems(
   if (!version) return [`No version ${record.currentVersion} for agent "${record.id}".`];
 
   try {
-    agentsFromSources({
-      definitions: { [record.id]: { json: version.definition, builtin: record.source === 'builtin' } },
-      usage: record.settings ? { [record.id]: record.settings } : undefined,
-      includeDisabled: true,
-    }, integrations);
+    agentsFromSources(
+      {
+        definitions: {
+          [record.id]: { json: version.definition, builtin: record.source === 'builtin' },
+        },
+        usage: record.settings ? { [record.id]: record.settings } : undefined,
+        includeDisabled: true,
+      },
+      integrations,
+    );
     return [];
   } catch (error) {
     return [error instanceof Error ? error.message : String(error)];

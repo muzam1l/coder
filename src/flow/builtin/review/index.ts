@@ -437,7 +437,7 @@ export default async function review(
     effort: a.effort,
     permissions: 'read-only',
     cwd,
-    system: reviewSystemPrompt(effort, repositoryRules(exec, baseSha)),
+    appendSystem: reviewSystemPrompt(effort, repositoryRules(exec, baseSha)),
   };
 
   const files = [...ranges]

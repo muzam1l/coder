@@ -5,13 +5,7 @@ import type { RunnerRecord, StoreRecords } from '../../types';
 import { chatState, engineCredential, runner, secret } from '../schema';
 import type { DrizzleStore } from '../store';
 import { credentialId } from '../../../settings/credentials';
-import {
-  dropKey,
-  heldKey,
-  type HeldToken,
-  type TokenDrop,
-  type TokenState,
-} from '../../tokens';
+import { dropKey, heldKey, type HeldToken, type TokenDrop, type TokenState } from '../../tokens';
 import { appValue, credentialValue, installationValue } from './apps';
 import {
   addSecret,

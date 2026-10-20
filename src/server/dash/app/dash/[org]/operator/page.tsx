@@ -1,18 +1,25 @@
 import '@/app/dash/[org]/settings/[tab]/list.css';
 import { ClientError } from '@coder/client';
-import { notFound } from '@wular/pnext/navigation';
+import { dynamic } from '@wular/pnext/dynamic';
+import { notFound, redirect } from '@wular/pnext/navigation';
 
 import { load } from '@/api/load';
 import { Page, PageHead } from '@/comps/frame/page-head';
-import { Button } from '@/comps/ui/button';
+import { Button, LinkButton } from '@/comps/ui/button';
 import { Card, FoldCard } from '@/comps/ui/card';
 import { formatDate, reasonText, zoneOf } from '@/utils/format';
 import { Row } from '@/app/dash/[org]/settings/[tab]/list';
+import { outcomeText, outcomeTitle, readOutcome, succeeded } from '@/app/dash/[org]/setup/outcome';
 import { OperatorApps } from './operator-apps';
+
+const OutcomeDialog = dynamic(() =>
+  import('@/app/dash/[org]/setup/outcome-dialog').then(m => m.OutcomeDialog),
+);
 
 const SIGN_IN_ERRORS: Record<string, string> = {
   stale: 'That sign-in was not fresh enough. Sign in again.',
   denied: 'That account is not an operator of this server, or not the one signed in here.',
+  lost: 'You signed in, but operator mode did not start. Sign in again.',
 };
 
 function SignInAgain({ error }: { error: string | null }) {
@@ -55,11 +62,32 @@ export default async function OperatorPage({ request }: { request?: Request }) {
       load(request).operator.audit(),
     ]);
     const tz = zoneOf(request);
+    // Back from creating a shared app on its platform.
+    const outcome = readOutcome(new URL(request.url).searchParams);
+    const name =
+      apps.platforms.find(row => row.integration === outcome?.platform)?.name ??
+      outcome?.platform ??
+      'the platform';
+    const org = me.organization?.slug;
 
     return (
       <Page>
         {head}
         <OperatorApps first={apps} />
+        {outcome ? (
+          <OutcomeDialog
+            ok={succeeded(outcome)}
+            title={outcomeTitle(outcome, name)}
+            text={outcomeText(outcome, name)}
+            issues={me.server?.issuesUrl}
+          >
+            {succeeded(outcome) && org ? (
+              <LinkButton href="/dash/[org]/agents" params={{ org }}>
+                Connect it in your workspace
+              </LinkButton>
+            ) : null}
+          </OutcomeDialog>
+        ) : null}
         <FoldCard
           title={
             <>
@@ -90,11 +118,17 @@ export default async function OperatorPage({ request }: { request?: Request }) {
       </Page>
     );
   } catch (error) {
+    const params = new URL(request.url).searchParams;
+    const signInError = params.get('error') ?? (params.has('entered') ? 'lost' : null);
+    // Operator mode ended: sign in again at once, unless a sign-in just returned here, so it never loops.
+    if (error instanceof ClientError && error.status === 401 && !signInError)
+      redirect('/api/auth/sign-in?operator=1');
+
     return (
       <Page>
         {head}
         {error instanceof ClientError && error.status === 401 ? (
-          <SignInAgain error={new URL(request.url).searchParams.get('error')} />
+          <SignInAgain error={signInError} />
         ) : (
           <Card tone="danger">
             <p class="body prose">{reasonText(error)}</p>

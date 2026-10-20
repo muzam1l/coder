@@ -42,7 +42,7 @@ const revoked = z.object({
   tokens: z.optional(z.object({ bot: z.optional(z.array(z.string())) })),
 });
 
-/** The Home tab opened, and links shared under Coder's domain. */
+/** The Home tab opened, and links shared under the app's unfurl domain. */
 const home = z.object({
   type: z.literal('app_home_opened'),
   user: z.string(),
@@ -59,15 +59,93 @@ const shared = z.object({
 
 /** Action ids of buttons that only open a page, such as on the Home tab. */
 export const LINK_ACTION = 'link:';
+/** Action ids of buttons the app posted whose click the host reads. */
+export const CLICK_ACTION = 'click:';
+/** Action ids of buttons that ask for text in a modal first; the modal's callback, block and input share `ASK_VIEW`. */
+export const ASK_ACTION = 'ask:';
+export const ASK_VIEW = 'ask';
 const clicks = z.object({
   type: z.literal('block_actions'),
   actions: z.array(z.object({ action_id: z.string() })),
 });
+const slackUser = z.object({
+  id: z.string(),
+  username: z.optional(z.string()),
+  name: z.optional(z.string()),
+});
+const buttonClick = z.object({
+  user: slackUser,
+  channel: z.object({ id: z.string() }),
+  message: z.optional(z.object({ ts: z.string(), thread_ts: z.optional(z.string()) })),
+  trigger_id: z.optional(z.string()),
+  actions: z.tuple([z.object({ action_id: z.string(), value: z.string() })]),
+});
+const submission = z.object({
+  type: z.literal('view_submission'),
+  user: slackUser,
+  view: z.object({
+    callback_id: z.literal(ASK_VIEW),
+    private_metadata: z.string(),
+    state: z.object({
+      values: z.object({
+        [ASK_VIEW]: z.object({
+          [ASK_VIEW]: z.object({ value: z.optional(z.nullable(z.string())) }),
+        }),
+      }),
+    }),
+  }),
+});
+/** Where an asking button was clicked, kept in its modal until the submission. */
+const asking = z.object({
+  thread: z.string(),
+  message: z.optional(z.string()),
+  value: z.string(),
+});
+
+const actorOf = (user: z.infer<typeof slackUser>) => {
+  const login = user.username ?? user.name;
+  return { id: user.id, ...(login ? { login } : {}) };
+};
+
+/** A click on a button the app posted, with the thread it is in; an asking button opens its modal instead. */
+function clicked(value: unknown): OwnEvent | undefined {
+  const click = buttonClick.safeParse(value).data;
+  const action = click?.actions[0];
+  if (!click || !action) return undefined;
+  const thread = click.message?.thread_ts ?? click.message?.ts;
+  const at = {
+    thread: `slack:${click.channel.id}${thread ? `:${thread}` : ''}`,
+    ...(click.message ? { message: click.message.ts } : {}),
+  };
+  const trigger = click.trigger_id;
+  if (action.action_id.startsWith(ASK_ACTION) && trigger)
+    return { work: async ctx => (await import('./views')).openAsk(ctx, trigger, at, action.value) };
+  if (!action.action_id.startsWith(CLICK_ACTION)) return undefined;
+
+  return { click: { ...at, value: action.value, actor: actorOf(click.user) } };
+}
+
+/** An asking button's modal submitted: its click, with the text when there is some. */
+function submitted(value: unknown): OwnEvent | undefined {
+  const sent = submission.safeParse(value).data;
+  let at;
+  try {
+    at = sent && asking.safeParse(JSON.parse(sent.view.private_metadata)).data;
+  } catch {
+    return undefined;
+  }
+  if (!sent || !at) return undefined;
+  const text = sent.view.state.values[ASK_VIEW][ASK_VIEW].value?.trim();
+
+  return { click: { ...at, ...(text ? { text } : {}), actor: actorOf(sent.user) } };
+}
 
 /** The Events API envelope, a slash command's form, or an interaction's `payload` field, read unverified. */
-function fields(
-  raw: string,
-): z.infer<typeof envelope> & { event?: unknown; team?: { id?: string }; enterprise?: { id?: string } } {
+function fields(raw: string): z.infer<typeof envelope> & {
+  event?: unknown;
+  team?: { id?: string };
+  enterprise?: { id?: string };
+} {
   try {
     return JSON.parse(raw);
   } catch {
@@ -82,7 +160,7 @@ function fields(
   }
 }
 
-/** What Coder handles itself, before verification: the Home tab, shared links, interactions, and an org install's workspace grants. */
+/** What the integration handles itself, before verification: the Home tab, shared links, interactions, and an org install's workspace grants. */
 function ownEvent(
   value: ReturnType<typeof fields>,
   app: string,
@@ -97,8 +175,12 @@ function ownEvent(
   if (opened) return { work: async ctx => (await import('./views')).publishHome(ctx, opened.user) };
   const links = shared.safeParse(value.event).data;
   if (links) return { work: async ctx => (await import('./views')).unfurl(ctx, links) };
-  const clicked = clicks.safeParse(value).data?.actions;
-  if (clicked?.length && clicked.every(action => action.action_id.startsWith(LINK_ACTION)))
+  const actions = clicks.safeParse(value).data?.actions;
+  const click = actions?.length ? clicked(value) : undefined;
+  if (click) return click;
+  const answer = submitted(value);
+  if (answer) return answer;
+  if (actions?.length && actions.every(action => action.action_id.startsWith(LINK_ACTION)))
     return { ack: true };
   // Buttons and other interactions come as a form whose payload has its own type.
   if (value.type && value.type !== 'event_callback' && value.type !== 'url_verification')
@@ -129,7 +211,7 @@ function verified(req: Request, raw: string, secret: string | undefined): boolea
 export const messageEvent = (channelType?: string) =>
   channelType === 'im' || channelType === 'mpim' ? 'dm' : 'channel';
 
-/** The four-colour Slack mark; the dashboard shows it full colour. */
+/** The four-colour Slack mark, for full colour display. */
 const SLACK_MARK =
   '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400"><g><path d="M 84.04 252.77 c 0 23.13 -18.89 42.02 -42.02 42.02 S 0 275.9 0 252.77 s 18.89 -42.02 42.02 -42.02 h 42.02 v 42.02 Z" fill="#e3066a"/><path d="M 105.21 252.77 c 0 -23.13 18.89 -42.02 42.02 -42.02 s 42.02 18.89 42.02 42.02 v 105.21 c 0 23.13 -18.89 42.02 -42.02 42.02 s -42.02 -18.89 -42.02 -42.02 c 0 0 0 -105.21 0 -105.21 Z" fill="#e3066a"/></g><g><path d="M 147.23 84.04 c -23.13 0 -42.02 -18.89 -42.02 -42.02 S 124.1 0 147.23 0 s 42.02 18.89 42.02 42.02 v 42.02 h -42.02 Z" fill="#00b3ff"/><path d="M 147.23 105.21 c 23.13 0 42.02 18.89 42.02 42.02 s -18.89 42.02 -42.02 42.02 H 42.02 c -23.13 0 -42.02 -18.89 -42.02 -42.02 s 18.89 -42.02 42.02 -42.02 c 0 0 105.21 0 105.21 0 Z" fill="#00b3ff"/></g><g><path d="M 315.96 147.23 c 0 -23.13 18.89 -42.02 42.02 -42.02 s 42.02 18.89 42.02 42.02 -18.89 42.02 -42.02 42.02 h -42.02 v -42.02 Z" fill="#41b658"/><path d="M 294.79 147.23 c 0 23.13 -18.89 42.02 -42.02 42.02 s -42.02 -18.89 -42.02 -42.02 V 42.02 c 0 -23.13 18.89 -42.02 42.02 -42.02 s 42.02 18.89 42.02 42.02 v 105.21 Z" fill="#41b658"/></g><g><path d="M 252.77 315.96 c 23.13 0 42.02 18.89 42.02 42.02 s -18.89 42.02 -42.02 42.02 -42.02 -18.89 -42.02 -42.02 v -42.02 h 42.02 Z" fill="#fcc003"/><path d="M 252.77 294.79 c -23.13 0 -42.02 -18.89 -42.02 -42.02 s 18.89 -42.02 42.02 -42.02 h 105.21 c 23.13 0 42.02 18.89 42.02 42.02 s -18.89 42.02 -42.02 42.02 h -105.21 Z" fill="#fcc003"/></g></svg>';
 
@@ -161,7 +243,7 @@ export const slack: Integration = {
   featured: true,
   description: 'Mentions, direct messages, and channel messages in a Slack workspace',
   installLabel: 'Add to Slack',
-  use: events => slackWays('{handle}', events),
+  use: (events, here) => slackWays('{handle}', events, here ? 'message it here' : undefined),
   covered: 'Slack workspace',
   sample: 'slack:C0000000000:1700000000.000100',
   prompt: [
@@ -205,7 +287,7 @@ export const slack: Integration = {
   target(_req, raw) {
     const value = fields(raw);
     const body = envelope.safeParse(value).data;
-    // URL verification names no app and arrives while the app is being created, before Coder has its secret.
+    // URL verification names no app and arrives while the app is being created, before the host has its secret.
     if (body?.type === 'url_verification' && body.challenge) return new Response(body.challenge);
     const auth = body?.authorizations?.[0];
     const team = auth?.team_id ?? body?.team_id ?? value.team?.id;
@@ -224,15 +306,23 @@ export const slack: Integration = {
         }
       : undefined;
   },
-  welcome: async (ctx, installer, links) =>
-    (await import('./views')).welcome(ctx, installer, links),
+  messages: {
+    asks: true,
+    post: async (place, draft) => (await import('./views')).postMessage(place, draft),
+    edit: async (place, ts, draft) => (await import('./views')).editMessage(place, ts, draft),
+    direct: async (ctx, user, page) => (await import('./views')).directMessage(ctx, user, page),
+  },
   link(event) {
     const thread = /^slack:([^:]+):(\d+)\.(\d+)$/.exec(event.chat?.thread.id ?? '');
     return thread ? `https://slack.com/archives/${thread[1]}/p${thread[2]}${thread[3]}` : undefined;
   },
   ownEvents(req, raw, app, credentials) {
     const target = slack.target(req, raw);
-    const own = ownEvent(fields(raw), app.id, target && !(target instanceof Response) ? target.installation : undefined);
+    const own = ownEvent(
+      fields(raw),
+      app.id,
+      target && !(target instanceof Response) ? target.installation : undefined,
+    );
     if (!own) return undefined;
 
     return verified(req, raw, (credentials as SlackAppCredentials | undefined)?.signingSecret)

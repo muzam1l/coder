@@ -1,5 +1,6 @@
 import { type Params } from '../routes/match';
 import { type AgentTask } from '../../agent/types';
+import { type Approval } from '../../core/types';
 import { type TaskStatus, type TaskLogLine, type UsageRecord } from '../store/types';
 import { type ServerContext } from '../context';
 import { taskContext, uninstall } from './context';
@@ -13,6 +14,7 @@ import { bearerToken } from '../routes/guards';
 import { json } from '../routes/http';
 import { type EngineLogin } from '../settings/logins';
 import { CONVERSATION_TTL_MS, knownPosts, rememberPost } from './conversation';
+import { askOpenAgain, syncApprovals } from './approvals';
 
 /** How long a reply or react call id is remembered, so a late retry still posts once. */
 const CALL_TTL_MS = 24 * 60 * 60 * 1000;
@@ -57,7 +59,9 @@ type TaskCallback = {
   result?: unknown;
   error?: string;
   tokens?: unknown;
-  approval?: unknown;
+  approval?: Approval;
+  /** The task's escalations so far, answers included. */
+  approvals?: Approval[];
   answer?: unknown;
   diff?: string;
   postedMessages?: string[];
@@ -200,6 +204,9 @@ export async function reportResult(
     !['running', 'waiting', 'completed', 'failed', 'cancelled'].includes(body.status) ||
     (body.installationRevoked !== undefined && body.installationRevoked !== true) ||
     (body.machine !== undefined && body.machine !== true) ||
+    (body.approvals !== undefined &&
+      (!Array.isArray(body.approvals) ||
+        body.approvals.some(entry => typeof entry?.id !== 'string'))) ||
     (body.postedMessages !== undefined &&
       (!Array.isArray(body.postedMessages) ||
         body.postedMessages.some(id => typeof id !== 'string')))
@@ -232,6 +239,7 @@ export async function reportResult(
             ? { approval: undefined }
             : {}),
         ...(body.answer !== undefined ? { answer: body.answer } : {}),
+        ...(body.approvals ? { approvals: body.approvals } : {}),
       },
       now,
       {
@@ -240,9 +248,19 @@ export async function reportResult(
         statuses: ['running', 'waiting'],
       },
     );
+    if (body.approvals || posted.length)
+      await announceApprovals(ctx, id, Boolean(body.approvals), posted.length ? now : undefined);
 
     return json({ ok: true });
   }
+  // The final list lands before the outcome, so a late answer finds every escalation.
+  if (body.approvals)
+    await ctx.queue.patchTask(ctx.organizationId, id, { approvals: body.approvals }, now, {
+      attempts: authorized.attempts,
+      tokenHash: authorized.tokenHash,
+    });
+  if (body.approvals || posted.length)
+    await announceApprovals(ctx, id, Boolean(body.approvals), posted.length ? now : undefined);
 
   const output = typeof body.result === 'string' ? body.result : JSON.stringify(body.result ?? '');
   const result = {
@@ -305,18 +323,9 @@ export async function reportResult(
   )
     await uninstall(ctx.store, `${event.appId}:${event.installationId}`, now);
 
-  if (completed && body.machine && event && authorized.task.source === event.integration) {
-    const app = await ctx.store.get('app', event.appId);
-    const { recordFailure } = await import('./failures');
-    if (app)
-      await recordFailure(
-        ctx,
-        app,
-        body.error ?? 'The machine failed',
-        event.installationId,
-        event,
-        async () => (await conversationReplies(ctx, authorized)).replies,
-      );
+  if (completed && body.machine) {
+    const { reportTaskFailure } = await import('./failures');
+    await reportTaskFailure(ctx, authorized.task, body.error ?? 'The machine failed');
   }
 
   if (completed)
@@ -328,6 +337,34 @@ export async function reportResult(
     );
 
   return json({ ok: true });
+}
+
+/** After the runner has its answer: syncs the conversation with the task's approvals when the report carried them, then, when the runner posted the turn's messages before `before`, asks again under them the open approvals they dismissed. */
+async function announceApprovals(
+  ctx: CallbackContext,
+  id: string,
+  sync: boolean,
+  before?: number,
+): Promise<void> {
+  const task = (await ctx.store.get('task', id))?.task;
+  if (!task) return;
+
+  (ctx.waitUntil ?? (() => {}))(
+    (async () => {
+      // The sync holds each post's lease, which a concurrent ask would find busy and skip.
+      if (sync && task.context?.approvals)
+        await syncApprovals(ctx, task, task.context.approvals).catch(error =>
+          console.error(`coder server: could not show the approvals of task ${id}`, error),
+        );
+      if (before !== undefined)
+        await askOpenAgain(ctx, task, before).catch(error =>
+          console.error(
+            `coder server: could not ask the open approvals of task ${id} again`,
+            error,
+          ),
+        );
+    })(),
+  );
 }
 
 const CALL_ID = /^[a-f0-9-]{36}$/;

@@ -31,6 +31,7 @@ import {
 
 import { BATCH_LEASE_MS } from '../types';
 import { createTaskToken } from '../../tasks/token';
+import { ApprovalRefusedError, mergeApprovals, refusedAnswer } from '../../../core/approvals';
 import type { AgentTask } from '../../../agent/types';
 import type { TaskLogLine, TaskStatus } from '../types';
 import type { StoredConfig } from '../../settings/config';
@@ -71,7 +72,7 @@ import {
 } from './tables/shared';
 import { appValue } from './tables/apps';
 import { pipeline, readQuery, type Db } from './client';
-import { TERMINAL_STATUSES } from '../../../core/types';
+import { STOPPED_BY_USER, TERMINAL_STATUSES, type Approval } from '../../../core/types';
 import { listRank } from '../../../core/defaults';
 import { AUTO_ARCHIVE_MS } from '../../../core/state';
 import {
@@ -127,6 +128,12 @@ const millis = (at: SQLWrapper) => sql`date_trunc('milliseconds', ${at})`;
 
 /** Ids in byte order, as the server and CLI compare them, whatever the database collation. */
 const bytes = (id: SQLWrapper) => sql`${id} collate "C"`;
+
+/** `awaitsApproval` in SQL: the turn waits, or an escalation has no answer. */
+const awaiting = or(
+  eq(task.status, 'waiting'),
+  sql`jsonb_path_exists(${task.context}, '$.approvals[*] ? (!(exists(@.response)) || @.response == null)')`,
+)!;
 
 const pageOrder = (row: Record<'status' | 'createdAt' | 'publicId', SQLWrapper>) => [
   asc(rank(row.status)),
@@ -542,31 +549,54 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     fence: TaskFence = {},
   ): Promise<boolean> {
-    const { answer, archivedAt, autoArchived: _auto, lastSeenAt, logsComplete, ...fields } = patch;
-    const [row] = await this.db
-      .update(task)
-      .set({
-        ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value ?? null])),
-        ...(logsComplete !== undefined
-          ? {
-              context: sql`jsonb_set(coalesce(${task.context}, '{}'::jsonb), '{runnerLogs}', coalesce(${task.context}->'runnerLogs', '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object('complete', ${logsComplete ?? null}::boolean, 'handle', ${task.handle}, 'attempts', ${task.attempts}, 'generation', ${task.generation})))`,
-            }
-          : {}),
-        ...(answer === undefined
-          ? {}
-          : {
-              answer: sql`coalesce(${task.answer}, '[]'::jsonb) || ${JSON.stringify([answer])}::jsonb`,
-            }),
-        ...(Object.hasOwn(patch, 'archivedAt')
-          ? { archivedAt: archivedAt === undefined ? null : new Date(archivedAt) }
-          : {}),
-        ...(Object.hasOwn(patch, 'lastSeenAt')
-          ? { lastSeenAt: lastSeenAt === undefined ? null : new Date(lastSeenAt) }
-          : {}),
-        updatedAt: new Date(now),
-      })
-      .where(this.fence(organizationId, id, fence))
-      .returning({ id: task.id });
+    const {
+      answer,
+      approvals,
+      archivedAt,
+      autoArchived: _auto,
+      lastSeenAt,
+      logsComplete,
+      ...fields
+    } = patch;
+    // Approvals merge under the row lock, so concurrent answers and runner reports all land.
+    const [row] = await this.db.transaction(async tx => {
+      const [known] = approvals
+        ? await tx
+            .select({ context: task.context })
+            .from(task)
+            .where(this.where(organizationId, id))
+            .for('update')
+        : [];
+      return tx
+        .update(task)
+        .set({
+          ...Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, value ?? null])),
+          ...(approvals
+            ? {
+                context: sql`jsonb_set(coalesce(${task.context}, '{}'::jsonb), '{approvals}', ${JSON.stringify(mergeApprovals(known?.context?.approvals ?? [], approvals))}::jsonb)`,
+              }
+            : {}),
+          ...(logsComplete !== undefined
+            ? {
+                context: sql`jsonb_set(coalesce(${task.context}, '{}'::jsonb), '{runnerLogs}', coalesce(${task.context}->'runnerLogs', '{}'::jsonb) || jsonb_strip_nulls(jsonb_build_object('complete', ${logsComplete ?? null}::boolean, 'handle', ${task.handle}, 'attempts', ${task.attempts}, 'generation', ${task.generation})))`,
+              }
+            : {}),
+          ...(answer === undefined
+            ? {}
+            : {
+                answer: sql`coalesce(${task.answer}, '[]'::jsonb) || ${JSON.stringify([answer])}::jsonb`,
+              }),
+          ...(Object.hasOwn(patch, 'archivedAt')
+            ? { archivedAt: archivedAt === undefined ? null : new Date(archivedAt) }
+            : {}),
+          ...(Object.hasOwn(patch, 'lastSeenAt')
+            ? { lastSeenAt: lastSeenAt === undefined ? null : new Date(lastSeenAt) }
+            : {}),
+          updatedAt: new Date(now),
+        })
+        .where(this.fence(organizationId, id, fence))
+        .returning({ id: task.id });
+    });
     return Boolean(row);
   }
 
@@ -780,6 +810,7 @@ export class DrizzleQueue implements TaskQueue {
     with cancelled as (
       update ${task} set status = case when status = 'queued' then 'cancelled' else status end,
         finished_at = case when status = 'queued' then ${at}::timestamptz else finished_at end,
+        error = case when status = 'queued' then ${STOPPED_BY_USER} else error end,
         inbox_seq = case when status = 'queued' then inbox_seq else inbox_seq + 1 end,
         cancel_requested_at = ${at}::timestamptz, updated_at = ${at}::timestamptz
       where ${this.fence(organizationId, id, { ...fence, statuses: ACTIVE_STATES })} returning id, generation, inbox_seq, status
@@ -802,12 +833,13 @@ export class DrizzleQueue implements TaskQueue {
   }
 
   private filter(organizationId: string, opts: TaskFilter) {
-    const states = opts.status ? [opts.status] : opts.statuses;
+    const states = opts.status && opts.status !== 'waiting' ? [opts.status] : opts.statuses;
     const q = opts.q?.trim();
     const pattern = q && `%${q.replace(/[\\%_]/g, '\\$&')}%`;
     return and(
       eq(task.organizationId, organizationId),
       states ? inArray(task.status, states) : undefined,
+      opts.status === 'waiting' ? awaiting : undefined,
       opts.agent ? eq(task.agent, opts.agent) : undefined,
       opts.source ? eq(task.source, opts.source) : undefined,
       opts.reviewKey ? eq(task.reviewKey, opts.reviewKey) : undefined,
@@ -839,6 +871,11 @@ export class DrizzleQueue implements TaskQueue {
           event:
             sql`case when ${task.event} is not null then jsonb_build_object('integration', ${task.event}->>'integration', 'type', ${task.event}->>'type', 'text', ${task.event}->>'text') end`.as(
               'event',
+            ),
+          // The engine, model and effort the list shows, from what ran or else the agent's defaults.
+          usage:
+            sql`jsonb_strip_nulls(jsonb_build_object('engine', coalesce(${task.usage}->>'engine', ${task.definition}->>'engine'), 'model', coalesce(${task.usage}->>'model', ${task.definition}->>'model'), 'effort', coalesce(${task.usage}->>'effort', ${task.definition}->>'effort')))`.as(
+              'usage',
             ),
           status: task.status,
           attempts: task.attempts,
@@ -895,6 +932,7 @@ export class DrizzleQueue implements TaskQueue {
         flow: row.flow,
         prompt: row.prompt,
         event: row.event,
+        usage: Object.keys((row.usage as object | null) ?? {}).length ? row.usage : undefined,
       }),
       status: row.status,
       attempts: row.attempts,
@@ -1004,9 +1042,7 @@ export class DrizzleQueue implements TaskQueue {
           sql<number>`(count(*) filter (where ${inArray(task.status, ACTIVE_STATES)}))::int`.as(
             'active',
           ),
-        waiting: sql<number>`(count(*) filter (where ${eq(task.status, 'waiting')}))::int`.as(
-          'waiting',
-        ),
+        waiting: sql<number>`(count(*) filter (where ${awaiting}))::int`.as('waiting'),
       })
       .from(task)
       .where(this.filter(organizationId, filter));
@@ -1144,6 +1180,50 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     generation: number,
     batch?: BatchAdmission,
+    approvals?: Approval[],
+  ): Promise<InboxEntry | undefined> {
+    if (approvals)
+      return this.db.transaction(async tx => {
+        const [known] = await tx
+          .select({ context: task.context })
+          .from(task)
+          .where(this.where(organizationId, id))
+          .for('update');
+        for (const answer of approvals) {
+          const refused = refusedAnswer(
+            known?.context?.approvals?.find(entry => entry.id === answer.id),
+            answer,
+          );
+          if (refused) throw new ApprovalRefusedError(refused);
+        }
+        const merged = mergeApprovals(known?.context?.approvals ?? [], approvals);
+        return this.insertInbox(
+          tx,
+          organizationId,
+          id,
+          kind,
+          value,
+          now,
+          generation,
+          batch,
+          merged,
+        );
+      });
+
+    return this.insertInbox(this.db, organizationId, id, kind, value, now, generation, batch);
+  }
+
+  /** One statement: the task's inbox position moves, the entry lands, and the batch or approvals write with it. */
+  private async insertInbox(
+    db: Pick<typeof this.db, 'execute'>,
+    organizationId: string,
+    id: string,
+    kind: InboxEntry['kind'],
+    value: unknown,
+    now: number,
+    generation: number,
+    batch?: BatchAdmission,
+    approvals?: Approval[],
   ): Promise<InboxEntry | undefined> {
     const held = batch
       ? sql`select key, value from ${chatState}
@@ -1155,12 +1235,14 @@ export class DrizzleQueue implements TaskQueue {
     const context = admissions
       ? sql`, context = coalesce(${task.context}, '{}'::jsonb) || jsonb_build_object('admissions',
           coalesce(${task.context}->'admissions', '{}'::jsonb) || ${JSON.stringify(admissions)}::jsonb)`
-      : sql``;
+      : approvals
+        ? sql`, context = jsonb_set(coalesce(${task.context}, '{}'::jsonb), '{approvals}', ${JSON.stringify(approvals)}::jsonb)`
+        : sql``;
     const reserved = sql`(${chatState.value}->'sending'->>'count')::int`;
     const admitted = sql`coalesce((select n from jsonb_array_elements(${chatState.value}->'items') with ordinality e(item,n)
           where n <= ${reserved} and item->>'admission' = ${batch?.through ?? null}::text limit 1), 0)`;
     const [row] = await rows<{ seq: number | null; held: boolean }>(
-      this.db,
+      db,
       sql`
       with held as materialized (${held}), next as (
         update ${task} set inbox_seq = inbox_seq + 1, updated_at = ${new Date(now).toISOString()}::timestamptz${context}
@@ -1230,6 +1312,7 @@ export class DrizzleQueue implements TaskQueue {
           when exists(select 1 from applied where kind = 'approve' and value->>'approvalId' = ${task.approval}->>'id') then 'running' else status end,
         approval = case when exists(select 1 from applied where kind = 'approve' and value->>'approvalId' = ${task.approval}->>'id') then null else approval end,
         finished_at = case when exists(select 1 from applied where kind = 'cancel') then now() else finished_at end,
+        error = case when exists(select 1 from applied where kind = 'cancel') then ${STOPPED_BY_USER} else error end,
         updated_at = now()
       from answers where id in (select id from current) returning status
     ), connections as (delete from ${chatState} where ${connectionSnapshots(organizationId, id)} and exists (select 1 from updated where status = 'cancelled'))

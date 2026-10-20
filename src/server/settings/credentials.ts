@@ -219,12 +219,23 @@ export async function resolveEngine(
       return { engine, usable: true, chain, credentials };
   }
 
-  const custom = Object.values(config.models ?? {}).some(isEndpointModel) || rows.some(
-    row => ![...Object.keys(ENGINE_KEYS), ...Object.values(ENGINE_KEYS), ...Object.values(SUBSCRIPTION_KEYS)]
-      .includes(parseCredentialId(row.id).name),
-  );
+  const custom =
+    Object.values(config.models ?? {}).some(isEndpointModel) ||
+    rows.some(
+      row =>
+        ![
+          ...Object.keys(ENGINE_KEYS),
+          ...Object.values(ENGINE_KEYS),
+          ...Object.values(SUBSCRIPTION_KEYS),
+        ].includes(parseCredentialId(row.id).name),
+    );
 
-  return { engine: custom ? 'custom' : chain[0] ?? DEFAULT_ENGINE, usable: false, chain, credentials };
+  return {
+    engine: custom ? 'custom' : (chain[0] ?? DEFAULT_ENGINE),
+    usable: false,
+    chain,
+    credentials,
+  };
 }
 
 /** Workspace credentials plus the caller's own; nobody sees another member's. */
@@ -488,8 +499,10 @@ export async function credentialFix(
   engine: string,
   slug?: string,
 ): Promise<string> {
-  const page = dashPath(slug ?? (await organizationSlug(ctx)),
-    engine === 'custom' ? '/settings/models' : '/settings/credentials');
+  const page = dashPath(
+    slug ?? (await organizationSlug(ctx)),
+    engine === 'custom' ? '/settings/models' : '/settings/credentials',
+  );
 
   return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${page}${engine === 'custom' ? '' : `?engine=${encodeURIComponent(engine)}`}`;
 }
@@ -585,8 +598,7 @@ export async function createCredential(
 
     return json({ ok: true, name: parseCredentialId(id).name, replaced });
   } catch (error) {
-    if (error instanceof CredentialCheckError)
-      return json({ error: error.message }, error.status);
+    if (error instanceof CredentialCheckError) return json({ error: error.message }, error.status);
     console.error('coder server: could not save credential', error);
 
     return json({ error: 'Could not save credential. Please try again.' }, 500);

@@ -214,8 +214,6 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
   });
 }
 
-
-
 function secretParts(s: DrizzleStore, value: string) {
   if (value.startsWith('plain.'))
     return {
@@ -268,7 +266,10 @@ export const statePrefix = (organizationId: string, kind: string) =>
 export const stateKey = (organizationId: string, kind: string, id: string) =>
   statePrefix(organizationId, kind) + id;
 
-export async function rows<T>(db: import('../client').Db, statement: SQL): Promise<T[]> {
+export async function rows<T>(
+  db: Pick<import('../client').Db, 'execute'>,
+  statement: SQL,
+): Promise<T[]> {
   const result = (await db.execute(statement)) as unknown as T[] | { rows: T[] };
   return Array.isArray(result) ? result : result.rows;
 }

@@ -27,7 +27,7 @@ import type {
   UsageRecord,
 } from '../server/store/types';
 import type { PushResult } from '../server/store/types';
-import {type LoginView} from '../server/settings/logins';
+import { type LoginView } from '../server/settings/logins';
 
 type RemoteTypes = Omit<
   ClientTypes,

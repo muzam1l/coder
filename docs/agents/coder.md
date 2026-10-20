@@ -20,14 +20,3 @@ The built-in agent. On the hosted service it has an install link per platform; s
 ## On Linear
 
 - Mentioning or assigning the agent starts a session that answers, or makes the change and links the pull request.
-
-## What it runs with
-
-|             |                                                                   |
-| ----------- | ----------------------------------------------------------------- |
-| Permissions | `workspace-write`; `read-only` for pull-request reviews           |
-| Tools       | GitHub `write`; Slack and Linear `read`                        |
-| Flows       | `review`                                                          |
-| Engine      | the workspace's [credential](../self-host.md#credentials)         |
-
-The definition is `src/agent/builtin/coder/{agent.json,system.md}` in the package; a custom agent is the same two files in your repo ([Your own agents](index.md#your-own-agents)).

@@ -11,8 +11,7 @@ export function markRepositoryMcp(
   entries: Record<string, McpConfigEntry> | undefined,
   repository: boolean,
 ) {
-  for (const entry of Object.values(entries ?? {}))
-    entry.repository = repository;
+  for (const entry of Object.values(entries ?? {})) entry.repository = repository;
 }
 
 export function mcpApprovalHash(entry: McpConfigEntry | McpServerSpec): string {

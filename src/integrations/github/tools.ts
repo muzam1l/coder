@@ -1,4 +1,4 @@
-import type { AgentEvent, McpServerSpec, Preset } from '../types';
+import type { PlatformEvent, ToolServer, Preset } from '../types';
 
 export const GITHUB_PRESETS: Record<Preset, string[]> = {
   read: ['read'],
@@ -12,18 +12,14 @@ export const GITHUB_MCP_SERVER_INSTALL =
 /** GitHub's official MCP server (github/github-mcp-server) on the task's narrowed installation token. */
 export function githubToolServer(
   tools: string[],
-  _event: AgentEvent | undefined,
+  _event: PlatformEvent | undefined,
   token: string,
-): McpServerSpec {
+): ToolServer {
   const readOnly = !tools.includes('write');
   return {
     name: 'github',
     command: 'github-mcp-server',
-    args: [
-      'stdio',
-      '--toolsets=all',
-      ...(readOnly ? ['--read-only'] : []),
-    ],
+    args: ['stdio', '--toolsets=all', ...(readOnly ? ['--read-only'] : [])],
     env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
   };
 }

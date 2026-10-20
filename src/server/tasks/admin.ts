@@ -11,8 +11,9 @@ import {
 import { parseCredentialId } from '../settings/credentials';
 import { type Params } from '../routes/match';
 import { type ServerContext } from '../context';
-import { taskRunner } from '../runners';
+import { removeTaskWork, taskRunner } from '../runners';
 import {
+  answerLocalApproval,
   inspectLocalTask,
   localLog,
   localTask,
@@ -38,6 +39,7 @@ import {
   pushInbox,
   taskTimes,
   type TaskFilter,
+  withApprovals,
 } from './queue';
 import { randomUUID } from 'node:crypto';
 import { queueRowWins } from '../../core/state';
@@ -47,6 +49,19 @@ import { eventReplies } from '../chat';
 import { dispatchEvent } from './events';
 import { start } from './flows';
 import { ConfigError } from '../settings/config';
+import {
+  ApprovalRefusedError,
+  approvalMessage,
+  withDecisions,
+  listApprovals,
+  closedResponse,
+  pendingApprovals,
+  stoppedMessage,
+} from '../../core/approvals';
+import { resolveTaskDir } from '../../core/state';
+import { syncApprovals } from './approvals';
+import { type Approval } from '../../core/types';
+import { awaitsApproval } from '../../core/defaults';
 
 export const DONE = new Set<TaskStatus['status']>(['completed', 'failed', 'cancelled']);
 
@@ -58,7 +73,10 @@ export function taskError(error: unknown): Response {
 }
 
 export function summarizeTask(status: TaskStatus) {
-  const { id, name, source, agent, flow, event, prompt, cwd } = status.task;
+  const { id, name, source, agent, flow, event, cwd } = status.task;
+  const { engine, model, effort } = { ...status.task.definition, ...status.task.usage };
+  // The first turn's prompt titles the task; a follow-up or a decision is a later turn.
+  const prompt = status.task.context?.turns?.[0]?.prompt ?? status.task.prompt;
   return {
     task: {
       id,
@@ -71,11 +89,17 @@ export function summarizeTask(status: TaskStatus) {
       ...(event
         ? { event: { integration: event.integration, type: event.type, text: event.text } }
         : {}),
+      ...(engine
+        ? { usage: { engine, ...(model ? { model } : {}), ...(effort ? { effort } : {}) } }
+        : {}),
     },
     status: status.status,
     ...(status.status === 'queued' ? { statusReason: 'Waiting for a task slot' } : {}),
     attempts: status.attempts,
     ...(status.approval !== undefined ? { approval: status.approval } : {}),
+    ...((status.approvals ?? status.task.context?.approvals)
+      ? { approvals: status.approvals ?? status.task.context?.approvals }
+      : {}),
     ...(status.archivedAt !== undefined ? { archivedAt: status.archivedAt } : {}),
     createdAt: status.createdAt,
     startedAt: status.startedAt,
@@ -93,7 +117,8 @@ export function redactTask(
     ...safe,
     ...taskTimes(status),
     ...(status.status === 'queued' ? { statusReason: 'Waiting for a task slot' } : {}),
-    turns: taskTurns(status),
+    ...(status.task.context?.approvals ? { approvals: status.task.context.approvals } : {}),
+    turns: withDecisions(taskTurns(status), status.approvals ?? status.task.context?.approvals),
     ...(status.task.credential
       ? { credential: parseCredentialId(status.task.credential).name }
       : {}),
@@ -190,6 +215,10 @@ export async function removeTask(
   }
   if (!(await deleteTask(ctx, status)))
     return json({ error: 'Task changed while deleting. Try again.' }, 409);
+  if (!status.handle?.startsWith('cli:'))
+    await removeTaskWork(ctx, status.task, status.handle).catch(error =>
+      console.error(`coder server: work folder of ${taskId} not removed`, error),
+    );
   if (ctx.local) {
     await ctx.store.delete('snapshot', `local-start:${taskId}`);
     await ctx.store.delete('snapshot', `completion:${taskId}`);
@@ -270,17 +299,118 @@ function inboxAction(kind: 'ask' | 'approve') {
     const found = await target(ctx, id);
     if (found instanceof Response) return found;
     const { status, cwd } = found;
+    if (kind === 'approve') {
+      const value = (await req.json().catch(() => undefined)) as
+        Record<string, unknown> | undefined;
+      return decideApproval(ctx, id, value ?? {}, ctx.session?.user.name);
+    }
     if (!status) return localTaskAction(req, cwd, id, kind, ctx);
     if (status.task.flow !== 'default')
       return json({ error: `${kind} is available only for default-flow tasks` }, 409);
     if (!ACTIVE_STATES.includes(status.status))
       return json({ error: `Task "${id}" is not active` }, 409);
-    if (kind === 'approve' && !status.approval)
-      return json({ error: `Task "${id}" has no pending approval` }, 409);
-    const entry = await addInbox(ctx, status, kind, await req.json().catch(() => undefined));
+    const value = (await req.json().catch(() => undefined)) as Record<string, unknown> | undefined;
+    const entry = await addInbox(ctx, status, kind, value);
 
     return entry ? json(entry) : json({ error: `Task "${id}" is no longer active` }, 409);
   };
+}
+
+/** Answers an approval from any surface, then brings the task's conversation in step with it; `by` names who answered. */
+export async function decideApproval(
+  ctx: ServerContext,
+  id: string,
+  value: Record<string, unknown>,
+  by?: string,
+): Promise<Response> {
+  const found = await target(ctx, id);
+  if (found instanceof Response) return found;
+  const { status, cwd } = found;
+  if (status && status.task.flow !== 'default')
+    return json({ error: 'approve is available only for default-flow tasks' }, 409);
+  const approvalId = String(
+    value.approvalId ??
+      value.id ??
+      (status
+        ? (status.approval as Approval | undefined)?.id
+        : pendingApprovals(resolveTaskDir(cwd, id))[0]?.id) ??
+      '',
+  );
+  const decision = value.decision === 'deny' || value.decision === 'decline' ? 'decline' : 'accept';
+  const answer = { ...value, approvalId, decision, ...(by ? { by } : {}) };
+  const response = status
+    ? await answerApproval(ctx, status, answer)
+    : await answerLocalApproval(cwd, id, answer, ctx);
+  if (!response.ok) return response;
+
+  const current = await ctx.store.get('task', id);
+  const approvals = status
+    ? (current?.task.context?.approvals ?? [])
+    : listApprovals(resolveTaskDir(cwd, id));
+  if (current)
+    (ctx.waitUntil ?? (() => {}))(
+      syncApprovals(ctx, current.task, approvals).catch(error =>
+        console.error(`coder server: could not show the decision on approval ${approvalId}`, error),
+      ),
+    );
+
+  return response;
+}
+
+/** Answer an approval, pending or denied, any time: a live task hears it in its inbox, a finished one resumes with it as a new turn. */
+async function answerApproval(
+  ctx: ServerContext,
+  status: TaskStatus,
+  value: Record<string, unknown>,
+): Promise<Response> {
+  const id = status.task.id;
+  const known = status.task.context?.approvals ?? [];
+  const pending = status.approval as Approval | undefined;
+  const approvalId = String(value.approvalId);
+  const approval =
+    known.find(entry => entry.id === approvalId) ??
+    (pending?.id === approvalId ? pending : undefined);
+  if (!approval) return json({ error: `Task "${id}" has no approval "${approvalId}"` }, 409);
+  if (approval.response?.decision === 'accept')
+    return json({ error: `Approval "${approvalId}" is already approved` }, 409);
+  if (approval.response?.decision === 'closed')
+    return json({ error: stoppedMessage(approvalId) }, 409);
+  const decision = value.decision as 'accept' | 'decline';
+  const answered: Approval = {
+    ...approval,
+    response: {
+      decision,
+      ...(typeof value.reason === 'string' && value.reason ? { reason: value.reason } : {}),
+      answeredAt: new Date((ctx.now ?? Date.now)()).toISOString(),
+      ...(typeof value.by === 'string' && value.by ? { by: value.by } : {}),
+    },
+  };
+  if (DONE.has(status.status)) {
+    try {
+      const next = await continueTask(
+        ctx,
+        { ...status, task: withApprovals(status.task, [answered]) },
+        approvalMessage(answered),
+      );
+      scheduleKick(ctx, true);
+      return json(redactTask(next));
+    } catch (error) {
+      return taskError(error);
+    }
+  }
+  if (!ACTIVE_STATES.includes(status.status))
+    return json({ error: `Task "${id}" is not active` }, 409);
+  // The answer and its inbox entry land in one write, checked against the record under the queue's lock.
+  let entry;
+  try {
+    entry = await addInbox(ctx, status, 'approve', value, undefined, [answered]);
+  } catch (error) {
+    if (error instanceof ApprovalRefusedError) return json({ error: error.message }, 409);
+    throw error;
+  }
+  if (!entry) return json({ error: `Task "${id}" is no longer active` }, 409);
+
+  return json(entry);
 }
 
 export const askTask = inboxAction('ask');
@@ -300,11 +430,30 @@ export async function cancelTask(
     return localTaskAction(req, cwd, taskId, 'cancel', ctx);
   }
 
-  const cancelled = await ctx.queue.cancel(ctx.organizationId, taskId, (ctx.now ?? Date.now)(), {
+  const now = (ctx.now ?? Date.now)();
+  const cancelled = await ctx.queue.cancel(ctx.organizationId, taskId, now, {
     attempts: status.attempts,
     tokenHash: status.tokenHash ?? null,
     generation: status.generation ?? 0,
   });
+  // Its open approvals close now, even where no runner reports the stop.
+  const open = (status.task.context?.approvals ?? []).filter(approval => !approval.response);
+  if (cancelled && open.length) {
+    const response = closedResponse(new Date(now).toISOString());
+    await ctx.queue.patchTask(
+      ctx.organizationId,
+      taskId,
+      { approvals: open.map(approval => ({ ...approval, response })) },
+      now,
+    );
+    const current = await ctx.store.get('task', taskId);
+    if (current)
+      (ctx.waitUntil ?? (() => {}))(
+        syncApprovals(ctx, current.task, current.task.context?.approvals ?? []).catch(error =>
+          console.error(`coder server: could not show the stop on ${taskId}`, error),
+        ),
+      );
+  }
   if (cancelled && status.status !== 'queued') {
     await pushInbox(ctx, taskId);
     const current = await ctx.store.get('task', taskId);
@@ -532,7 +681,9 @@ export async function listTasks(
             counts: {
               all: rows.length,
               active: rows.filter(row => ACTIVE_STATES.includes(row.status)).length,
-              waiting: rows.filter(row => row.status === 'waiting').length,
+              waiting: rows.filter(row =>
+                awaitsApproval(row.status, row.approvals ?? row.task.context?.approvals),
+              ).length,
             },
           }
         : {}),

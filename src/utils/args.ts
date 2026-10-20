@@ -47,6 +47,17 @@ export const serverOptions = {
   yes: flag('with --server: connect to a server used for the first time without asking'),
 };
 
+/** The `--server` and `--workspace` flags a follow-up command repeats. */
+export function serverSuffix(args: { server?: string | true; workspace?: string }) {
+  return (
+    (args.server === true
+      ? ' --server'
+      : typeof args.server === 'string'
+        ? ` --server ${JSON.stringify(args.server)}`
+        : '') + (args.workspace ? ` --workspace ${JSON.stringify(args.workspace)}` : '')
+  );
+}
+
 export const credentialServerOptions = {
   server: serverOnly('act on your Coder server, in the saved workspace'),
   yes: flag('connect to a server used for the first time without asking'),

@@ -112,6 +112,16 @@ function Platforms({
     }
     return `/create/${encodeURIComponent(integration)}?${params}`;
   };
+  // One Install with a menu makes every Install a split button, so they line up.
+  const split = order.some(id => {
+    const own = apps.filter(app => app.integration === id);
+    const installed = installations.some(
+      entry => !entry.uninstalled && own.some(app => app.id === entry.app),
+    );
+    const shared = builtin && catalog.find(entry => entry.id === id)?.builtinApp !== 'own';
+
+    return own.length > 0 && !installed && (own.length > 1 || !shared);
+  });
 
   return (
     <Card title="Handles" count={order.filter(id => catalog.some(entry => entry.id === id)).length}>
@@ -153,9 +163,7 @@ function Platforms({
                       entry.account.type?.toLowerCase(),
                       entry.covers &&
                         `${entry.covers.length} ${info?.covered ?? 'account'}${entry.covers.length === 1 ? '' : 's'}`,
-                      [entry.settings?.engine, entry.settings?.effort]
-                        .filter(Boolean)
-                        .join(', '),
+                      [entry.settings?.engine, entry.settings?.effort].filter(Boolean).join(', '),
                     ]
                       .filter(Boolean)
                       .join(' · ') || 'account'}
@@ -192,10 +200,10 @@ function Platforms({
                   <td class="where">
                     {installs.length ? (
                       <>
-                        {installs.slice(0, 2).map(place)}
-                        {installs.length > 2 ? (
-                          <MoreList label={`+${installs.length - 2} more`}>
-                            {installs.slice(2).map(place)}
+                        {place(installs[0]!)}
+                        {installs.length > 1 ? (
+                          <MoreList label={`+${installs.length - 1} more`}>
+                            {installs.slice(1).map(place)}
                           </MoreList>
                         ) : null}
                       </>
@@ -239,7 +247,8 @@ function Platforms({
                       <>
                         {gone ? (
                           <Badge tone="warn">uninstalled</Badge>
-                        ) : (
+                        ) : state === 'created' && builtin && info.builtinApp !== 'own' ? null : (
+                          // A shared app is never created by this workspace, only installed.
                           <Badge tone={REACH_BADGE[state].tone}>{REACH_BADGE[state].label}</Badge>
                         )}
                         <PlatformActions
@@ -260,6 +269,7 @@ function Platforms({
                           organizationApps={info?.organizationApps}
                           shared={builtin && info.builtinApp !== 'own'}
                           appUpdate={info.appUpdate}
+                          split={split}
                           failed={
                             failed?.platform === id
                               ? {

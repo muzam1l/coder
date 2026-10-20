@@ -2,8 +2,8 @@
 import {
   IntegrationError,
   PRESETS,
-  type AgentApp,
-  type AgentDefinition,
+  type PlatformApp,
+  type AppSpec,
   type AppDrift,
   type IntegrationApp,
   type IntegrationUserAuth,
@@ -146,7 +146,7 @@ interface UserToken {
 function oauthClient(credentials: unknown): { clientId: string; clientSecret: string } {
   const { clientId, clientSecret } = credentials as GithubAppCredentials;
   if (!clientId || !clientSecret)
-    throw new Error('This GitHub App has no OAuth client; create it again from the dashboard');
+    throw new Error('This GitHub App has no OAuth client; create it again');
   return { clientId, clientSecret };
 }
 
@@ -329,21 +329,15 @@ export function githubAppEvents(events: string[]): string[] {
   return [...new Set([...events.flatMap(event => APP_EVENTS[event] ?? []), 'push'])];
 }
 
-/** The manifest a definition asks for, named `name` unless the definition names itself. */
-function agentManifest(
-  publicUrl: string,
-  definition: AgentDefinition,
-  name: string,
-  isPublic?: boolean,
-): GithubManifest {
-  const wiring = definition.integrations.github ?? {};
-  const events = Array.isArray(wiring.events) ? wiring.events : Object.keys(wiring.events ?? {});
+/** The manifest a spec asks for. */
+function specManifest(publicUrl: string, spec: AppSpec, isPublic?: boolean): GithubManifest {
+  const { events } = spec;
 
   return buildGithubManifest(publicUrl, {
-    name: definition.name ?? name,
-    description: definition.description,
+    name: spec.name,
+    description: spec.description,
     permissions: {
-      ...githubAppPermissions(definition.access),
+      ...githubAppPermissions(spec.access),
       ...(events.some(event => Object.hasOwn(APP_EVENTS, event))
         ? { issues: 'write', pull_requests: 'write' }
         : {}),
@@ -367,15 +361,11 @@ const LEVEL_NAMES: Record<string, string> = {
 /** GitHub's label for an event or permission key, as its settings page shows it. */
 const uiLabel = (key: string) => key[0]!.toUpperCase() + key.slice(1).replaceAll('_', ' ');
 
-/** The app as GitHub has it, from `GET /app`, against the manifest Coder would create it with now. */
+/** The app as GitHub has it, from `GET /app`, against the manifest the spec asks for now. */
 async function githubDrift(
-  app: AgentApp,
+  app: PlatformApp,
   credentials: GithubAppCredentials,
-  {
-    publicUrl,
-    definition,
-    fetch: request,
-  }: { publicUrl: string; definition: AgentDefinition; fetch: Fetcher },
+  { publicUrl, spec, fetch: request }: { publicUrl: string; spec: AppSpec; fetch: Fetcher },
 ): Promise<AppDrift> {
   const response = await request(`${API}/app`, {
     headers: githubHeaders(await appToken(credentials)),
@@ -389,7 +379,7 @@ async function githubDrift(
     events?: string[];
     permissions?: Record<string, string>;
   };
-  const wanted = agentManifest(publicUrl, definition, app.agent);
+  const wanted = specManifest(publicUrl, spec);
   const events = new Set(live.events ?? []);
   const permissions = live.permissions ?? {};
   const lines: AppDrift['lines'] = [];
@@ -419,12 +409,12 @@ async function githubDrift(
 }
 
 export const githubApp: IntegrationApp = {
-  builtin: 'shared',
+  shareable: true,
   postOrigins: ['https://github.com'],
-  createPost({ publicUrl, state, definition, encodedState }) {
-    const manifest = agentManifest(publicUrl, definition, state.agent, state.public === true);
+  createPost({ publicUrl, spec, state, owner, public: isPublic }) {
+    const manifest = specManifest(publicUrl, spec, isPublic === true);
     return {
-      url: githubNewAppUrl(state.owner, encodedState),
+      url: githubNewAppUrl(owner, state),
       fields: { manifest: JSON.stringify(manifest) },
     };
   },
@@ -449,11 +439,11 @@ export const githubApp: IntegrationApp = {
     return owner ? settingsPage(slug, owner) : undefined;
   },
   drift: (app, credentials, input) => githubDrift(app, credentials as GithubAppCredentials, input),
-  installUrl(_app: AgentApp, credentials, { publicUrl, state, installation }) {
+  installUrl(_app: PlatformApp, credentials, { publicUrl, state, installation }) {
     const { slug } = credentials as GithubAppCredentials;
     if (!installation)
       return `https://github.com/apps/${slug}/installations/new?state=${encodeURIComponent(state)}`;
-    // Verifying an install GitHub started: a fresh user authorization, back to the install callback with only Coder's state.
+    // Verifying an install GitHub started: a fresh user authorization, back to the install callback with only the host's state.
     const params = new URLSearchParams({
       client_id: oauthClient(credentials).clientId,
       redirect_uri: installRedirect(publicUrl),
@@ -469,10 +459,7 @@ export const githubApp: IntegrationApp = {
       // One app's revoked key never hides another app's installation.
       const owns = await appInstallation(credentials as GithubAppCredentials, id, request).catch(
         (error: unknown) => {
-          console.error(
-            `coder server: asking GitHub whether ${app.id} owns installation ${id} failed`,
-            error,
-          );
+          console.error(`asking GitHub whether ${app.id} owns installation ${id} failed`, error);
           return false;
         },
       );

@@ -2,19 +2,11 @@
 import process from 'node:process';
 
 import { CoderError } from '../../core/dispatch';
-import type { SteerOutcome } from '../../core/task/actions';
-import type { TaskStatus } from '../../server/store/types';
-import { errStyle, outStyle } from '../../tui/output';
+import type { SteerResult } from '../../core/task';
+import { outStyle } from '../../tui/output';
 import { flag, serverOptions, str, strList } from '../../utils/args';
-import { command, nextSteps } from '../../cli';
-import { finishedNext, printOutcome, serverTaskJson, waitingNext } from './result';
-
-type Steered = {
-  taskId: string;
-  steered: SteerOutcome;
-  status?: string | null;
-  finalMessage?: string | null;
-};
+import { command } from '../../cli';
+import { finishedNext, waitingNext } from './result';
 
 /** The task id, then the text: what `steer` and `ask` take. */
 export function idAndText(args: string[], missing: string, hint: string[]) {
@@ -25,7 +17,7 @@ export function idAndText(args: string[], missing: string, hint: string[]) {
 }
 
 /** How the follow-up landed, or with --wait its answer. */
-function printSteer(outcome: Steered, wait = false): void {
+function printSteer(outcome: SteerResult, wait = false): void {
   const { taskId, steered } = outcome;
   if (steered === 'queued') {
     process.stdout.write(
@@ -79,26 +71,18 @@ export const commandSteer = command({
     ]);
     return tasks.steer(id, text, { ...options, organization: options.workspace });
   },
-  json(result, { options }) {
-    if ('attempts' in result) return serverTaskJson(result as unknown as TaskStatus);
-    const outcome = result as Steered;
-    return options.server !== undefined || !options.wait || outcome.steered === 'queued'
-      ? result
+  json: (outcome, { options }) =>
+    !options.wait || outcome.steered === 'queued'
+      ? outcome
       : {
           taskId: outcome.taskId,
           status: outcome.status ?? null,
           finalMessage: outcome.finalMessage ?? null,
-        };
-  },
-  next({ result, args }) {
-    const outcome = result as Steered;
-    if (args.server !== undefined)
-      return args.wait && ['completed', 'failed', 'cancelled'].includes(outcome.status ?? '')
-        ? finishedNext((result as unknown as TaskStatus).task.id, args)
-        : [];
+        },
+  next({ result: outcome, args }) {
     if (outcome.steered === 'queued' && !args.wait) return [];
     if (args.wait && outcome.steered !== 'queued')
-      return finishedNext(outcome.taskId).map(step => ({
+      return finishedNext(outcome.taskId, args).map(step => ({
         ...step,
         cli: { ...step.cli, stream: 'stderr' as const },
       }));
@@ -110,14 +94,8 @@ export const commandSteer = command({
       ),
     ];
   },
-  print(result, { options, args: [id] }) {
-    if (options.server === undefined) return printSteer(result as Steered, options.wait);
-    if (options.wait) return printOutcome(result as unknown as TaskStatus, outStyle);
-    process.stdout.write(`Steered server task ${outStyle.cyan(id!)}.\n`);
-  },
-  exit(result, { options }) {
-    const outcome = result as Steered;
-    if (options.wait && (options.server !== undefined || outcome.steered !== 'queued'))
-      return outcome.status === 'completed' ? 0 : 1;
+  print: (outcome, { options }) => printSteer(outcome, options.wait),
+  exit(outcome, { options }) {
+    if (options.wait && outcome.steered !== 'queued') return outcome.status === 'completed' ? 0 : 1;
   },
 });

@@ -307,20 +307,22 @@ export interface ClaudeTurnOptions {
   model?: string | null;
   effort?: Effort | null;
   permissions?: Permission | null;
-  /** Route unresolved permission asks to coder's approval policy (auto mode only). */
+  /** The task Coder's PreToolUse hook acts for; in auto mode its prompt tool also denies what still asks and points at `escalate`. */
   approvalTaskId?: string | null;
-  /** Hosts reachable inside the sandbox without approval (auto mode only). */
+  /** Hosts reachable inside the sandbox without review (auto mode only). */
   allowedNetworkHosts?: string[];
+  /** The task's scratch folder, writable in the writing modes. */
+  scratch?: string;
+  /** Whether the turn runs on the user's own machine (auto mode tells its classifier). */
+  local?: boolean;
   /** Extra existing directories the turn may reach; writes there follow the permission mode. */
   additionalDirectories?: string[];
   /** Extra environment for the CLI and the commands it runs. */
   env?: Record<string, string>;
   /** Inspection tools for a read-only sidecar; supplying any also applies CLAUDE_SIDECAR_FLAGS. */
   readOnlyAllowedTools?: string[];
-  /** Extra MCP servers (env already resolved) plus the tools the turn may call. */
+  /** Extra MCP servers (env already resolved) plus the tools the turn may call; `readOnly` ones go through the hook. */
   mcpServers?: McpServerSpec[];
-  /** Listed tools the turn may not call, as [server, tool]; denied in every permission mode. */
-  deniedMcpTools?: Array<[server: string, tool: string]>;
   nativeMcp?: boolean;
   /** Directory for the short-lived 0600 MCP config file. */
   taskRoot?: string;
@@ -332,6 +334,8 @@ export interface ClaudeTurnOptions {
   settingSources?: string;
   onProgress?: (update: Exclude<ProgressUpdate, string>) => void;
   onHeartbeat?: () => void;
+  /** Stops the turn: the child is terminated and the turn ends as it exits. */
+  signal?: AbortSignal;
   command?: MailboxKey;
   onResult?: (result: TurnResult) => void;
   /** Publishes the worker-owned endpoint once this turn can accept live input. */
@@ -352,6 +356,9 @@ export const claudeToolName = (server: string, tool?: string) =>
   ['mcp', server, ...(tool === undefined ? [] : [tool])]
     .map(part => part.replace(/[^A-Za-z0-9_-]/g, '_'))
     .join('__');
+
+/** One `sh -c` word, for the approval hook's command line. */
+const shellQuote = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`;
 
 /** The approval server's name, apart from an agent's `coder` server. */
 const APPROVAL_SERVER = 'coder-approval';
@@ -400,6 +407,7 @@ export function buildClaudeTurnArgs(
   mcpConfigPath?: string,
   cliVersion?: string,
   systemPromptPath?: string,
+  readOnlyPath?: string,
 ): string[] {
   // stream-json emits newline-delimited events (tool calls, result) as the turn
   // runs, so progress is visible instead of a single blob at the end like the
@@ -444,9 +452,6 @@ export function buildClaudeTurnArgs(
       ? server.tools.map(tool => claudeToolName(server.name, tool))
       : [claudeToolName(server.name)],
   );
-  const deniedTools = (options.deniedMcpTools ?? []).map(([server, tool]) =>
-    claudeToolName(server, tool),
-  );
   const mcpConfigFlags = Object.keys(mcpServers).length
     ? ['--mcp-config', mcpConfigPath ?? path.join(options.taskRoot ?? cwd, '.claude-mcp.json')]
     : options.nativeMcp
@@ -455,11 +460,9 @@ export function buildClaudeTurnArgs(
   if (!options.nativeMcp) args.push('--strict-mcp-config', '--no-chrome');
 
   if (approvalServer) {
-    // Prompt tool is only consulted in default mode (never auto/dontAsk):
-    // unresolved asks hit coder's policy instead of a flat deny.
+    // Claude's classifier decides; the prompt tool answers only what it hands back (repeated blocks, ask rules).
     args.push(
-      '--permission-mode',
-      'default',
+      ...CLAUDE_PERMISSION_FLAGS.auto,
       ...mcpConfigFlags,
       '--permission-prompt-tool',
       claudeToolName(APPROVAL_SERVER, 'approval_prompt'),
@@ -488,8 +491,30 @@ export function buildClaudeTurnArgs(
       args.push('--allowedTools', ...mcpTools);
     }
   }
-  if (deniedTools.length) args.push('--disallowedTools', ...deniedTools);
+  // The permission prompt tool answers Claude, never the model.
+  if (approvalServer)
+    args.push('--disallowedTools', claudeToolName(APPROVAL_SERVER, 'approval_prompt'));
   for (const directory of additionalDirectories) args.push('--add-dir', directory);
+  const readOnlyServers = extraServers.filter(server => server.readOnly);
+  const hook = options.approvalTaskId
+    ? [
+        process.execPath,
+        CLI_PATH,
+        'task',
+        'hook',
+        options.approvalTaskId,
+        ...(readOnlyServers.length
+          ? [
+              '--servers',
+              readOnlyPath ?? path.join(options.taskRoot ?? cwd, '.claude-read-only.json'),
+            ]
+          : []),
+        '--cwd',
+        cwd,
+      ]
+        .map(shellQuote)
+        .join(' ')
+    : undefined;
   // The OS sandbox enforces read-only writes when available.
   const turnSettings = claudeTurnSettings(
     permissions,
@@ -497,9 +522,23 @@ export function buildClaudeTurnArgs(
     options.allowedNetworkHosts ?? [],
     additionalDirectories,
     process.env[MACHINE_SANDBOX_ENV] !== '1',
+    options.scratch,
+    options.local ?? true,
+    hook,
   );
+  const base = turnSettings ? JSON.parse(turnSettings) : {};
+  // Read-only servers' calls go to the hook, which lists the server once and refuses tools not marked read-only.
+  const readOnlyHooks = hook
+    ? readOnlyServers.map(server => ({
+        matcher: `${claudeToolName(server.name)}__.*`,
+        hooks: [{ type: 'command', command: hook }],
+      }))
+    : [];
   const settings = {
-    ...(turnSettings ? JSON.parse(turnSettings) : {}),
+    ...base,
+    ...(readOnlyHooks.length
+      ? { hooks: { PreToolUse: [...(base.hooks?.PreToolUse ?? []), ...readOnlyHooks] } }
+      : {}),
     ...(!options.nativeMcp ? { disableClaudeAiConnectors: true } : {}),
     ...(options.promptCacheTtl && version && compareVersions(version, '2.1.242') >= 0
       ? { promptCacheTtl: options.promptCacheTtl }
@@ -630,9 +669,15 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
   const systemFile = options.systemPrompt
     ? path.join(options.taskRoot ?? cwd, `.claude-system-${randomUUID()}.md`)
     : undefined;
+  // The hook reads read-only servers for the whole turn; Claude's config goes once it started.
+  const readOnly = (options.mcpServers ?? []).filter(server => server.readOnly);
+  const readOnlyFile = readOnly.length
+    ? path.join(options.taskRoot ?? cwd, `.claude-read-only-${randomUUID()}.json`)
+    : undefined;
   for (const [file, content] of [
     [configFile, `${JSON.stringify({ mcpServers })}\n`],
     [systemFile, options.systemPrompt],
+    [readOnlyFile, JSON.stringify(readOnly)],
   ]) {
     if (!file) continue;
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -641,9 +686,17 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
   processTiming('claude.prepare', { resume: Boolean(options.resumeSessionId) });
   const env = engineEnvironment({ ...process.env, ...options.env });
   const version = claudeVersion(options.executable ?? 'claude', env, cwd);
-  const args = buildClaudeTurnArgs(cwd, options, sessionId, configFile, version, systemFile);
-  const removeConfig = () => {
-    for (const file of [configFile, systemFile]) {
+  const args = buildClaudeTurnArgs(
+    cwd,
+    options,
+    sessionId,
+    configFile,
+    version,
+    systemFile,
+    readOnlyFile,
+  );
+  const removeConfig = (ended = true) => {
+    for (const file of [configFile, systemFile, ...(ended ? [readOnlyFile] : [])]) {
       if (!file) continue;
       try {
         fs.unlinkSync(file);
@@ -697,7 +750,7 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
       // A protocol event proves Claude completed startup and consumed its
       // configuration. Removing the file on stdin's write callback races the
       // child before it has opened --mcp-config.
-      removeConfig();
+      removeConfig(false);
       options.onHeartbeat?.();
       if (event.type === 'system' && event.subtype === 'init' && event.session_id) {
         streamSessionId = event.session_id;
@@ -748,6 +801,7 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
             options.onProgress?.({
               kind: 'usage',
               tokens: { ...usage, output: outputSoFar, total },
+              context: contextTokens,
               threadId: streamSessionId,
             });
           }
@@ -869,6 +923,12 @@ async function claudeTurn(cwd: string, options: ClaudeTurnOptions): Promise<Clau
       process.exit(143);
     };
     process.on('SIGTERM', onTerm);
+    const onAbort = () => {
+      input.stopAccepting();
+      child.kill('SIGTERM');
+    };
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener('abort', onAbort, { once: true });
 
     void (async () => {
       if (options.onSteerReady) {

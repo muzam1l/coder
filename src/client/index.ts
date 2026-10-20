@@ -370,10 +370,16 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     ) => this.post(`/admin/tasks/${encodeURIComponent(id)}/steer`, { text, ...options }),
     ask: (id: string, question: string) =>
       this.post(`/admin/tasks/${encodeURIComponent(id)}/ask`, { question }),
-    approve: (id: string, approvalId: string, decision: 'accept' | 'decline') =>
+    approve: (
+      id: string,
+      approvalId: string,
+      decision: 'accept' | 'decline',
+      options: { reason?: string } = {},
+    ) =>
       this.post(`/admin/tasks/${encodeURIComponent(id)}/approve`, {
         approvalId,
         decision,
+        ...options,
       }),
     archive: (id: string): Promise<{ ok: true }> =>
       this.post(`/admin/tasks/${encodeURIComponent(id)}/archive`),
@@ -386,14 +392,15 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       input: T,
     ): Promise<T extends { event: D['event'] } ? { tasks: string[] } : D['task']> =>
       this.post('/admin/tasks', input),
-    /** Follow the task's event stream until it ends; `onLog` sees each log line as it lands. */
+    /** Follow the task's event stream until it ends or waits on an approval; `onLog` sees each log line as it lands. */
     wait: async (
       id: string,
       options: { onLog?: (line: TaskLog) => void } = {},
     ): Promise<D['task']> => {
       let after = -1;
       for (;;) {
-        const response = await this.tasks.stream(id, after);
+        const abort = new AbortController();
+        const response = await this.tasks.stream(id, after, abort.signal);
         if (!response.ok || !response.body) {
           // `get` renews an expired token before the stream is asked again.
           const status = await this.tasks.get(id);
@@ -407,8 +414,12 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
             const line = JSON.parse(event.data) as TaskLog;
             after = line.seq;
             options.onLog?.(line);
-          } else if (event.event === 'end') ended = true;
+          } else if (event.event === 'end' || event.event === 'approval') {
+            ended = true;
+            break;
+          }
         }
+        // Leaving the loop cancels the body; aborting first surfaces as "This operation was aborted".
         if (ended) return this.tasks.get(id);
       }
     },
@@ -575,6 +586,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       baseUrl: string;
       model: string;
       envKey?: string;
+      contextWindow?: number;
     }): Promise<Config> => this.post('/admin/models', body),
     probe: (body: { baseUrl: string; envKey?: string; key?: string }): Promise<ProbeResult> =>
       this.post('/admin/models/probe', body),

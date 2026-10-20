@@ -9,7 +9,7 @@ import { command } from '../../cli';
 
 const input = arg(z.optional(z.record(z.string(), z.unknown())), "The tool's input.");
 
-/** The approval policy for one task, served to its Claude turn. */
+/** Claude's permission prompt fallback for one task: denies and points at `escalate`. */
 const approvals = (cwd: string, caller: string) =>
   defineApp({
     name: 'coder',
@@ -20,11 +20,7 @@ const approvals = (cwd: string, caller: string) =>
         description: 'Coder approval policy for claude permission prompts.',
         args: { tool_name: str('The tool Claude asks to run.'), input, tool_input: input },
         access: 'read',
-        run: request =>
-          decidePermission(cwd, caller, request).catch(error => ({
-            behavior: 'deny',
-            message: `coder mcp tool failed: ${error instanceof Error ? error.message : String(error)}`,
-          })),
+        run: request => decidePermission(cwd, caller, request),
         mcp: { text: result => JSON.stringify(result) },
       }),
     ],

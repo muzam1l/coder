@@ -26,15 +26,13 @@ export const commandDelete = command({
       allArchived: options['all-archived'],
     });
   },
-  print(result, { options }) {
+  print(result) {
     if (result.count === undefined)
       return void process.stdout.write(`Deleted task ${outStyle.cyan(result.taskId)}.\n`);
     process.stdout.write(
-      options.server !== undefined
-        ? `Deleted ${result.count} server task${plural(result.count)}.\n`
-        : result.count
-          ? `Deleted ${result.count} archived task${plural(result.count)}.\n`
-          : `${outStyle.dim('No archived tasks to delete.')}\n`,
+      result.count
+        ? `Deleted ${result.count} archived task${plural(result.count)}.\n`
+        : `${outStyle.dim('No archived tasks to delete.')}\n`,
     );
   },
 });

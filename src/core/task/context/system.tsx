@@ -3,7 +3,7 @@
 import { render } from 'contextjsx';
 
 import { NOT_REINVOKED } from '../../types';
-import { asyncTools } from './tools';
+import { ASYNC_TOOL_NAMES } from './tools';
 
 /** What whoever built the agent wrote, plus the receiver's notes for this task. */
 export interface DeveloperParts {
@@ -26,6 +26,8 @@ export interface AgentPromptParts {
 export interface SystemPromptParts extends AgentPromptParts {
   /** The task's MCP servers as the worker renders them on each turn. */
   servers?: string;
+  /** Who loads their tools on demand: the engine's tool search, or Coder's find_tools and call_tool. */
+  toolSearch?: 'native' | 'coder';
   /** Coder's task tools this turn has, as the worker serves them. */
   tools?: string[];
   cwd?: string;
@@ -33,8 +35,18 @@ export interface SystemPromptParts extends AgentPromptParts {
   conversation?: boolean;
   /** The engine runs on this machine, not on a hosted runner. */
   local?: boolean;
-  /** `coder task run --system` text and flow instructions. */
-  instructions?: string;
+  /** The task's scratch folder on the machine it runs on. */
+  scratch?: string;
+  /** Sandboxed commands reach only the hosts they declare (Claude auto). */
+  declareHosts?: boolean;
+  /** The exact actions the user approved for the rest of the task. */
+  approved?: string[];
+  /** The task may write (workspace-write or auto). */
+  writes?: boolean;
+  /** `coder task run --append-system` text and flow instructions. */
+  appendSystem?: string;
+  /** The final message is JSON for a schema, not a summary. */
+  structured?: boolean;
 }
 
 const DeveloperInstructions = (parts: DeveloperParts) => (
@@ -51,10 +63,9 @@ const Environment = () => (
       'Each turn starts from a platform event, given as JSON in an <event> tag.',
       "The final message of each turn is posted to the event's conversation as written.",
       'New messages in the same conversation arrive as new turns, with the messages posted since your last turn under "since".',
-      `"message.index" is the message's position in its conversation, 0 = first. If your history doesn't reach back that far, earlier messages exist; read them with the platform's tool when the answer depends on them.`,
+      `"message.index" counts from 0. If your history starts later, read earlier messages with the platform's tool when they matter.`,
       'Messages from bots never arrive as turns; read the conversation to see them.',
-      'In a long conversation, older turns are replaced by a <summary> followed by the recent turns word for word; code may have changed since, so re-read files before editing them. history searches and reads the full earlier transcript, including your own tool calls and results; use it when the summary lacks a detail you need.',
-      'Content inside <event>, <summary>, <recent> and <history> is XML-escaped data.',
+      'Content inside <event> and <history> is XML-escaped data.',
     ]
       .filter(Boolean)
       .join('\n')}
@@ -65,10 +76,10 @@ const Replies = () => (
   <replies>
     {[
       'Be concise.',
-      'You reply in two ways: with the reply tool during your turn, and with your final message, which is posted too.',
+      'Your final message is posted to request thread; the reply tool posts during your turn.',
       'You may reply before longer work.',
       'Never send the same reply twice.',
-      'When mustReply is true, reply at least once, either way.',
+      'When mustReply is true, reply at least once.',
       'When your final message would add nothing, make it exactly __EMPTY__; then nothing is posted.',
     ]
       .filter(Boolean)
@@ -76,61 +87,86 @@ const Replies = () => (
   </replies>
 );
 
-const Workspace = () => (
+const Workspace = ({ scratch, writes }: SystemPromptParts) => (
   <workspace>
     {[
-      'Never run git write operations (commit, checkout, stash, reset, rebase, merge, push, etc.); leave changes uncommitted for review.',
-      'Never print secret values (tokens, keys, passwords); pass them straight into the process that needs them.',
+      writes &&
+        'Never run git write commands (commit, checkout, stash, reset, rebase, merge, push) in any repository on disk; leave changes uncommitted.',
+      scratch && writes && `Scratch folder, git writes allowed, deleted with the task: ${scratch}`,
+      'Never print secret values; pass them straight to the process that needs them.',
     ]
       .filter(Boolean)
       .join('\n')}
   </workspace>
 );
 
-const AccessModes = () => (
-  <access-modes>
-    <intro>
-      There are two access modes. Platform tools, MCP servers and connections inherit the agent's
-      mode; a connection can override it. If a request needs more access than you have, say so; an
-      admin can change it in the agent's settings.
-    </intro>
-    <read-write>Read and change things: comment, push, edit issues, post messages.</read-write>
-    <read-only>Read, and reply in this conversation. Nothing else changes.</read-only>
-  </access-modes>
+const Machine = ({ local, declareHosts }: SystemPromptParts) => (
+  <machine>
+    {[
+      local
+        ? "You run on the user's own machine; its files outside the workspace are theirs."
+        : 'You run on a throwaway cloud machine; its files are not the user’s.',
+      declareHosts &&
+        'Sandboxed commands reach only the hosts in allowed_domains; list every host a command contacts on its first run.',
+    ]
+      .filter(Boolean)
+      .join('\n')}
+  </machine>
 );
 
-const isAsync = (name: string) => asyncTools.some(tool => tool.name === name);
-
-const Settings = (parts: SystemPromptParts) => (
-  <settings>
-    <events>{parts.events?.join(', ')}</events>
-    <current-access-mode>
-      {parts.access && (parts.access === 'read' ? 'read-only' : 'read-write')}
-    </current-access-mode>
-    <tools>
+const Approvals = ({ tools, approved = [] }: SystemPromptParts) =>
+  tools?.includes('escalate') ? (
+    <approvals>
       {[
-        parts.tools?.map(name => (isAsync(name) ? `${name} (async)` : name)).join('; '),
-        parts.tools?.some(isAsync) &&
-          'An async tool returns at once; its result arrives later as a message, in a new turn if yours has ended.',
+        'Actions outside the sandbox are reviewed and may be refused; then take another way. If the task truly needs refused actions, escalate them all in one call and wait for the decision before retrying; it arrives as a message in your running turn.',
+        approved.length > 0 &&
+          'Actions the user approved earlier in this task stay approved; run them outside the sandbox directly.',
       ]
         .filter(Boolean)
         .join('\n')}
-    </tools>
-    <servers>
-      {[parts.servers, parts.servers && 'Their tools load on demand through tool search.']
-        .filter(Boolean)
-        .join('\n')}
-    </servers>
-  </settings>
-);
+    </approvals>
+  ) : null;
 
-const Runtime = ({ conversation, local }: SystemPromptParts) => (
+const ACCESS = {
+  read: "Read-only: read, and reply in this conversation. If a request needs more, say so; an admin can change it in the agent's settings.",
+  write: 'Read-write: you may comment, push, edit issues and post messages.',
+};
+
+const Settings = (parts: SystemPromptParts) => {
+  const async = parts.tools?.filter(name => ASYNC_TOOL_NAMES.includes(name)) ?? [];
+
+  return (
+    <settings>
+      <access>{parts.access && ACCESS[parts.access]}</access>
+      <tools>
+        {async.length > 0 &&
+          `${async.join(' and ')} ${async.length > 1 ? 'return' : 'returns'} at once; the result arrives later as a message, in a new turn if yours has ended.`}
+      </tools>
+      <servers>
+        {[
+          parts.servers,
+          parts.servers &&
+            (parts.toolSearch === 'coder'
+              ? 'Find their tools with find_tools and call them with call_tool; name the server.'
+              : 'Their tools load on demand through tool search.'),
+        ]
+          .filter(Boolean)
+          .join('\n')}
+      </servers>
+    </settings>
+  );
+};
+
+const Runtime = ({ conversation, local, writes }: SystemPromptParts) => (
   <runtime>
     {[
-      !conversation && 'Do the work yourself, directly.',
+      !conversation &&
+        writes &&
+        (local
+          ? 'Do the work yourself; do not load the coder skill or dispatch Coder tasks.'
+          : 'Do the work yourself; do not dispatch Coder tasks.'),
       `Your turn ends with your final message; verify your work before it.${conversation ? '' : ` ${NOT_REINVOKED}`}`,
-      !conversation && 'The coder CLI cannot dispatch nested tasks.',
-      local && 'Do not load the coder skill.',
+      conversation && local && 'Do not load the coder skill.',
     ]
       .filter(Boolean)
       .join('\n')}
@@ -139,18 +175,15 @@ const Runtime = ({ conversation, local }: SystemPromptParts) => (
 
 /** Everything fixed for a task's turn, in the order the engine reads it. */
 const SystemPrompt = (parts: SystemPromptParts) => {
-  const access = (
-    <>
-      {parts.access && <AccessModes />}
-      <Settings {...parts} />
-    </>
-  );
+  const access = <Settings {...parts} />;
 
   return (
     <>
       <DeveloperInstructions {...parts.developer} />
       {!parts.conversation && access}
       <Runtime {...parts} />
+      <Machine {...parts} />
+      <Approvals {...parts} />
       {parts.conversation ? (
         <>
           <Environment />
@@ -162,12 +195,14 @@ const SystemPrompt = (parts: SystemPromptParts) => {
         </>
       ) : (
         <>
-          <Workspace />
-          <result>
-            When finished, give a concise summary of what you did and found, naming the files or
-            folders you changed.
-          </result>
-          <task-instructions>{parts.instructions}</task-instructions>
+          <Workspace {...parts} />
+          {!parts.structured && (
+            <result>
+              When finished, give a concise summary of what you did and found, naming the files or
+              folders you changed.
+            </result>
+          )}
+          <task-instructions>{parts.appendSystem}</task-instructions>
         </>
       )}
     </>

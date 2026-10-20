@@ -16,7 +16,7 @@ Without --server, one row per built-in and workspace agent. With --server, list 
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `agent show [id] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
@@ -29,7 +29,7 @@ Describe one agent as it will run here, or its active version on a server: its s
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder agent show coder  # what the built-in agent listens to and may do
@@ -51,7 +51,7 @@ Create .coder/agents/<id>/ with an agent.json built from the integration catalog
 - `--match <match>` start tasks only for event text matching a regex, as event=regex pairs
 - `--yes` skip the questions and take the defaults
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder agent init  # answer the questions, id included
@@ -69,7 +69,7 @@ Upload one workspace agent, or every agent in .coder/agents when no id is given.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder agent push helper  # upload helper
@@ -90,7 +90,7 @@ Run a recorded platform event (AgentEvent JSON) through an agent. With --server 
 - `--flow <flow>` override the matched flow
 - `--task <task>` a runner's form: run that server task here
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder agent run helper sample-slack-mention.json  # offline: print what the agent would reply
@@ -107,7 +107,7 @@ aggregate usage by agent, installation, or engine
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## agent integrations
 

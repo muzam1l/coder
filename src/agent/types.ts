@@ -1,11 +1,16 @@
-import type { SerializedMessage, SerializedThread } from 'chat';
-
 import type { Effort, McpConfigEntry, Permission } from '../core/config';
+import type { Approval } from '../core/types';
 import type { TaskTurn, RunnerKind } from '../client/types';
-import type { SinceMessage } from '../integrations/types';
+import type {
+  PlatformApp,
+  PlatformEvent,
+  PlatformInstallation,
+  Preset,
+  SinceMessage,
+} from '../integrations/types';
 
-export type Preset = 'read' | 'write';
-export const PRESETS: Preset[] = ['read', 'write'];
+export type { Preset } from '../integrations/types';
+export { PRESETS } from '../integrations/types';
 
 export type { RunnerKind } from '../client/types';
 
@@ -77,23 +82,7 @@ export interface Agent {
 }
 
 /** A platform event, already typed by its integration. */
-export interface AgentEvent {
-  integration: string;
-  /** Catalog name, e.g. `pull_request` or `mention`. */
-  type: string;
-  /** `AgentApp.id` the webhook was addressed to. */
-  appId: string;
-  installationId: string;
-  deliveryId: string;
-  actor: { id: string; login?: string; role?: string; agent?: boolean };
-  /** Human text attached to the event: mention body, comment, PR title + body. */
-  text: string;
-  /** What the platform tells an agent about where the event happened, such as a Linear issue; bounded. */
-  promptContext?: string;
-  /** The covered account it happened in, for an installation that covers several. */
-  within?: string;
-  /** The Chat SDK thread and message it happened in, without raw platform payloads; replies go to this thread. */
-  chat?: { thread: SerializedThread; message?: SerializedMessage };
+export interface AgentEvent extends PlatformEvent {
   /** Whether the agent must answer: a mention, a 1:1 direct message, or a handle that answers every prompt. */
   mustReply?: boolean;
   /** The event's place in its conversation, gathered at dispatch; `more` counts messages past `since`'s cap. */
@@ -104,25 +93,15 @@ export interface AgentEvent {
     /** Internal acknowledgement watermark of the recorded unseen snapshot. */
     unseen?: { version: number; epoch?: string };
   };
-  repo?: {
-    owner: string;
-    name: string;
-    cloneUrl: string;
-    defaultBranch: string;
-  };
 }
 
 /**
  * One platform app = one agent's handle. Created from the dashboard, or once per server for the built-in agent;
  * the receiver routes each webhook to its app by id. Store kind `app`, id `<integration>:<platform app id>`.
  */
-export interface AgentApp {
-  id: string;
-  integration: string;
+export interface AgentApp extends PlatformApp {
   /** Agent id this app serves. */
   agent: string;
-  /** App handle: GitHub app slug (`@slug`), Slack bot user name. */
-  name: string;
   /** `owner/name` of the repo holding `.coder/agents/<agent>/`; absent for built-in agents. */
   agentsRepo?: string;
   /** Only pushes to this configured source branch may re-import the agent. */
@@ -175,26 +154,9 @@ export interface InstallationSettings {
   effort?: string;
 }
 
-/** One install of an app: a GitHub installation or a Slack workspace. Id `<app id>:<platform install id>`. */
-export interface Installation {
-  id: string;
-  app: string;
-  integration: string;
-  /** `url`: the account's page on the platform, when the install learned it. */
-  account: { login: string; type?: string; url?: string };
-  /** Secret the platform hands out once (Slack bot token), encrypted at rest. */
-  token?: string;
-  /** Platform user who installed (Slack user id); used for the welcome DM. */
-  installer?: string;
-  /** The app's own platform user here, as the platform named it at install (Linear's app user). */
-  self?: string;
-  /** Accounts an install spanning several covers (Slack workspaces of an org install). */
-  covers?: string[];
-  repos?: string[];
+/** One install of an app, with the settings a user sets from the platform. */
+export interface Installation extends PlatformInstallation {
   settings?: InstallationSettings;
-  createdAt: number;
-  deletedAt?: number;
-  uninstalled?: boolean;
 }
 
 /** Where a task came from: a Coder surface, or the id of the integration whose event started it. */
@@ -221,6 +183,10 @@ export interface AgentTask {
   args?: Record<string, unknown>;
   /** Workspace MCP servers the task attaches, by name. */
   mcp?: string[];
+  /** Standing instructions appended to the task's system prompt. */
+  appendSystem?: string;
+  /** Absolute directories beyond cwd the task may reach, kept only for runners on the caller's machine. */
+  addDirs?: string[];
   /** Connection ids granted when the task was made; secrets are resolved only when it starts. */
   connections?: string[];
   /** Handle the task posts as (GitHub `slug[bot]`, Slack bot user), so flows can trust only their own comments. */
@@ -261,4 +227,6 @@ export interface TaskContext {
   admissions?: Partial<Record<'batch' | 'reactions', string>>;
   /** The Coder account behind the event's actor, when they connected it. */
   user?: { name: string; email: string };
+  /** The task's escalations, answers included; a late answer resumes the task with them. */
+  approvals?: Approval[];
 }

@@ -42,3 +42,22 @@
   color: var(--muted);
   cursor: not-allowed;
 }
+
+/* a pill on a choice hangs off its top right corner, solid so it never blends with the choice */
+.seg-btns > button:has(.badge) {
+  position: relative;
+}
+.seg-btns > button .badge {
+  position: absolute;
+  top: -8px;
+  left: calc(100% - 14px);
+  z-index: 1;
+  border-color: transparent;
+  background: var(--acc);
+  color: var(--panel);
+  padding: 0 4px;
+  font-size: 8.5px;
+  line-height: 14px;
+  letter-spacing: 0.06em;
+  text-transform: none;
+}

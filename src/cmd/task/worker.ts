@@ -18,5 +18,7 @@ export const commandWorker = command({
     const task = loadTask(cwd, id!);
     if (!task) fail(`Worker: task ${id} not found.`);
     await runWorker(cwd, task);
+    // A summary turn abandoned at its deadline may still hold the loop open; the worker's work is done.
+    process.exit(0);
   },
 });

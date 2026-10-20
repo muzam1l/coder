@@ -20,6 +20,8 @@ import { knownKey, reactToConversation, recordUnseen } from './tasks/conversatio
 import { dashPath, organizationSlug } from './auth/account';
 import { kick } from './tasks/kick';
 import { recordFailure } from './tasks/failures';
+import { answersShown } from './tasks/approvals';
+import { homePage, linkCard, type AgentSummary, type TaskSummary } from './agents/pages';
 
 /** The installation a webhook names, and its repository when it has one. */
 export interface Target {
@@ -130,7 +132,7 @@ async function hears(
   );
 }
 
-/** Dispatch after the platform has its answer: a failure is logged, kept for the agent's Usage page, and told to its thread. */
+/** Dispatch after the platform has its answer: a failure is logged, kept for the agent's Usage page, and told to its thread when asked directly. */
 export function later(
   ctx: ServerContext,
   app: AgentApp,
@@ -163,7 +165,7 @@ export async function deliver(
   replies: Replies,
   accepted?: () => Promise<void>,
 ): Promise<string | undefined> {
-  if (app.builtin && integration.app.builtin !== 'shared') return;
+  if (app.builtin && !integration.app.shareable) return;
   const key = `${app.id}:${event.installationId}`;
   const tenant = await forInstallation(ctx, key);
   // A workspace's own app only ever serves that workspace.
@@ -228,6 +230,22 @@ export function threadReplies(
   };
 }
 
+/** The Chat SDK thread of an event that did not come through the adapter. */
+export async function eventThread(
+  ctx: ServerContext,
+  app: AgentApp,
+  event: AgentEvent,
+): Promise<Thread> {
+  if (!event.chat) throw new Error('The event has no conversation');
+  const chat = await chatFor(ctx, app, {
+    id: event.installationId,
+    ...(event.repo ? { repo: event.repo } : {}),
+  });
+  await chat.initialize();
+
+  return chat.thread(event.chat.thread.id);
+}
+
 /** Replies in the thread of an event that did not come through the adapter: GitHub pull requests, events sent by an admin. */
 export async function eventReplies(
   ctx: ServerContext,
@@ -236,13 +254,8 @@ export async function eventReplies(
 ): Promise<Replies> {
   if (!event.chat)
     return { post: async () => {}, problem: async () => {}, whisper: async () => {} };
-  const chat = await chatFor(ctx, app, {
-    id: event.installationId,
-    ...(event.repo ? { repo: event.repo } : {}),
-  });
-  await chat.initialize();
   return threadReplies(
-    chat.thread(event.chat.thread.id),
+    await eventThread(ctx, app, event),
     event.actor.id || undefined,
     event.chat.message?.id || undefined,
     ctx.integrations[app.integration]?.replyLimit,
@@ -266,10 +279,17 @@ function chatEvent(
   thread: Thread,
   message: Message,
   delivery = message.id,
+  answers = false,
 ): AgentEvent | undefined {
-  // A shared app hears messages only when its agent is addressed, by its plain name too.
+  // A shared app hears messages only when its agent is addressed, by its plain name too; an answer to its own approval counts as addressed.
   const address =
-    route === 'message' && app.builtin ? addressedTo(message.text, app.agent) : undefined;
+    route !== 'message'
+      ? undefined
+      : answers
+        ? message.text
+        : app.builtin
+          ? addressedTo(message.text, app.agent)
+          : undefined;
   if (route === 'message' && app.builtin && address === undefined) return;
   const type = raisedBy(integration, address === undefined ? route : 'mention');
   // Agents never wake agents; Chat already drops the app's own messages.
@@ -350,7 +370,7 @@ export async function dashUrl(ctx: ServerContext): Promise<string | undefined> {
   return base && `${base}${dashPath(await organizationSlug(ctx))}`;
 }
 
-/** What an app's integration gets for one request: tokens, and with a target, its workspace's agents and tasks; `dash` for its links. */
+/** What an app's integration gets for one request: tokens, and with a target, its home page and link cards; `dash` for their links. */
 export function adapterContext(
   ctx: ServerContext,
   integration: Integration,
@@ -397,53 +417,75 @@ export function adapterContext(
 
             return Boolean(await tenant?.store.get('delivery', key));
           },
-          agent: async slug => {
-            const tenant = await workspace(ctx, app, target);
-            const { record, version } = tenant
-              ? await agentWithVersion(tenant.store, slug ?? app.agent)
-              : {};
-            if (!record || !version) return undefined;
-            const { definition } = version;
-            const description = record.description ?? definition.description;
+          home: async () => {
+            const base = ctx.config.publicUrl;
+            if (!base || !dash) return undefined;
+            const agent = await agentSummary(ctx, app, target);
 
-            return {
-              slug: record.id,
-              name: record.name,
-              ...(description ? { description } : {}),
-              listens: Object.entries(definition.integrations).flatMap(([id, wiring]) => {
-                const events = definitionEvents(wiring);
-                const known = ctx.integrations[id];
-                return known && events.length
-                  ? [{ integration: id, name: known.name, events }]
-                  : [];
-              }),
-            };
+            return homePage(integration, { home: base, dash }, app.name, agent);
           },
-          task: async id => {
-            const tenant = await workspace(ctx, app, target);
-            const row = tenant && (await tenant.store.get('task', id));
-            if (!row) return undefined;
-            const { task } = row;
-            const from = task.event?.integration;
-
-            return {
-              id: task.id,
-              title:
-                task.name?.trim() ||
-                task.prompt?.trim() ||
-                task.event?.text?.trim() ||
-                `${task.event?.type ?? 'task'} on ${task.agent}`,
-              agent: task.agent,
-              status: row.status,
-              from: (from && ctx.integrations[from]?.name) || task.source,
-              startedAt: row.startedAt ?? row.createdAt,
-            };
-          },
+          preview: async url =>
+            dash
+              ? linkCard(integration, dash, url, {
+                  agent: slug => agentSummary(ctx, app, target, slug),
+                  task: id => taskSummary(ctx, app, target, id),
+                })
+              : undefined,
         }
       : {}),
     privateState: () => new LocalChatState(),
-    ...(ctx.config.publicUrl ? { publicUrl: ctx.config.publicUrl } : {}),
-    ...(dash ? { dashUrl: dash } : {}),
+  };
+}
+
+/** An agent of the workspace the installation is bound to, the app's own by default. */
+export async function agentSummary(
+  ctx: ServerContext,
+  app: AgentApp,
+  target: Target,
+  slug?: string,
+): Promise<AgentSummary | undefined> {
+  const tenant = await workspace(ctx, app, target);
+  const { record, version } = tenant ? await agentWithVersion(tenant.store, slug ?? app.agent) : {};
+  if (!record || !version) return undefined;
+  const { definition } = version;
+  const description = record.description ?? definition.description;
+
+  return {
+    slug: record.id,
+    name: record.name,
+    ...(description ? { description } : {}),
+    listens: Object.entries(definition.integrations).flatMap(([id, wiring]) => {
+      const events = definitionEvents(wiring);
+      const known = ctx.integrations[id];
+      return known && events.length ? [{ integration: id, name: known.name, events }] : [];
+    }),
+  };
+}
+
+/** A task of the workspace the installation is bound to; none for any other. */
+async function taskSummary(
+  ctx: ServerContext,
+  app: AgentApp,
+  target: Target,
+  id: string,
+): Promise<TaskSummary | undefined> {
+  const tenant = await workspace(ctx, app, target);
+  const row = tenant && (await tenant.store.get('task', id));
+  if (!row) return undefined;
+  const { task } = row;
+  const from = task.event?.integration;
+
+  return {
+    id: task.id,
+    title:
+      task.name?.trim() ||
+      task.prompt?.trim() ||
+      task.event?.text?.trim() ||
+      `${task.event?.type ?? 'task'} on ${task.agent}`,
+    agent: task.agent,
+    status: row.status,
+    from: (from && ctx.integrations[from]?.name) || task.source,
+    startedAt: row.startedAt ?? row.createdAt,
   };
 }
 
@@ -479,13 +521,16 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
   if (!target) return chat;
   // Dispatch continues after the handler so no webhook waits on it.
   const receive = async (route: ChatRoute, thread: Thread, message: Message, delivery?: string) => {
-    const event = chatEvent(integration, app, target, route, thread, message, delivery);
+    const answers =
+      route === 'message' && (await answersShown(ctx, app, target, thread.id, message.text));
+    const event = chatEvent(integration, app, target, route, thread, message, delivery, answers);
     if (!event) {
       if (message.author.isBot !== true) await unseen(ctx, app, target, thread, message);
       return;
     }
-    const replies = threadReplies(thread, message.author, message, integration.replyLimit,
-      error => failedPost(ctx, app, target.id, error));
+    const replies = threadReplies(thread, message.author, message, integration.replyLimit, error =>
+      failedPost(ctx, app, target.id, error),
+    );
     later(ctx, app, event, deliver(ctx, integration, app, credentials, event, replies), replies);
   };
   chat.onNewMention((thread, message) => receive('mention', thread, message));

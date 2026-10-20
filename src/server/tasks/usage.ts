@@ -272,5 +272,4 @@ export async function readUsageTotals(
     since,
     totals: await ctx.store.usageSummary(since, by as UsageGroup | undefined),
   });
-
 }

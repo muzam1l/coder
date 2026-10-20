@@ -55,7 +55,9 @@ function KeyForm({
   focus: string;
   ask: (title: string, run: () => void) => void;
 }) {
-  const [name, setName] = useState(ENGINES.find(engine => engine.id === focus)?.key ?? 'OPENAI_API_KEY');
+  const [name, setName] = useState(
+    ENGINES.find(engine => engine.id === focus)?.key ?? 'OPENAI_API_KEY',
+  );
   const [scope, setScope] = useState(admin ? 'workspace' : 'personal');
   const input = useRef<HTMLInputElement>(null);
   const action = useAction({ toast: 'Not saved', refresh: true });
@@ -443,8 +445,8 @@ export function CredentialsList({
         <Card title="Subscriptions">
           <div class="cred-engine">
             <p class="muted cred-note">
-              Personal only: a subscription runs your own tasks and your 1:1 DMs with agents,
-              never the workspace's shared threads.
+              Personal only: a subscription runs your own tasks and your 1:1 DMs with agents, never
+              the workspace's shared threads.
             </p>
             <table class="rows creds">
               <tbody>
@@ -552,8 +554,11 @@ export function CredentialsList({
         <div class="cred-engine">
           <p class="muted cred-note">
             Tasks read each key as its variable. Claude uses ANTHROPIC_API_KEY, Codex uses
-            OPENAI_API_KEY, and a <a class="link" href={`/dash/${org}/settings/models`}>custom model</a> uses the
-            one it names.
+            OPENAI_API_KEY, and a{' '}
+            <a class="link" href={`/dash/${org}/settings/models`}>
+              custom model
+            </a>{' '}
+            uses the one it names.
           </p>
           {keys.length ? (
             <table class="rows creds">

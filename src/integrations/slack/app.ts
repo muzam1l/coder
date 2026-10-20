@@ -1,7 +1,13 @@
 /** Slack app creation from a manifest plus the OAuth install dance for that app. */
 import { isIP } from 'node:net';
 
-import { IntegrationError, type AgentDefinition, type AppTokens, type IntegrationApp, type Preset } from '../types';
+import {
+  IntegrationError,
+  type AppSpec,
+  type AppTokens,
+  type IntegrationApp,
+  type Preset,
+} from '../types';
 
 type Fetcher = typeof fetch;
 
@@ -100,24 +106,17 @@ async function createSlackApp(
   };
 }
 
-/** The Slack events an agent's definition listens to. */
-function agentEvents(definition: AgentDefinition): string[] {
-  const events = definition.integrations.slack?.events;
-  return Array.isArray(events) ? events : Object.keys(events ?? {});
-}
+/** The bot scopes a spec asks for. */
+const specScopes = (spec: AppSpec) => slackAppScopes(spec.access, spec.events);
 
-/** The bot scopes an agent's definition asks for. */
-const agentScopes = (definition: AgentDefinition) =>
-  slackAppScopes(definition.access, agentEvents(definition));
-
-/** The manifest an agent's definition asks for. */
-function agentManifest(publicUrl: string, name: string, definition: AgentDefinition) {
+/** The manifest a spec asks for, named `name`. */
+function specManifest(publicUrl: string, name: string, spec: AppSpec) {
   return slackManifest(publicUrl, {
     name,
-    description: definition.description,
-    scopes: agentScopes(definition),
-    events: slackAppEvents(agentEvents(definition)),
-    extras: slackManifestExtras(publicUrl, definition),
+    description: spec.description,
+    scopes: specScopes(spec),
+    events: slackAppEvents(spec.events),
+    extras: slackManifestExtras(publicUrl, spec),
   });
 }
 
@@ -148,7 +147,14 @@ export async function rotateConfigToken(
     team_id?: string;
     user_id?: string;
   };
-  if (!response.ok || !value.ok || !value.token || !value.refresh_token || !value.team_id || !value.user_id)
+  if (
+    !response.ok ||
+    !value.ok ||
+    !value.token ||
+    !value.refresh_token ||
+    !value.team_id ||
+    !value.user_id
+  )
     throw new IntegrationError('platform-error', value.error ?? String(response.status));
   return {
     workspace: value.team_id,
@@ -265,13 +271,12 @@ async function grantedTeams(token: string, request: Fetcher): Promise<string[]> 
 }
 
 export const slackApp: IntegrationApp = {
-  builtin: 'own',
   createStep: (_publicUrl, input) => {
     const saved = input?.saved ?? [];
     const when = saved.length ? { field: 'token', equals: 'new' } : undefined;
     return {
       intro:
-        "Coder creates the Slack app with a configuration token and installs its bot in the token's whole workspace.",
+        "The Slack app is created with a configuration token and its bot installed in the token's whole workspace.",
       link: 'https://api.slack.com/apps',
       steps: [
         {
@@ -312,7 +317,7 @@ export const slackApp: IntegrationApp = {
       submit: 'Create Slack app',
     };
   },
-  async createCallback(req, { publicUrl, state, definition, fetch: request, tokens }) {
+  async createCallback(req, { publicUrl, spec, fetch: request, tokens }) {
     if (!tokens) throw new Error('Configuration token storage is unavailable');
     const form = new URLSearchParams(await req.text());
     let id = form.get('token');
@@ -349,22 +354,18 @@ export const slackApp: IntegrationApp = {
         workspaceName: identity?.team || value.workspaceName,
       });
     }
-    const name = definition.name ?? state.agent;
+    const { name } = spec;
     const created = await withConfigToken(tokens, id, request, token =>
-      createSlackApp(token, agentManifest(publicUrl, name, definition), request),
+      createSlackApp(token, specManifest(publicUrl, name, spec), request),
     );
     return {
       platformAppId: created.appId,
       name,
-      credentials: { ...created, configTokenId: id, scopes: agentScopes(definition) },
+      credentials: { ...created, configTokenId: id, scopes: specScopes(spec) },
     };
   },
-  manifest: (app, { publicUrl, definition }) => agentManifest(publicUrl, app.name, definition),
-  async update(
-    app,
-    credentials,
-    { publicUrl, definition, fetch: request, saveCredentials, tokens },
-  ) {
+  manifest: (app, { publicUrl, spec }) => specManifest(publicUrl, app.name, spec),
+  async update(app, credentials, { publicUrl, spec, fetch: request, saveCredentials, tokens }) {
     const current = credentials as SlackAppCredentials;
     if (!current.configTokenId || !tokens) throw new IntegrationError('no-refresh-token');
     await withConfigToken(tokens, current.configTokenId, request, token =>
@@ -372,13 +373,13 @@ export const slackApp: IntegrationApp = {
         'apps.manifest.update',
         {
           app_id: current.appId,
-          manifest: JSON.stringify(agentManifest(publicUrl, app.name, definition)),
+          manifest: JSON.stringify(specManifest(publicUrl, app.name, spec)),
         },
         token,
         request,
       ),
     );
-    const scopes = agentScopes(definition);
+    const scopes = specScopes(spec);
     if (scopes.join() !== current.scopes?.join()) await saveCredentials({ ...current, scopes });
   },
   settingsUrl: (_app, credentials) =>
@@ -400,7 +401,7 @@ export const slackApp: IntegrationApp = {
     const tokenId = (credentials as SlackAppCredentials).configTokenId;
     if (tokens && tokenId && !result.org)
       await tokens.use(tokenId, (pair, save) => save(pair, result.name));
-    // The workspace address, for the dashboard's link; `auth.test` needs no scope.
+    // The workspace address, for links to it; `auth.test` needs no scope.
     const url = await slackApi<{ url?: string }>('auth.test', {}, result.accessToken, request)
       .then(value => value.url?.replace(/\/$/, ''))
       .catch(() => undefined);
@@ -450,7 +451,10 @@ export function slackAppScopes(
   return [
     ...SCOPES,
     ...(events.includes('dm') ? ['mpim:history'] : []),
-    'chat:write', 'files:write', 'im:write', 'assistant:write',
+    'chat:write',
+    'files:write',
+    'im:write',
+    'assistant:write',
     ...((Array.isArray(tools) ? tools.includes('write') : tools === 'write')
       ? ['channels:join', 'channels:manage', 'groups:write', 'mpim:write', 'usergroups:write']
       : []),
@@ -480,26 +484,22 @@ export function slackAppEvents(events: string[]): string[] {
   ];
 }
 
-/** Manifest pieces beyond scopes and events: the `/setup` slash command and the agent view. */
+/** Manifest pieces beyond scopes and events: the spec's slash commands and the agent view. */
 export function slackManifestExtras(
   publicUrl: string,
-  agent: { name?: string; description?: string },
+  spec: Pick<AppSpec, 'name' | 'description' | 'commands'>,
 ): {
   slash_commands: Array<Record<string, string>>;
   agent_view: { agent_description: string };
 } {
   const base = publicUrl.replace(/\/$/, '');
   return {
-    slash_commands: [
-      {
-        command: '/setup',
-        url: `${base}/hooks/slack`,
-        description: 'Configure this agent',
-        usage_hint: 'repo owner/name | model <name> | show',
-      },
-    ],
-    agent_view: {
-      agent_description: agent.description ?? `${agent.name ?? 'Coder'} in your workspace.`,
-    },
+    slash_commands: (spec.commands ?? []).map(({ command, description, usage }) => ({
+      command,
+      url: `${base}/hooks/slack`,
+      description,
+      ...(usage ? { usage_hint: usage } : {}),
+    })),
+    agent_view: { agent_description: spec.description ?? `${spec.name} in your workspace.` },
   };
 }

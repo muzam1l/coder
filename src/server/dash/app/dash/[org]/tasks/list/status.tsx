@@ -1,11 +1,21 @@
 import './status.css';
-import type { TaskState } from '@coder/client/types';
+import type { TaskRow, TaskState } from '@coder/client/types';
+import { awaitsApproval } from '@coder/core/defaults';
 
-export function Status({ status }: { status: TaskState }) {
+/** A task's state; an open escalation reads as needing approval whatever its turn does. */
+export function Status({
+  status,
+  approvals,
+}: {
+  status: TaskState;
+  approvals?: TaskRow['approvals'];
+}) {
+  const shown = awaitsApproval(status, approvals) ? 'waiting' : status;
+
   return (
-    <span class={`st ${status}`}>
+    <span class={`st ${shown}`}>
       <i />
-      {STATUS_LABEL[status] ?? status}
+      {STATUS_LABEL[shown] ?? shown}
     </span>
   );
 }

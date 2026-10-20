@@ -29,7 +29,7 @@ export interface FlowTaskOptions<T = unknown> {
   permissions?: string;
   mcp?: string | McpServerSpec[];
   name?: string;
-  system?: string;
+  appendSystem?: string;
   cwd?: string;
   addDirs?: string[];
   returns?: FlowSchema<T>;

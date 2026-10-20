@@ -79,3 +79,15 @@
 .tabs[aria-hidden] > * {
   visibility: hidden;
 }
+/* phones: page tabs fit the width, so no tab is cut at the edge */
+@media (max-width: 760px) {
+  .page .tabs:not(.vertical) {
+    gap: 0;
+  }
+  .page .tabs:not(.vertical) a,
+  .page .tabs:not(.vertical) > button {
+    gap: 4px;
+    padding-inline: 6px;
+    letter-spacing: 0.04em;
+  }
+}

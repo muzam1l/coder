@@ -1,6 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { safeEqual } from '../../utils/crypto';
-import type { AgentEvent } from '../types';
+import type { PlatformEvent } from '../types';
 
 /** Linear's webhook check: an HMAC of the body under the app's secret, sent within the last minute. */
 export function verifyLinearWebhook(
@@ -17,7 +17,7 @@ export function verifyLinearWebhook(
 }
 
 export async function canWriteLinear(
-  event: AgentEvent,
+  event: PlatformEvent,
   token: string,
   request: typeof fetch = fetch,
 ): Promise<boolean> {
@@ -28,7 +28,7 @@ export async function canWriteLinear(
     headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
     body: JSON.stringify({
       query:
-        'query CoderWorkspaceMember($id: String!) { user(id: $id) { id active guest app organization { id } } }',
+        'query WorkspaceMember($id: String!) { user(id: $id) { id active guest app organization { id } } }',
       variables: { id: event.actor.id },
     }),
     redirect: 'error',

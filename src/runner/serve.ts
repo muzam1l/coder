@@ -7,7 +7,7 @@ import path from 'node:path';
 
 import { connect, serverFor, type ServerOptions } from '../core/remote';
 import { CoderError } from '../core/dispatch';
-import { coderHome } from '../core/state';
+import { coderHome, serverTasksDir } from '../core/state';
 import { LocalRunner } from '../server/runners/local';
 import type { RunnerRow } from '../client/types';
 import { bodyLimit, limitBody, nodeListener } from '../server/routes/http';
@@ -74,7 +74,7 @@ export async function serveRunner(options: RunnerServeOptions = {}): Promise<Run
     : serverFor(options);
   const saved = load();
   const mine = saved[target] ?? { secret: randomBytes(32).toString('base64url') };
-  const runner = new LocalRunner(coderHome('runner'));
+  const runner = new LocalRunner(serverTasksDir());
   const handler = runnerController({ secret: mine.secret, server: target, runner });
   const listener = http.createServer(
     nodeListener(async request => {
@@ -88,7 +88,10 @@ export async function serveRunner(options: RunnerServeOptions = {}): Promise<Run
   });
   const close = () => new Promise<void>(resolve => listener.close(() => resolve()));
   const name = options.name ?? os.hostname();
+  // Deleted tasks' folders removed here, reported with the next registration.
+  let removed: string[] = [];
   const register = async (token?: string, offline?: boolean) => {
+    const sent = removed;
     const response = await fetch(`${target}/runners/register`, {
       method: 'POST',
       redirect: 'manual',
@@ -100,11 +103,23 @@ export async function serveRunner(options: RunnerServeOptions = {}): Promise<Run
         url: address,
         secret: mine.secret,
         ...(offline ? { offline } : {}),
+        ...(sent.length ? { removed: sent } : {}),
       }),
     });
     if (!response.ok)
       throw new CoderError('server', 'Runner registration failed', { status: response.status });
-    return response.json() as Promise<RunnerRow & { organizationId: string }>;
+    const { deleted = [], ...row } = (await response.json()) as RunnerRow & {
+      organizationId: string;
+      deleted?: string[];
+    };
+    removed = removed.filter(id => !sent.includes(id));
+    for (const id of deleted)
+      await runner.remove(id).then(
+        () => removed.push(id),
+        error => console.error(`coder runner: folder of deleted task ${id} not removed`, error),
+      );
+
+    return row;
   };
   let registered: RunnerRow;
   try {
@@ -116,9 +131,9 @@ export async function serveRunner(options: RunnerServeOptions = {}): Promise<Run
       const returning =
         mine.id && mine.organizationId
           ? await register().catch(error => {
-            if (error instanceof CoderError && error.status === 401) return undefined;
-            throw error;
-          })
+              if (error instanceof CoderError && error.status === 401) return undefined;
+              throw error;
+            })
           : undefined;
       if (returning) registered = returning;
       else {
@@ -143,7 +158,7 @@ export async function serveRunner(options: RunnerServeOptions = {}): Promise<Run
   }
   let pending = Promise.resolve();
   const heartbeat = setInterval(() => {
-    pending = pending.then(() => register().then(() => { })).catch(() => { });
+    pending = pending.then(() => register().then(() => {})).catch(() => {});
   }, 60_000);
   return {
     ...registered,
@@ -152,7 +167,7 @@ export async function serveRunner(options: RunnerServeOptions = {}): Promise<Run
     close: async () => {
       clearInterval(heartbeat);
       await pending;
-      await register(undefined, true).catch(() => { });
+      await register(undefined, true).catch(() => {});
       await close();
     },
   };

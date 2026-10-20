@@ -5,14 +5,17 @@ import process from 'node:process';
 import { connect, type RemoteClient, type ServerOptions } from '../remote';
 import type { TaskLogLine, TaskStatus } from '../../server/store/types';
 import { readJsonFile } from '../../utils/fsx';
+import { decodeJson, encodeJson } from '../../utils/base64url';
+import { serverSuffix } from '../../utils/args';
 import { serverEvents } from '../../client';
-import { answerApproval, listPendingApprovals } from '../approvals';
+import { deniedApprovals, listApprovals, pendingApprovals } from '../approvals';
 import { loadConfig } from '../config';
 import { localConnections } from '../connections';
 import {
   buildFallbackPayload,
   CoderError,
   dispatchTask,
+  ignoredAddDirs,
   selectMcpServers,
   isSandboxFailure,
   turnFallbackEngine,
@@ -35,7 +38,13 @@ import {
   resolveTaskDir,
   type TaskLogEntry,
 } from '../state';
-import { ACTIVE_STATUSES, TERMINAL_STATUSES, type Task, type TokenUsage } from '../types';
+import {
+  ACTIVE_STATUSES,
+  TERMINAL_STATUSES,
+  type Approval,
+  type Task,
+  type TokenUsage,
+} from '../types';
 import { waitForTaskAttention } from '../dispatch';
 import {
   deleteTask,
@@ -44,9 +53,12 @@ import {
   streamTask,
   type ListOptions,
   askTask,
-  collectPending,
+  answerTaskApproval,
+  collectApprovals,
   steerTask,
+  type SteerOutcome,
 } from './actions';
+import { iso, remoteApprovals, remoteResult, remoteStep, remoteTask, remoteTurns } from './remote';
 
 /** Where a task call runs: this machine's tasks under `cwd`, or the server named by `server`. */
 export type TaskOptions = { cwd?: string } & ServerOptions;
@@ -85,6 +97,49 @@ function missingId(hint: string[]): never {
   throw new CoderError('invalid-option', 'Missing task id.', { hint });
 }
 
+/** Follow a server task until it ends; a pending approval stops it as it stops a local wait. */
+async function waitServer(api: RemoteClient, id: string): Promise<TaskStatus> {
+  for (;;) {
+    const status = await api.tasks.wait(id);
+    // Before a terminal return: a task can escalate and end its turn before this read.
+    const approval = remoteApprovals(status).find(entry => !entry.answered);
+    if (approval)
+      throw new CoderError(
+        'approval-pending',
+        `Approval needed for task ${id}: ${approval.reason}`,
+        { taskId: id, approval },
+      );
+    // An approval answered before this read leaves the task running.
+    if (TERMINAL_STATUSES.includes(status.status as Task['status'])) return status;
+  }
+}
+
+/** The commands that manage a started task, on the server it runs on. */
+function taskCommands(taskId: string, opts: TaskOptions): NonNullable<RunResult['commands']> {
+  const flags = serverSuffix({ server: opts.server, workspace: opts.organization });
+
+  return {
+    result: `coder task result ${taskId} --wait${flags}`,
+    steer: `coder task steer ${taskId} "<follow-up>"${flags}`,
+    stop: `coder task stop ${taskId}${flags}`,
+    list: `coder task list${flags}`,
+  };
+}
+
+/** A finished task's answer, as `run --wait` returns it. */
+function finished(task: Task, result: TaskInspection['result']): RunResult {
+  const error = result?.error?.message || task.error;
+
+  return {
+    taskId: task.id,
+    status: task.status,
+    finalMessage: result?.finalMessage,
+    ...(error ? { error } : {}),
+    tokens: result?.tokens ?? null,
+    model: result?.model ?? task.model ?? null,
+  };
+}
+
 export interface TaskRunOptions {
   /** Run as a local agent; the other options override its definition. */
   agent?: string;
@@ -94,7 +149,7 @@ export interface TaskRunOptions {
   effort?: string;
   permissions?: string;
   name?: string;
-  system?: string;
+  appendSystem?: string;
   /** Extra directories the task may reach, resolved against cwd. */
   addDirs?: string[];
   /** MCP servers to attach, by name from config. */
@@ -103,7 +158,6 @@ export interface TaskRunOptions {
   connections?: string[];
   /** Block until the task finishes, walking the engine chain when a turn fails to start. */
   wait?: boolean;
-  simulateApproval?: boolean;
   /** Server tasks: the repository and runner to use. */
   repo?: string;
   runner?: string;
@@ -111,8 +165,6 @@ export interface TaskRunOptions {
   onNote?: (note: string) => void;
   /** Each time a wait starts on a task id. */
   onWaiting?: (taskId: string) => void;
-  /** Server task log lines while waiting. */
-  onLog?: (line: TaskLogLine) => void;
 }
 
 export interface RunResult {
@@ -127,10 +179,7 @@ export interface RunResult {
 }
 
 /** Dispatch a task; with `wait`, block until it finishes. */
-async function run(
-  prompt: string,
-  opts: TaskRunOptions & TaskOptions = {},
-): Promise<RunResult | TaskStatus> {
+async function run(prompt: string, opts: TaskRunOptions & TaskOptions = {}): Promise<RunResult> {
   if (
     opts.outputSchema !== undefined &&
     (!opts.outputSchema ||
@@ -154,8 +203,24 @@ async function run(
       ...(opts.runner ? { runner: opts.runner } : {}),
       ...(opts.mcp ? { mcp: opts.mcp.split(',').map(name => name.trim()) } : {}),
       ...(opts.connections ? { connections: opts.connections } : {}),
+      ...(opts.name ? { name: opts.name } : {}),
+      ...(opts.appendSystem ? { appendSystem: opts.appendSystem } : {}),
+      ...(opts.addDirs?.length ? { addDirs: opts.addDirs.map(dir => path.resolve(cwd, dir)) } : {}),
     });
-    return opts.wait ? api.tasks.wait(created.task.id, { onLog: opts.onLog }) : created;
+    const taskId = created.task.id;
+    const ignored = opts.addDirs?.length ? ignoredAddDirs(created.task.runner) : undefined;
+    if (ignored) opts.onNote?.(ignored);
+    if (!opts.wait)
+      return {
+        taskId,
+        status: created.status,
+        startupCheck: 'pending',
+        commands: taskCommands(taskId, opts),
+      };
+    opts.onWaiting?.(taskId);
+    const status = await waitServer(api, taskId);
+
+    return finished(remoteTask(status), remoteResult(status));
   }
 
   // A local agent's options come from its definition, loaded only when asked for.
@@ -177,10 +242,9 @@ async function run(
     effort: opts.effort ?? (opts.engine ? undefined : agent?.effort),
     permissions: opts.permissions ?? agent?.permissions,
     name: opts.name,
-    system: opts.system,
+    appendSystem: opts.appendSystem,
     ...(agent ? { agentPrompt: { developer: agent.developer } } : {}),
     wait: opts.wait,
-    simulateApproval: opts.simulateApproval,
     addDirs: opts.addDirs,
     ...(opts.agent ? { agentId: opts.agent } : {}),
     mcp: selectedMcp.mcp,
@@ -200,12 +264,7 @@ async function run(
       taskId,
       status: dispatch.task.status,
       startupCheck: dispatch.startupCheck,
-      commands: {
-        result: `coder task result ${taskId} --wait`,
-        steer: `coder task steer ${taskId} "<follow-up>"`,
-        stop: `coder task stop ${taskId}`,
-        list: 'coder task list',
-      },
+      commands: taskCommands(taskId, opts),
     };
   }
 
@@ -226,7 +285,7 @@ async function run(
             dispatch.engine,
             turnError,
             final.permissions ?? 'auto',
-            opts.system,
+            opts.appendSystem,
             prompt,
           ),
         });
@@ -238,20 +297,12 @@ async function run(
           model: undefined,
           effort: undefined,
           name: undefined,
-          simulateApproval: undefined,
         },
         { config },
       );
       continue;
     }
-    return {
-      taskId,
-      status: final.status,
-      finalMessage: result?.finalMessage,
-      ...(turnError || final.error ? { error: turnError || final.error } : {}),
-      tokens: result?.tokens ?? null,
-      model: result?.model ?? final.model ?? null,
-    };
+    return finished(final, result);
   }
 }
 
@@ -262,7 +313,7 @@ export interface TaskInspection {
   result: ReturnType<typeof readTask>['result'];
   steps: TaskLogEntry[];
   turns: ReturnType<typeof readTurnResults>;
-  pendingApprovals: Array<{ id: string; summary: string; cwd: string | null }>;
+  pendingApprovals: Array<{ id: string; reason: string; actions: string[] }>;
   /** While running: time since the last sign of life, and whether it looks stalled. */
   idleMs?: number;
   lastActivityAt?: string | null;
@@ -280,11 +331,19 @@ async function result(
     tail?: number | 'all';
     onWaiting?: (taskId: string) => void;
   } = {},
-): Promise<TaskInspection | TaskStatus> {
+): Promise<TaskInspection> {
   const { cwd, api } = target(opts);
   if (api) {
-    const status = await serverTask(api, id);
-    return opts.wait ? api.tasks.wait(status.task.id) : status;
+    let status = await serverTask(api, id);
+    if (opts.wait) {
+      if (!['completed', 'failed', 'cancelled'].includes(status.status))
+        opts.onWaiting?.(status.task.id);
+      status = await waitServer(api, status.task.id);
+    }
+    const logs = opts.tail ? ((await api.tasks.logs(status.task.id)) as TaskLogLine[]) : [];
+    const steps = (opts.tail === 'all' ? logs : logs.slice(-Number(opts.tail))).map(remoteStep);
+
+    return remoteInspection(status, steps);
   }
 
   let task = localTask(cwd, id);
@@ -295,15 +354,15 @@ async function result(
     if (outcome.reason === 'approval')
       throw new CoderError(
         'approval-pending',
-        `Approval needed for task ${task.id}: ${outcome.approval!.summary}`,
+        `Approval needed for task ${task.id}: ${outcome.approval!.reason}`,
         {
           taskId: task.id,
           approval: outcome.approval,
         },
       );
   }
-  const { steps, result, turns } = readTask(cwd, task.id, { tail: opts.tail });
-  const pending = listPendingApprovals(resolveTaskDir(cwd, task.id)).filter(a => !a.response);
+  const { steps, result, turns } = readTask(cwd, task.id, { tail: opts.tail, task });
+  const pending = pendingApprovals(resolveTaskDir(cwd, task.id));
   const running = ACTIVE_STATUSES.includes(task.status);
   const lastActivity = running ? lastActivityAt(cwd, task) : task.updatedAt;
   const idle = ageMs(lastActivity);
@@ -315,7 +374,7 @@ async function result(
     result,
     steps,
     turns,
-    pendingApprovals: pending.map(a => ({ id: a.id, summary: a.summary, cwd: a.cwd ?? null })),
+    pendingApprovals: pending.map(({ id, reason, actions }) => ({ id, reason, actions })),
     ...(running
       ? {
           idleMs: idle,
@@ -329,6 +388,35 @@ async function result(
               .find(
                 entry => entry.kind === 'usage' && String(entry.at ?? '') >= (task.resumedAt ?? ''),
               )?.tokens as TokenUsage | undefined) ?? null,
+        }
+      : {}),
+  };
+}
+
+/** A server task as `result` inspects a local one. */
+function remoteInspection(status: TaskStatus, steps: TaskLogEntry[]): TaskInspection {
+  const task = remoteTask(status);
+  const pending = remoteApprovals(status)
+    .filter(approval => !approval.answered)
+    .map(({ id, reason, actions }) => ({ id, reason, actions }));
+  const running = ACTIVE_STATUSES.includes(task.status);
+  const lastActivity = iso(status.lastActivityAt ?? status.updatedAt);
+  const idle = ageMs(lastActivity);
+
+  return {
+    taskId: task.id,
+    status: running && pending.length ? 'waiting-approval' : task.status,
+    task,
+    result: remoteResult(status),
+    steps,
+    turns: remoteTurns(status),
+    pendingApprovals: pending,
+    ...(running
+      ? {
+          idleMs: idle,
+          lastActivityAt: lastActivity ?? null,
+          stalled: pending.length === 0 && idle > STALL_MS,
+          liveTokens: null,
         }
       : {}),
   };
@@ -350,61 +438,114 @@ export interface TaskRow {
   idleMs: number | null;
 }
 
-/** Recent tasks; `clipped` counts rows `limit` cut and `archived` the archived tasks, for the default view. */
-async function list(
-  opts: TaskOptions & ListOptions = {},
-): Promise<(TaskRow[] & { clipped: number; archived: number }) | TaskStatus[]> {
+/** One page of tasks; `next` continues it, and `archived` counts archived tasks when a default view is empty. */
+export interface TaskPage {
+  items: TaskRow[] & { archived: number };
+  next?: string;
+}
+
+/** A list row; idle is the time since the engine last emitted anything (log, heartbeat, or task update). */
+function taskRow(task: Task, pendingApprovals: number, lastActivity?: string | null): TaskRow {
+  const running = ACTIVE_STATUSES.includes(task.status);
+
+  return {
+    taskId: task.id,
+    status: running && pendingApprovals ? 'waiting-approval' : task.status,
+    pendingApprovals,
+    engine: task.engine ?? null,
+    model: task.model ?? null,
+    effort: task.effort ?? null,
+    name: task.name ?? null,
+    cwd: task.cwd ?? null,
+    prompt: String(task.prompt ?? '')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80),
+    updatedAt: task.updatedAt,
+    archived: task.archived ?? false,
+    flowRunId: task.flowRunId ?? null,
+    idleMs: running ? ageMs(lastActivity ?? undefined) : null,
+  };
+}
+
+/** Recent tasks, a page at a time (default 50, `limit: 'all'` for every one). */
+async function list(opts: TaskOptions & ListOptions & { cursor?: string } = {}): Promise<TaskPage> {
   const { cwd, api } = target(opts);
+  const limit = opts.limit ?? 50;
   if (api) {
-    const rows = await api.tasks.list({
-      status: opts.running ? 'running' : undefined,
-      limit: opts.limit === 'all' ? 200 : opts.limit,
-      archived: opts.archived,
-    });
-    return opts.stopped
-      ? rows.filter(row => TERMINAL_STATUSES.includes(row.status as Task['status']))
-      : rows;
+    const items: TaskRow[] = [];
+    let cursor = opts.cursor ?? '';
+    let next: string | undefined;
+    // A --stopped page keeps reading until it is full, so a run of active rows never ends it early.
+    do {
+      const page = (await api.tasks.list({
+        cursor,
+        limit: limit === 'all' ? 200 : Math.min(200, limit - items.length),
+        status: opts.running ? 'active' : undefined,
+        archived: opts.archived,
+      })) as unknown as { items: TaskStatus[]; next?: string };
+      for (const row of page.items)
+        if (!opts.stopped || TERMINAL_STATUSES.includes(row.status as Task['status']))
+          items.push(
+            taskRow(
+              remoteTask(row),
+              remoteApprovals(row).filter(approval => !approval.answered).length,
+              iso(row.lastActivityAt ?? row.updatedAt),
+            ),
+          );
+      next = page.next;
+      cursor = next ?? '';
+    } while (next && (limit === 'all' || items.length < limit));
+
+    return { items: Object.assign(items, { archived: 0 }), ...(next ? { next } : {}) };
   }
 
-  const { tasks, clipped } = collectTasks(cwd, { ...opts, dir: opts.dir ?? opts.cwd });
-  const rows: TaskRow[] = tasks.map(task => {
-    const pendingApprovals = ACTIVE_STATUSES.includes(task.status)
-      ? listPendingApprovals(resolveTaskDir(cwd, task.id)).filter(a => !a.response).length
-      : 0;
-    return {
-      taskId: task.id,
-      status: pendingApprovals ? 'waiting-approval' : task.status,
-      pendingApprovals,
-      engine: task.engine ?? null,
-      model: task.model ?? null,
-      effort: task.effort ?? null,
-      name: task.name ?? null,
-      cwd: task.cwd ?? null,
-      prompt: String(task.prompt ?? '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 80),
-      updatedAt: task.updatedAt,
-      archived: task.archived ?? false,
-      flowRunId: task.flowRunId ?? null,
-      // Idle = time since the engine last emitted anything (log, heartbeat, or task update).
-      idleMs: ACTIVE_STATUSES.includes(task.status) ? ageMs(lastActivityAt(cwd, task)) : null,
-    };
-  });
+  const { tasks } = collectTasks(cwd, { ...opts, limit: 'all', dir: opts.dir ?? opts.cwd });
+  const rows = tasks.map(task =>
+    taskRow(
+      task,
+      ACTIVE_STATUSES.includes(task.status)
+        ? pendingApprovals(resolveTaskDir(cwd, task.id)).length
+        : 0,
+      ACTIVE_STATUSES.includes(task.status) ? lastActivityAt(cwd, task) : null,
+    ),
+  );
+  let after = 0;
+  if (opts.cursor) {
+    let id: string;
+    try {
+      id = decodeJson<string>(opts.cursor);
+      if (typeof id !== 'string') throw new Error();
+    } catch {
+      throw new CoderError('invalid-option', 'Invalid task list cursor.');
+    }
+    const index = rows.findIndex(row => row.taskId === id);
+    if (index < 0)
+      throw new CoderError(
+        'invalid-option',
+        'Task list cursor is no longer available; start a new list.',
+      );
+    after = index + 1;
+  }
+  const items = rows.slice(after, limit === 'all' ? undefined : after + limit);
   const archived =
     !rows.length && !opts.archived ? listArchivedTasks(cwd, { migrate: false }).length : 0;
-  return Object.assign(rows, { clipped, archived });
+
+  return {
+    items: Object.assign(items, { archived }),
+    ...(after + items.length < rows.length ? { next: encodeJson(items.at(-1)!.taskId) } : {}),
+  };
 }
 
 export interface TaskWatch {
-  task: Task | TaskStatus;
+  task: Task;
   /** Progress entries as they land, ending when the task is terminal. */
-  events: AsyncGenerator<TaskLogEntry | TaskLogLine>;
+  events: AsyncGenerator<TaskLogEntry>;
   /** The task once the stream ends. */
-  final(): Promise<{ taskId: string; status: string; result: any; task: Task } | TaskStatus>;
+  final(): Promise<{ taskId: string; status: string; result: any; task: Task }>;
 }
 
-async function* serverLines(api: RemoteClient, taskId: string): AsyncGenerator<TaskLogLine> {
+async function* serverLines(api: RemoteClient, taskId: string): AsyncGenerator<TaskLogEntry> {
   let after = -1;
   for (;;) {
     const response = await api.tasks.stream(taskId, after);
@@ -419,7 +560,7 @@ async function* serverLines(api: RemoteClient, taskId: string): AsyncGenerator<T
       if (event.event === 'log') {
         const line = JSON.parse(event.data) as TaskLogLine;
         after = line.seq;
-        yield line;
+        yield remoteStep(line);
       } else if (event.event === 'end') ended = true;
     }
     if (ended) return;
@@ -437,14 +578,27 @@ async function watch(
 ): Promise<TaskWatch> {
   const { cwd, api } = target(opts);
   if (api) {
-    const task = await serverTask(api, id);
+    const task = remoteTask(await serverTask(api, id));
     return {
       task,
       events:
         opts.from === undefined
-          ? serverLines(api, task.task.id)
-          : each(api.tasks.logs(task.task.id, opts.from - 1) as Promise<TaskLogLine[]>),
-      final: () => api.tasks.get(task.task.id),
+          ? serverLines(api, task.id)
+          : each(
+              api.tasks
+                .logs(task.id, opts.from - 1)
+                .then(lines => (lines as TaskLogLine[]).map(remoteStep)),
+            ),
+      async final() {
+        const status = await api.tasks.get(task.id);
+        const current = remoteTask(status);
+        return {
+          taskId: task.id,
+          status: current.status,
+          result: remoteResult(status),
+          task: current,
+        };
+      },
     };
   }
   const task = localTask(cwd, id);
@@ -462,6 +616,14 @@ async function watch(
   };
 }
 
+export interface SteerResult {
+  taskId: string;
+  steered: SteerOutcome;
+  /** With `wait`, once a live or resumed turn finishes. */
+  status?: string | null;
+  finalMessage?: string | null;
+}
+
 /** Steer a follow-up into a task (live, queued, or resumed on its thread); `wait` blocks on a live or resumed one. */
 async function steer(
   id: string,
@@ -472,15 +634,25 @@ async function steer(
     permissions?: string;
     wait?: boolean;
   } = {},
-) {
+): Promise<SteerResult> {
   const { cwd, api } = target(opts);
   if (api) {
-    const steered = await api.tasks.steer(id, text, {
+    const answer = (await api.tasks.steer(id, text, {
       ...(opts.model ? { model: opts.model } : {}),
       ...(opts.effort ? { effort: opts.effort } : {}),
       ...(opts.permissions ? { permissions: opts.permissions } : {}),
-    });
-    return (opts.wait ? api.tasks.wait(id) : steered) as Promise<Record<string, unknown>>;
+    })) as { steered?: SteerOutcome; task?: unknown };
+    // A finished task resumes as a new turn; a live one takes the follow-up in its inbox.
+    const steered = answer.steered ?? (answer.task ? 'resumed' : 'live');
+    if (!opts.wait || steered === 'queued') return { taskId: id, steered };
+    const status = await waitServer(api, id);
+
+    return {
+      taskId: id,
+      steered,
+      status: remoteTask(status).status,
+      finalMessage: remoteResult(status)?.finalMessage ?? null,
+    };
   }
   const outcome = await steerTask(cwd, localTask(cwd, id), text, {
     model: opts.model,
@@ -495,13 +667,67 @@ async function steer(
 }
 
 /** Ask about a task through a read-only sidecar; its thread is never touched. */
+export interface AskResult {
+  taskId: string;
+  answer: string | null;
+  error?: string;
+  ok: boolean;
+}
+
+/** A server task's sidecar answer: a local server's comes with the request, a runner's lands in the task's answers. */
+async function askServer(api: RemoteClient, id: string, question: string): Promise<AskResult> {
+  const before = (await api.tasks.get(id)).answer?.length ?? 0;
+  const abort = new AbortController();
+  let response = await api.tasks.events([id], undefined, abort.signal);
+  try {
+    let answer = ((await api.tasks.ask(id, question)) as { answer?: unknown }).answer;
+    let ended = false;
+    let last: string | undefined;
+    while (answer === undefined && !ended) {
+      if (!response.ok || !response.body)
+        throw new CoderError('server', `The task events stream answered ${response.status}.`);
+      for await (const event of serverEvents(response.body)) {
+        last = event.id ?? last;
+        if (event.event !== 'task') continue;
+        const state = JSON.parse(event.data) as {
+          id: string;
+          status?: string;
+          deleted?: boolean;
+          answer?: unknown[] | null;
+        };
+        if (state.id !== id) continue;
+        if ((state.answer?.length ?? 0) > before) answer = state.answer![before];
+        else
+          ended =
+            Boolean(state.deleted) || TERMINAL_STATUSES.includes(state.status as Task['status']);
+        if (answer !== undefined || ended) break;
+      }
+      if (answer === undefined && !ended)
+        response = await api.tasks.events([id], last, abort.signal);
+    }
+    const text = typeof answer === 'string' ? answer : '';
+
+    return {
+      taskId: id,
+      answer: text || null,
+      ...(answer === undefined ? { error: 'The task ended before it answered.' } : {}),
+      ok: Boolean(text),
+    };
+  } finally {
+    abort.abort();
+  }
+}
+
 async function ask(
   id: string,
   question: string,
   opts: TaskOptions & { model?: string; effort?: string; onAsking?: (taskId: string) => void } = {},
-) {
+): Promise<AskResult> {
   const { cwd, api } = target(opts);
-  if (api) return api.tasks.ask(id, question) as Promise<Record<string, unknown>>;
+  if (api) {
+    opts.onAsking?.(id);
+    return askServer(api, id, question);
+  }
   const task = localTask(cwd, id);
   opts.onAsking?.(task.id);
   const result = await askTask(cwd, task, question, { model: opts.model, effort: opts.effort });
@@ -516,43 +742,56 @@ async function ask(
 export interface ApprovalRow {
   taskId: string;
   id: string;
-  summary: string;
-  cwd?: string | null;
+  reason: string;
+  actions: string[];
   createdAt?: string;
-  answered?: string | null;
+  answered?: 'accept' | 'decline' | 'closed' | null;
+  deniedReason?: string | null;
 }
 
-/** A task's approvals, answered ones included; without an id, every pending approval of running tasks. */
+const approvalRow = (taskId: string, approval: Approval): ApprovalRow => ({
+  taskId,
+  id: approval.id,
+  reason: approval.reason,
+  actions: approval.actions,
+  createdAt: approval.createdAt,
+  answered: approval.response?.decision ?? null,
+  deniedReason:
+    approval.response?.decision === 'decline' ? (approval.response.reason ?? null) : null,
+});
+
+/** One task's approvals, answered ones included (`denied`: only the denied ones); without an id, the pending (or denied) approvals of every task, ended ones too. */
 async function approvals(
   id?: string,
-  opts: TaskOptions = {},
-): Promise<ApprovalRow[] | Record<string, unknown>[]> {
+  opts: TaskOptions & { denied?: boolean } = {},
+): Promise<ApprovalRow[]> {
   const { cwd, api } = target(opts);
   if (api) {
     const tasks = id ? [await api.tasks.get(id)] : await api.tasks.list({ limit: 200 });
     return tasks.flatMap(task =>
-      task.approval
-        ? [{ taskId: task.task.id, ...(task.approval as Record<string, unknown>) }]
-        : [],
+      remoteApprovals(task)
+        .filter(approval =>
+          opts.denied ? approval.answered === 'decline' : id || !approval.answered,
+        )
+        .map(approval => ({ taskId: task.task.id, ...approval })),
     );
   }
-  if (!id) return collectPending(cwd);
+  const pick = opts.denied ? deniedApprovals : pendingApprovals;
+  if (!id)
+    return collectApprovals(cwd, pick, 'all').map(({ taskId, ...approval }) =>
+      approvalRow(taskId, approval),
+    );
   const task = localTask(cwd, id);
-  return listPendingApprovals(resolveTaskDir(cwd, task.id)).map(approval => ({
-    taskId: task.id,
-    id: approval.id,
-    summary: approval.summary,
-    cwd: approval.cwd ?? null,
-    createdAt: approval.createdAt,
-    answered: approval.response?.decision ?? null,
-  }));
+  return (opts.denied ? deniedApprovals : listApprovals)(resolveTaskDir(cwd, task.id)).map(
+    approval => approvalRow(task.id, approval),
+  );
 }
 
-/** Answer an approval (accept, or `deny`). Locally the task id is optional: approval ids are unique. */
+/** Answer an approval, pending or denied: accept, or `deny` with a reason. Locally the task id is optional: approval ids are unique. */
 async function approve(
   reference: string | undefined,
   approvalId?: string,
-  opts: TaskOptions & { deny?: boolean } = {},
+  opts: TaskOptions & { deny?: boolean; reason?: string } = {},
 ) {
   const { cwd, api } = target(opts);
   const decision = opts.deny ? 'decline' : 'accept';
@@ -561,13 +800,21 @@ async function approve(
       throw new CoderError('invalid-option', 'Server approvals need a task id and approval id.', {
         hint: 'Usage: coder task approve <task-id> <approval-id> --server <url>',
       });
-    return api.tasks.approve(reference, approvalId, decision);
+    await api.tasks.approve(
+      reference,
+      approvalId,
+      decision,
+      opts.reason ? { reason: opts.reason } : {},
+    );
+    return { taskId: reference, approvalId, decision };
   }
   if (reference && !approvalId && reference.startsWith('apr-')) {
     approvalId = reference;
-    reference = collectPending(cwd).find(row => row.id === approvalId)?.taskId;
+    reference = collectApprovals(cwd, listApprovals, 'all').find(
+      row => row.id === approvalId,
+    )?.taskId;
     if (!reference)
-      throw new CoderError('invalid-option', `No pending approval "${approvalId}".`, {
+      throw new CoderError('invalid-option', `No approval "${approvalId}".`, {
         hint: 'List them: coder task approvals',
       });
   }
@@ -575,18 +822,22 @@ async function approve(
     throw new CoderError('invalid-option', 'Missing approval id.', {
       hint: [
         'List them: coder task approvals',
-        'Usage: coder task approve [task-id] <approval-id> [--deny]',
+        'Usage: coder task approve [task-id] <approval-id> [--deny] [--reason <why>]',
       ],
     });
   const task = localTask(cwd, reference);
-  answerApproval(resolveTaskDir(cwd, task.id), approvalId, decision);
+  await answerTaskApproval(cwd, task, approvalId, decision, { reason: opts.reason });
   return { taskId: task.id, approvalId, decision };
 }
 
 /** Stop a running task. */
 async function stop(id?: string, opts: TaskOptions = {}) {
   const { cwd, api } = target(opts);
-  if (api) return api.tasks.cancel(id ?? missingId([]));
+  if (api) {
+    const taskId = id ?? (await serverTask(api)).task.id;
+    await api.tasks.cancel(taskId);
+    return { taskId, status: 'cancelled' as const, interrupt: 'stop requested on the server' };
+  }
   const task = localTask(cwd, id);
   const { interrupt } = await stopTask(cwd, task);
   return { taskId: task.id, status: 'cancelled' as const, interrupt };
@@ -600,7 +851,12 @@ async function archive(id?: string, opts: TaskOptions & { allStopped?: boolean }
       ? (await api.tasks.list({ limit: 200 }))
           .filter(task => TERMINAL_STATUSES.includes(task.status as Task['status']))
           .map(task => task.task.id)
-      : [id ?? missingId([])];
+      : [];
+    if (!opts.allStopped) {
+      if (!id) missingId(['Archive one: coder task archive <task-id> --server']);
+      await api.tasks.archive(id);
+      return { taskId: id, archived: true as const };
+    }
     await Promise.all(ids.map(each => api.tasks.archive(each)));
     return { archived: ids, count: ids.length };
   }
@@ -625,7 +881,12 @@ async function remove(id?: string, opts: TaskOptions & { allArchived?: boolean }
   if (api) {
     const ids = opts.allArchived
       ? (await api.tasks.list({ limit: 200, archived: true })).map(task => task.task.id)
-      : [id ?? missingId([])];
+      : [];
+    if (!opts.allArchived) {
+      if (!id) missingId(['Delete one: coder task delete <task-id> --server']);
+      await api.tasks.delete(id);
+      return { taskId: id, deleted: true as const };
+    }
     await Promise.all(ids.map(each => api.tasks.delete(each)));
     return { deleted: ids, count: ids.length };
   }

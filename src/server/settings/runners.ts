@@ -7,7 +7,14 @@ import { type Params } from '../routes/match';
 import { randomBytes } from 'node:crypto';
 import { type RunnerRecord, type Store } from '../store/types';
 import { decryptSecret, encryptSecret } from '../store/secrets';
-import { serverRunnerId, testRunner, validateRunnerConfig, visibleRunner } from '../runners';
+import {
+  deletedKey,
+  deletedRunnerTasks,
+  serverRunnerId,
+  testRunner,
+  validateRunnerConfig,
+  visibleRunner,
+} from '../runners';
 import { ACTIVE_STATES } from '../tasks/queue';
 import { workspaceAdmin } from '../routes/guards';
 import { json } from '../routes/http';
@@ -483,6 +490,7 @@ export async function deleteRunner(
           409,
         );
       await store.delete('runner', id);
+      await store.delete('snapshot', deletedKey(id));
       ctx.settings?.runnerInstances?.delete(id);
 
       return json({ ok: true });
@@ -561,6 +569,7 @@ export const registration = z.strictObject({
   url: z.string(),
   secret: z.string().check(z.minLength(32)),
   offline: z.optional(z.boolean()),
+  removed: z.optional(z.array(z.string())),
 });
 
 export async function registerRunner(
@@ -631,8 +640,13 @@ export async function registerRunner(
       };
     }
     await store.put('runner', id, record);
+    const deleted = input.token ? [] : await deletedRunnerTasks(store, id, input.removed);
 
-    return json({ ...runnerRow(id, record, now), organizationId });
+    return json({
+      ...runnerRow(id, record, now),
+      organizationId,
+      ...(deleted.length ? { deleted } : {}),
+    });
   });
   if (registered.ok) ctx.taskWatcher?.runnersChanged(ctx.organizationId);
 

@@ -31,6 +31,7 @@ import type { SinceMessage } from '../../../integrations/types';
 import type { AgentApp, Installation } from '../../../agent/types';
 import type { AgentVersionRecord, DeliveryLease, TaskHistory, TaskLogLine } from '../types';
 import type { ServerConfig } from '../../context';
+import type { ApprovalPost } from '../../tasks/approvals';
 import { type EngineLogin } from '../../settings/logins';
 import {
   completeLogin,
@@ -97,6 +98,7 @@ import {
   fromJson,
   install,
   splitKey,
+  rows,
   UNSCOPED_ORGANIZATION,
   versionValue,
   versionColumns,
@@ -614,6 +616,7 @@ export class DrizzleStore implements Store {
 
   async listAgentSummaries(opts: AgentPageOptions = {}) {
     const pattern = opts.q ? `%${escapeLike(opts.q)}%` : undefined;
+    const later = sql`${agent.source} <> 'builtin'`;
     const query = this.db
       .select({ record: agent, version: versionColumns })
       .from(agent)
@@ -625,7 +628,9 @@ export class DrizzleStore implements Store {
         and(
           this.mine(agent.organizationId),
           opts.slug === undefined ? undefined : eq(agent.slug, opts.slug),
-          opts.after ? gt(agent.slug, opts.after) : undefined,
+          opts.after
+            ? sql`(${later}, ${agent.slug}) > (${opts.after[0] === '1'}, ${opts.after.slice(2)})`
+            : undefined,
           opts.source ? eq(agent.source, opts.source) : undefined,
           pattern
             ? or(
@@ -640,7 +645,7 @@ export class DrizzleStore implements Store {
             : undefined,
         ),
       )
-      .orderBy(asc(agent.slug));
+      .orderBy(later, asc(agent.slug));
     const rows = await readQuery(this.db, () =>
       opts.limit === undefined ? query : query.limit(opts.limit),
     );
@@ -748,6 +753,24 @@ export class DrizzleStore implements Store {
       });
   }
 
+  async approvalPostsDue(now: number, staleMs: number) {
+    const found = await readQuery(this.db, () =>
+      rows<{ key: string; value: ApprovalPost }>(
+        this.db,
+        sql`select ${chatState.key} as key, ${chatState.value} as value from ${chatState}
+          where ${chatState.key} like ${'o:%,"delivery"]:approval:%'} and ${this.live(chatState.expiresAt)}
+            and ((${chatState.value}->>'retryAt')::bigint <= ${now}
+              or (coalesce((${chatState.value}->>'shownAt')::bigint, 0) = 0 and (${chatState.value}->>'at')::bigint <= ${now - staleMs}))`,
+      ),
+    );
+
+    return found.map(({ key, value }) => {
+      const end = key.indexOf(']:');
+      const [organizationId] = JSON.parse(key.slice(2, end + 1)) as [string, string];
+      return { organizationId, id: key.slice(end + 2), value };
+    });
+  }
+
   list<K extends StoreKind>(
     kind: K,
     options?: StoreListOptions,
@@ -789,9 +812,15 @@ export class DrizzleStore implements Store {
             ? eq(agent.slug, opts.agent)
             : sql`false`,
       );
-    if (opts.active) filters.push(kind === 'installation'
-      ? or(isNull(install.deletedAt), ...(opts.includeUninstalled ? [eq(install.uninstalled, true)] : []))
-      : undefined);
+    if (opts.active)
+      filters.push(
+        kind === 'installation'
+          ? or(
+              isNull(install.deletedAt),
+              ...(opts.includeUninstalled ? [eq(install.uninstalled, true)] : []),
+            )
+          : undefined,
+      );
     if (opts.apps)
       filters.push(
         kind === 'installation' && opts.apps.length ? inArray(app.key, opts.apps) : sql`false`,

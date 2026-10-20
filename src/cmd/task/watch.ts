@@ -6,17 +6,15 @@ import * as z from 'zod/mini';
 import type { TaskWatch } from '../../core/task';
 import type { TaskLogEntry } from '../../core/state';
 import { ACTIVE_STATUSES, type Style, type Task, type TokenUsage } from '../../core/types';
-import type { TaskLogLine, TaskStatus } from '../../server/store/types';
+import type { TaskLogLine } from '../../server/store/types';
 import { outStyle } from '../../tui/output';
 import { termCols } from '../../tui/live';
 import { arg, serverOptions, str, tailOption } from '../../utils/args';
 import { command, nextSteps } from '../../cli';
 import {
   finalMessageLine,
-  finishedNext,
   LogRenderer,
   OUTPUT_PREVIEW_CHARS,
-  printOutcome,
   promptBlock,
   taskHeaderLines,
   taskSummaryLines,
@@ -42,36 +40,6 @@ async function printWatch(
 ): Promise<never> {
   const trim =
     opts.trim === undefined ? OUTPUT_PREVIEW_CHARS : opts.trim === 'none' ? Infinity : opts.trim;
-  if ('attempts' in watch.task) {
-    const { logEntry } = await import('../../core/task/log-view');
-    const renderer = await LogRenderer.create({
-      cwd: watch.task.task.cwd ?? cwd,
-      startedAt: watch.task.startedAt ?? watch.task.createdAt,
-      trim,
-      explicitTrim: opts.trim !== undefined,
-      width: termCols(),
-    });
-    for await (const event of watch.events) {
-      const line = event as TaskLogLine;
-      if (opts.json) {
-        process.stdout.write(`${JSON.stringify(line, null, 2)}\n`);
-        continue;
-      }
-      const entry = line.entry ?? logEntry(line.line);
-      if (!entry) {
-        printLine(line, outStyle);
-        continue;
-      }
-      const lines = renderer.render({ ...entry, at: entry.at ?? new Date(line.at).toISOString() });
-      if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
-    }
-    const status = (await watch.final()) as TaskStatus;
-    if (!opts.json) {
-      printOutcome(status, outStyle);
-      next(status);
-    }
-    process.exit(0);
-  }
   const task = watch.task;
 
   // Display budget for tool output and thinking, applied to text and JSON
@@ -168,7 +136,7 @@ async function printWatch(
 type LogSlice = {
   taskId: string;
   status: string;
-  events: Array<TaskLogEntry | TaskLogLine>;
+  events: TaskLogEntry[];
   next?: string;
 };
 
@@ -179,18 +147,15 @@ async function logSlice(
 ): Promise<LogSlice> {
   const events: LogSlice['events'] = [];
   for await (const event of watch.events) events.push(event);
-  const remote = 'attempts' in watch.task;
-  const task = 'attempts' in watch.task ? watch.task.task : watch.task;
-  const last = events.at(-1) as TaskLogLine | undefined;
-  const at = remote && last ? last.seq + 1 : from + events.length;
+  const { task } = watch;
   const flag = server === undefined ? '' : server === true ? ' --server' : ` --server ${server}`;
 
   return {
     taskId: task.id,
-    status: watch.task.status,
+    status: task.status,
     events,
-    ...(ACTIVE_STATUSES.includes(watch.task.status as Task['status'])
-      ? { next: `coder task watch ${task.id} --from ${at}${flag}` }
+    ...(ACTIVE_STATUSES.includes(task.status)
+      ? { next: `coder task watch ${task.id} --from ${from + events.length}${flag}` }
       : {}),
   };
 }
@@ -203,10 +168,6 @@ async function printSlice(slice: LogSlice, cwd: string): Promise<void> {
     width: termCols(),
   });
   for (const event of slice.events) {
-    if ('seq' in event) {
-      printLine(event as TaskLogLine, outStyle);
-      continue;
-    }
     const lines = renderer.render(event);
     if (lines.length) process.stdout.write(`${lines.join('\n')}\n`);
   }
@@ -254,12 +215,6 @@ export const commandWatch = command({
   },
   next({ result, args }) {
     if (!result) return [];
-    if ('attempts' in result) {
-      const status = result as unknown as TaskStatus;
-      return ['completed', 'failed', 'cancelled'].includes(status.status)
-        ? finishedNext(status.task.id, args)
-        : [];
-    }
     return result.next ? nextSteps([`Continue: ${result.next}`]) : [];
   },
   print: (slice, { cwd }) => slice && printSlice(slice, cwd),

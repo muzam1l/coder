@@ -2,7 +2,6 @@ import type { CoderConfig } from './config';
 
 /** Built-in config every file and flag merges over; import-free so the shipped dashboard can read it. */
 export const DEFAULT_CONFIG: CoderConfig = {
-  conversationCompactTokens: 70_000,
   // Agents are tried in order; the next one is the fallback when the previous
   // fails to start (missing binary, auth, quota, rate limit).
   chain: ['codex', 'claude', 'custom'],
@@ -20,7 +19,6 @@ export const DEFAULT_CONFIG: CoderConfig = {
   },
   models: {},
   approvals: {
-    escalationTimeoutMs: 120_000,
     allowedNetworkHosts: [],
   },
 };
@@ -38,6 +36,12 @@ export const EMPTY_MESSAGE_NOTICE = 'The agent returned no reply.';
 /** The default task list's groups: failed first, then active, then other stopped, then completed. */
 export const listRank = (status: string) =>
   status === 'failed' ? 0 : status === 'completed' ? 3 : status === 'cancelled' ? 2 : 1;
+
+/** Whether a task waits on a person: its turn waits, or an escalation is open whatever its turn does. */
+export const awaitsApproval = (
+  status: string,
+  approvals?: ReadonlyArray<{ response?: unknown }> | null,
+) => status === 'waiting' || Boolean(approvals?.some(approval => !approval.response));
 
 /** A row's place in the task list, which keyset cursors carry. */
 export type ListKey = { rank: number; createdAt: number; id: string };

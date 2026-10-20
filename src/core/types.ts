@@ -74,9 +74,9 @@ export interface Task {
   // The prompt of the active (resumed/steered) turn. `prompt` always keeps the
   // task's original text; follow-ups run from here so they never displace it.
   currentPrompt?: string | null;
-  // Harness-supplied standing instructions (--system), kept separate from the
-  // task prompt so previews (list/result/stream) show only the task itself.
-  system?: string | null;
+  // Standing instructions appended to the system prompt (--append-system), kept
+  // separate from the task prompt so previews (list/result/stream) show only the task itself.
+  appendSystem?: string | null;
   // What the engine's system prompt says, rendered on every turn with the task's servers.
   promptParts?: Omit<SystemPromptParts, 'servers'>;
   // A system prompt as given, for a task without promptParts.
@@ -90,10 +90,10 @@ export interface Task {
   dispatchId?: string;
   threadId?: string | null;
   previousThreadIds?: string[];
-  pendingRollover?: { summary: string; recent: string; exchanges: number };
-  rollingOver?: boolean;
   steerClosed?: boolean;
-  // A conversation's task (an agent's default flow): its history rolls over past the context budget.
+  // The process preparing a resumed worker, before its pid is published.
+  resumeOwner?: number;
+  // A conversation's task (an agent's default flow).
   conversation?: boolean;
   turnId?: string | null;
   // Ephemeral worker-owned endpoint used for live Codex controls or Claude
@@ -108,9 +108,6 @@ export interface Task {
   archivedAt?: string;
   // Archived by the auto-archive sweep, which lists take up on their next read rather than as an event.
   autoArchived?: boolean;
-  // Dev hook (--simulate-approval): the worker raises one real pending approval
-  // before running, to exercise the escalate -> --wait exit 4 -> approve loop.
-  simulateApproval?: boolean;
   // Set when this task was dispatched by a flow run; groups it under the run in
   // `coder list`.
   flowRunId?: string;
@@ -131,6 +128,8 @@ export interface Task {
   addDirs?: string[];
 }
 
+/** The error a task stopped by `coder task stop` or the dashboard records. */
+export const STOPPED_BY_USER = 'Stopped by user.';
 export const TERMINAL_STATUSES: readonly TaskStatus[] = ['completed', 'failed', 'cancelled'];
 export const ACTIVE_STATUSES: readonly TaskStatus[] = ['queued', 'running'];
 /** Logged when a resumed turn cannot load its engine conversation and starts a new one. */
@@ -198,14 +197,22 @@ export interface AuthStatus {
   detail: string;
 }
 
-/** A persisted approval escalation and its answer, if any. */
+/** A task's escalation and its answer, if any. */
 export interface Approval {
   id: string;
-  summary: string;
-  /** Where an escalated command runs. */
-  cwd?: string;
+  /** One short sentence: what the actions are for. */
+  reason: string;
+  /** The exact commands; one answer covers them all. */
+  actions: string[];
   createdAt?: string;
-  response?: { decision: string } | null;
+  /** `by` names who answered; `deliveredAt` is set once the task has the decision; `closed` when the task was stopped first. */
+  response?: {
+    decision: 'accept' | 'decline' | 'closed';
+    reason?: string;
+    answeredAt?: string;
+    by?: string;
+    deliveredAt?: string;
+  } | null;
   [key: string]: unknown;
 }
 

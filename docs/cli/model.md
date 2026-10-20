@@ -20,9 +20,9 @@ Use luna or sonnet for mechanical work; sol or opus is the default.
 Use astra or fable for the hardest work; they cost the most.
 
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
-## `model add [name] [--base-url <base-url>] [--model <model>] [--env-key <env-key>] [--workspace] [--json] [--cwd <cwd>]`
+## `model add [name] [--base-url <base-url>] [--model <model>] [--env-key <env-key>] [--context-window <context-window>] [--workspace] [--json] [--cwd <cwd>]`
 
 connect a model
 
@@ -35,9 +35,10 @@ agent default in config. Alias: `coder model setup`.
 - `--base-url <base-url>` OpenAI-compatible API base (e.g. http://localhost:11434/v1)
 - `--model <model>` the provider's model id (e.g. qwen2.5-coder:32b)
 - `--env-key <env-key>` env var holding the API key (omit for keyless local endpoints)
+- `--context-window <context-window>` the model's context window in tokens; filled from the provider when it reports one
 - `--workspace` write to <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder model add qwen --base-url http://localhost:11434/v1 --model qwen2.5-coder:32b  # local Ollama model, no key
@@ -45,7 +46,7 @@ coder model add kimi --base-url https://openrouter.ai/api/v1 --model moonshotai/
 coder run --model qwen "explain this repo"  # dispatch a task on it
 ```
 
-## `model update [name] [--base-url <base-url>] [--model <model>] [--env-key <env-key>] [--workspace] [--json] [--cwd <cwd>]`
+## `model update [name] [--base-url <base-url>] [--model <model>] [--env-key <env-key>] [--context-window <context-window>] [--workspace] [--json] [--cwd <cwd>]`
 
 change a model in place
 
@@ -56,9 +57,10 @@ is re-probed and the wire protocol re-detected.
 - `--base-url <base-url>` new API base
 - `--model <model>` new provider model id
 - `--env-key <env-key>` new API-key env var
+- `--context-window <context-window>` the model's context window in tokens; filled from the provider when it reports one
 - `--workspace` write to <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `model remove [name] [--workspace] [--json] [--cwd <cwd>]`
 
@@ -69,7 +71,7 @@ Remove a configured custom model.
 - `<name>` the custom model
 - `--workspace` target <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `model disable [name] [--workspace] [--json] [--cwd <cwd>]`
 
@@ -80,7 +82,7 @@ Disable a model - built-in, custom, or alias. Requests for it fail until re-enab
 - `<name>` a built-in, custom model, or alias
 - `--workspace` target <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `model enable [name] [--workspace] [--json] [--cwd <cwd>]`
 
@@ -89,7 +91,7 @@ re-enable a disabled model
 - `<name>` a built-in, custom model, or alias
 - `--workspace` target <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `model alias [name] [spec] [--workspace] [--json] [--cwd <cwd>]`
 
@@ -102,7 +104,7 @@ built-in name to override it.
 - `<spec>` the engine spec, such as codex:luna
 - `--workspace` target <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `model unalias [name] [--workspace] [--json] [--cwd <cwd>]`
 
@@ -113,4 +115,4 @@ Remove a user-defined alias.
 - `<name>` the alias
 - `--workspace` target <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current

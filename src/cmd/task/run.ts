@@ -2,18 +2,10 @@
 import process from 'node:process';
 
 import type { TokenUsage } from '../../core/types';
-import type { TaskStatus } from '../../server/store/types';
-import { errStyle, formatTokens, outStyle } from '../../tui/output';
-import { flag, optStr, str, strList } from '../../utils/args';
+import { formatTokens, outStyle } from '../../tui/output';
+import { flag, optStr, serverSuffix, str, strList } from '../../utils/args';
 import { command, MODEL_HINT } from '../../cli';
-import {
-  finalMessageLine,
-  finishedNext,
-  printOutcome,
-  serverTaskJson,
-  waitingNext,
-} from './result';
-import { printLine } from './watch';
+import { finalMessageLine, finishedNext, waitingNext } from './result';
 
 export function taskRunNext(
   taskId: string,
@@ -25,15 +17,16 @@ export function taskRunNext(
     'run this in its own background shell, one per task (never wait on several tasks in one call). Returns with the answer or a pending approval.',
   );
   wait.cli = { ...wait.cli, layout: 'rows', title: 'Next step' };
+  const flags = serverSuffix(args);
   return [
     wait,
     ...[
       {
-        usage: `coder task steer ${taskId} "<follow-up>"`,
+        usage: `coder task steer ${taskId} "<follow-up>"${flags}`,
         blurb: "steer the task with a message (use 'ask' without interrupting main thread)",
       },
-      { usage: `coder task stop ${taskId}`, blurb: 'stop the task' },
-      { usage: 'coder task list', blurb: 'recent tasks' },
+      { usage: `coder task stop ${taskId}${flags}`, blurb: 'stop the task' },
+      { usage: `coder task list${flags}`, blurb: 'recent tasks' },
       { usage: 'coder task --help', blurb: 'all task commands' },
     ].map(step => ({ ...step, cli: { layout: 'rows' as const, title: 'Related' } })),
   ];
@@ -89,8 +82,8 @@ export const commandTask = command({
       'run as that agent: its system.md, engine settings, MCP servers and flows; flags override them',
       '<id>',
     ),
-    system: str(
-      'standing instructions prepended to the task (kept out of prompt previews)',
+    'append-system': str(
+      "standing instructions appended to Coder's system prompt (kept out of prompt previews)",
       '<text>',
     ),
     wait: flag('run in the foreground and block until the answer is ready'),
@@ -125,7 +118,6 @@ export const commandTask = command({
     background: flag('with --server: print the task id instead of following it'),
     repo: str("with --server: check out a repo from the workspace's installs", '<owner/name>'),
     runner: str('with --server: where it runs (a runner kind or a registered runner)'),
-    'simulate-approval': flag('test only: raise a fake approval request'),
   },
   cli: {
     positional: ['prompt'],
@@ -140,7 +132,7 @@ export const commandTask = command({
       'coder run "add a /health endpoint"  # dispatch in the background, print a task id',
       'coder result <task-id> --wait  # then block until it finishes and print the answer',
       'coder run --wait "fix the failing test"  # or block on the run itself',
-      'coder task run --model luna --system "tests live in test/, don\'t touch anything outside of it" "rename foo to bar"  # pick an engine via its model alias; --system adds standing instructions',
+      'coder task run --model luna --append-system "tests live in test/, don\'t touch anything outside of it" "rename foo to bar"  # pick an engine via its model alias; --append-system adds standing instructions',
       'coder task run --agent reviewer "review the last commit"  # run a repo agent from .coder/agents/reviewer',
       'coder run --add-dir ../api --add-dir ../shared "update the client for the new endpoint"  # let the task reach sibling repos too',
     ],
@@ -167,16 +159,14 @@ export const commandTask = command({
       effort: options.effort,
       permissions: options.permissions,
       name: options.name,
-      system: options.system,
+      appendSystem: options['append-system'],
       mcp: options.mcp,
       connections: options.connections
         ?.split(',')
         .map(id => id.trim())
         .filter(Boolean),
       addDirs: options['add-dir'],
-      // A server task is followed until it ends unless --background; a local one only with --wait.
-      wait: options.server !== undefined ? !options.background : options.wait,
-      simulateApproval: options['simulate-approval'],
+      wait: waited(options),
       repo: options.repo,
       runner: options.runner,
       server: options.server,
@@ -194,19 +184,11 @@ export const commandTask = command({
           next({ taskId, phase: 'waiting' }, { stream: 'stderr', style: 'stdout' });
         }
       },
-      // A tool's stdout is the MCP stream.
-      onLog: line =>
-        tool
-          ? undefined
-          : json
-            ? process.stdout.write(`${JSON.stringify(line, null, 2)}\n`)
-            : printLine(line, outStyle),
     });
   },
-  json: done => ('attempts' in done ? serverTaskJson(done) : done),
   next({ result: done, args }) {
     const phase = (done as { phase?: string }).phase;
-    const taskId = 'task' in done ? done.task.id : done.taskId;
+    const taskId = done.taskId;
     if (phase === 'detached')
       return [
         waitingNext(
@@ -216,30 +198,22 @@ export const commandTask = command({
         ),
       ];
     if (phase === 'waiting') return taskRunNext(taskId, args);
-    if ('attempts' in done) {
-      if (['completed', 'failed', 'cancelled'].includes(done.status))
-        return args.background ? [] : finishedNext(taskId, args);
-      return [{ ...waitingNext(taskId, args, ''), cli: { hidden: true } }];
-    }
-    if (args.wait)
-      return finishedNext(taskId).map(step => ({
+    if (waited(args))
+      return finishedNext(taskId, args).map(step => ({
         ...step,
         cli: { ...step.cli, stream: 'stderr' as const },
       }));
     return taskRunNext(taskId, args);
   },
   print(done, { options }) {
-    if ('attempts' in done) {
-      if (options.background) return void process.stdout.write(`${done.task.id}\n`);
-      return printOutcome(done as TaskStatus, outStyle);
-    }
-    if (options.wait) printFinished(done);
+    if (waited(options)) printFinished(done);
     else printStarted(done.taskId, done.status);
   },
   exit: (done, { options }) =>
-    ('attempts' in done ? !options.background : options.wait)
-      ? done.status === 'completed'
-        ? 0
-        : 1
-      : undefined,
+    waited(options) ? (done.status === 'completed' ? 0 : 1) : undefined,
 });
+
+/** A server task is followed until it ends unless --background; a local one only with --wait. */
+function waited(options: { server?: string | true; background?: boolean; wait?: boolean }) {
+  return options.server !== undefined ? !options.background : Boolean(options.wait);
+}

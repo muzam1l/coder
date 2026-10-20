@@ -33,7 +33,6 @@ coder config set engines.codex.model sol
     "astra": { "disabled": true }
   },
   "approvals": {
-    "escalationTimeoutMs": 120000,
     "allowedNetworkHosts": ["localhost", "127.0.0.1", "registry.npmjs.org"]
   },
   "agents": {
@@ -53,10 +52,6 @@ coder config set engines.codex.model sol
 
 Fallback order. When an engine can't start (missing binary, auth, quota), the task automatically retries on the next entry. Default `["codex", "claude"]`.
 
-## `conversationCompactTokens`
-
-Context size in tokens at which a platform conversation's task, such as a Slack thread or a pull request, continues from a summary plus its recent messages. Default `70000`.
-
 ## `engines`
 
 Per-engine defaults, used when a dispatch doesn't override them:
@@ -67,7 +62,7 @@ Per-engine defaults, used when a dispatch doesn't override them:
 | `effort`      | `low`, `medium`, `high`                                                                                                                       |
 | `permissions` | `read-only`, `workspace-write`, `auto`                                                                                                        |
 
-Permission modes are one surface across all engines: read-only can't modify anything, workspace-write stays inside the repo, and auto enables Codex network access plus policy-answered escalations; `engines.codex.network` overrides network access for every mode when set.
+Permission modes are one surface across all engines: read-only can't modify anything, workspace-write stays inside the repo, and auto lets the engine's own reviewer decide actions outside the sandbox (see [approvals](#approvals)); `engines.codex.network` overrides network access for every mode when set.
 
 A task reaches only its workspace unless you give it more. Pass `--add-dir <dir>` to `coder run` once for each sibling repo or shared folder the task needs. Relative paths resolve against the workspace and each one must already exist. Read-only tasks can read these directories but never write them, while workspace-write and auto tasks can write them just like the workspace. Claude receives them as `--add-dir` and `permissions.additionalDirectories`, so its OS sandbox follows the same rules. Codex already reads everywhere in read-only, and in the other modes it receives them as extra writable roots in the turn's sandbox policy. The directories are saved on the task, `coder result` lists them, and steering keeps them.
 
@@ -85,16 +80,11 @@ Every shape also accepts `"disabled": true` to park the entry without deleting i
 
 ## `approvals`
 
-Tunes the `auto` permission mode; ignored by `read-only` and `workspace-write`.
+| Key                   | Meaning                                                                                                           |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `allowedNetworkHosts` | Hosts (and their subdomains) tasks reach without review. Default `[]`. Also in the dashboard, Settings → Engines. |
 
-| Key                   | Meaning                                                                                                                |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `escalationTimeoutMs` | How long an escalated approval waits for an answer before auto-denying and letting the task move on. Default `120000`. |
-| `allowedNetworkHosts` | Hosts (and their subdomains) coders may reach without an approval when network sandboxing is active. Default `[]`.     |
-
-`allowedNetworkHosts` is pre-allowed in the Claude sandbox and auto-accepted by the Codex approval policy when `engines.codex.network` is `false`. A bare hostname covers its subdomains; anything else escalates as usual. Listing `localhost`, `127.0.0.1` or `::1` also lets sandboxed Claude commands serve on local ports (macOS), so a task can run a dev server. On `vercel-sandbox` they also open the firewall of tasks below `auto`.
-
-Allowlist only hosts you trust: the check is by name, not by the address the name resolves to.
+How tasks ask for more: [Access and approvals](access.md).
 
 ## `agents`
 

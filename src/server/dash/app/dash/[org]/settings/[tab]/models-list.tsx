@@ -21,6 +21,7 @@ import {
 } from '@/app/dash/[org]/settings/model-options';
 import { reasonText } from '@/utils/format';
 import { useAction } from '@/utils/action';
+import { toastError } from '@/comps/frame/task-toasts';
 import { List, Row, replaceTitle, useConfig, useReplace } from './list';
 import type {
   Config,
@@ -111,6 +112,7 @@ function AddModel({
               baseUrl: values.baseUrl!,
               model: values.model!,
               envKey,
+              ...(values.contextWindow ? { contextWindow: Number(values.contextWindow) } : {}),
             });
           });
     setBusy(false);
@@ -211,7 +213,11 @@ function CustomFields({
   const [scope, setScope] = useState(admin ? 'workspace' : 'personal');
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const latest = useRef(0);
+  // One toast per failure; a probe that works again clears it.
+  const failed = useRef('');
   const [model, setModel] = useState('');
+  const [contextWindow, setContextWindow] = useState<string | null>(null);
+  const reported = probe?.contextWindows?.[model];
   const has = (name: string, where: string) =>
     Boolean(name) && Boolean(credentials?.some(row => row.name === name && row.scope === where));
   // The scope whose saved key a model would use; a member's tasks fall back to the workspace's.
@@ -242,6 +248,13 @@ function CustomFields({
         if (round !== latest.current) return;
         setChecking(false);
         setProbe(result.models ? { ...result, models: [...result.models].sort() } : result);
+        const failure = result.reachable
+          ? ''
+          : /HTTP 40[13]/.test(result.detail)
+            ? 'The API key was rejected.'
+            : `${url.trim()} isn't reachable.`;
+        if (failure && failure !== failed.current) toastError('Models not listed', failure);
+        failed.current = failure;
       });
   };
   // Typing settles for 250 ms before a probe, like the registry search.
@@ -249,15 +262,8 @@ function CustomFields({
     clearTimeout(timer.current);
     timer.current = setTimeout(() => check(url, name, typed), 250);
   };
-  const status = !probe
-    ? undefined
-    : !probe.reachable
-      ? /HTTP 40[13]/.test(probe.detail)
-        ? 'key rejected'
-        : probe.detail
-      : probe.models
-        ? `${probe.models.length} listed`
-        : 'reachable, no model list';
+  // Only what the endpoint lists; an unreachable one just offers no suggestions.
+  const status = probe?.models ? `${probe.models.length} listed` : undefined;
   const keyRow =
     preset.needsKey && credentials ? (
       <div class="add-grid">
@@ -283,7 +289,9 @@ function CustomFields({
             name="key"
             type="password"
             autocomplete="off"
-            placeholder={saved(envKey) ? 'Leave empty to use the saved key' : `${preset.name} API key`}
+            placeholder={
+              saved(envKey) ? 'Leave empty to use the saved key' : `${preset.name} API key`
+            }
             value={key}
             onInput={event => {
               setKey(event.currentTarget.value);
@@ -314,9 +322,12 @@ function CustomFields({
               setPreset(next);
               setBaseUrl(next.baseUrl);
               setEnvKey(next.envKey);
+              // The model and a typed key belong to the previous provider.
+              setModel('');
+              setContextWindow(null);
+              setKey('');
               setProbe(null);
-              if (key.trim() || saved(next.envKey) || !next.needsKey)
-                check(next.baseUrl, next.envKey, key);
+              if (saved(next.envKey) || !next.needsKey) check(next.baseUrl, next.envKey, '');
             }}
           />
         </Field>
@@ -334,7 +345,10 @@ function CustomFields({
             options={probe?.models ?? []}
             placeholder={probe?.models?.[0] ?? 'qwen3-coder'}
             value={model}
-            onChange={setModel}
+            onChange={next => {
+              setModel(next);
+              setContextWindow(null);
+            }}
           />
         </Field>
         <Field label="Short name" hint="used as --model; defaults to the model id">
@@ -382,6 +396,18 @@ function CustomFields({
                 pattern="[A-Za-z_][A-Za-z0-9_]*"
                 value={envKey}
                 onInput={event => setEnvKey(event.currentTarget.value)}
+              />
+            </Field>
+            <Field label="Context window" hint="tokens; empty uses Codex's default, 272000">
+              <input
+                name="contextWindow"
+                type="number"
+                min="1"
+                step="1"
+                placeholder="272000"
+                autocomplete="off"
+                value={contextWindow ?? (reported ? String(reported) : '')}
+                onInput={event => setContextWindow(event.currentTarget.value)}
               />
             </Field>
           </div>

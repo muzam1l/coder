@@ -27,15 +27,13 @@ export const commandArchive = command({
       allStopped: options['all-stopped'],
     });
   },
-  print(result, { options }) {
+  print(result) {
     if (result.count === undefined)
       return void process.stdout.write(`Archived task ${outStyle.cyan(result.taskId)}.\n`);
     process.stdout.write(
-      options.server !== undefined
-        ? `Archived ${result.count} server task${plural(result.count)}.\n`
-        : result.count
-          ? `Archived ${result.count} stopped task${plural(result.count)}.\n`
-          : `${outStyle.dim('No stopped tasks to archive.')}\n`,
+      result.count
+        ? `Archived ${result.count} stopped task${plural(result.count)}.\n`
+        : `${outStyle.dim('No stopped tasks to archive.')}\n`,
     );
   },
 });

@@ -16,10 +16,8 @@ export const commandStop = command({
     const { tasks } = await import('../../core/task');
     return tasks.stop(id, { ...options, organization: options.workspace });
   },
-  print: (result, { options, args: [id] }) =>
+  print: ({ taskId, interrupt }) =>
     process.stdout.write(
-      options.server !== undefined
-        ? `Stopped server task ${outStyle.cyan(id!)}.\n`
-        : `Stopped task ${outStyle.cyan((result as { taskId: string }).taskId)} ${outStyle.dim(`(${(result as { interrupt: string }).interrupt})`)}\n`,
+      `Stopped task ${outStyle.cyan(taskId)} ${outStyle.dim(`(${interrupt})`)}\n`,
     ),
 });

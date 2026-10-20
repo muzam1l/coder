@@ -1,444 +1,299 @@
 /**
- * Auto-mode approval engine. Codex runs with approvalPolicy "on-request" (or
- * "untrusted"): whenever it wants to escalate beyond the sandbox it sends a
- * server request, and this module answers it like the CLI prompt would.
- * except a policy decides instead of a human, and genuinely ambiguous asks are
- * escalated to the caller through pending-approval files.
- *
- * Protocol (codex app-server v2):
- * - item/commandExecution/requestApproval -> { decision }
- * - item/fileChange/requestApproval       -> { decision }
- * decision: "accept" | "acceptForSession" | "decline" | "cancel"
+ * Approvals: the engine's own reviewer decides routine actions; a task reaches a human only
+ * through its `escalate` tool. Each escalation is a request file in the task's approvals dir,
+ * its answer a response file beside it. Answers never block the task: the decision arrives as
+ * a steer. The engines' own permission fallbacks (Claude's prompt tool, Codex's approval
+ * requests) deny at once and point the task at `escalate`.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { readJsonFile, watchChanges } from '../utils/fsx';
+import { readJsonFile } from '../utils/fsx';
+import { appendTaskLog, type TaskLogEntry } from './state';
 
 import type { Approval } from './types';
 
-/** A policy verdict: accept/decline outright, or escalate to a human. */
-type VerdictDecision = 'accept' | 'decline' | 'escalate';
-interface Verdict {
-  decision: VerdictDecision;
+/** What the engine gets when its reviewer could not decide and asked Coder. */
+export const NOT_ALLOWED =
+  'Not allowed here. If the task truly needs this, call the escalate tool with the exact command and why, then continue or end your turn; the decision arrives as a message, in this turn if it is still running.';
+
+/** An escalation as the task raises it. */
+export interface ApprovalRequest {
+  /** One short sentence: what the actions are for. */
   reason: string;
+  /** The exact commands, as the task will run them. */
+  actions: string[];
 }
 
-/** Extra context for a command decision (network escalations). */
-interface DecideContext {
-  networkHost?: string | null;
-  allowedNetworkHosts?: string[];
-}
-
-/** An event emitted to the caller as approvals are decided/escalated. */
-interface ApprovalEvent {
-  kind: string;
-  approvalId?: string;
-  summary?: string;
-  message?: string;
-  decision?: string;
+/** An answer to an escalation; `closed` when the task was stopped before anyone answered. */
+export interface ApprovalAnswer {
+  decision: 'accept' | 'decline' | 'closed';
   reason?: string;
-  method?: string;
-}
-type ApprovalEventHandler = (event: ApprovalEvent) => void;
-
-/** Params for a codex app-server approval request. */
-interface ApprovalRequestParams {
-  command?: string;
-  cwd?: string | null;
-  itemId?: string;
-  reason?: string;
-  networkApprovalContext?: { host?: string | null } | null;
-  [key: string]: unknown;
+  answeredAt: string;
+  /** Who answered, as the conversation shows it. */
+  by?: string;
+  /** Set once the task has the decision: steered, queued or resumed with it. */
+  deliveredAt?: string;
 }
 
-/** A pending item (command or file change) tracked by the codex run state. */
-interface ApprovalItem {
-  command?: string;
-  cwd?: string;
-  changes?: Array<{ path?: string }>;
-  [key: string]: unknown;
-}
+const approvalsDir = (taskDir: string) => path.join(taskDir, 'approvals');
 
-/** The codex run state passed to the handler (holds the item index). */
-interface ApprovalState {
-  itemIndex?: Map<string, ApprovalItem>;
-  [key: string]: unknown;
-}
-
-/** The persisted request written to disk when an ambiguous ask is escalated. */
-interface EscalateRequest {
-  method: string;
-  summary: string;
-  command?: string;
-  /** Where the command runs. */
-  cwd?: string;
-  paths?: string[];
-  params?: ApprovalRequestParams;
-}
-
-/** Options for createApprovalHandler. */
-interface ApprovalHandlerOptions {
-  workspaceRoot: string;
-  taskDir: string;
-  mode?: 'auto' | 'deny' | null;
-  escalationTimeoutMs?: number;
-  allowedNetworkHosts?: string[];
-  onEvent?: ApprovalEventHandler | null;
-}
-
-type ApprovalRequestHandler = (
-  method: string,
-  params: ApprovalRequestParams,
-  state?: ApprovalState,
-) => Promise<{ decision: string }>;
-
-const COMMAND_APPROVAL_METHOD = 'item/commandExecution/requestApproval';
-const FILE_CHANGE_APPROVAL_METHOD = 'item/fileChange/requestApproval';
-
-// Never allowed, no matter what the task says. Git stays read-only by policy.
-const GIT_WRITE_SUBCOMMANDS = new Set([
-  'commit',
-  'checkout',
-  'switch',
-  'restore',
-  'stash',
-  'reset',
-  'rebase',
-  'merge',
-  'push',
-  'pull',
-  'cherry-pick',
-  'revert',
-  'clean',
-  'am',
-  'apply',
-  'tag',
-  'branch',
-  'worktree',
-  'filter-branch',
-  'filter-repo',
-  'gc',
-  'prune',
-  'reflog',
-  'remote',
-  'submodule',
-  'config',
-]);
-
-const HARD_DENY_PATTERNS = [
-  /\bsudo\b/,
-  /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*f|-[a-zA-Z]*f[a-zA-Z]*r)\b.*\s(\/\*?|~\/?|\$HOME\/?)(\s|$)/,
-  /\b(shutdown|reboot|halt|poweroff)\b/,
-  /\bmkfs\b|\bdiskutil\s+erase/i,
-  /\b(chmod|chown)\b.*-R.*\s\/(\s|$)/,
-  /\bkill(all)?\s+-9\s+1\b/,
-  /curl[^|;&]*\|\s*(ba|z|da)?sh\b/,
-  /wget[^|;&]*\|\s*(ba|z|da)?sh\b/,
-  /\blaunchctl\b|\bsystemctl\b/,
-  /\bdefaults\s+write\b/,
-  />\s*\/dev\/(sd|disk)/,
-];
-
-// First-token allowlist for commands that are safe to run un-sandboxed.
-const GIT_READ_SUBCOMMANDS = new Set([
-  'status',
-  'log',
-  'diff',
-  'show',
-  'blame',
-  'rev-parse',
-  'ls-files',
-  'ls-tree',
-  'cat-file',
-  'describe',
-  'shortlog',
-  'grep',
-  'branch', // bare `git branch` lists; write forms are caught by flag check below
-  'stash', // bare `git stash list` only; other forms caught below
-]);
-
-function firstShellCommand(command: string): string {
-  // Unwrap `bash -lc "..."` / `sh -c '...'` wrappers so the inner command is judged.
-  const wrapped = command.match(
-    /^\s*(?:ba|z|da)?sh\s+(?:-[a-zA-Z]+\s+)*(?:-c\s+)?(["'])([\s\S]*)\1\s*$/,
-  );
-  return wrapped?.[2] ?? command;
-}
-
-function tokenize(command: string): string[] {
-  return command.trim().split(/\s+/).filter(Boolean);
-}
-
-function classifyGit(tokens: string[]): Verdict {
-  const sub = tokens.find((token, index) => index > 0 && !token.startsWith('-'));
-  if (!sub) {
-    return { decision: 'accept', reason: 'bare git' };
-  }
-  if (
-    sub === 'branch' &&
-    tokens.some(t => /^-(d|D|m|M|c|C|f|u)|^--(delete|move|copy|force|set-upstream)/.test(t))
-  ) {
-    return {
-      decision: 'decline',
-      reason: 'git branch write operation (git is read-only for Coder)',
-    };
-  }
-  if (sub === 'stash') {
-    const stashSub = tokens.find((t, i) => i > 1 && !t.startsWith('-'));
-    if (stashSub === 'list' || stashSub === 'show') {
-      return { decision: 'accept', reason: `git stash ${stashSub} is read-only` };
-    }
-    return {
-      decision: 'decline',
-      reason: 'git stash write operation (git is read-only for Coder)',
-    };
-  }
-  if (GIT_READ_SUBCOMMANDS.has(sub)) {
-    return { decision: 'accept', reason: `git ${sub} is read-only` };
-  }
-  if (GIT_WRITE_SUBCOMMANDS.has(sub)) {
-    return {
-      decision: 'decline',
-      reason: `git ${sub} is a write operation (git is read-only for Coder)`,
-    };
-  }
-  return { decision: 'escalate', reason: `unrecognized git subcommand: ${sub}` };
-}
-
-/**
- * Decide a command approval without human input.
- * Returns { decision: "accept" | "decline" | "escalate", reason }.
- */
-export function decideCommand(rawCommand: unknown, context: DecideContext = {}): Verdict {
-  const command = firstShellCommand(String(rawCommand ?? ''));
-  if (!command.trim()) {
-    return { decision: 'escalate', reason: 'empty command' };
-  }
-
-  for (const pattern of HARD_DENY_PATTERNS) {
-    if (pattern.test(command)) {
-      return { decision: 'decline', reason: `matches hard-deny pattern ${pattern}` };
-    }
-  }
-
-  // Command/process substitution can smuggle a second command past the
-  // first-token checks (`echo $(git push)`); never auto-accept it.
-  if (/\$\(|`|<\(/.test(command)) {
-    return { decision: 'escalate', reason: 'contains command substitution' };
-  }
-
-  // Compound commands: every segment must be individually acceptable.
-  const segments = command
-    .split(/&&|\|\||;|\||\r?\n/)
-    .map(segment => segment.trim())
-    .filter(Boolean);
-  if (segments.length > 1) {
-    let worst: Verdict = { decision: 'accept', reason: 'all segments safe' };
-    for (const segment of segments) {
-      const result = decideCommand(segment, context);
-      if (result.decision === 'decline') {
-        return result;
-      }
-      if (result.decision === 'escalate') {
-        worst = result;
-      }
-    }
-    return worst;
-  }
-
-  const tokens = tokenize(command);
-  const binary = path.basename(tokens[0] ?? '');
-
-  if (binary === 'git') {
-    return classifyGit(tokens);
-  }
-
-  // Network escalations are their own category: only allow allowlisted hosts.
-  const networkHost = context.networkHost;
-  if (networkHost) {
-    const allowedHosts = context.allowedNetworkHosts ?? [];
-    if (allowedHosts.some(host => networkHost === host || networkHost.endsWith(`.${host}`))) {
-      return { decision: 'accept', reason: `network host ${networkHost} is allowlisted` };
-    }
-    return { decision: 'escalate', reason: `network access to ${networkHost}` };
-  }
-
-  // No command allowlist: the OS sandbox is the boundary. Any command that
-  // reached this handler is trying to escape the sandbox, so it is a real
-  // decision. Escalate to the caller, the orchestrating main thread, which
-  // approves it itself or delegates to a human, rather than rubber-stamping it
-  // by name.
-  return { decision: 'escalate', reason: `command needs approval: ${binary || '(unknown)'}` };
-}
-
-/**
- * Decide a file-change approval: accept edits inside the workspace, escalate
- * anything that reaches outside it or touches .git/.
- */
-export function decideFileChange(paths: string[], workspaceRoot: string): Verdict {
-  if (!paths.length) {
-    return { decision: 'escalate', reason: 'file change with no resolvable paths' };
-  }
-  for (const filePath of paths) {
-    const resolved = path.resolve(workspaceRoot, filePath);
-    const relative = path.relative(workspaceRoot, resolved);
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
-      return { decision: 'escalate', reason: `path outside workspace: ${filePath}` };
-    }
-    if (relative === '.git' || relative.startsWith(`.git${path.sep}`)) {
-      return { decision: 'decline', reason: `direct .git modification: ${filePath}` };
-    }
-  }
-  return { decision: 'accept', reason: 'all paths inside workspace' };
-}
-
-function approvalsDir(taskDir: string): string {
-  return path.join(taskDir, 'approvals');
-}
-
-export function listPendingApprovals(taskDir: string): Approval[] {
+/** Every approval of a task, oldest first, answered ones with their answer. */
+export function listApprovals(taskDir: string): Approval[] {
   const dir = approvalsDir(taskDir);
-  if (!fs.existsSync(dir)) {
-    return [];
-  }
+  if (!fs.existsSync(dir)) return [];
+
   return fs
     .readdirSync(dir)
     .filter(name => name.endsWith('.request.json'))
     .flatMap((name): Approval[] => {
       const id = name.replace(/\.request\.json$/, '');
-      // A request caught mid-write parses as null. Skip it. The next list
-      // pass picks it up once the write lands.
-      const request = readJsonFile<Record<string, unknown>>(path.join(dir, name));
-      if (!request) {
-        return [];
-      }
-      const response = readJsonFile<{ decision: string }>(path.join(dir, `${id}.response.json`));
-      return [{ ...request, id, response } as Approval];
+      // A request caught mid-write parses as null; the next list picks it up.
+      const request = readJsonFile<Approval>(path.join(dir, name));
+      if (!request) return [];
+      const response = readJsonFile<ApprovalAnswer>(path.join(dir, `${id}.response.json`));
+
+      return [{ ...request, id, response }];
     })
-    .sort((left, right) =>
-      String(left.createdAt ?? '').localeCompare(String(right.createdAt ?? '')),
-    );
+    .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
 }
 
-export function answerApproval(
-  taskDir: string,
-  approvalId: string,
-  decision: 'accept' | 'decline',
-): void {
-  const dir = approvalsDir(taskDir);
-  const requestFile = path.join(dir, `${approvalId}.request.json`);
-  if (!fs.existsSync(requestFile)) {
-    throw new Error(`No pending approval "${approvalId}" for this task.`);
-  }
-  fs.writeFileSync(
-    path.join(dir, `${approvalId}.response.json`),
-    `${JSON.stringify({ decision, answeredAt: new Date().toISOString() }, null, 2)}\n`,
-    'utf8',
+/** Every action the user approved for this task, oldest first; each later turn tells the reviewer. */
+export const approvedActions = (taskDir: string) => [
+  ...new Set(
+    listApprovals(taskDir).flatMap(approval =>
+      approval.response?.decision === 'accept' ? approval.actions : [],
+    ),
+  ),
+];
+
+/** The accepted escalation with this exact command among its actions, read at call time. */
+export const approvalFor = (taskDir: string, command: string) =>
+  listApprovals(taskDir).find(
+    approval =>
+      approval.response?.decision === 'accept' &&
+      approval.actions.some(action => action.trim() === command.trim()),
   );
+
+/** The task's approvals nobody has answered. */
+export const pendingApprovals = (taskDir: string) =>
+  listApprovals(taskDir).filter(approval => !approval.response);
+
+/** The task's approvals that were denied; they stay answerable. */
+export const deniedApprovals = (taskDir: string) =>
+  listApprovals(taskDir).filter(approval => approval.response?.decision === 'decline');
+
+/** Why a closed approval takes no answer. */
+export const stoppedMessage = (approvalId: string) =>
+  `The task was stopped, so approval "${approvalId}" is closed.`;
+
+/** The answer a stop gives an open approval; the task never hears it. */
+export const closedResponse = (at = new Date().toISOString()) => ({
+  decision: 'closed' as const,
+  answeredAt: at,
+  deliveredAt: at,
+});
+
+/** Closes the task's open approvals as it stops. */
+export function closeApprovals(taskDir: string): Approval[] {
+  const response = closedResponse();
+
+  return pendingApprovals(taskDir).map(approval => {
+    writeResponse(taskDir, approval.id, response);
+
+    return { ...approval, response };
+  });
 }
 
-export async function escalate(
-  taskDir: string,
-  request: EscalateRequest,
-  { timeoutMs, onEvent }: { timeoutMs: number; onEvent?: ApprovalEventHandler | null },
-): Promise<'accept' | 'decline'> {
+/** Record an escalation; returns its id at once. */
+export function requestApproval(taskDir: string, request: ApprovalRequest): Approval {
   const dir = approvalsDir(taskDir);
   fs.mkdirSync(dir, { recursive: true });
   const id = `apr-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+  const approval: Approval = {
+    id,
+    reason: request.reason,
+    actions: request.actions,
+    createdAt: new Date().toISOString(),
+  };
+  const { id: _, response: __, ...stored } = approval;
   fs.writeFileSync(
     path.join(dir, `${id}.request.json`),
-    `${JSON.stringify({ ...request, createdAt: new Date().toISOString() }, null, 2)}\n`,
+    `${JSON.stringify(stored, null, 2)}\n`,
     'utf8',
   );
-  onEvent?.({
+
+  return approval;
+}
+
+/** Raise an escalation for a task and log it; what the `escalate` tool and `CODER_SIMULATE_APPROVAL` do. */
+export function escalate(cwd: string, taskId: string, taskDir: string, request: ApprovalRequest) {
+  const approval = requestApproval(taskDir, request);
+  appendTaskLog(cwd, taskId, {
     kind: 'approval-escalated',
-    approvalId: id,
-    summary: request.summary,
-    message: `Approval needed (${id}): ${request.summary}. Answer with: coder task approve ${path.basename(taskDir)} ${id} [--deny]`,
-  });
+    approvalId: approval.id,
+    summary: approval.actions.join('\n'),
+    actions: approval.actions,
+    reason: approval.reason,
+    message: `Approval needed (${approval.id}): ${approval.reason}`,
+  } as TaskLogEntry);
 
-  const responseFile = path.join(dir, `${id}.response.json`);
-  const response = await watchChanges(dir).until(
-    () => readJsonFile<{ decision: string }>(responseFile) ?? undefined,
-    timeoutMs,
-  );
-  if (response) {
-    const decision = response.decision === 'accept' ? 'accept' : 'decline';
-    onEvent?.({ kind: 'approval-answered', approvalId: id, decision });
-    return decision;
-  }
-  onEvent?.({
-    kind: 'approval-timeout',
-    approvalId: id,
-    message: `Approval ${id} timed out; declining.`,
-  });
-  return 'decline';
+  return approval;
 }
 
-/**
- * Dev/test hook (--simulate-approval): raise one real pending approval and block
- * on it, so the escalate -> --wait exit 4 -> `coder task approve` loop can be
- * exercised without relying on the engine to request an escalation.
- */
-export function probeApproval(
+/** Dev hook: a new task raises one escalation at its start, as if it had called `escalate`. */
+export const SIMULATE_APPROVAL_ENV = 'CODER_SIMULATE_APPROVAL';
+
+/** Answer an approval, pending or already denied; returns it with its answer. */
+export function answerApproval(
   taskDir: string,
-  opts: { timeoutMs?: number; onEvent?: ApprovalEventHandler | null } = {},
-): Promise<'accept' | 'decline'> {
-  return escalate(
-    taskDir,
-    { method: 'simulate', summary: 'simulated approval probe (--simulate-approval)' },
-    { timeoutMs: opts.timeoutMs ?? 120_000, onEvent: opts.onEvent ?? null },
+  approvalId: string,
+  decision: ApprovalAnswer['decision'],
+  reason?: string,
+  by?: string,
+): Approval {
+  const approval = listApprovals(taskDir).find(entry => entry.id === approvalId);
+  if (!approval) throw new Error(`No approval "${approvalId}" for this task.`);
+  if (approval.response?.decision === 'closed') throw new Error(stoppedMessage(approvalId));
+  if (approval.response?.decision === 'accept')
+    throw new Error(`Approval "${approvalId}" is already approved.`);
+  const response: ApprovalAnswer = {
+    decision,
+    ...(reason ? { reason } : {}),
+    answeredAt: new Date().toISOString(),
+    ...(by ? { by } : {}),
+  };
+  writeResponse(taskDir, approvalId, response);
+
+  return { ...approval, response };
+}
+
+/** Marks an answer delivered to the task; a retry of its delivery is then a no-op. */
+export function markDelivered(taskDir: string, approval: Approval): Approval {
+  // A later answer recorded while this one was delivered stays.
+  const stored = listApprovals(taskDir).find(entry => entry.id === approval.id)?.response;
+  if (
+    stored?.decision !== approval.response?.decision ||
+    stored?.answeredAt !== approval.response?.answeredAt
+  )
+    return approval;
+
+  const response = { ...approval.response!, deliveredAt: new Date().toISOString() };
+  writeResponse(taskDir, approval.id, response);
+
+  return { ...approval, response };
+}
+
+function writeResponse(taskDir: string, approvalId: string, response: Approval['response']) {
+  fs.writeFileSync(
+    path.join(approvalsDir(taskDir), `${approvalId}.response.json`),
+    `${JSON.stringify(response, null, 2)}\n`,
+    'utf8',
   );
 }
 
-/**
- * Build the onApprovalRequest callback for a Codex run.
- *
- * mode:
- * - "auto": policy engine decides; ambiguous requests are escalated to
- *   pending-approval files and declined after escalationTimeoutMs.
- * - "deny": decline everything (Codex stays strictly inside its sandbox).
- */
-export function createApprovalHandler({
-  workspaceRoot,
-  taskDir,
-  mode = 'auto',
-  escalationTimeoutMs = 120_000,
-  allowedNetworkHosts = [],
-  onEvent = null,
-}: ApprovalHandlerOptions): ApprovalRequestHandler {
-  return async (method, params, state) => {
-    const item = state?.itemIndex?.get(params.itemId ?? '');
-    let request: EscalateRequest;
-    let verdict: Verdict;
-    if (method === COMMAND_APPROVAL_METHOD) {
-      const command = params.command ?? item?.command ?? '';
-      const cwd = params.cwd ?? item?.cwd ?? workspaceRoot;
-      const summary = `Run command. ${command || 'Unknown command'}${params.reason ? `. ${params.reason}` : ''}`;
-      request = { method, summary, command, cwd, params };
-      verdict = decideCommand(command, {
-        networkHost: params.networkApprovalContext?.host ?? null,
-        allowedNetworkHosts,
-      });
-    } else if (method === FILE_CHANGE_APPROVAL_METHOD) {
-      const paths = (item?.changes ?? [])
-        .map(change => change.path)
-        .filter((p): p is string => Boolean(p));
-      const summary = `Apply file changes. ${paths.join(', ') || 'Unknown paths'}${params.reason ? `. ${params.reason}` : ''}`;
-      request = { method, summary, paths, params };
-      verdict = decideFileChange(paths, workspaceRoot);
-    } else {
-      onEvent?.({ kind: 'approval-unsupported', method });
-      throw new Error(`Coder does not handle server request ${method}; treating as denied.`);
-    }
-    if (mode === 'deny') verdict = { decision: 'decline', reason: 'deny mode' };
-    onEvent?.({ kind: 'approval-decision', method, ...verdict, summary: request.summary });
-    const decision =
-      verdict.decision === 'escalate'
-        ? await escalate(taskDir, request, { timeoutMs: escalationTimeoutMs, onEvent })
-        : verdict.decision;
+/** An answer the record refuses: the approval is already approved and this one differs. */
+export class ApprovalRefusedError extends Error {}
 
-    return { decision };
+/** Why `answer` cannot land over `known`, or null when it can; the same decision again is a retry. */
+export function refusedAnswer(known: Approval | undefined, answer: Approval): string | null {
+  if (known?.response?.decision === 'closed' && answer.response?.decision !== 'closed')
+    return stoppedMessage(answer.id);
+
+  return known?.response?.decision === 'accept' && answer.response?.decision !== 'accept'
+    ? `Approval "${answer.id}" is already approved`
+    : null;
+}
+
+/** Put a task's approvals, answers included, in its dir on this machine: a resumed server task carries them over. */
+export function restoreApprovals(taskDir: string, approvals: Approval[]): void {
+  if (!approvals.length) return;
+  const dir = approvalsDir(taskDir);
+  fs.mkdirSync(dir, { recursive: true });
+  for (const { id, response, ...request } of approvals) {
+    const file = path.join(dir, `${id}.request.json`);
+    if (!fs.existsSync(file))
+      fs.writeFileSync(file, `${JSON.stringify(request, null, 2)}\n`, 'utf8');
+    if (response)
+      fs.writeFileSync(
+        path.join(dir, `${id}.response.json`),
+        `${JSON.stringify(response, null, 2)}\n`,
+        'utf8',
+      );
+  }
+}
+
+/** The known list updated by a reported one: an answer, once given anywhere, stays; the newer one wins. */
+export function mergeApprovals(known: Approval[], reported: Approval[]): Approval[] {
+  const answers = new Map(known.map(approval => [approval.id, approval.response]));
+  const ids = new Set(reported.map(approval => approval.id));
+  // Known and reported answers: a closed one stays, else the later `answeredAt` wins, the reported one on a tie.
+  const newer = (known: Approval['response'], reported: Approval['response']) =>
+    known?.decision !== 'closed' &&
+    (!known || !reported || String(reported.answeredAt ?? '') >= String(known.answeredAt ?? ''))
+      ? (reported ?? known)
+      : known;
+
+  return [
+    ...reported.map(approval => ({
+      ...approval,
+      response: newer(answers.get(approval.id), approval.response) ?? null,
+    })),
+    ...known.filter(approval => !ids.has(approval.id)),
+  ].sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+}
+
+/** The message the task gets for an answer; `Approved` tells it to retry the action. */
+export function approvalMessage(approval: Approval): string {
+  const { decision, reason } = approval.response!;
+  const { actions } = approval;
+  const list = actions.map((action, index) => `${index + 1}. ${action}`).join(' ');
+
+  if (decision === 'decline') return `Denied: ${list}${reason ? `: ${reason}` : ''}`;
+  if (decision === 'closed') return `Closed, the task was stopped: ${list}`;
+
+  return actions.length === 1
+    ? `The user approved doing exactly this outside the sandbox for the rest of this task: ${actions[0]}. Retry it outside the sandbox now, exactly as written.`
+    : `The user approved doing exactly these outside the sandbox for the rest of this task: ${list}. Retry them outside the sandbox now, each exactly as written.`;
+}
+
+/** Turns with each one whose prompt is a decision naming its approval, so surfaces show it as that decision. */
+export const withDecisions = <T extends { prompt: string }>(
+  turns: T[],
+  approvals: Approval[] = [],
+): Array<T & { approval?: string }> =>
+  turns.map(turn => {
+    const decision = approvals.find(
+      approval => approval.response && approvalMessage(approval) === turn.prompt,
+    );
+
+    return decision ? { ...turn, approval: decision.id } : turn;
+  });
+
+/** The exact actions for a terminal, which cannot fold: one numbered line each. */
+export const actionLines = (actions: string[]) =>
+  actions
+    .map((action, index) => `  ${index + 1}. ${action.replaceAll('\n', '\n     ')}`)
+    .join('\n');
+
+/** The collapsed label of an approval's actions: `1 action`, `3 actions`. */
+export function approvalActionsLabel(approval: Pick<Approval, 'actions'>) {
+  const count = approval.actions.length;
+
+  return `${count} action${count === 1 ? '' : 's'}`;
+}
+
+/** Codex's approval request that reached Coder: auto review decided already, so it is declined at once with why. */
+export function codexApprovalHandler(onEvent: (event: Record<string, unknown>) => void) {
+  return async (method: string, params: { command?: string }) => {
+    onEvent({
+      kind: 'approval-decision',
+      method,
+      decision: 'decline',
+      summary: params.command ?? method,
+      reason: NOT_ALLOWED,
+    });
+
+    return { decision: 'decline' };
   };
 }

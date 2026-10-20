@@ -61,7 +61,7 @@ export const conversationCommands = [
   defineCommand({
     name: 'reply',
     description:
-      'Post a reply now, during your turn, such as before longer work. Your final message is a reply too; never send the same text twice.',
+      'Post a reply now, such as before longer work. Never repeat text you already posted or will put in your final message.',
     args: { text: arg(z.string(), 'Markdown to post.') },
     access: 'write',
     run: async ({ text }, ctx: PosterContext) => {
@@ -106,7 +106,7 @@ export const conversationCommands = [
   defineCommand({
     name: 'history',
     description:
-      "Search or read this task's earlier conversation, including your tool calls and results, oldest first. With query, the messages containing that exact text; without, the messages from `from` on.",
+      "Search or read this task's full earlier conversation, including anything compacted out of your context, with your tool calls and results, oldest first. With query, the messages containing that exact text; without, the messages from `from` on.",
     args: {
       query: str(
         'Exact text to find, case-insensitive, 1 to 500 characters: a word or phrase from the message, not a question.',

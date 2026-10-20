@@ -22,9 +22,16 @@ import type { MailboxKey } from '../../mailbox';
 import { requestCodexControl, startCodexControlServer } from './control';
 import { binaryAvailable, processTiming } from '../../../utils/process';
 import { engineEnvironment } from '../../connections';
-import { MACHINE_SANDBOX_ENV } from '../../config';
+import { MACHINE_SANDBOX_ENV, resolveCustomModel } from '../../config';
 import { isCodexSessionArchived, unarchiveCodexSession } from './sessions';
-import type { Availability, AuthStatus, Effort, McpServerSpec, TurnResult } from '../../types';
+import type {
+  Availability,
+  AuthStatus,
+  CustomModelConfig,
+  Effort,
+  McpServerSpec,
+  TurnResult,
+} from '../../types';
 import { HISTORY_LOST } from '../../types';
 import {
   type TurnCaptureState,
@@ -44,20 +51,21 @@ export interface RunTurnOptions {
   availabilityChecked?: boolean;
   prompt?: string;
   model?: string | null;
-  /** Codex model provider id (custom OpenAI-compatible endpoints). */
-  modelProvider?: string | null;
-  /** Per-thread codex config overrides (e.g. a model_providers entry). */
+  /** A custom OpenAI-compatible model, served through the client's bridge. */
+  customModel?: { alias: string; entry: CustomModelConfig };
+  /** Per-thread codex config overrides. */
   configOverrides?: Record<string, unknown> | null;
   /** Extra MCP servers (env already resolved) plus the tools the turn may call. */
   mcpServers?: McpServerSpec[];
   nativeMcp?: boolean;
   effort?: Effort | null;
   sandbox?: string;
-  approvalPolicy?: string;
+  /** A policy name, or `{ granular: … }` choosing which approvals Codex asks. */
+  approvalPolicy?: string | { granular: Record<string, boolean> };
   networkAccess?: boolean;
   /** Extra writable roots; in a read-only sandbox they are the only writable paths. */
   writableRoots?: string[];
-  /** "auto_review" routes approvals to codex's native reviewer subagent. */
+  /** Who answers approval requests; "user" (the client's handler) whenever a policy asks. */
   approvalsReviewer?: string | null;
   onApprovalRequest?: ApprovalRequestHandler;
   resumeThreadId?: string | null;
@@ -66,23 +74,33 @@ export interface RunTurnOptions {
   onProgress?: ProgressReporter;
   onHeartbeat?: () => void;
   onResult?: (result: TurnResult) => void;
+  /** Interrupts the turn (`turn/interrupt`) once it has started. */
+  signal?: AbortSignal;
   ephemeral?: boolean;
   outputSchema?: unknown;
   /** Publishes control for the exact client only after turn/start returns its active turnId. */
   onControlReady?: (endpoint: string, threadId: string, turnId: string) => void;
 }
 
-/** turn/start sandboxPolicy carrying extra writable roots, or null to keep the thread's sandbox. */
+/** turn/start sandboxPolicy carrying extra writable roots or read-only network, or null to keep the thread's sandbox. */
 export function codexSandboxPolicy(
   sandbox: string | undefined,
   networkAccess: boolean | undefined,
   writableRoots: string[] = [],
 ): Record<string, unknown> | null {
+  if (sandbox === 'read-only') return networkAccess ? { type: 'readOnly', networkAccess } : null;
   if (sandbox !== 'workspace-write' || !writableRoots.length) return null;
-  return { type: 'workspaceWrite', writableRoots, networkAccess: networkAccess ?? false };
+  // Temp roots stay read-only: the task's scratch is one of the writable roots.
+  return {
+    type: 'workspaceWrite',
+    writableRoots,
+    networkAccess: networkAccess ?? false,
+    excludeTmpdirEnvVar: true,
+    excludeSlashTmp: true,
+  };
 }
 
-/** Thread-scoped MCP servers, with Codex's per-server tool allowlists. */
+/** Thread-scoped MCP servers. */
 export function buildCodexMcpOverrides(
   servers: McpServerSpec[] = [],
   nativeServers: string[] = [],
@@ -106,46 +124,10 @@ export function buildCodexMcpOverrides(
             args: server.args ?? [],
             ...(server.env ? { env: server.env } : {}),
           }),
-      ...(server.tools?.length ? { enabled_tools: server.tools } : {}),
       default_tools_approval_mode: 'approve',
     };
   }
   return Object.keys(configured).length ? { mcp_servers: configured } : {};
-}
-
-/** Codex starts MCP servers in the background; waits for the thread's own so their tools reach the first request, and logs each failure. */
-async function awaitMcpStartup(
-  client: AppServerClient,
-  threadId: string,
-  servers: Record<string, unknown>,
-  onProgress?: ProgressReporter | null,
-) {
-  const names = Object.entries(servers)
-    .filter(([, entry]) => (entry as { enabled?: boolean }).enabled !== false)
-    .map(([name]) => name);
-
-  await Promise.all(
-    names.map(async serverName => {
-      const status = await client
-        .request('mcpServerStatus/list', { threadId, serverName, detail: 'toolsAndAuthOnly' })
-        .catch(error => {
-          emitProgress(
-            onProgress,
-            `MCP server ${serverName} status unavailable. ${errorText(error)}`,
-            null,
-            { kind: 'warning' },
-          );
-        });
-      for (const server of status?.data ?? [])
-        if (server.name === serverName && server.runtimeStatus === 'failed')
-          emitProgress(
-            onProgress,
-            `MCP server ${server.name} failed to start. ${server.toolsError ?? ''}`.trim(),
-            null,
-            { kind: 'error' },
-          );
-    }),
-  );
 }
 
 function cleanCodexStderr(stderr: string) {
@@ -166,12 +148,14 @@ async function withAppServer<T>(
     connect?: typeof CodexAppServerClient.connect;
     networkAccess?: boolean;
     nativeMcp?: boolean;
+    disableBroker?: boolean;
   } = {},
 ): Promise<T> {
   const connect = internals.connect ?? CodexAppServerClient.connect;
   const clientOptions = {
     ...(internals.networkAccess === undefined ? {} : { networkAccess: internals.networkAccess }),
     nativeMcp: internals.nativeMcp ?? false,
+    disableBroker: internals.disableBroker ?? false,
   };
   let client: AppServerClient | null = null;
   try {
@@ -375,7 +359,7 @@ export async function steerTurn(
  * Run one Codex turn. Options:
  * - prompt (required), model, effort
  * - sandbox: "read-only" | "workspace-write" | "danger-full-access"
- * - approvalPolicy: "untrusted" | "on-request" | "never"
+ * - approvalPolicy: "untrusted" | "on-request" | "never" | { granular }
  * - onApprovalRequest(method, params, state) -> {decision} (required unless approvalPolicy is "never")
  * - resumeThreadId: continue an existing thread (steering)
  * - onProgress: progress reporter
@@ -401,6 +385,9 @@ export async function runTurn(
       ? 'danger-full-access'
       : options.sandbox;
   const sandbox = { sandbox: mode ?? 'read-only' };
+  // A policy that asks answers through the handler, never a reviewer the user's config names.
+  const reviewer =
+    options.approvalsReviewer ?? ((options.approvalPolicy ?? 'never') === 'never' ? null : 'user');
   const configOverrides =
     options.configOverrides && Object.keys(options.configOverrides).length
       ? options.configOverrides
@@ -413,8 +400,17 @@ export async function runTurn(
     processTiming('codex.config.start');
     const effective = await client.request('config/read', { cwd, includeLayers: false });
     processTiming('codex.config.done');
+    const custom = options.customModel
+      ? resolveCustomModel(
+          options.customModel.alias,
+          options.customModel.entry,
+          client.bridgeUrl ?? missingBridge(),
+        )
+      : null;
+    const model = options.customModel?.entry.model ?? options.model ?? null;
     const threadConfig = {
-      ...(!options.modelProvider ? { model_reasoning_summary: 'auto' } : {}),
+      ...(!custom ? { model_reasoning_summary: 'auto' } : {}),
+      ...custom?.configOverrides,
       ...configOverrides,
       ...buildCodexMcpOverrides(
         options.mcpServers,
@@ -422,6 +418,8 @@ export async function runTurn(
         options.nativeMcp,
       ),
       ...(!options.nativeMcp ? { 'features.apps': false, 'features.plugins': false } : {}),
+      // Snapshots save the shell's environment, task tokens included, to disk.
+      'features.shell_snapshot': false,
     };
 
     const developer = options.developerInstructions
@@ -441,13 +439,13 @@ export async function runTurn(
         .request('thread/resume', {
           threadId: options.resumeThreadId,
           cwd,
-          model: options.model ?? null,
-          modelProvider: options.modelProvider ?? null,
+          model,
+          modelProvider: custom?.modelProvider ?? null,
           config: threadConfig,
           approvalPolicy: options.approvalPolicy ?? 'never',
           ...sandbox,
           // Only sent when set: older codex builds reject unknown enum-bearing fields.
-          ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
+          ...(reviewer ? { approvalsReviewer: reviewer } : {}),
           ...developer,
         })
         .catch(error => {
@@ -467,12 +465,12 @@ export async function runTurn(
       processTiming('codex.thread.start');
       const response = await client.request('thread/start', {
         cwd,
-        model: options.model ?? null,
-        modelProvider: options.modelProvider ?? null,
+        model,
+        modelProvider: custom?.modelProvider ?? null,
         config: threadConfig,
         approvalPolicy: options.approvalPolicy ?? 'never',
         ...sandbox,
-        ...(options.approvalsReviewer ? { approvalsReviewer: options.approvalsReviewer } : {}),
+        ...(reviewer ? { approvalsReviewer: reviewer } : {}),
         ...developer,
         serviceName: SERVICE_NAME,
         // Persist by default so status/steer/stop can target the thread later.
@@ -497,9 +495,14 @@ export async function runTurn(
       kind: 'status',
       threadId,
     });
-    await awaitMcpStartup(client, threadId, threadConfig.mcp_servers ?? {}, options.onProgress);
 
     let turnState: TurnCaptureState;
+    let activeTurnId: string | null = null;
+    const interrupt = () => {
+      if (activeTurnId)
+        void client.request('turn/interrupt', { threadId, turnId: activeTurnId }).catch(() => {});
+    };
+    options.signal?.addEventListener('abort', interrupt, { once: true });
     try {
       turnState = await captureTurn(
         client,
@@ -514,9 +517,12 @@ export async function runTurn(
                 text_elements: [],
               },
             ],
-            model: options.model ?? null,
+            model,
             effort: options.effort ?? null,
             outputSchema: options.outputSchema ?? null,
+            // A turn's policy persists on the thread, so every turn sets its own.
+            approvalPolicy: options.approvalPolicy ?? 'never',
+            ...(reviewer ? { approvalsReviewer: reviewer } : {}),
             ...(sandboxPolicy ? { sandboxPolicy } : {}),
           }),
         {
@@ -524,12 +530,14 @@ export async function runTurn(
           onProgress: options.onProgress,
           onHeartbeat: options.onHeartbeat,
           onApprovalRequest: options.onApprovalRequest,
-          onTurnStarted: options.onControlReady
-            ? async turnId => {
-                controlServer = await startCodexControlServer(client, { threadId, turnId });
-                options.onControlReady?.(controlServer.endpoint, threadId, turnId);
-              }
-            : undefined,
+          onTurnStarted: async turnId => {
+            activeTurnId = turnId;
+            if (options.signal?.aborted) interrupt();
+            if (options.onControlReady) {
+              controlServer = await startCodexControlServer(client, { threadId, turnId });
+              options.onControlReady(controlServer.endpoint, threadId, turnId);
+            }
+          },
         },
       );
       processTiming('codex.result');
@@ -541,6 +549,7 @@ export async function runTurn(
         error: turnState.error ?? (turnState.finalTurn?.error as TurnCaptureState['error']) ?? null,
       });
     } finally {
+      options.signal?.removeEventListener('abort', interrupt);
       await (controlServer as Awaited<ReturnType<typeof startCodexControlServer>> | null)?.close();
     }
 
@@ -556,7 +565,7 @@ export async function runTurn(
       fileChanges: turnState.fileChanges,
       tokens: collectTokenUsage(turnState),
       contextTokens: turnState.contextTokens,
-      model: options.model ?? null,
+      model: options.customModel?.alias ?? options.model ?? null,
       commandExecutions: turnState.commandExecutions,
     };
   };
@@ -611,6 +620,10 @@ export async function runTurn(
     const hint = describeUnsupportedModel(errorText(error), options.model);
     throw hint ? new Error(hint) : error;
   }
+}
+
+function missingBridge(): never {
+  throw new Error('The Codex app-server has no custom-model bridge; restart the Coder broker.');
 }
 
 async function recycleAppServer(client: AppServerClient) {

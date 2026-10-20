@@ -14,6 +14,16 @@ export interface MailboxKey {
   seq: number;
 }
 
+/** Sequence numbers from here up name commands by `namedCommand`, never an inbox position. */
+const NAMED_SEQ = 2 ** 40;
+
+/** A command keyed by a name (an approval's answer) in the shape every worker reads, so a retry carries the same id. */
+export function namedCommand(task: string, name: string): MailboxKey {
+  const hash = createHash('sha256').update(name).digest();
+
+  return { task, generation: 0, seq: NAMED_SEQ + hash.readUInt32BE(0) };
+}
+
 export function mailboxId(key?: MailboxKey): string {
   if (!key) return randomUUID();
   if (

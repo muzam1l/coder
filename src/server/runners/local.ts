@@ -12,6 +12,7 @@ import type { Runner } from '.';
 import { INTEGRATIONS } from '../../integrations';
 import type { InboxEntry, InboxAck } from '../tasks/queue';
 import { checkoutCache, releaseCheckout, inboxSocket, sendInbox } from '../../runner/task';
+import { assertValidId } from '../../core/state';
 
 type LocalHandle = { pid: number; dir: string; started: string };
 const exec = promisify(execFile);
@@ -44,12 +45,12 @@ export class LocalRunner implements Runner {
   constructor(private readonly workDir: string) {}
 
   async start(task: AgentTask, env: Record<string, string>): Promise<string> {
-    await fsp.mkdir(this.workDir, { recursive: true });
-    const dir = await fsp.mkdtemp(path.join(this.workDir, 'task-'));
+    const dir = this.taskDir(task.id);
     const cache = task.runner === 'local' ? checkoutCache(task) : undefined;
+    await fsp.mkdir(dir, { recursive: true });
     const log = fs.openSync(path.join(dir, 'runner.log'), 'a');
     // This server's own coder answers `coder` for the engine, whatever the machine has installed.
-    await fsp.mkdir(path.join(dir, 'bin'));
+    await fsp.mkdir(path.join(dir, 'bin'), { recursive: true });
     await fsp.writeFile(
       path.join(dir, 'bin/coder'),
       `#!/bin/sh\nexec "${process.execPath}" "${CLI_PATH}" "$@"\n`,
@@ -78,9 +79,6 @@ export class LocalRunner implements Runner {
     this.children.set(child.pid!, state);
     child.once('close', code => {
       state.code = code;
-      void releaseCheckout(path.join(dir, 'repo')).catch(error =>
-        console.error('coder runner: checkout cleanup failed', error),
-      );
     });
     child.unref();
     const started = await processIdentity(child.pid!);
@@ -89,7 +87,7 @@ export class LocalRunner implements Runner {
   }
 
   async status(handle: string) {
-    const { pid, dir, started } = decode(handle);
+    const { pid, started } = decode(handle);
     const known = this.children.get(pid);
     if (known?.code === undefined) {
       try {
@@ -97,7 +95,6 @@ export class LocalRunner implements Runner {
         if ((await processIdentity(pid)) === started) return { state: 'running' as const };
       } catch {}
     }
-    await releaseCheckout(path.join(dir, 'repo'));
     return {
       state: 'exited' as const,
       ...(known?.code == null ? {} : { code: known.code }),
@@ -115,6 +112,27 @@ export class LocalRunner implements Runner {
         process.kill(pid, 'SIGTERM');
       } catch {}
     }
+  }
+
+  /** Delete a task's folder, its checkout included, once a stopped run has exited. */
+  async remove(taskId: string, handle?: string): Promise<void> {
+    const dir = this.taskDir(taskId);
+    if (handle) {
+      const { pid, started } = decode(handle);
+      for (let wait = 0; wait < 100 && (await processIdentity(pid)) === started; wait++)
+        await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    // A worktree left registered is pruned by the cache's next checkout.
+    await releaseCheckout(path.join(dir, 'work')).catch(error =>
+      console.error('coder runner: checkout cleanup failed', error),
+    );
+    await fsp.rm(dir, { recursive: true, force: true });
+    await fsp.rm(inboxSocket(dir), { force: true });
+  }
+
+  private taskDir(taskId: string): string {
+    assertValidId(taskId, 'task id');
+    return path.join(this.workDir, taskId);
   }
 
   async push(handle: string, entries: InboxEntry[]): Promise<InboxAck> {

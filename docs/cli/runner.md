@@ -57,7 +57,7 @@ Run tasks on this machine with its own claude and codex logins. Expose the port 
 - `--server <server>` act on your Coder server, in the saved workspace
 - `--yes` connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 cloudflared tunnel --url http://localhost:4100  # expose the port in one terminal

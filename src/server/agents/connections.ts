@@ -14,6 +14,7 @@ import { LOOPBACK } from '../routes/guards';
 import { updateMetadata } from '../store';
 import { dropTokens, installationToken, unsealed } from '../tasks/context';
 import type { Installation, AgentApp } from '../../agent/types';
+import { appSpec } from './platform';
 import type { Integration } from '../../integrations/types';
 
 export async function adminInstallLink(
@@ -47,8 +48,7 @@ export async function agentApps(ctx: ServerContext, agent?: string | null) {
           .store.list('app')
           .then(rows =>
             rows.filter(
-              ({ value }) =>
-                value.builtin && ctx.integrations[value.integration]?.app.builtin === 'shared',
+              ({ value }) => value.builtin && ctx.integrations[value.integration]?.app.shareable,
             ),
           )
       : [],
@@ -56,7 +56,7 @@ export async function agentApps(ctx: ServerContext, agent?: string | null) {
 
   return [...own, ...shared].filter(
     ({ value }) =>
-      (!value.builtin || ctx.integrations[value.integration]?.app.builtin === 'shared') &&
+      (!value.builtin || ctx.integrations[value.integration]?.app.shareable) &&
       (!agent || value.agent === agent),
   );
 }
@@ -207,7 +207,7 @@ export async function updateApp(
   if (integration.app.values) {
     const { lines } = integration.app.values(app, {
       publicUrl: ctx.config.publicUrl!,
-      definition: version.definition,
+      spec: appSpec(version.definition, app.agent, app.integration),
     });
     await ctx.store.put('delivery', syncKey(app.id), {
       version: version.version,
@@ -266,9 +266,12 @@ export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<
   return json(
     await Promise.all(
       Object.values(ctx.integrations).map(async integration => {
-        const use = typeof integration.use === 'function'
-          ? integration.use(definitionEvents(loaded?.version?.definition.integrations[integration.id]))
-          : integration.use;
+        const use =
+          typeof integration.use === 'function'
+            ? integration.use(
+                definitionEvents(loaded?.version?.definition.integrations[integration.id]),
+              )
+            : integration.use;
         return {
           id: integration.id,
           name: integration.name,
@@ -278,7 +281,7 @@ export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<
           ...(use ? { use } : {}),
           ...(integration.covered ? { covered: integration.covered } : {}),
           ...(integration.featured ? { featured: true } : {}),
-          builtinApp: integration.app.builtin,
+          builtinApp: integration.app.shareable ? 'shared' : 'own',
           ...(integration.auth.user ? { personal: true } : {}),
           ...((await nativeApp(ctx, integration.id, undefined, [
             ...apps,
@@ -299,7 +302,7 @@ export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<
             ? {
                 create: integration.app.createStep(base, {
                   saved: await savedAppTokens(ctx, integration.id),
-                name: record?.name,
+                  name: record?.name,
                   shared: shared.has(integration.id),
                   public: integration.publicApps === true && url.searchParams.get('public') === '1',
                 }),

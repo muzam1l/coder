@@ -221,6 +221,18 @@ export function everyMessageDelivered(
   );
 }
 
+/** Whether someone asked the agent directly: a mention, a 1:1 direct message or a command. */
+export function directAsk(integration: Integration, event: AgentEvent): boolean {
+  const on = integration.events[event.type]?.on;
+
+  return (
+    on === 'mention' ||
+    on === 'command' ||
+    event.chat?.thread.isDM === true ||
+    event.chat?.message?.isMention === true
+  );
+}
+
 /** The event as the agent reads it: whether it must reply, where the message sits, and what was said since its last turn. */
 export async function describe(
   ctx: ServerContext,
@@ -237,9 +249,7 @@ export async function describe(
   const thread = event.chat?.thread;
   if (!thread) return event;
   const direct = thread.isDM === true;
-  const mention =
-    integration.events[event.type]?.on === 'mention' || event.chat?.message?.isMention === true;
-  const mustReply = direct || mention || integration.answersEveryPrompt === true;
+  const mustReply = directAsk(integration, event) || integration.answersEveryPrompt === true;
   const [unseen, facts] = await Promise.all([
     input.loaded
       ? (input.unseen ?? { messages: [], more: 0 })

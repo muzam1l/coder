@@ -27,7 +27,7 @@ Connect a platform account by its name (OAuth in the browser), an API key that t
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 GROQ_API_KEY=gsk_... coder connection add groq --env GROQ_API_KEY  # an API key from this shell
@@ -45,7 +45,7 @@ Your connections, and the MCP servers this repository and its agents declare wit
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `connection rm <name> [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
@@ -58,7 +58,7 @@ Remove a connection. The credential an API key connection reads stays.
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `connection reconnect <name> [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
@@ -71,7 +71,7 @@ Give a key connection its new key, read from stdin or a prompt, or sign in to an
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 pbpaste | coder connection reconnect groq  # the new key from the clipboard
@@ -86,4 +86,4 @@ Approve an MCP server this repository or one of its agents declares, on this mac
 - `<name>` the MCP server
 - `--agent <agent>` select the agent when names have different definitions
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current

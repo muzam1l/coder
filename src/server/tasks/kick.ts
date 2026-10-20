@@ -2,12 +2,18 @@ import type { TaskStatus } from '../store/types';
 import { SERVER_LIMITS } from '../limits';
 import { scoped, type ServerContext } from '../context';
 import { loadedStore } from '../store/primed';
-import { brokeredKeys, taskCredential, taskEngineCredentials, taskHosts } from './context';
-import { taskConfig } from '../settings/config';
+import { machineFirewall } from './context';
 import type { ClaimedTask, TaskFence } from './queue';
 import { taskRunner, type Runner } from '../runners';
-import { startQueuedLocalTask, inspectLocalTask, localTasks, sweepLocalQueue } from './local';
+import {
+  startQueuedLocalTask,
+  inspectLocalTask,
+  localTasks,
+  syncLocalApprovals,
+  sweepLocalQueue,
+} from './local';
 import { loadTask } from '../../core/state';
+import { syncDuePosts } from './approvals';
 
 function deadline<T>(work: Promise<T>, ms: number, operation: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -55,7 +61,11 @@ async function fail(
       ...fence,
     },
   );
-  if (finished) await stopTaskMachine(ctx, status, true, runner);
+  if (finished) {
+    const { reportTaskFailure } = await import('./failures');
+    await reportTaskFailure(ctx, status.task, error);
+    await stopTaskMachine(ctx, status, true, runner);
+  }
 
   return finished;
 }
@@ -117,7 +127,11 @@ async function inspect(ctx: ServerContext, status: TaskStatus, now: number): Pro
     },
   );
   if (!checked) return false;
-  const state = await deadline(runner.status(status.handle), ctx.runnerTimeoutMs ?? 10_000, 'runner status');
+  const state = await deadline(
+    runner.status(status.handle),
+    ctx.runnerTimeoutMs ?? 10_000,
+    'runner status',
+  );
   if (state.state === 'exited')
     return fail(
       ctx,
@@ -196,8 +210,10 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
       ? ctx.config.maxTasks
       : Math.min(concurrentTasks, ctx.config.maxTasks ?? concurrentTasks);
   {
-    if (sweep && ctx.local) await sweepLocalQueue(ctx, ctx.local.cwd);
-    else if (sweep) await ctx.queue.archiveStopped(undefined, now());
+    if (sweep && ctx.local)
+      await Promise.all([sweepLocalQueue(ctx, ctx.local.cwd), syncLocalApprovals(ctx)]);
+    else if (sweep)
+      await Promise.all([ctx.queue.archiveStopped(undefined, now()), syncDuePosts(ctx)]);
     const running = await ctx.queue.running();
     let freed = 0;
     for (const claimed of running) {
@@ -256,17 +272,8 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
     };
     let handle: string | undefined;
     try {
-      const credential =
-        runner.kind === 'vercel-sandbox' ? await taskCredential(taskCtx, status.task) : undefined;
-      const credentials = credential
-        ? [
-            credential,
-            ...(await taskEngineCredentials(taskCtx, status.task)).map(row => row.credential),
-          ]
-        : [];
-      const hosts = await Promise.all(
-        credentials.map(value => taskHosts(taskCtx, status.task, value)),
-      );
+      const firewall =
+        runner.kind === 'vercel-sandbox' ? await machineFirewall(taskCtx, status.task) : undefined;
       const start = runner.start(
         status.task,
         {
@@ -277,31 +284,22 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
           CODER_TASK_TOKEN: claimed.token,
           CODER_INBOX_MODE: runner.push ? 'push' : 'poll',
         },
-        credential
-          ? Object.assign({}, ...credentials.map(value => value.env).reverse())
-          : undefined,
+        firewall?.credential,
         {
           timeoutMs: taskCtx.config.taskTimeoutMs + 60_000,
           waitUntil: taskCtx.waitUntil,
-          ...(credential
-            ? {
-                hosts: hosts.some(value => value === undefined)
-                  ? undefined
-                  : [...new Set(hosts.flatMap(value => value ?? []))],
-                brokered: await taskConfig(taskCtx.store).then(config =>
-                  credentials.flatMap(value => brokeredKeys(config, status.task, value)),
-                ),
-              }
-            : {}),
+          ...(firewall ? { hosts: firewall.hosts, brokered: firewall.brokered } : {}),
         },
       );
-      handle = await deadline(start, taskCtx.runnerTimeoutMs ?? 30_000, 'runner start').catch(error => {
-        void start.then(
-          handle => stop(taskCtx, runner, handle, status.task.id),
-          () => {},
-        );
-        throw error;
-      });
+      handle = await deadline(start, taskCtx.runnerTimeoutMs ?? 30_000, 'runner start').catch(
+        error => {
+          void start.then(
+            handle => stop(taskCtx, runner, handle, status.task.id),
+            () => {},
+          );
+          throw error;
+        },
+      );
       if (
         !(await taskCtx.queue.patchTask(
           claimed.organizationId,

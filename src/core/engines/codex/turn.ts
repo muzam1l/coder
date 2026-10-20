@@ -750,8 +750,9 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
     case 'thread/tokenUsage/updated': {
       const last = normalizeTokenUsage(message.params?.tokenUsage?.last);
       const usageThreadId = extractThreadId(message);
-      if (usageThreadId === state.threadId && message.params?.tokenUsage?.last)
+      if (usageThreadId === state.threadId && message.params?.tokenUsage?.last) {
         state.contextTokens = last?.total;
+      }
       // Cumulative per-thread usage; keep the latest snapshot per thread and
       // sum across threads (subagents included) when the turn completes.
       const usage = normalizeTokenUsage(
@@ -770,7 +771,11 @@ function applyTurnNotification(state: TurnCaptureState, message: AppServerMessag
         const total = collectTokenUsage(state);
         if (total && (!state.loggedTokens || total.total - state.loggedTokens >= USAGE_LOG_STEP)) {
           state.loggedTokens = total.total;
-          state.onProgress?.({ kind: 'usage', tokens: total });
+          state.onProgress?.({
+            kind: 'usage',
+            tokens: total,
+            context: state.contextTokens ?? null,
+          });
         }
       }
       break;

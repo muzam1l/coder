@@ -2,7 +2,7 @@
 
 import '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/page.css';
 
-import { useEffect, useId, useRef, useState } from 'preact/hooks';
+import { useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
 import { toastFailure } from '@/utils/action';
@@ -10,8 +10,9 @@ import { ClientError } from '@coder/client';
 import type { OperatorAppRow, OperatorApps as Apps } from '@coder/client/types';
 import { Badge } from '@/comps/ui/badge';
 import { Field } from '@/comps/ui/field';
-import { Button, IconButton } from '@/comps/ui/button';
-import { iX } from '@/comps/ui/icons';
+import { Button } from '@/comps/ui/button';
+import { iOut } from '@/comps/ui/icons';
+import { Modal } from '@/comps/ui/modal';
 import { List, Row } from '@/app/dash/[org]/settings/[tab]/list';
 
 /** The set-up form for one platform's shared app, as a dialog like an agent's Create app. */
@@ -27,13 +28,11 @@ function SetUpDialog({
   unreachable?: boolean;
   onClose: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  const id = useId();
   const [busy, setBusy] = useState(false);
-  useEffect(() => dialog.current!.showModal(), []);
-  const close = () => !busy && dialog.current!.close();
 
-  const submit = (form: FormData) => {
+  const submit = (event: SubmitEvent) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget as HTMLFormElement);
     const value = (key: string) => String(form.get(key) ?? '').trim() || undefined;
     setBusy(true);
     void client.operator
@@ -42,66 +41,50 @@ function SetUpDialog({
         location.href = url;
       })
       .catch(reason => {
-        // Operator mode ended; the page asks to sign in again.
-        if (reason instanceof ClientError && reason.status === 401) return location.reload();
+        // Operator mode ended; the page signs in again.
+        if (reason instanceof ClientError && reason.status === 401)
+          return location.assign(location.pathname);
         setBusy(false);
         toastFailure(reason);
       });
   };
 
   return (
-    <dialog
-      ref={dialog}
+    <Modal
       class="create-dialog"
-      aria-labelledby={id}
+      title={`Set up shared ${row.name} app`}
+      dismiss
+      busy={busy}
+      onSubmit={submit}
       onClose={onClose}
-      onCancel={event => {
-        event.preventDefault();
-        close();
-      }}
-      onClick={event => event.target === event.currentTarget && close()}
+      actions={
+        <Button type="submit" rightIcon={iOut} disabled={unreachable} loading={busy}>
+          Continue on {row.name}
+        </Button>
+      }
     >
-      <form
-        onSubmit={event => {
-          event.preventDefault();
-          submit(new FormData(event.currentTarget));
-        }}
-      >
-        <header>
-          <h2 id={id}>Set up shared {row.name} app</h2>
-          <IconButton icon={iX} label="Close" onClick={close} />
-        </header>
-        {unreachable ? (
-          <p class="flash err">
-            {row.name} cannot reach this server yet. Set a public address first: run the server with
-            PUBLIC_URL set to an address {row.name} can reach.
-          </p>
-        ) : null}
-        <p class="muted">
-          One app on {row.name} serves the built-in agent in every workspace. People see its name on
-          consent screens, as in {product} wants to connect.
+      {unreachable ? (
+        <p class="flash err">
+          {row.name} cannot reach this server yet. Set a public address first: run the server with
+          PUBLIC_URL set to an address {row.name} can reach.
         </p>
-        <Field label="App name">
-          <input name="name" defaultValue={product} autocomplete="off" required />
+      ) : null}
+      <p class="muted">
+        One app on {row.name} serves the built-in agent in every workspace. People see its name on
+        consent screens, as in {product} wants to connect.
+      </p>
+      <Field label="App name">
+        <input name="name" defaultValue={product} autocomplete="off" required />
+      </Field>
+      {row.organizationApps ? (
+        <Field
+          label={`${row.name} organization`}
+          hint="owns the app; leave empty to own it on your personal account"
+        >
+          <input name="owner" placeholder="your-org" autocomplete="off" />
         </Field>
-        {row.organizationApps ? (
-          <Field
-            label={`${row.name} organization`}
-            hint="owns the app; leave empty to own it on your personal account"
-          >
-            <input name="owner" placeholder="your-org" autocomplete="off" />
-          </Field>
-        ) : null}
-        <div class="actions">
-          <Button variant="ghost" disabled={busy} onClick={close}>
-            Cancel
-          </Button>
-          <Button type="submit" disabled={unreachable} loading={busy}>
-            Continue on {row.name}
-          </Button>
-        </div>
-      </form>
-    </dialog>
+      ) : null}
+    </Modal>
   );
 }
 

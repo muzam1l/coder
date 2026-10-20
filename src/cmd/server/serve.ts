@@ -99,7 +99,7 @@ export const commandServerServe = command({
         'CODER_CACHE_HOME',
         'archived tasks, flows and usage (default OS cache directory/wular-coder)',
       ],
-      ['WORK_DIR', 'where tasks check out repositories'],
+      ['WORK_DIR', 'where the local runner keeps task work folders'],
       ['SERVER_NAME', 'what the dashboard calls this server (default Coder)'],
     ],
     examples: [

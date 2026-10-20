@@ -7,7 +7,7 @@ import { redactTask, taskError } from './admin';
 import { json } from '../routes/http';
 import { type AgentApp, type AgentEvent } from '../../agent/types';
 import { type Integration, type OwnEvent } from '../../integrations/types';
-import { importAgents, pushedFiles, sourceEvent } from '../agents/repo';
+import { agentChanges, importAgents, pushedFiles, pushesFiles, sourceEvent } from '../agents/repo';
 import { storeInstallation } from '../agents/install';
 import {
   adapterContext,
@@ -21,6 +21,7 @@ import {
 import { dropTokens, uninstall } from './context';
 import { appendLog } from './logs';
 import { recordFailure } from './failures';
+import { clickedApproval } from './approvals';
 import { reviewKey } from './queue';
 import { updateMetadata } from '../store';
 import { decryptSecret } from '../store/secrets';
@@ -176,6 +177,15 @@ async function ownEvent(
     if (tenant) await uninstall(tenant.store, own.uninstalled, now);
     return json({ ok: true });
   }
+  if ('click' in own) {
+    if (target)
+      (ctx.waitUntil ?? (() => {}))(
+        clickedApproval(ctx, integration, app, target, own.click).catch(error =>
+          console.error(`coder server: a click failed for ${app.id}`, error),
+        ),
+      );
+    return new Response(null, { status: 200 });
+  }
   if ('unhandled' in own) {
     console.warn(`coder server: ${app.id} sent ${own.unhandled}, which Coder does not handle yet`);
     return new Response(null, { status: 200 });
@@ -212,7 +222,10 @@ async function ownEvent(
             )
         : own.installation.installation.repos;
       await updateMetadata(store, 'installation', existing.id, {
-        account: own.installation.op === 'delete' ? current.account : own.installation.installation.account,
+        account:
+          own.installation.op === 'delete'
+            ? current.account
+            : own.installation.installation.account,
         ...(change || repos ? { repos } : {}),
         deletedAt: own.installation.op === 'delete' ? now : undefined,
         uninstalled: own.installation.installation.uninstalled,
@@ -250,13 +263,14 @@ async function ownEvent(
       ? json({ ok: true })
       : new Response('Installation not stored yet', { status: 503 });
   }
-  if ('pushed' in own && own.pushed) {
-    const tenant = await forInstallation(ctx, own.pushed.installation);
-    if (tenant) await pushedFiles(tenant.store, own.pushed);
-  }
-  if (!('changes' in own) && 'pushed' in own) return json({ ok: true });
-  if ('changes' in own) {
-    const change = own.changes;
+  if ('push' in own) {
+    const { push } = own;
+    if (pushesFiles(push)) {
+      const tenant = await forInstallation(ctx, push.installation);
+      if (tenant) await pushedFiles(tenant.store, push);
+    }
+    const change = agentChanges(push, app);
+    if (!change) return pushesFiles(push) ? json({ ok: true }) : json({ accepted: 0 }, 202);
     try {
       if (!app.branch) await updateMetadata(ctx.store, 'app', app.id, { branch: change.branch });
       const imported = await importAgents(

@@ -27,7 +27,7 @@ import {
   validateServer,
 } from './client/auth/session';
 import { TOP_HELP } from './cmd/help';
-import { loadConfig } from './core/config';
+import { actionLines } from './core/approvals';
 import { CoderError, type FallbackPayload } from './core/dispatch';
 import { CLI_PATH, readVersion } from './core/runtime';
 import { newerVersion } from './core/update-check';
@@ -41,19 +41,25 @@ import {
 } from './tui/help';
 import { bad, errStyle, fail, formatHints, good, outStyle, printJson } from './tui/output';
 import { canPrompt, pick, PromptCancelled } from './tui/prompt';
-import { flag, str } from './utils/args';
+import { flag, serverSuffix, str } from './utils/args';
 
 export const MODEL_HINT =
   'Use luna or sonnet for mechanical work; sol or opus is the default.\nUse astra or fable for the hardest work; they cost the most.';
 
 const GLOBALS = {
   json: flag('JSON output'),
-  cwd: str('workspace directory (default: current)', '<dir>'),
+  cwd: str('workspace directory; default current', '<dir>'),
 };
 
 type Globals = typeof GLOBALS;
 
-type Flags = { json?: boolean; cwd?: string; server?: string | true; yes?: boolean };
+type Flags = {
+  json?: boolean;
+  cwd?: string;
+  server?: string | true;
+  workspace?: string;
+  yes?: boolean;
+};
 
 export type CommandInput<S extends Shape> = {
   options: Args<S & Globals>;
@@ -205,19 +211,19 @@ function readOnlyUnavailable(detail: string, json = false): never {
 // Coder-specific 4 is deliberately not 2. Two is the conventional CLI usage-error code.
 const EXIT_APPROVAL_NEEDED = 4;
 
-function approvalNext(cwd: string, taskId: string, approval: NonNullable<CoderError['approval']>) {
-  const timeoutSeconds = loadConfig(cwd).approvals.escalationTimeoutMs / 1000;
+function approvalNext(
+  cwd: string,
+  taskId: string,
+  approval: NonNullable<CoderError['approval']>,
+  flags: Flags,
+) {
+  const server = serverSuffix(flags);
 
   return nextSteps([
-    `Approve: coder task approve ${taskId} ${approval.id}`,
-    `Deny: coder task approve ${taskId} ${approval.id} --deny`,
-    `Then wait again in its own background shell, one per task: coder task result ${taskId} --wait`,
-    `Unanswered approvals auto-deny after ${timeoutSeconds} seconds.`,
-    ...(approval.networkHost
-      ? [
-          `Network access to ${approval.networkHost} can be pre-approved with approvals.allowedNetworkHosts.`,
-        ]
-      : []),
+    `Approve: coder task approve ${taskId} ${approval.id}${server}`,
+    `Deny: coder task approve ${taskId} ${approval.id} --deny --reason "<why>"${server}`,
+    `Then wait again in its own background shell, one per task: coder task result ${taskId} --wait${server}`,
+    'The decision reaches the task as a message, any time.',
   ]);
 }
 
@@ -238,28 +244,22 @@ function toolError(output: unknown, steps: CommandNext[]): Error {
 function surfaceApproval(
   cwd: string,
   taskId: string,
-  approval: { id: string; summary: string; cwd?: string | null; networkHost?: string | null },
-  json = false,
+  approval: NonNullable<CoderError['approval']>,
+  flags: Flags,
 ): never {
-  if (json) {
+  if (flags.json) {
     printJson({ taskId, status: 'awaiting-approval', approval });
   } else {
-    const hints = approvalNext(cwd, taskId, approval).map(step => step.cli!.text!);
-    process.stdout.write(`Approval needed for task ${taskId}: ${approval.summary}\n`);
-    if (approval.cwd) {
-      process.stdout.write(`Runs in: ${approval.cwd}\n`);
-    }
+    const hints = approvalNext(cwd, taskId, approval, flags).map(step => step.cli!.text!);
+    process.stdout.write(`Approval needed for task ${taskId}: ${approval.reason}\n`);
+    process.stdout.write(`${actionLines(approval.actions)}\n`);
     process.stderr.write(`\n${formatHints(hints, errStyle, errStyle.blue, 'Next steps')}\n`);
   }
   process.exit(EXIT_APPROVAL_NEEDED);
 }
 
 /** How the CLI shows a typed failure: its exit code, output and next steps. */
-function report(
-  error: CoderError,
-  cwd: string,
-  options: { json?: boolean; server?: string | true },
-): never {
+function report(error: CoderError, cwd: string, options: Flags): never {
   switch (error.code) {
     case 'chain-exhausted':
       printFallback(error.payload!);
@@ -267,7 +267,7 @@ function report(
     case 'read-only-unavailable':
       readOnlyUnavailable(error.message, options.json);
     case 'approval-pending':
-      surfaceApproval(cwd, error.taskId!, error.approval!, options.json);
+      surfaceApproval(cwd, error.taskId!, error.approval!, options);
     case 'startup-failed':
       if (options.json) {
         printJson({ taskId: error.taskId, status: 'failed', detail: error.message });
@@ -373,7 +373,7 @@ export function command<S extends Shape, R>(spec: {
         )
           throw toolError(
             { taskId: error.taskId, status: 'awaiting-approval', approval: error.approval },
-            approvalNext(given.cwd, error.taskId, error.approval),
+            approvalNext(given.cwd, error.taskId, error.approval, given.options as Flags),
           );
         throw error;
       }
@@ -449,7 +449,9 @@ export function group({
 const INTERNAL: Record<string, () => Promise<CoderCommand>> = {
   'task worker': async () => (await import('./cmd/task/worker')).commandWorker,
   'task mcp': async () => (await import('./cmd/task/mcp')).commandTaskMcp,
+  'task hook': async () => (await import('./cmd/task/hook')).commandTaskHook,
   'task tools': async () => (await import('./cmd/task/tools')).commandTools,
+  'task tools-search': async () => (await import('./cmd/task/tools-search')).commandToolsSearch,
   'flow drive': async () => (await import('./cmd/flow/drive')).commandDrive,
   'upgrade refresh': async () => (await import('./cmd/upgrade/refresh')).commandRefreshUpdate,
 };

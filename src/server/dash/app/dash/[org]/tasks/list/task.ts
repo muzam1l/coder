@@ -109,11 +109,12 @@ export const replyRequired = (task: TaskRow, prompt: string) =>
 
 /** A platform task is titled by its first message; dashboard and CLI tasks by their prompt. */
 export function taskTitle(task: TaskRow) {
-  const prompt = task.task.prompt?.trim();
+  // The first turn's prompt: a follow-up or a decision never retitles the task.
+  const prompt = (task.turns?.[0]?.prompt ?? task.task.prompt)?.trim();
   const first =
     !prompt || eventMessages(prompt)
       ? task.task.event?.text?.trim() ||
-        eventMessages(task.turns?.[0]?.prompt ?? prompt)
+        eventMessages(prompt ?? '')
           ?.find(message => !message.reaction)
           ?.text.trim()
       : prompt;
@@ -121,6 +122,13 @@ export function taskTitle(task: TaskRow) {
   return (
     task.task.name?.trim() || first || `${task.task.event?.type ?? 'task'} on ${task.task.agent}`
   );
+}
+
+/** The engine, model and effort a task runs on, as `claude/opus/high`. */
+export function taskModel(task: TaskRow) {
+  const { engine, model, effort } = { ...task.task.definition, ...task.task.usage };
+
+  return [engine, model, effort].filter(Boolean).join('/');
 }
 
 /** A folder path's last segment. */

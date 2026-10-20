@@ -71,7 +71,7 @@ coder dash
 
 > **Recommended setup:** Claude Code as the host (Fable, low or medium effort) and Codex (sol) as the engine, the best split of performance and cost.
 
-[Models](docs/models.md) · [Configuration](docs/config.md) · [MCP](docs/mcp.md)
+[Models](docs/models.md) · [Configuration](docs/config.md) · [Access and approvals](docs/access.md) · [MCP](docs/mcp.md)
 
 ## Coder Cloud
 

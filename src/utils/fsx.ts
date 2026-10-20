@@ -198,7 +198,8 @@ export function watchChanges(directory?: string, onChange?: (file: string | null
       try {
         for (;;) {
           const value = await read();
-          if (value !== undefined || closed || Date.now() >= deadline || signal?.aborted) return value;
+          if (value !== undefined || closed || Date.now() >= deadline || signal?.aborted)
+            return value;
           await this.wait(Math.min(recoveryMs, deadline - Date.now()), signal);
         }
       } finally {
@@ -215,6 +216,9 @@ export function watchChanges(directory?: string, onChange?: (file: string | null
 }
 
 /** Serialize file-backed state with a fenced owner marker and a recovery lease. */
+/** How long a lock waiter sleeps between looks at the lock. */
+const LOCK_POLL_MS = 200;
+
 export async function withFileLock<T>(
   file: string,
   work: () => T,
@@ -265,7 +269,8 @@ export async function withFileLock<T>(
             fs.rmdirSync(file);
         } catch {}
         if (Date.now() >= deadline) throw new Error('File lock wait timed out');
-        await changes.wait(Math.min(30000, staleMs, deadline - Date.now()));
+        // The watch wakes the wait early; the poll bounds it where a watch event never comes.
+        await changes.wait(Math.min(LOCK_POLL_MS, staleMs, deadline - Date.now()));
       }
     }
     heartbeat = setInterval(() => {

@@ -2,7 +2,7 @@ import process from 'node:process';
 
 import { builtinDefinitions, defaultAgent } from '../../agent/load';
 import { enabledIntegrations } from '../../integrations';
-import type { CreateState } from '../../integrations/types';
+import type { CreateState } from './platform';
 import type { AgentApp, AgentDefinition } from '../../agent/types';
 import { CoderError } from '../../core/dispatch';
 import { encodeJson } from '../../utils/base64url';
@@ -34,7 +34,7 @@ export async function sharedApps(
 
   return (await (store === ctx.store && own ? own : store.list('app')))
     .map(({ value }) => value)
-    .filter(app => app.builtin && ctx.integrations[app.integration]?.app.builtin === 'shared');
+    .filter(app => app.builtin && ctx.integrations[app.integration]?.app.shareable);
 }
 
 /** The one-time page that creates the built-in agent's public app on `integration`, stored for the whole server. */
@@ -48,7 +48,7 @@ export async function serverAppLink(
     throw new CoderError('invalid-option', `Unknown integration "${integration}".`, {
       hint: `Pick one of ${Object.keys(integrations).join(', ')}.`,
     });
-  if (integrations[integration]!.app.builtin !== 'shared')
+  if (!integrations[integration]!.app.shareable)
     throw new CoderError(
       'invalid-option',
       `Create ${integration} apps in your workspace from the agent's Platforms tab.`,
@@ -78,7 +78,7 @@ export async function serverAppUrl(
   integration: string,
   options: Pick<ServerAppOptions, 'owner' | 'name'>,
 ): Promise<string> {
-  if (ctx.integrations[integration]?.app.builtin !== 'shared')
+  if (!ctx.integrations[integration]?.app.shareable)
     throw new CoderError(
       'invalid-option',
       `Create ${integration} apps in your workspace from the agent's Platforms tab.`,

@@ -1,4 +1,4 @@
-/** GitHub comments through Chat SDK: the app's webhook secret verifies, Coder mints the installation token. */
+/** GitHub comments through Chat SDK: the app's webhook secret verifies, the host mints the installation token. */
 import { createGitHubAdapter } from '@chat-adapter/github';
 import { type Adapter, ConsoleLogger } from 'chat';
 

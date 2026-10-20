@@ -1,5 +1,5 @@
 /** @jsxImportSource contextjsx */
-/** An agent turn's messages: events, requests, history and rollover. */
+/** An agent turn's messages: events, requests and history. */
 import { Data, render } from 'contextjsx';
 
 import type { AgentEvent, TaskContext } from '../types';
@@ -77,12 +77,12 @@ function messageJson(event: AgentEvent) {
     id: message.id,
     ...(event.conversation?.index !== undefined ? { index: event.conversation.index } : {}),
     text: event.text,
-    mention: message.isMention === true,
+    ...(message.isMention ? { mention: true } : {}),
     author: {
       id: author.userId,
       handle: author.userName,
       name: author.fullName,
-      bot: author.isBot === true,
+      ...(author.isBot ? { bot: true } : {}),
     },
     sentAt: metadata.dateSent,
     ...(metadata.edited ? { edited: true } : {}),
@@ -190,40 +190,6 @@ export function historyPrompt(
     <history>
       <Data>{messages.map(m => `${m.user}: ${m.text}`).join('\n')}</Data>
     </history>,
-  );
-
-  return `${earlier}\n\n${prompt}`;
-}
-
-// Conversation rollover (core/task/worker).
-
-/** The private turn that asks the old conversation for its summary. */
-export const SUMMARY_REQUEST = render(
-  <summary-request>
-    {[
-      'Summarize this conversation so a new engine conversation can continue it. Return only the summary: no tools, no reply to the platform.',
-      'Use these headings in order, each even if empty: Goal; Decisions; Preferences and constraints; Files and PRs touched; Open items.',
-      'Name who asked for or decided each thing. Keep durable facts, including any earlier summary. Leave out details a speaker asked to forget, without quoting them.',
-    ]
-      .filter(Boolean)
-      .join('\n')}
-  </summary-request>,
-);
-
-/** The new conversation's first turn: the summary and the recent turns word for word, then the turn itself. */
-export function rolloverPrompt(
-  rollover: { summary: string; recent: string },
-  prompt: string,
-): string {
-  const earlier = render(
-    <>
-      <summary>
-        <Data>{rollover.summary}</Data>
-      </summary>
-      <recent>
-        <Data>{rollover.recent}</Data>
-      </recent>
-    </>,
   );
 
   return `${earlier}\n\n${prompt}`;

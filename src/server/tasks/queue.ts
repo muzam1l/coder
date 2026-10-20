@@ -8,8 +8,10 @@ import type { Loaded } from '../store/primed';
 import { scoped, type ServerContext } from '../context';
 import { taskRunner } from '../runners';
 import { pushLocalInbox } from './local';
-import { byId, byListKey, listRank, type ListKey } from '../../core/defaults';
+import { awaitsApproval, byId, byListKey, listRank, type ListKey } from '../../core/defaults';
 import { archiveDue } from '../../core/state';
+import { STOPPED_BY_USER, type Approval } from '../../core/types';
+import { ApprovalRefusedError, mergeApprovals, refusedAnswer } from '../../core/approvals';
 import { INTEGRATIONS } from '../../integrations';
 import type { Batch, Conversation } from './conversation';
 
@@ -97,7 +99,10 @@ export function matchesTask(status: TaskStatus, filter: TaskFilter): boolean {
   )
     return false;
   const states = filter.status ? [filter.status] : filter.statuses;
-  if (states && !states.includes(status.status)) return false;
+  if (filter.status === 'waiting') {
+    if (!awaitsApproval(status.status, status.approvals ?? status.task.context?.approvals))
+      return false;
+  } else if (states && !states.includes(status.status)) return false;
   if (filter.agent && status.task.agent !== filter.agent) return false;
   if (filter.source && status.task.source !== filter.source) return false;
   if (filter.reviewKey && reviewKey(status.task) !== filter.reviewKey) return false;
@@ -172,7 +177,7 @@ export type TaskPatch = Partial<
     | 'autoArchived'
     | 'approval'
   >
-> & { answer?: unknown };
+> & { answer?: unknown; approvals?: Approval[] };
 
 export interface Completion {
   outcome: Outcome;
@@ -366,6 +371,7 @@ export interface TaskQueue {
   ): Promise<{ items: TaskStatus[]; counts: TaskCounts }>;
   runningCount(): Promise<number>;
   running(): Promise<ClaimedTask[]>;
+  /** Appends an inbox entry; `approvals` are merged into the task in the same write. */
   appendInbox(
     organizationId: string,
     id: string,
@@ -374,6 +380,7 @@ export interface TaskQueue {
     now: number,
     generation: number,
     batch?: BatchAdmission,
+    approvals?: Approval[],
   ): Promise<InboxEntry | undefined>;
 }
 
@@ -394,6 +401,15 @@ export async function deleteTask(ctx: ServerContext, status: TaskStatus): Promis
 }
 
 /** The task with these admissions recorded in its context, a steer's or a consumed entry's. */
+/** The task with its approvals list replaced: what the runner reported, merged over what the server answered. */
+export const withApprovals = (task: AgentTask, approvals: Approval[]): AgentTask => ({
+  ...task,
+  context: {
+    ...task.context,
+    approvals: mergeApprovals(task.context?.approvals ?? [], approvals),
+  },
+});
+
 const withAdmissions = (
   task: AgentTask,
   admissions: NonNullable<TaskContext['admissions']>,
@@ -409,6 +425,7 @@ export async function addInbox(
   kind: InboxEntry['kind'],
   value: unknown,
   batch?: BatchAdmission,
+  approvals?: Approval[],
 ): Promise<InboxEntry | undefined> {
   const id = status.task.id;
   const entry = await ctx.queue.appendInbox(
@@ -419,6 +436,7 @@ export async function addInbox(
     (ctx.now ?? Date.now)(),
     status.generation ?? 0,
     batch,
+    approvals,
   );
   if (entry) await pushInbox(ctx, id, status.task, status);
   return entry;
@@ -778,7 +796,7 @@ export class StoreQueue implements TaskQueue {
     return this.serial(async () => {
       const current = await this.read(id);
       if (!current || !this.allowed(current, fence)) return false;
-      const { answer, ...fields } = patch;
+      const { answer, approvals, ...fields } = patch;
       await this.store.put('task', id, {
         ...current,
         ...(Object.hasOwn(patch, 'handle') && patch.handle !== current.handle
@@ -786,6 +804,7 @@ export class StoreQueue implements TaskQueue {
           : {}),
         ...fields,
         ...(answer !== undefined ? { answer: [...(current.answer ?? []), answer] } : {}),
+        ...(approvals ? { task: withApprovals(current.task, approvals) } : {}),
         updatedAt: now,
       });
       return true;
@@ -946,7 +965,9 @@ export class StoreQueue implements TaskQueue {
         await this.store.put('inbox', `${id}:${String(entry.seq).padStart(8, '0')}`, entry);
       await this.store.put('task', id, {
         ...current,
-        ...(current.status === 'queued' ? { status: 'cancelled', finishedAt: now } : {}),
+        ...(current.status === 'queued'
+          ? { status: 'cancelled', error: STOPPED_BY_USER, finishedAt: now }
+          : {}),
         cancelRequestedAt: now,
         ...(entry ? { inboxSeq: entry.seq } : {}),
         updatedAt: now,
@@ -999,7 +1020,7 @@ export class StoreQueue implements TaskQueue {
     return {
       all: rows.length,
       active: rows.filter(row => ACTIVE_STATES.includes(row.status)).length,
-      waiting: rows.filter(row => row.status === 'waiting').length,
+      waiting: rows.filter(row => awaitsApproval(row.status, row.task.context?.approvals)).length,
     };
   }
 
@@ -1147,7 +1168,9 @@ export class StoreQueue implements TaskQueue {
         inboxAck: { generation: ack.generation, seq: Math.max(after, ack.seq) },
         ...(answers.length ? { answer: [...(current.answer ?? []), ...answers] } : {}),
         ...(approved ? { status: 'running', approval: undefined } : {}),
-        ...(cancelled ? { status: 'cancelled', finishedAt: Date.now() } : {}),
+        ...(cancelled
+          ? { status: 'cancelled', error: STOPPED_BY_USER, finishedAt: Date.now() }
+          : {}),
         updatedAt: Date.now(),
       };
       await this.store.put('task', id, next);
@@ -1178,6 +1201,7 @@ export class StoreQueue implements TaskQueue {
     now: number,
     generation: number,
     batch?: BatchAdmission,
+    approvals?: Approval[],
   ): Promise<InboxEntry | undefined> {
     const work = async () => {
       if (batch) {
@@ -1191,6 +1215,13 @@ export class StoreQueue implements TaskQueue {
         (current.generation ?? 0) !== generation
       )
         return undefined;
+      for (const answer of approvals ?? []) {
+        const refused = refusedAnswer(
+          current.task.context?.approvals?.find(entry => entry.id === answer.id),
+          answer,
+        );
+        if (refused) throw new ApprovalRefusedError(refused);
+      }
       const seq = await this.nextSeq(id);
       const admissions = batch && batchAdmissions(batch);
       const entry = {
@@ -1202,12 +1233,10 @@ export class StoreQueue implements TaskQueue {
       };
       // The entry carries the admission first, so a crash before the task write still reconciles.
       await this.store.put('inbox', `${id}:${String(seq).padStart(8, '0')}`, entry);
-      await this.store.put('task', id, {
-        ...current,
-        ...(admissions ? { task: withAdmissions(current.task, admissions) } : {}),
-        inboxSeq: seq,
-        updatedAt: now,
-      });
+      let next = current.task;
+      if (admissions) next = withAdmissions(next, admissions);
+      if (approvals) next = withApprovals(next, approvals);
+      await this.store.put('task', id, { ...current, task: next, inboxSeq: seq, updatedAt: now });
       if (batch) await this.store.finishBatch(batch.key, batch.owner, true, batch.through);
       return entry;
     };

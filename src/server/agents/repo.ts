@@ -5,7 +5,7 @@ import { isDeepStrictEqual } from 'node:util';
 
 import { AgentLoadError, agentsFromSources, assertNotReserved, loadAgents } from '../../agent/load';
 import { INTEGRATIONS } from '../../integrations';
-import type { AppDrift, Integration, IntegrationApp, Pushed } from '../../integrations/types';
+import type { AppDrift, Integration, IntegrationApp, Push } from '../../integrations/types';
 import type { AppCheck } from '../../client/types';
 import type {
   Agent,
@@ -19,6 +19,7 @@ import type { AgentVersionRecord, Store } from '../store/types';
 import type { ServerConfig, ServerContext } from '../context';
 import type { PlatformAccess, TokenSource } from '../tasks/context';
 import { decryptSecret, encryptSecret } from '../store/secrets';
+import { appSpec } from './platform';
 import {
   agentWithVersion,
   getVersion,
@@ -144,8 +145,29 @@ async function storedFile(
   return file.text;
 }
 
+/** Whether a push may change the `.coder/` files Coder holds; a push whose paths may be incomplete counts. */
+export const pushesFiles = (push: Push): push is Push & { installation: string } =>
+  Boolean(push.installation) &&
+  (push.partial === true || push.paths.some(file => file.startsWith('.coder/')));
+
+/** The agent definitions a push to the app's source branch changed, for re-import. */
+export function agentChanges(
+  push: Push,
+  app: AgentApp,
+): { repo: string; ref: string; branch: string; paths: string[] } | undefined {
+  const branch = app.branch ?? push.defaultBranch;
+  const paths = push.paths.filter(file => file.startsWith('.coder/agents/'));
+  if (push.repo !== app.agentsRepo || push.branch !== branch || !push.commit || !paths.length)
+    return undefined;
+
+  return { repo: push.repo, ref: push.commit, branch, paths };
+}
+
 /** Marks the files Coder holds for a pushed branch stale; the default branch's are also held under no ref. */
-export async function pushedFiles(store: Store, pushed: Pushed): Promise<void> {
+export async function pushedFiles(
+  store: Store,
+  pushed: Push & { installation: string },
+): Promise<void> {
   const refs = [pushed.branch, ...(pushed.branch === pushed.defaultBranch ? [''] : [])];
   for (const ref of refs) {
     await store.put(
@@ -278,9 +300,7 @@ export function remoteAgentLoader(
         ? (usage as Record<string, unknown>)[app.agent]
         : undefined;
     if (entry === false || (entry as AgentUsage | undefined)?.disabled)
-      throw new Error(
-        `Agent "${app.agent}" is disabled in ${eventRepo(event) ?? app.agentsRepo}.`,
-      );
+      throw new Error(`Agent "${app.agent}" is disabled in ${eventRepo(event) ?? app.agentsRepo}.`);
     return toAgent(
       record,
       version,
@@ -440,7 +460,9 @@ export const syncManifest = (
   app: AgentApp,
   publicUrl: string,
   definition: AgentDefinition,
-) => platform.manifest?.(app, { publicUrl, definition }) ?? definition;
+) =>
+  platform.manifest?.(app, { publicUrl, spec: appSpec(definition, app.agent, app.integration) }) ??
+  definition;
 
 /** Whether the app already has `manifest` as of `version`. */
 export const inSync = (marker: SyncMarker | undefined, version: number, manifest: unknown) =>
@@ -463,7 +485,10 @@ export async function checkApp(
   const marker = await store.get<SyncMarker>('delivery', syncKey(app.id));
 
   if (platform?.values) {
-    const drift = platform.values(app, { publicUrl, definition: version.definition });
+    const drift = platform.values(app, {
+      publicUrl,
+      spec: appSpec(version.definition, app.agent, app.integration),
+    });
     const known = (marker?.manifest ?? []) as AppDrift['lines'];
     const lines = drift.lines.map(line =>
       known.some(seen => seen.text === line.text && seen.copy === line.copy)
@@ -484,7 +509,7 @@ export async function checkApp(
 
   const drift = await platform.drift(app, decryptSecret(ctx.config, app.credentials), {
     publicUrl,
-    definition: version.definition,
+    spec: appSpec(version.definition, app.agent, app.integration),
     fetch: ctx.fetch ?? fetch,
   });
   const changed = drift.lines.length > 0;
@@ -546,7 +571,7 @@ export async function syncApps(
           try {
             const credentials = await update(app, decryptSecret(ctx.config, app.credentials), {
               publicUrl,
-              definition: version.definition,
+              spec: appSpec(version.definition, app.agent, app.integration),
               fetch: ctx.fetch ?? fetch,
               tokens: appTokens({ ...ctx, store }, app.integration),
               saveCredentials: async credentials => {

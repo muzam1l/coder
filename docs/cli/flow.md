@@ -26,7 +26,7 @@ Stop a run with `coder flow stop`.
 - `--max-tasks <max-tasks>` total tasks the run may dispatch (default: CPU count x 10)
 - `--dry-run` print every resolved prompt and gate command without dispatching
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder flow run audit-routes --wait  # run a discovered flow
@@ -44,7 +44,7 @@ within the last 30 minutes. Older runs auto-archive and move to --archived.
 - `--archived` show archived runs (auto-archived or via flow archive)
 - `--limit <limit>` show at most n runs (default all)
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `flow discover [--json] [--cwd <cwd>]`
 
@@ -54,7 +54,7 @@ List every flow discoverable from the current directory: workspace flows in
 .coder/flows/ (walking up to the repo root) and global flows in ~/.coder/flows/.
 
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `flow result [run-id] [--tail <tail>] [--json] [--cwd <cwd>]`
 
@@ -67,7 +67,7 @@ recent run. To watch a run live, prefer `coder flow watch`.
 - `<run-id>` the run (default: the most recent)
 - `--tail <tail>` show the last n step rows (default: all; 0 hides them)
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder flow result --tail 0  # the most recent run's result, no step rows
@@ -89,7 +89,7 @@ following, and `next`: the command that continues them while the run goes on.
 - `--tail <tail>` replay only the last n events first (default: all)
 - `--from <from>` return the events from event n on instead of following them
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder flow watch  # follow the most recent run to completion
@@ -107,7 +107,7 @@ the journal stays ready for `coder flow resume`.
 - `<run-id>` the run (default: the most recent)
 - `--keep-tasks` leave the run's still-running tasks running
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `flow resume [run-id] [--wait] [--args <args>] [--concurrency <concurrency>] [--max-tasks <max-tasks>] [--dry-run] [--json] [--cwd <cwd>]`
 
@@ -124,7 +124,7 @@ Accepts the same flags as flow run.
 - `--max-tasks <max-tasks>` total tasks the run may dispatch (default: CPU count x 10)
 - `--dry-run` print every resolved prompt and gate command without dispatching
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ```sh
 coder flow resume  # continue the most recent run
@@ -141,7 +141,7 @@ finished run. A running run must be stopped first.
 - `<run-id>` the run to archive
 - `--all-stopped` archive every stopped (finished) run
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current
 
 ## `flow delete [run-id] [--all-archived] [--json] [--cwd <cwd>]`
 
@@ -155,4 +155,4 @@ stopped first.
 - `<run-id>` the run to delete
 - `--all-archived` delete every archived run
 - `--json` JSON output
-- `--cwd <cwd>` workspace directory (default: current)
+- `--cwd <cwd>` workspace directory; default current

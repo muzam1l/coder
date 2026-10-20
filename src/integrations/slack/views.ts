@@ -1,9 +1,20 @@
-/** Block Kit that Coder publishes in Slack: an agent's Home tab and the cards of Coder links. */
-import type { AdapterContext, AgentSummary, TaskSummary } from '../types';
+/** Block Kit for Slack: the app's Home tab, direct messages laid out as pages, link cards, and messages with buttons. */
+import * as z from 'zod/mini';
+
+import type {
+  AdapterContext,
+  Card,
+  Click,
+  LinkButton,
+  MessageDraft,
+  MessagePlace,
+  Page,
+} from '../types';
 import { slackApi } from './app';
-import { LINK_ACTION, slack, slackWays } from './index';
+import { ASK_ACTION, ASK_VIEW, CLICK_ACTION, LINK_ACTION } from './index';
 
 const mrkdwn = (text: string) => ({ type: 'mrkdwn', text });
+const plain = (text: string) => ({ type: 'plain_text', text });
 /** Slack refuses a section text over 3,000 characters. */
 const section = (text: string) => ({
   type: 'section',
@@ -16,193 +27,78 @@ const escaped = (text: string) =>
 
 const link = (url: string, text: string) => `<${url}|${escaped(text)}>`;
 
-const STATUS: Record<string, string> = {
-  queued: 'Queued',
-  running: 'Running',
-  waiting: 'Needs approval',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-};
-
-/** A button that opens `url`; Slack still posts the click, which Coder only answers. */
-const linkButton = (id: string, url: string, text: string, primary?: boolean) => ({
+/** A button that opens `url`; Slack still posts the click, which the host only answers. */
+const linkButton = ({ id, url, label, primary }: LinkButton) => ({
   type: 'button',
   action_id: `${LINK_ACTION}${id}`,
-  text: { type: 'plain_text', text },
+  text: { type: 'plain_text', text: label },
   url,
   ...(primary ? { style: 'primary' } : {}),
 });
 
-/** The Home tab: what the agent is, how to use it here, and links to it and to Coder. */
-function homeView(
-  urls: { home: string; dash: string },
-  name: string,
-  agent: AgentSummary | undefined,
-): Record<string, unknown> {
-  const slug = agent?.slug ?? name;
-  const events = agent?.listens.find(entry => entry.integration === slack.id)?.events ?? [];
-  const listens = events.map(event => slack.events[event]?.description ?? event);
-  const use = slackWays(escaped(name), events, 'message it here');
+/** A bold title over its text. */
+const titled = (title: string, text?: string) =>
+  section([`*${escaped(title)}*`, text && escaped(text)].filter(Boolean).join('\n'));
 
-  return {
-    type: 'home',
-    blocks: [
-      section(
-        [`*${escaped(agent?.name ?? name)}*`, agent?.description && escaped(agent.description)]
-          .filter(Boolean)
-          .join('\n'),
-      ),
-      ...(use ? [section(`*Use it here*\n${use}`)] : []),
-      ...(listens.length ? [section(`*Listens to*\n${listens.join('\n')}`)] : []),
-      { type: 'divider' },
-      {
-        type: 'actions',
-        elements: [
-          linkButton(
-            'agent',
-            `${urls.dash}/agents/${encodeURIComponent(slug)}/platforms`,
-            'Open in Coder',
-            true,
-          ),
-          linkButton('coder', urls.home.replace(/\/$/, ''), 'Make your own agent'),
-        ],
-      },
-    ],
-  };
+/** A page's blocks; the Home tab sets its buttons apart with a divider. */
+function pageBlocks({ title, text, sections, links }: Page, divider?: boolean) {
+  return [
+    titled(title, text),
+    ...sections.map(entry => titled(entry.title, entry.text)),
+    ...(divider ? [{ type: 'divider' }] : []),
+    { type: 'actions', elements: links.map(linkButton) },
+  ];
 }
 
 /** Publishes the Home tab for the user who opened it. */
 export async function publishHome(ctx: AdapterContext, user: string): Promise<void> {
-  if (!ctx.publicUrl || !ctx.dashUrl || !ctx.installationId) return;
-  const urls = { home: ctx.publicUrl, dash: ctx.dashUrl };
-  const view = homeView(urls, ctx.name, await ctx.agent?.());
+  const page = await ctx.home?.();
+  if (!page || !ctx.installationId) return;
   await slackApi(
     'views.publish',
-    { user_id: user, view },
+    { user_id: user, view: { type: 'home', blocks: pageBlocks(page, true) } },
     await ctx.token(ctx.installationId),
     ctx.fetch,
   );
 }
 
-/** The DM to the installer: what the agent is, how to use it, and the model step while one is missing. */
-export async function welcome(
-  ctx: AdapterContext,
-  installer: string,
-  { open, setup }: { open: string; setup?: string },
-): Promise<void> {
+/** A direct message to `user`, laid out as a page. */
+export async function directMessage(ctx: AdapterContext, user: string, page: Page): Promise<void> {
   if (!ctx.installationId) return;
-  const agent = await ctx.agent?.();
-  const name = agent?.name ?? ctx.name;
-  const use = slackWays(
-    escaped(ctx.name),
-    agent
-      ? (agent.listens.find(entry => entry.integration === slack.id)?.events ?? [])
-      : ['mention'],
-    'message it here',
-  );
-  const blocks = [
-    section(
-      [`*${escaped(name)} is in your workspace*`, agent?.description && escaped(agent.description)]
-        .filter(Boolean)
-        .join('\n'),
-    ),
-    ...(use ? [section(`*Use it*\n${use}`)] : []),
-    ...(setup
-      ? [section(`*One step left*\nAdd a model so ${escaped(name)} can start working.`)]
-      : []),
-    {
-      type: 'actions',
-      elements: [
-        ...(setup ? [linkButton('model', setup, 'Add a model', true)] : []),
-        linkButton('agent', open, 'Open in Coder', !setup),
-      ],
-    },
-  ];
   await slackApi(
     'chat.postMessage',
-    { channel: installer, text: `${name} is in your workspace`, blocks },
+    { channel: user, text: page.title, blocks: pageBlocks(page) },
     await ctx.token(ctx.installationId),
     ctx.fetch,
   );
 }
 
-/** A task's card. */
-function taskCard(url: string, task: TaskSummary): Record<string, unknown> {
-  const at = Math.floor(task.startedAt / 1000);
-  const title = task.title.length > 150 ? `${task.title.slice(0, 149)}…` : task.title;
-
+/** A card's blocks: the linked title, its fields, and the footer. */
+function cardBlocks({ title, url, text, fields, footer }: Card): Record<string, unknown> {
   return {
     blocks: [
       {
-        ...section(`*${link(url, title)}*`),
-        fields: [
-          mrkdwn(`*Agent*\n${escaped(task.agent)}`),
-          mrkdwn(`*Status*\n${STATUS[task.status] ?? task.status}`),
-          mrkdwn(`*From*\n${escaped(task.from)}`),
-          mrkdwn(
-            `*Started*\n<!date^${at}^{date_short_pretty} at {time}|${new Date(task.startedAt).toISOString()}>`,
-          ),
-        ],
+        ...section([`*${link(url, title)}*`, text && escaped(text)].filter(Boolean).join('\n')),
+        ...(fields
+          ? {
+              fields: fields.map(field =>
+                mrkdwn(
+                  `*${escaped(field.label)}*\n${
+                    'at' in field
+                      ? `<!date^${Math.floor(field.at / 1000)}^{date_short_pretty} at {time}|${new Date(field.at).toISOString()}>`
+                      : escaped(field.text)
+                  }`,
+                ),
+              ),
+            }
+          : {}),
       },
-      { type: 'context', elements: [mrkdwn(`Coder task ${escaped(task.id)}`)] },
+      { type: 'context', elements: [mrkdwn(escaped(footer))] },
     ],
   };
 }
 
-/** An agent's card. */
-function agentCard(url: string, agent: AgentSummary): Record<string, unknown> {
-  const platforms = agent.listens.map(entry => entry.name);
-  const onlyHere = agent.listens.length === 1 && agent.listens[0]!.integration === slack.id;
-
-  return {
-    blocks: [
-      {
-        ...section(
-          [`*${link(url, agent.name)}*`, agent.description && escaped(agent.description)]
-            .filter(Boolean)
-            .join('\n'),
-        ),
-        ...(onlyHere
-          ? {}
-          : { fields: [mrkdwn(`*Listens on*\n${platforms.join(', ') || 'Nothing yet'}`)] }),
-      },
-      { type: 'context', elements: [mrkdwn('Coder agent')] },
-    ],
-  };
-}
-
-/** The card of one dashboard link: a task or an agent of the installation's workspace, else none. */
-async function card(ctx: AdapterContext, dash: URL, url: string) {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return undefined;
-  }
-  const root = `${dash.pathname.replace(/\/$/, '')}/`;
-  if (parsed.origin !== dash.origin || !parsed.pathname.startsWith(root)) return undefined;
-  const [kind, id] = parsed.pathname.slice(root.length).split('/');
-  if (!id) return undefined;
-  let key: string;
-  try {
-    key = decodeURIComponent(id);
-  } catch {
-    return undefined;
-  }
-
-  if (kind === 'tasks') {
-    const task = await ctx.task?.(key);
-    return task && taskCard(url, task);
-  }
-  if (kind === 'agents') {
-    const agent = await ctx.agent?.(key);
-    return agent && agentCard(url, agent);
-  }
-  return undefined;
-}
-
-/** `chat.unfurl` for the shared links that point at the workspace's tasks and agents. */
+/** `chat.unfurl` for the shared links the host has cards for. */
 export async function unfurl(
   ctx: AdapterContext,
   shared: {
@@ -213,12 +109,14 @@ export async function unfurl(
     links: Array<{ url: string }>;
   },
 ): Promise<void> {
-  if (!ctx.dashUrl || !ctx.installationId) return;
-  const dash = new URL(ctx.dashUrl);
+  const { preview } = ctx;
+  if (!preview || !ctx.installationId) return;
   const cards = await Promise.all(
-    shared.links.map(async ({ url }) => [url, await card(ctx, dash, url)] as const),
+    shared.links.map(async ({ url }) => [url, await preview(url)] as const),
   );
-  const unfurls = Object.fromEntries(cards.filter(([, value]) => value));
+  const unfurls = Object.fromEntries(
+    cards.flatMap(([url, card]) => (card ? [[url, cardBlocks(card)]] : [])),
+  );
   if (!Object.keys(unfurls).length) return;
 
   // A link in the composer has no message yet; Slack names it by its unfurl id.
@@ -230,6 +128,172 @@ export async function unfurl(
     'chat.unfurl',
     { ...where, unfurls },
     await ctx.token(ctx.installationId),
+    ctx.fetch,
+  );
+}
+
+/** A Chat SDK Slack thread id as `chat.postMessage` names it; a whole DM has no thread. */
+function conversation(threadId: string): { channel: string; thread_ts?: string } {
+  const [, channel = '', ts = ''] = /^slack:([^:]+):?(.*)$/.exec(threadId) ?? [];
+
+  return { channel, ...(ts ? { thread_ts: ts } : {}) };
+}
+
+/** Markdown as mrkdwn: bold, links and code keep their meaning, everything else is escaped text. */
+function mrkdwnOf(markdown: string): string {
+  return escaped(markdown)
+    .replace(/\*\*([^*\n]+)\*\*/g, '*$1*')
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<$2|$1>');
+}
+
+/** Slack refuses a card's body or subtext over 200 characters. */
+const cut = (text: string) => (text.length > 200 ? `${text.slice(0, 199)}…` : text);
+
+/** The message's text or card, its collapsed section as a plan or a block Slack folds under "see more", its buttons, then its hint. */
+function messageBlocks({ markdown, card, collapsed, buttons = [], hint, link }: MessageDraft) {
+  const elements = [
+    ...buttons.map((button, index) => ({
+      type: 'button',
+      action_id: `${button.ask ? ASK_ACTION : CLICK_ACTION}${index}`,
+      text: { type: 'plain_text', text: button.label },
+      // An asking button carries what its modal shows, since the click payload holds only the value.
+      value: button.ask
+        ? JSON.stringify({ value: button.value, label: button.label, ask: button.ask })
+        : button.value,
+      ...(button.style ? { style: button.style } : {}),
+      ...(button.confirm
+        ? {
+            confirm: {
+              title: { type: 'plain_text', text: `${button.label}?` },
+              text: { type: 'plain_text', text: button.confirm.slice(0, 300) },
+              confirm: { type: 'plain_text', text: button.label },
+              deny: { type: 'plain_text', text: 'Cancel' },
+            },
+          }
+        : {}),
+    })),
+    ...(link ? [linkButton({ id: 'open', ...link })] : []),
+  ];
+  // A plan holds up to 50 tasks, one per entry; a longer list folds as text.
+  const tasks = collapsed?.items && collapsed.items.length <= 50 ? collapsed.items : undefined;
+  const status = card?.outcome
+    ? { success: 'complete', failure: 'error' }[card.outcome]
+    : 'pending';
+
+  return [
+    card
+      ? {
+          type: 'card',
+          title: plain(card.title),
+          body: plain(cut(card.body)),
+          ...(card.status ? { subtext: mrkdwn(cut(mrkdwnOf(card.status))) } : {}),
+          ...(elements.length ? { actions: elements } : {}),
+        }
+      : section(mrkdwnOf(markdown)),
+    ...(collapsed
+      ? [
+          tasks
+            ? {
+                type: 'plan',
+                // Slack wants a fresh `block_id` on every update (plan block reference).
+                block_id: `plan-${crypto.randomUUID()}`,
+                title: collapsed.summary,
+                tasks: tasks.map((task, index) => ({
+                  task_id: `task-${index + 1}`,
+                  title: task,
+                  status,
+                })),
+              }
+            : // `expand: false` lets Slack fold long text under "see more" (section block reference).
+              {
+                ...section(mrkdwnOf(`**${collapsed.summary}**\n${collapsed.markdown}`)),
+                expand: false,
+              },
+        ]
+      : []),
+    ...(elements.length && !card ? [{ type: 'actions', elements }] : []),
+    ...(hint ? [{ type: 'context', elements: [mrkdwn(mrkdwnOf(hint))] }] : []),
+  ];
+}
+
+const askedButton = z.object({
+  value: z.string(),
+  label: z.string(),
+  ask: z.object({ label: z.string(), placeholder: z.optional(z.string()) }),
+});
+
+/** Opens an asking button's modal for whoever clicked it; its submission comes back as the click. */
+export async function openAsk(
+  ctx: AdapterContext,
+  trigger: string,
+  at: Pick<Click, 'thread' | 'message'>,
+  value: string,
+): Promise<void> {
+  const button = askedButton.parse(JSON.parse(value));
+  if (!ctx.installationId) return;
+  await slackApi(
+    'views.open',
+    {
+      trigger_id: trigger,
+      view: {
+        type: 'modal',
+        callback_id: ASK_VIEW,
+        title: plain(button.label.slice(0, 24)),
+        submit: plain(button.label.slice(0, 24)),
+        close: plain('Cancel'),
+        private_metadata: JSON.stringify({ ...at, value: button.value }),
+        blocks: [
+          {
+            type: 'input',
+            block_id: ASK_VIEW,
+            optional: true,
+            label: plain(button.ask.label),
+            element: {
+              type: 'plain_text_input',
+              action_id: ASK_VIEW,
+              multiline: true,
+              focus_on_load: true,
+              ...(button.ask.placeholder ? { placeholder: plain(button.ask.placeholder) } : {}),
+            },
+          },
+        ],
+      },
+    },
+    await ctx.token(ctx.installationId),
+    ctx.fetch,
+  );
+}
+
+/** Posts in the thread; returns the message `ts`. */
+export async function postMessage(
+  { ctx, thread }: MessagePlace,
+  draft: MessageDraft,
+): Promise<string> {
+  const sent = await slackApi<{ ts: string }>(
+    'chat.postMessage',
+    { ...conversation(thread.id), text: draft.markdown, blocks: messageBlocks(draft) },
+    await ctx.token(ctx.installationId!),
+    ctx.fetch,
+  );
+
+  return sent.ts;
+}
+
+/** Replaces a posted message's text and buttons. */
+export async function editMessage(
+  { ctx, thread }: MessagePlace,
+  ts: string,
+  draft: MessageDraft,
+): Promise<void> {
+  await slackApi(
+    'chat.update',
+    {
+      channel: conversation(thread.id).channel,
+      ts,
+      text: draft.markdown,
+      blocks: messageBlocks(draft),
+    },
+    await ctx.token(ctx.installationId!),
     ctx.fetch,
   );
 }

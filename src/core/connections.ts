@@ -337,10 +337,12 @@ export interface McpToolInfo {
   annotations?: { readOnlyHint?: boolean };
 }
 
-interface McpClient {
+export interface McpClient {
   initialize(): Promise<void>;
   /** Every tool, page by page; initializes first when needed. */
   tools(): Promise<McpToolInfo[]>;
+  /** One tool's result as the server sends it, unbounded by `startup`. */
+  call(name: string, args: Record<string, unknown>): Promise<unknown>;
   close(): Promise<void>;
 }
 
@@ -403,6 +405,11 @@ export async function mcpClient(
       } while (cursor !== undefined);
 
       return tools;
+    },
+    async call(name, args) {
+      await client.initialize();
+
+      return call('tools/call', { name, arguments: args });
     },
     close: () => base.close(),
   };

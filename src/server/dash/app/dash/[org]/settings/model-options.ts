@@ -106,7 +106,8 @@ export const CUSTOM_PROVIDERS: CustomProvider[] = [
     name: 'Vercel AI Gateway',
     baseUrl: 'https://ai-gateway.vercel.sh/v1',
     envKey: 'AI_GATEWAY_API_KEY',
-    keyUrl: 'https://vercel.com/d?to=%2F%5Bteam%5D%2F~%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys',
+    keyUrl:
+      'https://vercel.com/d?to=%2F%5Bteam%5D%2F~%2Fai-gateway%2Fapi-keys&title=AI+Gateway+API+Keys',
     needsKey: true,
   },
   {

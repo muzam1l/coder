@@ -2,7 +2,7 @@ import { type Params } from '../routes/match';
 import { LOOPBACK } from '../routes/guards';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import { type AgentApp, type AgentDefinition } from '../../agent/types';
-import { type CreateState, IntegrationError } from '../../integrations/types';
+import { IntegrationError } from '../../integrations/types';
 import { inspectNonce, issueNonce } from '../auth/nonce';
 import { encodeJson } from '../../utils/base64url';
 import { sha256 } from '../../utils/crypto';
@@ -23,6 +23,8 @@ import {
   readState,
   createTarget,
   takeCreateState,
+  appSpec,
+  type CreateState,
 } from './platform';
 
 const FINISHED_TTL_MS = 10 * 60 * 1000;
@@ -57,7 +59,7 @@ async function startCreate(
         'PUBLIC_URL is not set on this server; set it to the address platforms should call and restart',
       status: 400,
     };
-  if (operator && ctx.integrations[id]!.app.builtin !== 'shared')
+  if (operator && !ctx.integrations[id]!.app.shareable)
     return {
       error: "Create this app in your workspace from the agent's Platforms tab.",
       status: 400,
@@ -142,8 +144,10 @@ async function startedCreate(ctx: AppsContext, id: string, source: URLSearchPara
   const back = ctx.operatorApp ? undefined : platformsPath(ctx, started.state.agent);
   const post = app.createPost?.({
     publicUrl,
-    ...started,
-    encodedState: encodeJson({ tx, ...(back ? { back } : {}) }),
+    spec: appSpec(started.definition, started.state.agent, id),
+    state: encodeJson({ tx, ...(back ? { back } : {}) }),
+    ...(started.state.owner ? { owner: started.state.owner } : {}),
+    ...(started.state.public ? { public: true } : {}),
   });
 
   return json({ tx, ...(post ? { post } : {}), ...(create ? { create } : {}) });
@@ -186,7 +190,7 @@ async function finishCreate(
   const userId = operator ? OPERATOR : (ctx.session?.user.id ?? 'anonymous');
   const integration = ctx.integrations[id];
   if (!integration) return outcome(ctx, 'unknown-integration', { platform: id }, stated);
-  if (operator && integration.app.builtin !== 'shared')
+  if (operator && !integration.app.shareable)
     return json(
       { error: "Create this app in your workspace from the agent's Platforms tab." },
       400,
@@ -214,7 +218,7 @@ async function finishCreate(
   const created = await integration.app
     .createCallback(req, {
       publicUrl,
-      ...parsed,
+      spec: appSpec(parsed.definition, parsed.state.agent, id),
       fetch: ctx.fetch ?? fetch,
       tokens: appTokens(ctx, id),
       ...(shared ? { shared: decryptSecret(ctx.config, shared.credentials) } : {}),
@@ -253,7 +257,10 @@ async function finishCreate(
   if (integration.app.values)
     await ctx.store.put('delivery', syncKey(app.id), {
       version: 0,
-      manifest: integration.app.values(app, { publicUrl, definition: parsed.definition }).lines,
+      manifest: integration.app.values(app, {
+        publicUrl,
+        spec: appSpec(parsed.definition, app.agent, id),
+      }).lines,
       changed: false,
     });
   if (operator) {

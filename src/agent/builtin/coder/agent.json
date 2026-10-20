@@ -1,7 +1,6 @@
 {
   "name": "Coder",
   "description": "Answers engineering questions, reviews pull requests, and makes requested changes.",
-  "permissions": "workspace-write",
   "integrations": {
     "github": {
       "events": {

@@ -9,15 +9,10 @@ import { consumeNonce, inspectNonce, issueNonce, nonceOrganization } from '../au
 import { memberOf } from '../auth/connect';
 import { encodeJson } from '../../utils/base64url';
 import { agentWithVersion } from './records';
+import { welcomePage } from './pages';
 import { credentialFix, resolveEngine } from '../settings/credentials';
 import { decodeParam, redirect } from '../routes/http';
-import {
-  type AppsContext,
-  OPERATOR,
-  outcome,
-  platformsPath,
-  backPath,
-} from './platform';
+import { type AppsContext, OPERATOR, outcome, platformsPath, backPath } from './platform';
 
 /** Write an installation under its lock from its current value; the same app's own installations of accounts it now covers are retired. */
 export function storeInstallation(
@@ -199,7 +194,7 @@ async function bindInstall(
   const request = ctx.fetch ?? fetch;
   const now = ctx.now?.() ?? Date.now();
   const publicUrl = ctx.config.publicUrl!;
-  if (target.builtin && integration.app.builtin !== 'shared')
+  if (target.builtin && !integration.app.shareable)
     return outcome(ctx, 'unknown-app', { platform: id }, stated);
 
   const back = stated ?? (target.builtin ? undefined : platformsPath(ctx, target.agent));
@@ -279,7 +274,7 @@ async function bindInstall(
         )
       : outcome(ctx, 'installation-taken', { platform: id }, back);
   }
-  if (installation.installer && integration.welcome)
+  if (installation.installer && integration.messages?.direct)
     await greet(
       ctx,
       integration,
@@ -292,7 +287,7 @@ async function bindInstall(
   return outcome(ctx, 'connected', { platform: id, account: installation.account.login }, back);
 }
 
-/** The integration's greeting to its installer, with the model step while nothing can run the agent. */
+/** A welcome to the installer, with the model step while nothing can run the agent. */
 async function greet(
   ctx: AppsContext,
   integration: Integration,
@@ -302,27 +297,26 @@ async function greet(
   installer: string,
 ): Promise<void> {
   try {
-    const [{ adapterContext, dashUrl }, { record, version }] = await Promise.all([
+    const [{ adapterContext, agentSummary }, { record, version }] = await Promise.all([
       import('../chat'),
       agentWithVersion(ctx.store, app.agent),
     ]);
-    const { engine, usable } = await resolveEngine(ctx, {
-      engine: record?.settings?.engine ?? version?.definition.engine,
-      model: record?.settings?.model ?? version?.definition.model,
-    }, ctx.session?.user.id);
-    const adapter = adapterContext(
+    const { engine, usable } = await resolveEngine(
       ctx,
-      integration,
-      app,
-      credentials,
-      { id: installationId },
-      await dashUrl(ctx),
+      {
+        engine: record?.settings?.engine ?? version?.definition.engine,
+        model: record?.settings?.model ?? version?.definition.model,
+      },
+      ctx.session?.user.id,
     );
+    const target = { id: installationId };
+    const adapter = adapterContext(ctx, integration, app, credentials, target);
     const open = `${ctx.config.publicUrl!.replace(/\/$/, '')}${platformsPath(ctx, app.agent)}`;
-    await integration.welcome!(adapter, installer, {
+    const page = welcomePage(integration, app.name, await agentSummary(ctx, app, target), {
       open,
       ...(usable ? {} : { setup: await credentialFix(ctx, engine) }),
     });
+    await integration.messages!.direct!(adapter, installer, page);
   } catch (error) {
     console.error(`coder server: could not greet the installer of ${app.id}`, error);
   }

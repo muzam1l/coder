@@ -1,3 +1,8 @@
+import type { ApprovalPost } from '../tasks/approvals';
+
+/** Whether an approval post needs another platform call now: its retry is due, or it was never shown for `staleMs`. */
+export const postDue = (post: ApprovalPost, now: number, staleMs: number) =>
+  (post.retryAt ?? Infinity) <= now || (!post.shownAt && post.at <= now - staleMs);
 import type { UsageGroup, UsageTotals } from '../tasks/usage';
 import type {
   AgentDefinition,
@@ -8,6 +13,7 @@ import type {
   Installation,
 } from '../../agent/types';
 import type { AppSync, AuditRow, TaskTurn } from '../../client/types';
+import type { Approval } from '../../core/types';
 import { type EngineLogin } from '../settings/logins';
 import type { StoredCredential } from '../settings/credentials';
 import type { StoredConfig } from '../settings/config';
@@ -35,6 +41,7 @@ export interface StoreRecords {
   snapshot:
     | { secret: string; expiresAt?: number }
     | { resolvedConnections: string; expiresAt?: number }
+    | { deletedTasks: string[] }
     | SnapshotState
     | PairingRecord
     | LocalStart
@@ -79,7 +86,8 @@ export type DeliveryRecord =
   | SyncMarker
   /** How Wular names the organization, under `workspace`, for links made without a session. */
   | { slug: string; name: string; pending?: never }
-  | (FailedDelivery & { pending?: never });
+  | (FailedDelivery & { pending?: never })
+  | (ApprovalPost & { pending?: never });
 
 /** A platform event Coder failed to handle, kept a day under `failed:<agent>:<delivery>`. */
 export interface FailedDelivery {
@@ -150,8 +158,13 @@ export type CredentialWork<K extends CredentialScope> = (
   rows: Array<{ id: string; value: StoreRecords[K] }>,
   store: Store,
 ) => Promise<CredentialChange<K>[] | undefined>;
+/** Agents list built-in ones first, then by slug; a page cursor is the last row's key. */
+export const agentOrderKey = (record: Pick<AgentRecord, 'id' | 'source'>) =>
+  `${record.source === 'builtin' ? 0 : 1}:${record.id}`;
+
 export interface AgentPageOptions {
   slug?: string;
+  /** An `agentOrderKey`. */
   after?: string;
   source?: AgentRecord['source'];
   q?: string;
@@ -223,6 +236,11 @@ export interface Store {
   completionWatches?: Map<string, { stopped: boolean; work: Promise<void> }>;
   handoffs?: Map<string, Promise<unknown>>;
   withAppLock<T>(id: string, work: (store: Store) => Promise<T>): Promise<T>;
+  /** Approval posts due for another platform call (`retryAt` reached, or never shown and older than `staleMs`), in every organization. */
+  approvalPostsDue(
+    now: number,
+    staleMs: number,
+  ): Promise<Array<{ organizationId?: string; id: string; value: ApprovalPost }>>;
   withConfigLock<T>(work: (store: Store) => Promise<T>): Promise<T>;
   /** The one write path for sealed records: `work` sees the scope reread under its lock and its changes land atomically; true when anything was written. */
   withCredential<K extends CredentialScope>(
@@ -467,7 +485,9 @@ export interface TaskStatus {
   archivedAt?: number;
   /** Archived by the auto-archive sweep, which lists take up on their next read rather than as an event. */
   autoArchived?: true;
-  approval?: unknown;
+  approval?: Approval;
+  /** Derived for task rows returned by the server: `task.context.approvals`. */
+  approvals?: Approval[];
   /** Ask-sidecar answers in arrival order. */
   answer?: unknown[];
   createdAt: number;

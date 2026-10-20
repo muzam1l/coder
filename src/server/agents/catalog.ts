@@ -2,13 +2,21 @@ import { type Params } from '../routes/match';
 import { builtinDefinitions, defaultAgent } from '../../agent/load';
 import { type AgentApp } from '../../agent/types';
 import {
+  agentOrderKey,
   type AgentPageOptions,
   type AgentRecord,
   type AgentVersionRecord,
   type AgentVersionSummary,
 } from '../store/types';
 import { type ServerContext } from '../context';
-import { getAgent, agentWithVersion, getVersion, ensureBuiltinAgents, versionKey, agentProblems } from './records';
+import {
+  getAgent,
+  agentWithVersion,
+  getVersion,
+  ensureBuiltinAgents,
+  versionKey,
+  agentProblems,
+} from './records';
 import { syncLocalAgents } from '../store/local';
 import { agentApps } from './connections';
 import { failedDeliveries } from '../tasks/failures';
@@ -69,14 +77,14 @@ export async function agentRecords(
     .map(({ record }) => record)
     .filter(
       record =>
-        (!after || record.id > after) &&
+        (!after || agentOrderKey(record) > after) &&
         (!source || record.source === source) &&
         (!q ||
           [record.id, record.name, record.description, record.repo].some(value =>
             value?.toLowerCase().includes(q),
           )),
     )
-    .sort((a, b) => a.id.localeCompare(b.id))
+    .sort((a, b) => (agentOrderKey(a) < agentOrderKey(b) ? -1 : 1))
     .slice(0, limit);
 }
 
@@ -102,7 +110,7 @@ export async function listAgents(
     });
     const shape = (record: AgentRecord) =>
       fields === 'id' ? { id: record.id } : { id: record.id, name: record.name };
-    const result = page(records, limit, record => record.id);
+    const result = page(records, limit, agentOrderKey);
     return json(paged(url) ? { ...result, items: result.items.map(shape) } : records.map(shape));
   }
 
@@ -285,9 +293,7 @@ export async function readAgent(
           },
         }
       : {}),
-    ...(resolved
-      ? { ...(!resolved.usable ? { needsModel: true } : {}) }
-      : {}),
+    ...(resolved ? { ...(!resolved.usable ? { needsModel: true } : {}) } : {}),
   });
 }
 
@@ -319,15 +325,17 @@ export async function agentsPage(
       ? ctx.scope(server).store.list('app')
       : [],
     all
-      ? all.filter(
-          ({ record }) =>
-            (!after || record.id > after) &&
-            (!source || record.source === source) &&
-            (!q ||
-              [record.id, record.name, record.description, record.repo].some(value =>
-                value?.toLowerCase().includes(q),
-              )),
-        )
+      ? all
+          .filter(
+            ({ record }) =>
+              (!after || agentOrderKey(record) > after) &&
+              (!source || record.source === source) &&
+              (!q ||
+                [record.id, record.name, record.description, record.repo].some(value =>
+                  value?.toLowerCase().includes(q),
+                )),
+          )
+          .sort((a, b) => (agentOrderKey(a.record) < agentOrderKey(b.record) ? -1 : 1))
       : ctx.store.listAgentSummaries({
           after,
           source,
@@ -337,7 +345,9 @@ export async function agentsPage(
         }),
   ]);
   const live = new Set(
-    installations.filter(({ value }) => !value.deletedAt && !value.uninstalled).map(({ value }) => value.app),
+    installations
+      .filter(({ value }) => !value.deletedAt && !value.uninstalled)
+      .map(({ value }) => value.app),
   );
   const reach = (agent: string, integration: string): Reach => {
     const own = appRows.filter(
@@ -354,7 +364,7 @@ export async function agentsPage(
     rows.push({ record, version, ids });
     if (rows.length > limit) break;
   }
-  const result = page(rows, limit, last => last.record.id);
+  const result = page(rows, limit, last => agentOrderKey(last.record));
   const preferred = defaultAgent();
 
   return {
@@ -365,7 +375,7 @@ export async function agentsPage(
             .filter(
               ({ value }) =>
                 value.builtin &&
-                ctx.integrations[value.integration]?.app.builtin === 'shared' &&
+                ctx.integrations[value.integration]?.app.shareable &&
                 !live.has(value.id),
             )
             .map(({ value }) => ({

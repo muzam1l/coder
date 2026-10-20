@@ -22,7 +22,7 @@ import { dispatchStore } from '../store/primed';
 import { runLocalTask } from './local';
 import { syncLocalAgents } from '../store/local';
 import { credentialFix, resolveEngine } from '../settings/credentials';
-import { dispatchTokens, requesterToken, type EventTokens } from './context';
+import { dispatchTokens, requesterToken } from './context';
 import { chooseRunner } from '../runners';
 import { buildContext, conversationKey } from './thread';
 import {
@@ -30,6 +30,7 @@ import {
   conversationState,
   everyMessageDelivered,
   describe,
+  directAsk,
   forgetUnseen,
   recordUnseen,
   rememberConversation,
@@ -39,8 +40,9 @@ import {
 import { eventPrompt } from '../../agent/context/turn';
 import { appendTaskLog, generateTaskId } from '../../core/state';
 import { generateRunId } from '../../flow/runs';
-import { connectionWarnings } from './logs';
+import { taskWarnings } from './logs';
 import type { PendingDelivery } from './queue';
+import { answerInConversation, openApprovals, readApprovalCommand } from './approvals';
 import { dashPath, organizationSlug } from '../auth/account';
 
 const PENDING_TTL_MS = 60_000;
@@ -125,21 +127,27 @@ async function loadInstallation(
 }
 
 /** The Coder user linked to the event's actor, when they belong to this workspace. */
-async function linkedMember(ctx: ServerContext, integration: Integration, event: AgentEvent) {
+export async function linkedMember(
+  ctx: ServerContext,
+  integration: Integration,
+  event: Pick<AgentEvent, 'actor'>,
+) {
   const user = await ctx.auth!.linkedUser(integration.id, event.actor.id).catch(() => undefined);
   return user?.organizations?.includes(ctx.organizationId) ? user : undefined;
 }
 
+export const ACCESS_UNCHECKED = 'Coder could not check your access to this conversation.';
+
 /** Whether the actor may write where the event happened, as the platform says; `null` when the check failed, which counts as no, and a platform without one answers nothing. */
-async function writeCheck(
+export async function writeCheck(
   ctx: ServerContext,
   integration: Integration,
   event: AgentEvent,
-  tokens: EventTokens,
+  token: () => Promise<string | undefined>,
 ): Promise<boolean | null | undefined> {
   if (!integration.auth.canWrite) return undefined;
-  const token = await (await tokens(event.integration))!.token();
-  return integration.auth.canWrite(event, token!, ctx.fetch).catch((error: unknown) => {
+
+  return integration.auth.canWrite(event, (await token())!, ctx.fetch).catch((error: unknown) => {
     console.error(
       `coder server: ${integration.id} write check failed for ${event.appId} event ${event.deliveryId}`,
       error,
@@ -427,6 +435,18 @@ async function claimed(
 
   // Dispatch reads only: matching, usage, history and the write check, minting only on a cache miss. Execution mints the task's own token.
   const tokens = dispatchTokens(ctx, integration, installation, event, credentials);
+  const token = async () => (await tokens(event.integration))!.token();
+
+  // An approval answer in a task's conversation goes to that task, never to the agent; a bare one only while one approval is open.
+  const answer = event.chat ? readApprovalCommand(event.text) : undefined;
+  const asked = answer && (await conversationState(ctx, event)).status;
+  if (answer && asked && (answer.id || (await openApprovals(ctx, asked.task.id)).length === 1))
+    return effect(() =>
+      answerInConversation(ctx, integration, asked, answer, event, token, text =>
+        replies.whisper(text),
+      ),
+    );
+
   const [agent, member] = await Promise.all([
     ctx.loadAgent(app, installation, event, tokens, claim?.loaded),
     ctx.auth && event.actor.id ? linkedMember(ctx, integration, event) : undefined,
@@ -446,10 +466,10 @@ async function claimed(
   }
 
   // Only someone the platform lets write where the event happened starts or steers a task; a failed check says so, so every prompt gets an answer.
-  const canWrite = await writeCheck(ctx, integration, event, tokens);
+  const canWrite = await writeCheck(ctx, integration, event, token);
   if (canWrite === null)
     return effect(async () => {
-      await replies.problem('Coder could not check your access to this conversation.');
+      await replies.problem(ACCESS_UNCHECKED);
     });
   if (canWrite === false) return {};
 
@@ -523,7 +543,7 @@ async function claimed(
   ]);
   const { engine, credential, usable, chain, credentials: engineCredentials } = resolved;
   if (!usable && route.runner !== 'http') {
-    const spoken = described.mustReply ?? integration.events[event.type]?.on === 'mention';
+    const spoken = described.mustReply ?? directAsk(integration, event);
     if (!spoken) return {};
     return effect(async () => {
       // Once per thread, unless every prompt waits for an answer; a retry of the delivery that holds the mark may post again.
@@ -610,7 +630,7 @@ async function claimed(
     },
   );
   if (fallbackText && delivered.taskId) {
-    await connectionWarnings(ctx, delivered.taskId, [fallbackText]);
+    await taskWarnings(ctx, delivered.taskId, [fallbackText]);
   }
 
   return delivered;

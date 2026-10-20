@@ -1,7 +1,13 @@
 /** `coder model update`: change fields of a custom endpoint model. */
 import { flag, str } from '../../utils/args';
 import { command } from '../../cli';
-import { modelSavedJson, modelSavedNext, printModelSaved, writeOptions } from './add';
+import {
+  contextWindowOption,
+  modelSavedJson,
+  modelSavedNext,
+  printModelSaved,
+  writeOptions,
+} from './add';
 
 export const commandModelUpdate = command({
   name: 'update',
@@ -14,6 +20,7 @@ export const commandModelUpdate = command({
     'base-url': str('new API base', '<url>'),
     model: str('new provider model id', '<id>'),
     'env-key': str('new API-key env var', '<VAR>'),
+    'context-window': contextWindowOption,
     workspace: flag('write to <repo>/.coder/config.json instead of the user file'),
   },
   cli: { positional: ['name'] },

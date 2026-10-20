@@ -10,17 +10,17 @@ const MAX_LOG_BYTES = 2 * 1024 * 1024;
 
 const logKey = (taskId: string, seq: number) => `${taskId}:${String(seq).padStart(6, '0')}`;
 
-export async function connectionWarnings(
+export async function taskWarnings(
   ctx: ServerContext,
   taskId: string,
   warnings: string[],
 ): Promise<void> {
   if (!warnings.length) return;
-  await ctx.store.withAppLock(`connection-warnings:${taskId}`, async store => {
+  await ctx.store.withAppLock(`task-warnings:${taskId}`, async store => {
     const queue = store instanceof DrizzleStore ? new DrizzleQueue(store.db) : ctx.queue;
     const pending: string[] = [];
     for (const warning of new Set(warnings))
-      if (!(await store.get('delivery', `connection-warning:${taskId}:${warning}`)))
+      if (!(await store.get('delivery', `task-warning:${taskId}:${warning}`)))
         pending.push(warning);
     if (!pending.length) return;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -51,7 +51,7 @@ export async function connectionWarnings(
       );
       if (!saved) continue;
       for (const warning of pending)
-        await store.put('delivery', `connection-warning:${taskId}:${warning}`, { at: now });
+        await store.put('delivery', `task-warning:${taskId}:${warning}`, { at: now });
       return;
     }
   });

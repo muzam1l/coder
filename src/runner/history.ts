@@ -13,7 +13,7 @@ import type { Task } from '../core/types';
 
 type Engine = TaskHistory['engine'];
 type Request = <T>(suffix: string, init?: RequestInit) => Promise<T>;
-type Chain = Pick<Task, 'previousThreadIds' | 'pendingRollover'>;
+type Chain = Pick<Task, 'previousThreadIds'>;
 
 // The upload's JSON body stays under the server's 4 MB history limit.
 const MAX_UPLOAD_CHARS = 3 * 1024 * 1024;
@@ -124,15 +124,7 @@ export function taskHistory(request: Request, secrets: () => Promise<string[]>) 
           continue;
         }
         const state: Chain | undefined = active
-          ? JSON.parse(
-              redactHistory(
-                JSON.stringify({
-                  previousThreadIds: current!.previousThreadIds,
-                  pendingRollover: current!.pendingRollover,
-                }),
-                values,
-              ),
-            )
+          ? { previousThreadIds: current!.previousThreadIds }
           : undefined;
         await request('/history', {
           method: 'POST',

@@ -574,6 +574,7 @@ export function PlatformActions({
   organizationApps = false,
   shared = false,
   appUpdate,
+  split = false,
   failed,
 }: {
   integration: string;
@@ -595,6 +596,8 @@ export function PlatformActions({
   shared?: boolean;
   /** How apps are brought up to date: Coder pushes them, or shows what to change on the platform. */
   appUpdate?: 'push' | 'drift' | 'confirm';
+  /** Another row's Install has a menu, so this one keeps the same split shape. */
+  split?: boolean;
   /** The platform's last setup failed, on `app` when it was an install; `title` and `text` say how, else it was unexpected. */
   failed?: { name: string; app?: string; issues?: string; title?: string; text?: string };
 }) {
@@ -705,6 +708,33 @@ export function PlatformActions({
         {failure}
       </>
     );
+  // Installing is the only action: a plain button, or the split shape with a disabled caret when other rows' Install has a menu.
+  if (shared && !installed && apps.length === 1) {
+    const installButton = (
+      <Button size="sm" loading={busy} onClick={() => install(main!.id)}>
+        {reinstall ? 'Reinstall' : 'Install'}
+      </Button>
+    );
+
+    return (
+      <>
+        {split ? (
+          <span class="split">
+            {installButton}
+            <span class="menu">
+              <Button size="sm" class="split-more" disabled aria-label="No more actions">
+                <Icon d={iDown} />
+              </Button>
+            </span>
+          </span>
+        ) : (
+          installButton
+        )}
+        {where}
+        {failure}
+      </>
+    );
+  }
   return (
     <>
       <span class="split">
@@ -728,8 +758,12 @@ export function PlatformActions({
               <MenuItem
                 key={app.id}
                 icon={iPlus}
-                title={`Install${named}`}
-                sub={`On its owner's account, or any account if it is public on ${name}.`}
+                title={installed ? `Install${named} on another account` : `Install${named}`}
+                sub={
+                  shared
+                    ? `Any ${name} account can add it.`
+                    : `Any ${name} account if the app is public, else only the account that owns it.`
+                }
                 onClick={() => install(app.id)}
               />
             );

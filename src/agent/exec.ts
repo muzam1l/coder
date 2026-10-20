@@ -446,8 +446,10 @@ export async function execAgent(options: {
                 ...(task.author ? { author: task.author } : {}),
                 ...(event?.repo ? { repo: `${event.repo.owner}/${event.repo.name}` } : {}),
                 ...(options.source
-                  ? { source: options.source }
+                  ? { name: task.name, source: options.source }
                   : { name: `${AGENT_TASK_PREFIX}${task.id}`, source: task.source }),
+                appendSystem: task.appendSystem,
+                addDirs: task.addDirs,
                 engine: resolved.engine,
                 model: resolved.model ?? undefined,
                 effort: resolved.effort ?? undefined,
@@ -455,6 +457,7 @@ export async function execAgent(options: {
                 agentPrompt: defaults.agentPrompt,
                 prompt: defaults.prompt,
                 outputSchema: task.context?.outputSchema,
+                ...(task.context?.approvals ? { approvals: task.context.approvals } : {}),
                 wait: true,
               },
               task.engineChain
@@ -462,8 +465,11 @@ export async function execAgent(options: {
                 : {},
             );
         await options.onTask?.(dispatched.taskId, first);
-        completed = await waitForAgentTask(cwd, dispatched.taskId, options.onApproval, (cwd, id) =>
-          waitTask(cwd, id, { turn: first, worker }),
+        completed = await waitForAgentTask(
+          cwd,
+          dispatched.taskId,
+          options.onApproval,
+          (cwd, id, opts) => waitTask(cwd, id, { ...opts, turn: first, worker }),
         );
       } catch (error) {
         if (!task.engineChain || !(error instanceof CoderError) || error.code !== 'chain-exhausted')
@@ -609,17 +615,18 @@ export async function waitForAgentTask(
   wait: typeof waitTask = waitTask,
   pause?: () => Promise<void>,
 ) {
-  let reportedId: string | undefined;
+  const reported = new Set<string>();
   const changes = watchTask(cwd, taskId);
   try {
     for (;;) {
       try {
-        return await wait(cwd, taskId);
+        return await wait(cwd, taskId, { seen: [...reported] });
       } catch (error) {
         if (!(error instanceof CoderError) || error.code !== 'approval-pending' || !onApproval)
           throw error;
-        if (error.approval?.id !== reportedId) {
-          reportedId = error.approval?.id;
+        const id = String(error.approval?.id);
+        if (!reported.has(id)) {
+          reported.add(id);
           await onApproval(error.approval);
           continue;
         }
@@ -749,6 +756,8 @@ export async function agentTaskOptions(
 }
 
 const MAX_SYSTEM_CHARS = 48_000;
+/** Where the built-in review flow leaves its findings, on a platform that hosts code. */
+const REVIEW_FINDINGS = 'Review findings are inline review comments marked coder-review:fp.';
 
 /** The developer's part of the system prompt: what whoever built the agent wrote, plus the installation's repository instructions. */
 export function agentDeveloperInstructions(agent: Agent, context?: TaskContext): DeveloperParts {
@@ -821,7 +830,13 @@ export function defaultTask(
       developer: agentDeveloperInstructions(agent, context),
       ...(conversation
         ? {
-            platform: { name: event!.integration, prompt: integration?.prompt },
+            platform: {
+              name: event!.integration,
+              prompt:
+                [integration?.prompt, integration?.repos && REVIEW_FINDINGS]
+                  .filter(Boolean)
+                  .join('\n') || undefined,
+            },
             events: definitionEvents(agent.definition.integrations[event!.integration]),
           }
         : {}),
