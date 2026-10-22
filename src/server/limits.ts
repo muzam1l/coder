@@ -29,17 +29,16 @@ export const SERVER_LIMITS = {
 } as const;
 
 /** Which bucket a request charges besides its principal or IP. */
-export type LimitRoute = 'auth' | 'register' | 'pairing';
+type LimitRoute = 'auth' | 'register' | 'pairing';
 
 export class ServerLimits {
   private readonly buckets = new Map<string, { tokens: number; at: number }>();
   private sweptAt: number;
-  readonly startedAt: number;
   requests = 0;
   rejections = 0;
 
   constructor(now = Date.now()) {
-    this.startedAt = this.sweptAt = now;
+    this.sweptAt = now;
   }
 
   consume(key: string, capacity: number, now: number): Response | undefined {
@@ -96,15 +95,17 @@ export async function admit(
     path === '/runners/register'
       ? await runnerPrincipal(req, ctx)
       : scope && !(scope instanceof Response)
-        ? scope.session
-          ? `user:${scope.session.user.id}`
-          : 'admin'
+        ? scope.taskPrincipal
+          ? `task:${scope.taskPrincipal.task}`
+          : scope.session
+            ? `user:${scope.session.user.id}`
+            : 'admin'
         : undefined;
 
   return rateLimit(ctx, principal, ip, rule[1]) ?? { scope };
 }
 
-export function rateLimit(
+function rateLimit(
   ctx: ServerContext,
   principal: string | undefined,
   ip: string,

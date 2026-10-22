@@ -325,7 +325,7 @@ export default function DashLayout({
 }) {
   if (!request) return null;
   const org = orgOf(request);
-  const { pathname, host, searchParams } = new URL(request.url);
+  const { host, searchParams } = new URL(request.url);
   const link = searchParams.get('link');
   const me = load(request).me();
   const side = /(?:^|; )side=(min|max)(?:;|$)/.exec(request.headers.get('cookie') ?? '')?.[1];
@@ -356,6 +356,15 @@ export default function DashLayout({
                 <Icon d={icon} />
                 {label}
                 {label === 'Tasks' ? <ActiveCount /> : null}
+                {label === 'Settings' ? (
+                  <WithMe me={me}>
+                    {who =>
+                      who?.reconnect ? (
+                        <i class="dot" title="A connection needs reconnecting" />
+                      ) : null
+                    }
+                  </WithMe>
+                ) : null}
               </CurrentLink>
             ),
           )}

@@ -29,7 +29,6 @@ export const args = z.object({
   /** Git pathspecs relative to `cwd`; submodule contents included. */
   path: z.array(z.string()).optional(),
   exclude: z.array(z.string()).optional(),
-  engine: z.string().optional(),
   model: z.string().optional(),
   /** Reasoning effort, and review depth in the prompt. */
   effort: z.enum(['low', 'medium', 'high']).optional(),
@@ -432,10 +431,9 @@ export default async function review(
 
   const effort = a.effort ?? 'medium';
   const common = {
-    engine: a.engine,
     model: a.model,
     effort: a.effort,
-    permissions: 'read-only',
+    access: 'read-only' as const,
     cwd,
     appendSystem: reviewSystemPrompt(effort, repositoryRules(exec, baseSha)),
   };

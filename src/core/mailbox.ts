@@ -41,7 +41,7 @@ export function mailboxId(key?: MailboxKey): string {
   return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-${hash.slice(12, 16)}-${hash.slice(16, 20)}-${hash.slice(20)}`;
 }
 
-export type MailboxHandlers = Record<string, (payload: any) => unknown>;
+type MailboxHandlers = Record<string, (payload: any) => unknown>;
 
 // The structured CoderError fields a caller acts on.
 const ERROR_FIELDS = [

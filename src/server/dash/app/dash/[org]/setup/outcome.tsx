@@ -3,7 +3,7 @@ import type { ComponentChildren } from 'preact';
 
 import type { IntegrationInfo, SetupOutcome } from '@coder/client/types';
 
-/** The outcome a create, install or link flow put in the URL. */
+/** The outcome a create, install or connect flow put in the URL. */
 export function readOutcome(search: URLSearchParams): SetupOutcome | undefined {
   const status = search.get('status') as SetupOutcome['status'] | null;
   if (!status) return undefined;
@@ -31,9 +31,7 @@ export function outcomeTitle({ status }: SetupOutcome, name: string): string {
     case 'created':
       return `${name} app created`;
     case 'linked':
-      return `Linked on ${name}`;
-    case 'disconnected':
-      return `Disconnected from ${name}`;
+      return `Connected on ${name}`;
     case 'create-expired':
     case 'invalid-field':
     case 'no-public-url':
@@ -55,7 +53,7 @@ export function outcomeText({ status, account, app, error }: SetupOutcome, name:
     case 'created':
       return `Created ${app ?? 'the app'} on ${name}. Every workspace on this server can now connect it from its dashboard.`;
     case 'linked':
-      return `Linked ${account ?? 'your account'} on ${name} to your Coder account. Mention the agent again to start.`;
+      return `Connected ${account ?? 'your account'} on ${name}. Mention the agent again to start.`;
     case 'cancelled':
       return `The ${name} install was cancelled, so nothing was connected.`;
     case 'install-expired':
@@ -76,12 +74,8 @@ export function outcomeText({ status, account, app, error }: SetupOutcome, name:
       return `${account ?? 'This account'} is already connected to another agent through this server's ${name} app, in this or another workspace. Disconnect it there first.`;
     case 'account-taken':
       return `That ${name} account is connected to someone else.`;
-    case 'not-member':
-      return 'Only members of the workspace this agent works for can link here.';
     case 'other-workspace':
       return 'This app belongs to another Coder workspace. Ask its owner to invite you.';
-    case 'disconnected':
-      return `This ${name} installation is no longer connected.`;
     case 'platform-error':
       return `${name} answered ${error ?? 'with an error'}, so nothing was connected.`;
     case 'missing-code':

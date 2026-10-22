@@ -2,63 +2,8 @@
 /** An agent turn's messages: events, requests and history. */
 import { Data, render } from 'contextjsx';
 
+import { changeDecisionMessage } from '../../core/approvals';
 import type { AgentEvent, TaskContext } from '../types';
-
-// Event JSON (agent/exec, server/tasks).
-
-type EventAuthor = { id: string; handle?: string; name?: string };
-
-export type EventJson = {
-  event?: string;
-  mustReply?: boolean;
-  message?: { id?: string; text?: string; author: EventAuthor };
-  messages?: Array<{ id?: string; text?: string; author: EventAuthor }>;
-  reactions?: Array<{ emoji: string; by: string[] }>;
-};
-
-export const unxml = (text: string) =>
-  text.replace(
-    /&(amp|lt|gt);/g,
-    (_, name: 'amp' | 'lt' | 'gt') => ({ amp: '&', lt: '<', gt: '>' })[name],
-  );
-
-/** Read event JSON, optionally alongside a turn's history or other text. */
-export function eventJsons(prompt = '', embedded = false): EventJson[] | undefined {
-  const event = /<event>\n([^]*?)\n<\/event>/g;
-  if (!embedded && (!prompt.trimStart().startsWith('<event>') || prompt.replace(event, '').trim()))
-    return;
-  const events: EventJson[] = [];
-  for (const [, body] of prompt.matchAll(event)) {
-    try {
-      const json = JSON.parse(unxml(body!));
-      if (!json || typeof json !== 'object' || Array.isArray(json)) {
-        if (!embedded) return;
-        continue;
-      }
-      events.push(json);
-    } catch (error) {
-      console.error('coder: unreadable event prompt', error);
-      if (!embedded) return;
-    }
-  }
-
-  return events.length ? events : undefined;
-}
-
-/** Any event in a turn or its live steers can require a reply. */
-export function replyRequired(
-  prompt?: string | null,
-  fallback?: boolean,
-  steers: string[] = [],
-): boolean | undefined {
-  const asks = [prompt ?? '', ...steers].flatMap(text =>
-    (eventJsons(text, true) ?? []).flatMap(json =>
-      typeof json.mustReply === 'boolean' ? [json.mustReply] : [],
-    ),
-  );
-
-  return asks.length ? asks.includes(true) : fallback;
-}
 
 /** `since` holds at most this many messages; past that the agent is told how many more there are. */
 export const SINCE_LIMIT = 50;
@@ -143,7 +88,7 @@ export function eventJson(
     ...(event.promptContext ? { context: event.promptContext } : {}),
     ...(since.length ? { since } : {}),
     ...(more ? { more } : {}),
-    ...(user ? { requester: user } : {}),
+    ...(user ? { requester: { name: user.name } } : {}),
   };
 }
 
@@ -193,4 +138,25 @@ export function historyPrompt(
   );
 
   return `${earlier}\n\n${prompt}`;
+}
+
+/** Decisions on the task's change requests since the turn before the last ended: a steer that reached the last turn too late is lost when it completes. */
+export function decisionsPrompt(context: TaskContext | undefined, prompt: string): string {
+  const turns = context?.turns ?? [];
+  const since = turns.at(-2)?.finishedAt ?? 0;
+  const decided = (context?.approvals ?? []).filter(
+    approval =>
+      approval.change &&
+      turns.length > 0 &&
+      (approval.response?.decision === 'accept' || approval.response?.decision === 'decline') &&
+      Date.parse(approval.response.answeredAt ?? '') >= since,
+  );
+  if (!decided.length) return prompt;
+  const decisions = render(
+    <decisions>
+      <Data>{decided.map(changeDecisionMessage).join('\n')}</Data>
+    </decisions>,
+  );
+
+  return `${decisions}\n\n${prompt}`;
 }

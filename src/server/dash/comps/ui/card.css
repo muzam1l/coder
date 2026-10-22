@@ -69,6 +69,10 @@
 .card .empty {
   border: 0;
 }
+.empty .actions {
+  justify-content: center;
+  margin-top: 10px;
+}
 .loading {
   display: flex;
   align-items: center;

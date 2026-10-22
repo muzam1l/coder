@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { promisify } from 'node:util';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 
 import { processTiming } from '../utils/process';
 
@@ -42,7 +42,6 @@ import {
   isPidAlive,
   appendTaskLog,
   watchTask,
-  writeTask,
 } from '../core/state';
 import { listApprovals } from '../core/approvals';
 import {
@@ -53,14 +52,12 @@ import {
   stopTask,
   type ConnectionResolver,
 } from '../core/task/actions';
-import { addTokens } from '../core/task/log-view';
+import { addTokens, SKIPPED } from '../core/task/view';
 import { readResultJson, resolveTaskOptions, waitTask } from '../core/dispatch';
-import { SKIPPED } from '../core/defaults';
 import { connectionVariables } from '../core/connections';
 import type { InboxEntry, InboxAck } from '../server/tasks/queue';
 import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mailbox';
-import type { Task } from '../core/types';
-import type { McpServerSpec } from '../core/types';
+import type { Task, McpServerSpec } from '../core/types';
 import {
   readJsonFile,
   writeJsonFileAtomic,
@@ -78,7 +75,7 @@ type RemoteTask = {
   logCursor?: number;
   timeoutMs?: number;
   tokens: Record<string, string>;
-  nativeTokens?: Record<string, string>;
+  dashboard?: string;
   postToken?: string;
   credential: EngineCredential;
   engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
@@ -330,7 +327,6 @@ async function historySecrets(
     token,
     ...Object.values(remote.tokens),
     ...(remote.postToken ? [remote.postToken] : []),
-    ...Object.values(remote.nativeTokens ?? {}),
     ...Object.values(remote.connectionEnv ?? {}),
     ...Object.entries(remote.credential.env)
       .filter(([name]) => /KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH/i.test(name))
@@ -865,11 +861,12 @@ async function runCheckedOutTask(
       task: restored
         ? { ...remote.task, context: { ...remote.task.context, messages: undefined } }
         : remote.task,
-      toolEnvironment: {
-        tokens: { ...remote.tokens, ...remote.nativeTokens },
-        native: Object.keys(remote.nativeTokens ?? {}),
+      toolEnvironment: { tokens: remote.tokens },
+      replyEndpoint: {
+        url: `${auth.server}/tasks/${encodeURIComponent(id)}`,
+        token: auth.token,
+        ...(remote.dashboard ? { dashboard: remote.dashboard } : {}),
       },
-      replyEndpoint: { url: `${auth.server}/tasks/${encodeURIComponent(id)}`, token: auth.token },
       connections: remote.connections,
       connectionEnv: remote.connectionEnv,
       post: remote.task.source === event?.integration,

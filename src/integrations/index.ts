@@ -20,7 +20,3 @@ export function enabledIntegrations(ids?: string[]): Record<string, Integration>
     );
   return Object.fromEntries(ids.map(id => [id, INTEGRATIONS[id]!]));
 }
-
-/** The integration that reads repository files, for config kept in a repository. */
-export const repositoryReader = (integrations: Record<string, Integration>) =>
-  Object.values(integrations).find(integration => integration.repos);

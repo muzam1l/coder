@@ -77,11 +77,20 @@ export function FoldCard({
   );
 }
 
-export function Empty({ title, children }: { title: string; children?: ComponentChildren }) {
+export function Empty({
+  title,
+  actions,
+  children,
+}: {
+  title: string;
+  actions?: ComponentChildren;
+  children?: ComponentChildren;
+}) {
   return (
     <div class="empty">
       <b>{title}</b>
       {children ? <span>{children}</span> : null}
+      {actions ? <div class="actions">{actions}</div> : null}
     </div>
   );
 }

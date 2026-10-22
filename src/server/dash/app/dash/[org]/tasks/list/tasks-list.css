@@ -1,13 +1,13 @@
 .tasks {
   table-layout: fixed;
-  /* the task column keeps about 300px; narrower, the table scrolls */
-  min-width: 1044px;
+  /* the task column keeps about 240px; narrower, the table scrolls */
+  min-width: 944px;
 }
 .tasks th:nth-child(2) {
   width: 160px;
 }
 .tasks .model {
-  width: 200px;
+  width: 160px;
 }
 .tasks th:nth-child(4) {
   width: 120px;
@@ -118,7 +118,6 @@ td.model {
 .source .ic {
   color: var(--dim);
 }
-
 /* a row's menu waits at its right edge, above the cover link, and shows on hover, focus or while open */
 .tasks th:last-child,
 .tasks td:last-child {

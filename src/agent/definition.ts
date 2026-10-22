@@ -1,28 +1,31 @@
 /** What an agent is: the `agent.json` schema, how a repo runs it (`agents` in config), and the settings it resolves to. */
 import * as z from 'zod/mini';
 
-import { mcpEntrySchema, type Permission } from '../core/config';
+import {
+  accessSchema,
+  mcpEntrySchema,
+  schemaIssues,
+  strictestAccess,
+  type Access,
+} from '../core/config';
 import { markRepositoryMcp } from '../core/mcp';
+import { INTEGRATIONS } from '../integrations';
 import type { Integration } from '../integrations/types';
 import type {
   Agent,
   AgentDefinition,
   AgentDefinitionIntegration,
+  AgentEvent,
   AgentEventOptions,
   AgentUsage,
-  Preset,
 } from './types';
 
 const slug = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
 const effort = z.enum(['low', 'medium', 'high']);
-const permissions = z.enum(['read-only', 'workspace-write', 'auto']);
-const access = z.enum(['read', 'write']);
 
 const eventOptionsSchema = z.strictObject({
   flow: z.optional(slug),
   match: z.optional(z.string().check(z.minLength(1))),
-  permissions: z.optional(permissions),
-  actAs: z.optional(z.literal('requester')),
 });
 
 const definitionIntegrationSchema = z.strictObject({
@@ -43,8 +46,7 @@ const agentDefinitionSchema = z.strictObject({
   runner: z.optional(z.string().check(z.minLength(1))),
   model: z.optional(z.string()),
   effort: z.optional(effort),
-  permissions: z.optional(permissions),
-  access: z.optional(access),
+  access: z.optional(accessSchema),
   mcp: z.optional(z.record(slug, mcpEntrySchema)),
   integrations: z._default(z.record(z.string(), definitionIntegrationSchema), {}),
 });
@@ -58,21 +60,12 @@ const agentUsageSchema = z.strictObject({
   engine: z.optional(z.string()),
   model: z.optional(z.string()),
   effort: z.optional(effort),
-  permissions: z.optional(permissions),
-  access: z.optional(access),
+  access: z.optional(accessSchema),
   integrations: z.optional(z.record(z.string(), usageIntegrationSchema)),
   disabled: z.optional(z.boolean()),
 });
 
 const agentsUsageSchema = z.record(slug, z.union([z.boolean(), agentUsageSchema]));
-
-function issues(error: {
-  issues: ReadonlyArray<{ path: PropertyKey[]; message: string }>;
-}): string {
-  return error.issues
-    .map(issue => `${issue.path.map(String).join('.') || '(root)'}: ${issue.message}`)
-    .join('; ');
-}
 
 /** A stored definition carries the repository marker from its last parse; it is derived again, never read. */
 function withoutMarkers(json: unknown): unknown {
@@ -91,13 +84,52 @@ function withoutMarkers(json: unknown): unknown {
   };
 }
 
+/** Keys `agent.json` once had, with the key that took their place. */
+const REPLACED: Record<string, string> = { permissions: 'access' };
+
+/** A definition's issues in plain words, each naming its field and what to change. */
+const problemsOf = (issues: ReadonlyArray<z.core.$ZodIssue>) =>
+  issues.flatMap(issue =>
+    issue.code === 'unrecognized_keys' && !issue.path.length
+      ? issue.keys.map(key =>
+          REPLACED[key]
+            ? `${key} was replaced by ${REPLACED[key]}, remove ${key}`
+            : `${key} is not an agent setting, remove it`,
+        )
+      : schemaIssues([issue]),
+  );
+
+/** Keys a stored definition has that Coder renamed, with their new name, or no longer reads; the editor fixes them. */
+export function staleKeys(json: unknown): { renamed?: Record<string, string>; unknown?: string[] } {
+  const keys = json && typeof json === 'object' ? Object.keys(json) : [];
+  const stale = keys.filter(key => !(key in agentDefinitionSchema.shape));
+  const renamed = Object.fromEntries(
+    stale.filter(key => REPLACED[key]).map(key => [key, REPLACED[key]!]),
+  );
+  const unknown = stale.filter(key => !REPLACED[key]);
+
+  return {
+    ...(Object.keys(renamed).length ? { renamed } : {}),
+    ...(unknown.length ? { unknown } : {}),
+  };
+}
+
+/** What keeps a definition from loading, one line per problem; none when it is valid. */
+export function definitionProblems(json: unknown): string[] {
+  const parsed = agentDefinitionSchema.safeParse(withoutMarkers(json));
+  return parsed.success ? [] : problemsOf(parsed.error.issues);
+}
+
 export function parseAgentDefinition(
   id: string,
   json: unknown,
   repository = true,
 ): AgentDefinition {
   const parsed = agentDefinitionSchema.safeParse(withoutMarkers(json));
-  if (!parsed.success) throw new Error(`Invalid agent definition "${id}": ${issues(parsed.error)}`);
+  if (!parsed.success)
+    throw new Error(
+      `Invalid agent definition "${id}": ${problemsOf(parsed.error.issues).join('; ')}`,
+    );
   const { $schema: _ignored, ...definition } = parsed.data;
   markRepositoryMcp(definition.mcp, repository);
   return definition as AgentDefinition;
@@ -106,7 +138,8 @@ export function parseAgentDefinition(
 export function parseAgentsUsage(json: unknown): Record<string, boolean | AgentUsage> {
   if (json === undefined) return {};
   const parsed = agentsUsageSchema.safeParse(json);
-  if (!parsed.success) throw new Error(`Invalid agents usage: ${issues(parsed.error)}`);
+  if (!parsed.success)
+    throw new Error(`Invalid agents usage: ${schemaIssues(parsed.error.issues).join('; ')}`);
   return parsed.data as Record<string, boolean | AgentUsage>;
 }
 
@@ -126,6 +159,31 @@ export function eventOptions(
   if (!Object.prototype.hasOwnProperty.call(wiring.events, type)) return undefined;
   const value = wiring.events[type]!;
   return value === true ? {} : typeof value === 'string' ? { flow: value } : value;
+}
+
+/** The definition with each match set on every integration that has its event; an empty regex clears it. */
+export function withMatches(
+  definition: AgentDefinition,
+  matches: Record<string, string>,
+): AgentDefinition {
+  const integrations = Object.fromEntries(
+    Object.entries(definition.integrations).map(([id, wiring]) => {
+      const events = wiring.events ?? [];
+      const map = Array.isArray(events) ? Object.fromEntries(events.map(e => [e, true])) : events;
+      if (!Object.keys(map).some(event => event in matches)) return [id, wiring];
+      const next = Object.entries(map).map(([event, value]) => {
+        if (!(event in matches)) return [event, value];
+        const options =
+          typeof value === 'object' ? value : typeof value === 'string' ? { flow: value } : {};
+        const { match: _, ...rest } = options;
+        const set = matches[event] ? { ...rest, match: matches[event] } : rest;
+        return [event, Object.keys(set).length ? set : true];
+      });
+      return [id, { ...wiring, events: Object.fromEntries(next) }];
+    }),
+  );
+
+  return { ...definition, integrations };
 }
 
 export function validateAgents(
@@ -173,9 +231,9 @@ export function validateAgents(
   return errors;
 }
 
-/** The agent's one access mode: the definition's, lowered to Read-only by its usage. */
-export function agentAccess(agent: Pick<Agent, 'definition' | 'usage'>): Preset {
-  return agent.definition.access === 'read' || agent.usage?.access === 'read' ? 'read' : 'write';
+/** The agent's access: the definition's, lowered to read-only by its usage or the task's. */
+export function agentAccess(agent: Pick<Agent, 'definition' | 'usage'>, task?: Access): Access {
+  return strictestAccess(agent.definition.access, agent.usage?.access, task);
 }
 
 /** Effective events: the definition's, capped by the repo's `allowedEvents` when set. */
@@ -185,28 +243,49 @@ export function resolveEvents(agent: Agent, integrationId: string): string[] {
   return allow === undefined ? used : used.filter(event => allow.includes(event));
 }
 
-/** Engine and permission settings a task runs with: usage overrides definition. */
+/** Engine settings a task runs with: usage overrides definition. */
 export function effectiveSettings(agent: Agent): {
   engine?: string;
   model?: string;
   effort?: AgentUsage['effort'];
-  permissions: Permission;
 } {
   return {
     engine: agent.usage?.engine ?? agent.definition.engine,
     model: agent.usage?.model ?? agent.definition.model,
     effort: agent.usage?.effort ?? agent.definition.effort,
-    permissions: agent.usage?.permissions ?? agent.definition.permissions ?? 'auto',
   };
 }
 
-const PERMISSION_RANK: Record<Permission, number> = {
-  'read-only': 0,
-  'workspace-write': 1,
-  auto: 2,
-};
+/** Effective tools for every integration the agent declares and the catalog knows. */
+export function declaredTools(agent: Agent, access?: Access): Record<string, string[]> {
+  const result: Record<string, string[]> = {};
+  for (const id of Object.keys(agent.definition.integrations)) {
+    const integration = INTEGRATIONS[id];
+    if (integration) result[id] = integration.tools.presets[agentAccess(agent, access)];
+  }
+  return result;
+}
 
-/** Return `requested` only when it does not broaden `maximum`. */
-export function narrowPermission(maximum: Permission, requested?: Permission): Permission {
-  return requested && PERMISSION_RANK[requested] <= PERMISSION_RANK[maximum] ? requested : maximum;
+/** Whether this one agent handles the event, and with which flow and tools per integration. */
+export function matchAgent(
+  event: AgentEvent,
+  agent: Agent,
+  access?: Access,
+): { flow: string; tools: Record<string, string[]> } | undefined {
+  const integration = INTEGRATIONS[event.integration];
+  if (!integration) return undefined;
+  if (!resolveEvents(agent, event.integration).includes(event.type)) return undefined;
+  const options = eventOptions(agent.definition.integrations[event.integration], event.type);
+  if (!options) return undefined;
+  if (options.match !== undefined && !new RegExp(options.match).test(event.text)) return undefined;
+
+  return { flow: options.flow ?? 'default', tools: declaredTools(agent, access) };
+}
+
+/** Local `coder agent run` helper: every agent the event matches. */
+export function matchAgents(event: AgentEvent, agents: Agent[]) {
+  return agents.flatMap(agent => {
+    const match = matchAgent(event, agent);
+    return match ? [{ agent, ...match }] : [];
+  });
 }

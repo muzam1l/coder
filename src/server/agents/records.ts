@@ -4,22 +4,17 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 import { builtinDefinitions, agentsFromSources } from '../../agent/load';
-import { parseAgentDefinition } from '../../agent/definition';
+import { definitionProblems, parseAgentDefinition } from '../../agent/definition';
 import { INTEGRATIONS } from '../../integrations';
 import type { Integration } from '../../integrations/types';
-import {
-  PRESETS,
-  type Agent,
-  type AgentDefinition,
-  type AgentUsage,
-  type Preset,
-} from '../../agent/types';
+import { strictestAccess } from '../../core/config';
+import { type Agent, type AgentDefinition, type AgentUsage } from '../../agent/types';
 import { type AgentRecord, type AgentVersionRecord, type AgentPublication } from '../store/types';
 import { readVersion } from '../../core/runtime';
 import type { Store } from '../store/types';
 import type { ServerContext } from '../context';
 
-export interface PublishAgentInput {
+interface PublishAgentInput {
   id: string;
   name?: string;
   description?: string;
@@ -62,18 +57,12 @@ export async function agentWithVersion(
   return (await store.listAgentsWithVersions(slug))[0] ?? {};
 }
 
-/** Every agent with its current version, in one round of reads where the store can. */
-export async function agentsWithVersions(
-  store: Store,
-): Promise<Array<{ record: AgentRecord; version?: AgentVersionRecord }>> {
-  return store.listAgentsWithVersions();
-}
-
 export async function publishAgent(
   store: Store,
   input: PublishAgentInput,
   now: number,
-): Promise<AgentPublication> {
+  expected?: Pick<AgentRecord, 'currentVersion'>,
+): Promise<AgentPublication | undefined> {
   const definition = parseAgentDefinition(input.id, input.definition);
   const files = input.files && Object.keys(input.files).length ? input.files : undefined;
   return store.publishAgent(
@@ -101,6 +90,7 @@ export async function publishAgent(
       importedFrom: input.importedFrom,
       createdAt: now,
     },
+    expected,
   );
 }
 
@@ -110,7 +100,7 @@ export async function publishVersion(
   now: number,
   loaded?: { record?: AgentRecord; version?: AgentVersionRecord },
 ): Promise<AgentVersionRecord> {
-  if (!loaded) return (await publishAgent(store, input, now)).version;
+  if (!loaded) return (await publishAgent(store, input, now))!.version;
 
   const definition = parseAgentDefinition(input.id, input.definition);
   const files = input.files && Object.keys(input.files).length ? input.files : undefined;
@@ -190,8 +180,6 @@ export async function setAgentSettings(
   return updated;
 }
 
-const PERMISSIONS = ['read-only', 'workspace-write', 'auto'] as const;
-
 function mergedUsage(
   definition: AgentDefinition,
   base: AgentUsage | undefined,
@@ -216,19 +204,12 @@ function mergedUsage(
       return [id, allowedEvents ? { allowedEvents } : {}];
     }),
   );
-  const maximum = first.permissions ?? definition.permissions ?? 'auto';
-  const requested = second.permissions;
-  const permissions =
-    requested && PERMISSIONS.indexOf(requested) <= PERMISSIONS.indexOf(maximum)
-      ? requested
-      : maximum;
-  const access =
-    first.access === 'read' || second.access === 'read' ? 'read' : (second.access ?? first.access);
   return {
     ...first,
     ...second,
-    permissions,
-    ...(access ? { access } : {}),
+    ...(first.access || second.access
+      ? { access: strictestAccess(first.access, second.access) }
+      : {}),
     ...(ids.size ? { integrations: integrationUsage } : {}),
     ...(first.connections !== undefined || second.connections !== undefined
       ? {
@@ -248,6 +229,8 @@ export function agentProblems(
 ): string[] {
   if (record.problems?.length) return record.problems;
   if (!version) return [`No version ${record.currentVersion} for agent "${record.id}".`];
+  const problems = definitionProblems(version.definition);
+  if (problems.length) return problems;
 
   try {
     agentsFromSources(

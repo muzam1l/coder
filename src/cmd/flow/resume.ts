@@ -10,6 +10,7 @@ export const commandResume = command({
   usage:
     'Re-run a flow from its journal: finished steps replay instantly, the first\nchanged or new step onward runs live. Defaults to the most recent run.\nAccepts the same flags as flow run.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: { 'run-id': str('the run (default: the most recent)'), ...RUN_FLAGS },
   cli: {
     positional: ['run-id'],

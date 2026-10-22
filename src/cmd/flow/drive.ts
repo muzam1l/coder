@@ -8,6 +8,7 @@ export const commandDrive = command({
   name: 'drive',
   description: "drive a run's orchestrator, detached",
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     'run-id': str(),
     task: str('the task this run reports to; it gets the result as a message', '<id>'),

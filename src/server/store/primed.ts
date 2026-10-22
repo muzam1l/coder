@@ -2,15 +2,14 @@
 import type { AgentApp, Installation } from '../../agent/types';
 import type { StoredCredential } from '../settings/credentials';
 import type { StoredConfig } from '../settings/config';
-import type { TokenState } from './tokens';
 import type {
+  TokenState,
   DispatchInput,
   DispatchLoaded,
   RunnerRecord,
   Store,
   StoreKind,
   StoreListOptions,
-  StoreRecords,
   TaskStatus,
 } from './types';
 
@@ -23,8 +22,8 @@ export interface Loaded {
   credentials?: Array<{ id: string; value: StoredCredential }>;
   config?: StoredConfig;
   runner?: RunnerRecord;
-  /** Sealed secret rows, and a row in the old single-row layout when one exists. */
-  secrets?: { rows: string[]; old?: unknown };
+  /** Sealed secret rows. */
+  secrets?: { rows: string[] };
   resolved?: { id: string; value: { resolvedConnections: string; expiresAt?: number } };
   tokens?: TokenState;
 }
@@ -73,7 +72,7 @@ export function loadedStore(store: Store, status: TaskStatus, loaded: Loaded): S
               : kind === 'runner' && has('runner') && id === task.runnerId
                 ? loaded.runner
                 : kind === 'snapshot' && has('secrets') && id === `connection-secrets:${task.id}`
-                  ? (loaded.secrets?.old as StoreRecords['snapshot'] | undefined)
+                  ? undefined
                   : kind === 'snapshot' && has('resolved') && id.startsWith(resolved)
                     ? loaded.resolved?.id === id
                       ? loaded.resolved.value
@@ -87,7 +86,7 @@ export function loadedStore(store: Store, status: TaskStatus, loaded: Loaded): S
           }))
         : MISS,
     listCredentials: (opts: { owner?: string; limit?: number }) =>
-      has('credentials') && opts.owner === task.requester && opts.limit === undefined
+      has('credentials') && opts.owner === task.requestedBy && opts.limit === undefined
         ? (loaded.credentials ?? [])
         : MISS,
     heldTokens: (installations: string[], apps: string[]) =>
@@ -102,7 +101,7 @@ export function loadedStore(store: Store, status: TaskStatus, loaded: Loaded): S
 
 /** The store as an event's dispatch sees it: the workspace's records with the linked member's own, read with the claim. */
 export function dispatchStore(store: Store, loaded: DispatchLoaded, input: DispatchInput): Store {
-  const own = (owner: string | undefined) => owner === undefined || owner === loaded.requester;
+  const own = (owner: string | undefined) => owner === undefined || owner === loaded.member?.id;
   const visible = (row: { owner?: string }, owner: string | undefined) =>
     !row.owner || row.owner === owner;
 

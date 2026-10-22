@@ -2,7 +2,7 @@ import type http from 'node:http';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { type ReadableStream as WebStream } from 'node:stream/web';
-import { decodeJson, encodeJson } from '../../utils/base64url';
+import { decodeJson, encodeJson } from '../../utils/crypto';
 
 export function json(value: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(value), {
@@ -54,6 +54,18 @@ export const notAllowed = () => new Response('Method not allowed', { status: 405
 export const toLogin = (url: URL) =>
   redirect(`/login?return=${encodeURIComponent(`${url.pathname}${url.search}`)}`);
 
+export function safeReturnPath(candidate: string | null, origin: string): string {
+  const value = candidate ?? '/dash';
+  try {
+    const target = new URL(value, origin);
+    return target.origin === origin && !value.includes('\\') && !/^\/[/\\]/.test(target.pathname)
+      ? `${target.pathname}${target.search}${target.hash}`
+      : '/dash';
+  } catch {
+    return '/dash';
+  }
+}
+
 export const bodyLimit = (path: string): number =>
   path.startsWith('/api/auth')
     ? 64 * 1024
@@ -61,7 +73,7 @@ export const bodyLimit = (path: string): number =>
       ? 4 * 1024 * 1024
       : 1024 * 1024;
 
-export async function readLimited(
+async function readLimited(
   body: AsyncIterable<Uint8Array>,
   declared: string | number | undefined,
   limit: number,
@@ -170,4 +182,38 @@ export async function limitBody(req: Request, limit: number): Promise<Request | 
       return new Response('Payload too large', { status: 413 });
     throw error;
   }
+}
+
+export function withCookies(response: Response, cookies: string[] = []): Response {
+  if (!cookies.length) return response;
+  const headers = new Headers(response.headers);
+  for (const cookie of cookies) headers.append('set-cookie', cookie);
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+export function untilSent(response: Response, end: () => void): Response {
+  const reader = response.body!.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          end();
+          controller.close();
+        } else controller.enqueue(value);
+      } catch (error) {
+        end();
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      end();
+      return reader.cancel(reason);
+    },
+  });
+  return new Response(body, response);
 }

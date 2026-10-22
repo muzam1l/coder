@@ -7,6 +7,7 @@ import { load } from '@/api/load';
 import { Settle } from '@/comps/frame/stream';
 import { LoadingCard, LoadingToolbar } from '@/comps/frame/loading-card';
 import { listFilters } from '@/app/dash/[org]/tasks/list/task';
+import type { Me } from '@coder/client/types';
 
 // Rows arrive rendered; paging and filters hydrate once the list is in view.
 const TasksList = dynamic(() => import('./tasks-list').then(m => m.TasksList), {
@@ -39,6 +40,7 @@ export function loadTasks(request: Request, agent?: string) {
     limit: LIST_PAGE,
     summary: true,
     counts: true,
+    approvals: !agent,
     ...listFilters(filters),
     agent: agent ?? filters.agent,
   });
@@ -52,11 +54,14 @@ export function loadTasks(request: Request, agent?: string) {
           page => page.items.map((row): [string, string] => [row.id, row.name]),
           () => [],
         );
-  return { filters, first, catalog, agents, tz: zoneOf(request) };
+  const me = load(request)
+    .me()
+    .catch((): Me => ({}));
+  return { filters, first, catalog, agents, me, tz: zoneOf(request) };
 }
 
 export function TasksSection({
-  tasks: { filters, first, catalog, agents, tz },
+  tasks: { filters, first, catalog, agents, me, tz },
   agent,
   head,
   missing,
@@ -70,8 +75,8 @@ export function TasksSection({
   return (
     <Settle
       load={() =>
-        Promise.all([first, catalog.catch(() => []), agents, missing]).then(
-          ([page, integrations, ids, needs]) => (
+        Promise.all([first, catalog.catch(() => []), agents, missing, me]).then(
+          ([page, integrations, ids, needs, who]) => (
             <TasksList
               first={page}
               platforms={integrations.map((entry): [string, string] => [entry.id, entry.name])}
@@ -81,6 +86,8 @@ export function TasksSection({
               agent={agent}
               head={head}
               missing={needs}
+              pendingApprovals={page.pendingApprovals}
+              me={who}
               tz={tz}
               now={Date.now()}
             />

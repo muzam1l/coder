@@ -1,16 +1,12 @@
-import type { Effort, McpConfigEntry, Permission } from '../core/config';
+import type { Access, Effort, McpConfigEntry } from '../core/config';
 import type { Approval } from '../core/types';
 import type { TaskTurn, RunnerKind } from '../client/types';
 import type {
   PlatformApp,
   PlatformEvent,
   PlatformInstallation,
-  Preset,
   SinceMessage,
 } from '../integrations/types';
-
-export type { Preset } from '../integrations/types';
-export { PRESETS } from '../integrations/types';
 
 export type { RunnerKind } from '../client/types';
 
@@ -21,10 +17,6 @@ export interface AgentEventOptions {
   flow?: string;
   /** Regex the event text must match (e.g. keywords on Slack `message`). */
   match?: string;
-  /** May only narrow the agent's default permission for this event. */
-  permissions?: Permission;
-  /** `requester`: the task acts with the linked requester's own platform token. */
-  actAs?: 'requester';
 }
 
 export interface AgentDefinitionIntegration {
@@ -40,9 +32,8 @@ export interface AgentDefinition {
   runner?: string;
   model?: string;
   effort?: Effort;
-  permissions?: Permission;
-  /** Read-only or Read-write on its handles and connections; defaults to `write`. */
-  access?: Preset;
+  /** Read-only or auto for every task, handle and connection it uses; defaults to `auto`. */
+  access?: Access;
   /** MCP servers every task of this agent attaches, in the `.mcp.json` entry shape. */
   mcp?: Record<string, McpConfigEntry>;
   integrations: Record<string, AgentDefinitionIntegration>;
@@ -58,14 +49,20 @@ export interface AgentUsage {
   engine?: string;
   model?: string;
   effort?: Effort;
-  permissions?: Permission;
   /** May only lower the definition's access. */
-  access?: Preset;
+  access?: Access;
   integrations?: Record<string, AgentUsageIntegration>;
   /** Connections its tasks may use, by id; absent allows every connection the task is granted. */
   connections?: string[];
   /** Off in this workspace; the other settings stay for when it is enabled again. */
   disabled?: boolean;
+}
+
+/** A task's usage, plus the model its latest turn started with, its pick else its engine's default. */
+export interface TaskUsage extends AgentUsage {
+  /** The engine, model and effort chosen for this task, by its starter or a later turn; without one each turn follows its agent's settings. */
+  pick?: Pick<AgentUsage, 'engine' | 'model' | 'effort'>;
+  resolvedModel?: string;
 }
 
 export interface Agent {
@@ -126,8 +123,8 @@ export interface Connection {
   provider: 'mcp' | (string & {});
   /** The member it belongs to; absent for the workspace's. */
   owner?: string;
-  /** Absent follows the mode of the agent whose task uses it. */
-  access?: Preset;
+  /** `read-only` exposes only its read-only tools; absent or `auto` follows the task. */
+  access?: Access;
   /** Where the secret goes, without secret values; repository entries can name the connection but never change it. */
   endpoint?: McpConfigEntry;
   auth: 'none' | 'key' | 'oauth';
@@ -139,6 +136,8 @@ export interface Connection {
   credential?: string;
   /** Platform account or login that authorized it, for display. */
   account?: string;
+  /** The login of a member's linked `account`, when the link knows it. */
+  login?: string;
   /** The client that issued a personal native OAuth token. */
   oauthApp?: string;
   /** A refresh or call proved the secret dead; tasks skip it until it is reconnected. */
@@ -147,17 +146,8 @@ export interface Connection {
   updatedAt?: number;
 }
 
-/** Per-installation settings a user sets from the platform (`/setup` in Slack). */
-export interface InstallationSettings {
-  model?: string;
-  engine?: string;
-  effort?: string;
-}
-
-/** One install of an app, with the settings a user sets from the platform. */
-export interface Installation extends PlatformInstallation {
-  settings?: InstallationSettings;
-}
+/** One install of an app. */
+export type Installation = PlatformInstallation;
 
 /** Where a task came from: a Coder surface, or the id of the integration whose event started it. */
 export type TaskSource = 'dashboard' | 'cli' | 'schedule' | (string & {});
@@ -173,8 +163,8 @@ export interface AgentTask {
   runner: RunnerKind;
   /** Registered `http` runner the task routes to. */
   runnerId?: string;
-  /** Effective permission after host, usage, and event narrowing. */
-  permissions?: Permission;
+  /** Defaults to `auto`; at most its agent's and its parent's. */
+  access?: Access;
   /** The platform event, or for a dashboard or CLI task on a repo, that repo through its install. */
   event?: AgentEvent;
   /** What a dashboard or CLI task asks; the newest turn after a continue. */
@@ -199,10 +189,16 @@ export interface AgentTask {
   /** Applicable credentials frozen with the engine order, without their values. */
   engineCredentials?: Record<string, string>;
   /** Wular user who asked, when known; their personal credential comes first. */
-  requester?: string;
+  requestedBy?: string;
+  /** The task that started this one through its Coder server; a parent sees only its children. */
+  parent?: string;
+  /** Who sees it, set once when it is created; a child copies its parent's. */
+  audience?: string;
+  /** The space it came from, own or inherited. */
+  space?: string;
   /** Stored agent body for runners whose checkout does not contain the agent. */
   files?: Record<string, string>;
-  usage?: AgentUsage;
+  usage?: TaskUsage;
   /** Effective tools per integration the agent declares, by its access mode; every installation of the agent's apps serves them. */
   tools: Record<string, string[]>;
   /** Context gathered by the receiver: notes for the turn and who asked. */
@@ -211,6 +207,8 @@ export interface AgentTask {
   failureReply?: string;
   /** The task's dashboard page, linked when the agent returns no reply where one is due. */
   taskUrl?: string;
+  /** The agent's settings page, linked when its engine can't run the model it is set to. */
+  settingsUrl?: string;
 }
 
 export interface TaskContext {
@@ -227,6 +225,8 @@ export interface TaskContext {
   admissions?: Partial<Record<'batch' | 'reactions', string>>;
   /** The Coder account behind the event's actor, when they connected it. */
   user?: { name: string; email: string };
+  /** The linked member whose message started this turn, in any conversation. */
+  asker?: string;
   /** The task's escalations, answers included; a late answer resumes the task with them. */
   approvals?: Approval[];
 }

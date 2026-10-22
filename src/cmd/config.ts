@@ -1,8 +1,8 @@
 /** `coder config [list|get|set|unset]`: the effective config, or one dotted key in the user (or --workspace) file. */
 import process from 'node:process';
 
-import { config, configSet, resolveUserConfigFile } from '../core/config';
-import { CoderError } from '../core/dispatch';
+import type { configSet } from '../core/config';
+import { CoderError } from '../core/errors';
 import type { CoderConfig, EngineConfig } from '../core/types';
 import { renderCommandHelp } from '../tui/help';
 import { outStyle, printJson } from '../tui/output';
@@ -26,7 +26,7 @@ function parseValue(raw: string): unknown {
 }
 
 type ConfigResult =
-  | { action: 'list'; config: CoderConfig }
+  | { action: 'list'; config: CoderConfig; file: string }
   | { action: 'get'; value: unknown }
   | { action: 'set' | 'unset'; set: ReturnType<typeof configSet> };
 
@@ -36,6 +36,7 @@ export const commandConfig = command({
   usage:
     'Read or write configuration. `list` prints the effective config; get/set/unset\ntarget a dotted key (e.g. engines.codex.model). Writes go to ~/.coder/config.json.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     action: str('list, get, set or unset'),
     key: str('a dotted key, such as engines.codex.model'),
@@ -50,9 +51,19 @@ export const commandConfig = command({
       'coder config get engines.codex.model  # read one value',
     ],
   },
-  run({ options, args: [action, key, ...valueParts], cwd }): ConfigResult | undefined {
+  async run({
+    options,
+    args: [action, key, ...valueParts],
+    cwd,
+  }): Promise<ConfigResult | undefined> {
     if (!action || action === 'help') return undefined;
-    if (action === 'list') return { action, config: config.get(undefined, { cwd }) as CoderConfig };
+    const { config, resolveUserConfigFile } = await import('../core/config');
+    if (action === 'list')
+      return {
+        action,
+        config: config.get(undefined, { cwd }) as CoderConfig,
+        file: resolveUserConfigFile(),
+      };
     if (action === 'get') {
       if (!key) throw usage('coder config get <key>  (e.g. chain, engines.codex.model)');
       return { action, value: config.get(key, { cwd }) };
@@ -76,7 +87,7 @@ export const commandConfig = command({
   },
   print(result) {
     if (!result) return void process.stdout.write(renderCommandHelp(commandConfig));
-    if (result.action === 'list') return printConfigList(result.config, resolveUserConfigFile());
+    if (result.action === 'list') return printConfigList(result.config, result.file);
     if (result.action === 'get') return printConfigValue(result.value);
     printConfigSet(result.set);
   },
@@ -85,7 +96,7 @@ export const commandConfig = command({
 function printConfigList(cfg: CoderConfig, file: string): void {
   const s = outStyle;
   const summary = (engine?: EngineConfig) =>
-    [engine?.model, engine?.effort, engine?.permissions].filter(Boolean).join('/') || '-';
+    [engine?.model, engine?.effort].filter(Boolean).join('/') || '-';
   process.stdout.write(
     [
       `${s.dim('chain')}      ${cfg.chain.join(' -> ')}`,

@@ -12,6 +12,7 @@ export const commandConnectionApprove = command({
   usage:
     'Approve an MCP server this repository or one of its agents declares, on this machine. A changed endpoint or command needs approval again.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     name: z.string().check(z.describe('the MCP server')),
     agent: str('select the agent when names have different definitions', '<id>'),

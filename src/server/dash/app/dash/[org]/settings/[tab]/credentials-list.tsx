@@ -42,6 +42,10 @@ const KEYS = [
   ...CUSTOM_PROVIDERS.flatMap(provider => provider.envKey || []),
 ];
 
+/** The first known variable with no key saved yet, so the form never starts on one that exists. */
+const unsaved = (keys: CredentialRow[], saved?: string) =>
+  KEYS.find(key => key !== saved && !keys.some(row => row.name === key)) ?? '';
+
 /** One API key by its variable; a variable already saved in that scope asks before it is replaced. */
 function KeyForm({
   keys,
@@ -51,12 +55,13 @@ function KeyForm({
 }: {
   keys: CredentialRow[];
   admin: boolean;
-  /** The engine whose key the page was opened for. */
+  /** The engine or variable whose key the page was opened for. */
   focus: string;
   ask: (title: string, run: () => void) => void;
 }) {
   const [name, setName] = useState(
-    ENGINES.find(engine => engine.id === focus)?.key ?? 'OPENAI_API_KEY',
+    ENGINES.find(engine => engine.id === focus)?.key ??
+      (/^[A-Z][A-Z0-9_]*$/.test(focus) ? focus : unsaved(keys)),
   );
   const [scope, setScope] = useState(admin ? 'workspace' : 'personal');
   const input = useRef<HTMLInputElement>(null);
@@ -82,7 +87,7 @@ function KeyForm({
               ...(scope === 'workspace' ? { workspace: true } : {}),
             });
             form.reset();
-            setName('OPENAI_API_KEY');
+            setName(unsaved(keys, variable));
           });
         if (keys.some(row => row.name === variable && row.scope === scope))
           ask(replaceTitle(variable, scope), save);
@@ -445,8 +450,8 @@ export function CredentialsList({
         <Card title="Subscriptions">
           <div class="cred-engine">
             <p class="muted cred-note">
-              Personal only: a subscription runs your own tasks and your 1:1 DMs with agents, never
-              the workspace's shared threads.
+              Yours only, other members sign in themselves. A subscription runs your own tasks and
+              your 1:1 DMs with agents, never the workspace's shared threads.
             </p>
             <table class="rows creds">
               <tbody>
@@ -462,7 +467,7 @@ export function CredentialsList({
                       actions={
                         <>
                           <Button
-                            {...(row ? { variant: 'ghost', size: 'sm' } : {})}
+                            {...(row ? { variant: 'secondary', size: 'sm' } : {})}
                             autoFocus={focus === engine.id && !row}
                             disabled={Boolean(active)}
                             onClick={() => replacing(engine, () => signIn(engine.id))}
@@ -574,6 +579,7 @@ export function CredentialsList({
                         ? {
                             title: `Remove ${row.name}?`,
                             body: 'Tasks that use it stop running.',
+                            link: row.name,
                             onRemove: () => remove(row),
                           }
                         : undefined

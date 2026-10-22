@@ -1,6 +1,7 @@
 /** The command tree: one contextjsx app and its top-level shortcuts. */
 import { defineApp } from 'contextjsx';
 
+import { CODER_APP_NAME, CODER_DESCRIPTION } from '../core/runtime';
 import { commandAgent } from './agent';
 import { commandAuth } from './auth';
 import { commandConfig } from './config';
@@ -18,8 +19,8 @@ import { commandTaskGroup } from './task';
 import { commandUpgrade } from './upgrade';
 
 export const cli = defineApp({
-  name: 'coder',
-  description: 'Delegate a coding task to the best available engine and steer it while it runs.',
+  name: CODER_APP_NAME,
+  description: CODER_DESCRIPTION,
   namespaces: [
     commandTaskGroup,
     commandFlow,

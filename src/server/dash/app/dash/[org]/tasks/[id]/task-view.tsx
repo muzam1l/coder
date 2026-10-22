@@ -6,15 +6,22 @@ import { Fragment } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useFollowEnd } from '@/utils/follow';
 
-import { serverEvents } from '@coder/client';
-import { LogView, type TaskDisplayRow } from '@coder/core/task/log-view';
-import { EMPTY_MESSAGE, EMPTY_MESSAGE_NOTICE, SKIPPED } from '@coder/core/defaults';
+import { serverEvents } from '@coder/client/http';
+import {
+  LogView,
+  type TaskDisplayRow,
+  EMPTY_MESSAGE,
+  EMPTY_MESSAGE_NOTICE,
+  SKIPPED,
+  eventMessages,
+  type EventMessage,
+} from '@coder/core/task/view';
 import { client } from '@/utils/client';
 import { formatDate, formatDuration, reasonText } from '@/utils/format';
 import { Link } from '@wular/pnext/link';
 import { useSearchParams } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
-import type { TaskLog, TaskRow, TaskTurn } from '@coder/client/types';
+import type { Me, TaskLog, TaskRow, TaskTurn } from '@coder/client/types';
 import { iAgent, iClock, iDown, iFolder, iPlug, iRight, iTerminal } from '@/comps/ui/icons';
 import { Badge } from '@/comps/ui/badge';
 import { Button } from '@/comps/ui/button';
@@ -25,9 +32,8 @@ import { Menu } from '@/comps/ui/menu';
 import { MenuRadio } from '@/comps/ui/menu-items';
 import { Back, PageHead } from '@/comps/frame/page-head';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
-import { Status } from '@/app/dash/[org]/tasks/list/status';
+import { ReadOnlyBadge, Status } from '@/app/dash/[org]/tasks/list/status';
 import {
-  eventMessages,
   folderName,
   replyRequired,
   sourceLabel,
@@ -35,7 +41,6 @@ import {
   taskModel,
   taskTitle,
   TASK_TABS,
-  type EventMessage,
 } from '@/app/dash/[org]/tasks/list/task';
 import { useAction } from '@/utils/action';
 import { useZone } from '@/app/zone';
@@ -61,7 +66,12 @@ function turnMessages(task: TaskRow, prompt: string, first: boolean): EventMessa
   return (
     eventMessages(prompt) ??
     (first && event?.actor && prompt === event.text
-      ? [{ author: event.actor.login ?? event.actor.id, text: prompt }]
+      ? [
+          {
+            author: event.actor.login !== event.actor.id ? (event.actor.login ?? '') : '',
+            text: prompt,
+          },
+        ]
       : [{ author: 'Prompt', text: prompt }])
   );
 }
@@ -170,6 +180,7 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
         <>
           <Status status={task.status} approvals={task.approvals} />
           {task.archivedAt ? <Badge>archived</Badge> : null}
+          {task.task.access === 'read-only' ? <ReadOnlyBadge /> : null}
         </>
       }
       lead={
@@ -230,7 +241,15 @@ function useDisplayRows(lines: TaskLog[]) {
 }
 
 /** A task as a conversation with its activity; the box at the bottom steers, asks, or continues. */
-export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: string }) {
+export function TaskView({
+  initial,
+  tz: serverZone,
+  me,
+}: {
+  initial: TaskRow;
+  tz: string;
+  me: Me;
+}) {
   const tz = useZone(serverZone);
   const [task, setTask] = useState(initial);
   const [lines, setLines] = useState(initial.logs ?? []);
@@ -502,7 +521,6 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
     setTimeout(() => input.current?.focus());
   };
 
-  const result = task.result;
   return (
     <>
       <TaskHead task={task} tz={tz} />
@@ -532,7 +550,7 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
         <Activity rows={rows} live={live} tz={tz} at={at} />
       ) : (
         <>
-          <Approval task={task} />
+          <Approval task={task} me={me} />
           <div class="convo">
             {shown.map((turn, index) => {
               const last = index === turns.length - 1;
@@ -550,7 +568,7 @@ export function TaskView({ initial, tz: serverZone }: { initial: TaskRow; tz: st
                   {decision ? <DecisionTurn approval={decision} /> : null}
                   {(decision ? [] : parsed[index]!.messages).map((message, index) => (
                     <div key={`p${index}`} class="turn prompt">
-                      <p class="who">{message.author}</p>
+                      {message.author ? <p class="who">{message.author}</p> : null}
                       <Collapse class="prose">{message.text}</Collapse>
                     </div>
                   ))}

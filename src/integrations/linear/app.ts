@@ -1,7 +1,7 @@
 /** Linear apps: the user's own OAuth application, workspaces bound by installing it as an app actor. */
 import { randomUUID } from 'node:crypto';
 
-import { freshToken, postedFields, tokenGrant } from '../setup';
+import { freshToken, postedFields, tokenGrant, type StoredToken } from '../setup';
 import {
   IntegrationError,
   type PlatformInstallation,
@@ -18,6 +18,7 @@ export interface LinearAppCredentials {
 
 const AUTHORIZE = 'https://linear.app/oauth/authorize';
 const TOKEN = 'https://api.linear.app/oauth/token';
+const REVOKE = 'https://api.linear.app/oauth/revoke';
 const GRAPHQL = 'https://api.linear.app/graphql';
 const FIELDS = ['clientId', 'clientSecret', 'webhookSecret'] as const;
 
@@ -154,6 +155,22 @@ export const linearApp: IntegrationApp = {
     return { platformAppId: key, name: spec.name, credentials };
   },
   accountUrl: ({ login }) => `https://linear.app/${encodeURIComponent(login)}`,
+  // Revoking the refresh token ends the whole grant (RFC 7009).
+  async uninstall(installation, _credentials, { fetch: request }) {
+    if (!installation.token) throw new Error('The installation has no token');
+    const { accessToken, refreshToken }: StoredToken = JSON.parse(installation.token);
+    const response = await request(REVOKE, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams(
+        refreshToken
+          ? { token: refreshToken, token_type_hint: 'refresh_token' }
+          : { token: accessToken, token_type_hint: 'access_token' },
+      ),
+    });
+    if (!response.ok) throw new Error(`Linear answered ${response.status} to the revoke`);
+  },
+  installationUrl: () => 'https://linear.app/settings/applications',
   installUrl(_app, credentials, { publicUrl, state }) {
     return authorizeUrl(credentials, `${base(publicUrl)}/install/linear/callback`, state, true);
   },
@@ -200,7 +217,7 @@ export const linearUserAuth: IntegrationUserAuth = {
       ...(access ? { token: JSON.stringify(token) } : {}),
     };
   },
-  async access(stored, credentials, { fetch: request, now }) {
+  async access(stored, credentials, { fetch: request, now, force }) {
     const { clientId, clientSecret } = credentials as LinearAppCredentials;
     let refreshed: string | undefined;
     const accessToken = await freshToken(
@@ -221,6 +238,7 @@ export const linearUserAuth: IntegrationUserAuth = {
         refreshed = token;
       },
       now,
+      force,
     );
 
     return { accessToken, ...(refreshed ? { refreshed } : {}) };

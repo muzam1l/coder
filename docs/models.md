@@ -4,6 +4,8 @@ Manage every model Coder can dispatch to. That means the built-in Codex and Clau
 
 ## Connect a model
 
+Add one under **# Settings → (Models)** or with `coder model add`:
+
 ```bash
 # local Ollama model, no key
 coder model add qwen --base-url http://localhost:11434/v1 --model qwen2.5-coder:32b
@@ -28,8 +30,7 @@ Anywhere a model name goes; together they form the `custom` engine:
 
 ```bash
 coder run --model qwen "explain this repo"        # per task
-coder run --engine custom "explain this repo"      # the custom engine (its default model, or the only one)
-coder config set engines.custom.model qwen         # default model for --engine custom
+coder config set engines.custom.model qwen         # default model of the custom engine
 coder model list                                  # list models + probe their endpoints
 ```
 

@@ -3,16 +3,18 @@ import process from 'node:process';
 
 import type { models } from '../../core/models';
 import { outStyle } from '../../tui/output';
-import { command, nextSteps, MODEL_HINT } from '../../cli';
+import { serverOptions } from '../../utils/args';
+import { command, nextSteps } from '../../cli';
 
 export const commandModelList = command({
   name: 'list',
   description: 'list built-ins, custom models, and aliases',
-  usage: `List built-in aliases, configured custom models, and user aliases. Only custom\nmodels are probed.\n\n${MODEL_HINT}`,
+  usage: `List built-in aliases, configured custom models, and user aliases. Only custom\nmodels on this machine are probed; --server lists the workspace's.`,
   access: 'read',
-  run: async ({ cwd }) => {
+  args: serverOptions,
+  run: async ({ options, cwd }) => {
     const { models } = await import('../../core/models');
-    return models.list({ cwd });
+    return models.list({ ...options, cwd });
   },
   next: () =>
     nextSteps([
@@ -53,9 +55,15 @@ function printModelList(data: Awaited<ReturnType<typeof models.list>>): void {
   lines.push(s.bold('Custom models'), '');
   if (!data.custom.length) lines.push(s.dim('  None.'));
   for (const { name, probe, ...entry } of data.custom) {
-    const reach = entry.disabled ? s.dim('∅') : probe.reachable ? s.green('✔') : s.red('✘');
+    const reach = entry.disabled
+      ? s.dim('∅')
+      : !probe
+        ? s.dim('·')
+        : probe.reachable
+          ? s.green('✔')
+          : s.red('✘');
     lines.push(
-      `  ${reach} ${name.padEnd(14)} ${entry.model} ${s.dim(`@ ${entry.baseUrl}${entry.contextWindow ? `, ${entry.contextWindow} tokens` : ''}. ${probe.detail}`)}${suffix(entry.disabled)}`,
+      `  ${reach} ${name.padEnd(14)} ${entry.model} ${s.dim(`@ ${entry.baseUrl}${entry.contextWindow ? `, ${entry.contextWindow} tokens` : ''}.${probe ? ` ${probe.detail}` : ''}`)}${suffix(entry.disabled)}`,
     );
   }
   lines.push('');
@@ -70,6 +78,5 @@ function printModelList(data: Awaited<ReturnType<typeof models.list>>): void {
     lines.push('');
   }
 
-  lines.push(...MODEL_HINT.split('\n'));
-  process.stdout.write(`${lines.join('\n')}\n`);
+  process.stdout.write(`${lines.join('\n').trimEnd()}\n`);
 }

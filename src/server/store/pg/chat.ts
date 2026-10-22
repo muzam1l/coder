@@ -1,4 +1,4 @@
-/** Chat SDK state, one statement per call: `k:` values, `l:` locks and `s:` subscriptions in `chat_state`; `k:` lists and `q:` queues one row per item in `chat_item`. */
+/** Chat SDK state, one statement per call: `k:` values, `l:` locks and `s:` subscriptions in `state`; `k:` lists and `q:` queues one row per item in `chat_item`. */
 import { randomUUID } from 'node:crypto';
 
 import { and, eq, gt, isNull, lte, or, sql, type SQL } from 'drizzle-orm';

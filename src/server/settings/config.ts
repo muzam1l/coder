@@ -10,7 +10,7 @@ import {
 } from '../../core/config';
 import { taskError } from '../tasks/admin';
 import { json } from '../routes/http';
-import { mergePatch } from '../../core/defaults';
+import { mergePatch } from '../../core/types';
 import { type ServerContext } from '../context';
 import { type Store } from '../store/types';
 

@@ -22,6 +22,7 @@ import { SCOPES } from '@/app/dash/[org]/settings/model-options';
 import { sortedRunners } from '@/app/dash/[org]/tasks/composer-data';
 import { useRunnerEvents } from '@/comps/frame/task-toasts';
 import { useRemove } from './list';
+import { useSearchParams } from '@wular/pnext/navigation/client';
 import type { Me, RunnerKind, RunnerPairing, RunnerRow, RunnerSpec } from '@coder/client/types';
 
 type Runners = { items: RunnerRow[]; catalog: RunnerSpec[] };
@@ -83,6 +84,7 @@ function RunnerItem({
       ? {
           title: `Remove ${runner.name}?`,
           body: 'Its tasks go to another runner.',
+          link: runner.id,
           onRemove: () => onChange(() => client.runners.remove(runner.id)),
         }
       : undefined,
@@ -120,8 +122,10 @@ function RunnerItem({
               runner.name
             )}
           </b>
-          <Badge>{runner.scope}</Badge>
-          {runner.default ? <Badge tone="acc">default</Badge> : null}
+          <span class="runner-badges">
+            <Badge>{runner.scope}</Badge>
+            {runner.default ? <Badge tone="acc">default</Badge> : null}
+          </span>
         </span>
         <Status runner={runner} tested={tested} />
       </td>
@@ -199,8 +203,16 @@ function AddRunner({
   known: string[];
   onAdded: (rows: Runners) => void;
 }) {
-  const [picked, setKind] = useState<RunnerKind>();
-  const [scope, setScope] = useState(personal ? 'personal' : 'workspace');
+  // A chat's link picks a kind set up by fields and fills the form in.
+  const asked = useSearchParams();
+  const [picked, setKind] = useState(
+    catalog.find(
+      each => each.available && each.connect === 'fields' && each.kind === asked.get('add'),
+    )?.kind,
+  );
+  const [scope, setScope] = useState(
+    asked.get('scope') === 'workspace' && admin ? 'workspace' : personal ? 'personal' : 'workspace',
+  );
   const action = useAction();
   const busy = Boolean(action.pending);
   const [paired, setPairing] = useState<RunnerPairing>();
@@ -292,7 +304,12 @@ function AddRunner({
             {spec.help ? <p class="muted runner-help">{spec.help}</p> : null}
             <div class="add-grid">
               <Field label="Name" hint="shown in the list">
-                <input name="name" placeholder={spec.name} autocomplete="off" />
+                <input
+                  name="name"
+                  defaultValue={asked.get('name') ?? undefined}
+                  placeholder={spec.name}
+                  autocomplete="off"
+                />
               </Field>
               {spec.fields.map(field => (
                 <Field

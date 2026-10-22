@@ -1,17 +1,19 @@
-/** GitHub App creation from a manifest, installs bound by user authorization, and user OAuth for linking. */
+/** GitHub App creation from a manifest, installs bound by user authorization, user OAuth for linking, and installation tokens. */
+import { createHash } from 'node:crypto';
+
 import {
   IntegrationError,
-  PRESETS,
+  type Access,
   type PlatformApp,
   type AppSpec,
   type AppDrift,
   type IntegrationApp,
+  type IntegrationAuth,
   type IntegrationUserAuth,
   type PlatformUser,
-  type Preset,
+  type TokenBound,
 } from '../types';
-import { API, githubHeaders, type Fetcher } from './api';
-import { GITHUB_PRESETS } from './tools';
+import { API, GITHUB_PRESETS, githubHeaders, octokit, type Fetcher } from './api';
 
 export interface GithubAppCredentials {
   appId: string;
@@ -25,7 +27,7 @@ export interface GithubAppCredentials {
   owner?: { login: string; type?: string };
 }
 
-export interface GithubManifest {
+interface GithubManifest {
   name: string;
   description?: string;
   url: string;
@@ -40,7 +42,7 @@ export interface GithubManifest {
   default_events: string[];
 }
 
-export interface GithubAppCreated {
+interface GithubAppCreated {
   appId: string;
   slug: string;
   privateKey: string;
@@ -167,12 +169,13 @@ async function tokenRequest(
     refresh_token?: string;
     expires_in?: number;
     error?: string;
+    error_description?: string;
   };
   if (!response.ok || !body.access_token)
     throw new IntegrationError(
       'platform-error',
       body.error ?? String(response.status),
-      `GitHub authorization failed: ${body.error ?? response.status}`,
+      `GitHub authorization failed: ${body.error_description ?? body.error ?? response.status}`,
     );
   return {
     accessToken: body.access_token,
@@ -234,7 +237,7 @@ async function appToken(credentials: GithubAppCredentials): Promise<string> {
 }
 
 /** Whether this app owns the installation, from `GET /app/installations/{id}` as the app itself; GitHub answers 404 for another app's. */
-export async function appInstallation(
+async function appInstallation(
   credentials: GithubAppCredentials,
   installationId: string,
   request: Fetcher = fetch,
@@ -289,9 +292,18 @@ export const githubUserAuth: IntegrationUserAuth = {
     );
     return user;
   },
-  async access(stored, credentials, { fetch: request, now }) {
+  async access(stored, credentials, { fetch: request, now, force }) {
     const token = JSON.parse(stored) as UserToken;
-    if (!token.expiresAt || token.expiresAt - 5 * 60_000 > now || !token.refreshToken)
+    if (!token.refreshToken) {
+      if (force)
+        throw new IntegrationError(
+          'platform-error',
+          'invalid_token',
+          'The refused token has no refresh token',
+        );
+      return { accessToken: token.accessToken };
+    }
+    if (!force && (!token.expiresAt || token.expiresAt - 5 * 60_000 > now))
       return { accessToken: token.accessToken };
     const refreshed = await tokenRequest(
       credentials,
@@ -304,18 +316,16 @@ export const githubUserAuth: IntegrationUserAuth = {
 };
 
 /** Smallest preset holding every listed tool. */
-function presetFor(tools: Preset | string[]): Preset {
+function presetFor(tools: Access | string[]): Access {
   if (!Array.isArray(tools)) return tools;
-  return (
-    PRESETS.find(preset => tools.every(tool => GITHUB_PRESETS[preset].includes(tool))) ?? 'write'
-  );
+  return tools.every(tool => GITHUB_PRESETS['read-only'].includes(tool)) ? 'read-only' : 'auto';
 }
-const APP_PERMISSIONS: Record<Preset, Record<string, string>> = {
-  read: { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'write' },
-  write: { metadata: 'read', contents: 'write', pull_requests: 'write', issues: 'write' },
+const APP_PERMISSIONS: Record<Access, Record<string, string>> = {
+  'read-only': { metadata: 'read', contents: 'read', pull_requests: 'write', issues: 'write' },
+  auto: { metadata: 'read', contents: 'write', pull_requests: 'write', issues: 'write' },
 };
 /** GitHub App manifest permissions for a tools preset or explicit tool list. */
-export function githubAppPermissions(tools: Preset | string[] = 'write'): Record<string, string> {
+export function githubAppPermissions(tools: Access | string[] = 'auto'): Record<string, string> {
   return { ...APP_PERMISSIONS[presetFor(tools)] };
 }
 const APP_EVENTS: Record<string, string[]> = {
@@ -324,9 +334,18 @@ const APP_EVENTS: Record<string, string[]> = {
   comment: ['issue_comment', 'pull_request_review_comment'],
   mention: ['issue_comment', 'pull_request_review_comment'],
 };
-/** GitHub App manifest webhook events for catalog event names; GitHub sends installation events to every app unasked. */
+/** Webhooks that change who is in a repository's member list. */
+const MEMBERSHIP_EVENTS = ['member', 'membership', 'organization', 'team'];
+/** GitHub App manifest webhook events for catalog event names, plus `repository` for privacy changes and the membership webhooks; GitHub sends installation events to every app unasked. */
 export function githubAppEvents(events: string[]): string[] {
-  return [...new Set([...events.flatMap(event => APP_EVENTS[event] ?? []), 'push'])];
+  return [
+    ...new Set([
+      ...events.flatMap(event => APP_EVENTS[event] ?? []),
+      'push',
+      'repository',
+      ...MEMBERSHIP_EVENTS,
+    ]),
+  ];
 }
 
 /** The manifest a spec asks for. */
@@ -341,6 +360,8 @@ function specManifest(publicUrl: string, spec: AppSpec, isPublic?: boolean): Git
       ...(events.some(event => Object.hasOwn(APP_EVENTS, event))
         ? { issues: 'write', pull_requests: 'write' }
         : {}),
+      // The membership webhooks need it; task tokens never carry it.
+      members: 'read',
     },
     events: githubAppEvents(events),
     isPublic,
@@ -434,6 +455,19 @@ export const githubApp: IntegrationApp = {
     return { platformAppId: created.appId, name: created.slug, credentials };
   },
   accountUrl: ({ login }) => `https://github.com/${encodeURIComponent(login)}`,
+  // `DELETE /app/installations/{id}` as the app itself.
+  async uninstall(installation, credentials, { fetch: request }) {
+    const id = installation.id.split(':').pop()!;
+    const response = await request(`${API}/app/installations/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: githubHeaders(await appToken(credentials as GithubAppCredentials)),
+    });
+    if (!response.ok) throw new Error(`GitHub answered ${response.status} to the uninstall`);
+  },
+  installationUrl: ({ id, account }) =>
+    account.type === 'Organization'
+      ? `https://github.com/organizations/${encodeURIComponent(account.login)}/settings/installations/${id.split(':').pop()}`
+      : `https://github.com/settings/installations/${id.split(':').pop()}`,
   settingsUrl(_app, credentials) {
     const { slug, owner } = credentials as GithubAppCredentials;
     return owner ? settingsPage(slug, owner) : undefined;
@@ -491,4 +525,62 @@ export const githubApp: IntegrationApp = {
       user,
     };
   },
+};
+
+/** An installation token narrowed to `scope`, minted with the app's key through the GitHub adapter's own auth library; GitHub's last an hour. */
+async function mintInstallationToken(
+  config: { appId: string; privateKey: string },
+  installationId: string | number,
+  scope: { permissions?: Record<string, string> } = {},
+  request?: typeof fetch,
+): Promise<{ token: string; expiresAt: number }> {
+  const client = await octokit(
+    { appId: config.appId, privateKey: config.privateKey, installationId: Number(installationId) },
+    request,
+  );
+  const { token, expiresAt } = (await client.auth({
+    type: 'installation',
+    installationId,
+    ...(scope.permissions ? { permissions: scope.permissions } : {}),
+  })) as { token: string; expiresAt: string };
+  return { token, expiresAt: Date.parse(expiresAt) };
+}
+
+export async function installationToken(
+  ...input: Parameters<typeof mintInstallationToken>
+): Promise<string> {
+  return (await mintInstallationToken(...input)).token;
+}
+
+/** The app key and the exact scope; an omitted part differs from an empty one. */
+function githubReuseKey(credentials: unknown, bound?: TokenBound): string {
+  const { appId, privateKey } = credentials as GithubAppCredentials;
+  const { permissions } = githubTokenScope(bound);
+  return createHash('sha256')
+    .update(
+      JSON.stringify([appId, privateKey, permissions ? Object.entries(permissions).sort() : null]),
+    )
+    .digest('base64url');
+}
+
+/** The narrowest token for a bound: the permissions its tools need, on every repository of the installation. */
+export function githubTokenScope(bound: TokenBound = {}): { permissions?: Record<string, string> } {
+  return bound.tools ? { permissions: githubAppPermissions(bound.tools) } : {};
+}
+
+export const githubToken: IntegrationAuth['token'] = async (
+  installation,
+  credentials,
+  bound,
+  { fetch: request, hold } = {},
+) => {
+  const mint = () =>
+    mintInstallationToken(
+      credentials as GithubAppCredentials,
+      // Installation store ids are `<app id>:<platform installation id>`.
+      installation.id.split(':').pop()!,
+      githubTokenScope(bound),
+      request,
+    );
+  return hold ? hold(githubReuseKey(credentials, bound), mint) : (await mint()).token;
 };

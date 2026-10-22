@@ -10,6 +10,7 @@ export const commandRunnerTest = command({
   description: 'check a runner connection',
   usage: 'Check the runner connection.',
   access: 'read',
+  approvalPolicy: 'deny',
   args: { id: z.string().check(z.describe('the runner')), ...credentialServerOptions },
   globalFlags: { cwd: false },
   cli: { positional: ['id'] },

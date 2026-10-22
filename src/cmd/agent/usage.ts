@@ -5,6 +5,7 @@ import type { UsageTotals } from '../../server/tasks/usage';
 import { outStyle, renderTable } from '../../tui/output';
 import { serverOptions, str } from '../../utils/args';
 import { command } from '../../cli';
+import { CoderError } from '../../core/errors';
 
 function printUsage(result: UsageTotals, by?: string): void {
   const rows = Array.isArray(result.totals)
@@ -32,6 +33,17 @@ function printUsage(result: UsageTotals, by?: string): void {
   );
 }
 
+/** `--since` as epoch ms: a period back from now, or epoch ms as given. */
+function since(value: string): number {
+  if (/^\d+$/.test(value)) return Number(value);
+  const match = /^(\d+)([dh])$/.exec(value);
+  if (!match)
+    throw new CoderError('invalid-option', 'Invalid --since value.', {
+      hint: 'Use 7d, 24h, or milliseconds since epoch',
+    });
+  return Date.now() - Number(match[1]) * (match[2] === 'd' ? 86_400_000 : 3_600_000);
+}
+
 export const commandAgentUsage = command({
   name: 'usage',
   description: 'aggregate usage by agent, installation, or engine',
@@ -47,7 +59,7 @@ export const commandAgentUsage = command({
       ...options,
       cwd,
       organization: options.workspace,
-      since: options.since ?? '7d',
+      since: since(options.since ?? '7d'),
     });
   },
   print: (result, { options }) => printUsage(result, options.by),

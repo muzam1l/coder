@@ -8,8 +8,18 @@ import { CoderError } from '../core/dispatch';
 import { processStartMs, processStarts, loadTask } from '../core/state';
 import { createJsonlTail, watchChanges } from '../utils/fsx';
 import { stopTask } from '../core/task/actions';
-import { TERMINAL_STATUSES, type TokenUsage } from '../core/types';
-import { Journal, readJournal } from './journal';
+import { TERMINAL_STATUSES, type Access, type TokenUsage } from '../core/types';
+import {
+  Journal,
+  readJournal,
+  type FlowHooks,
+  type RunContext,
+  ctxALS,
+  scopeALS,
+  Semaphore,
+  loadAndRun,
+  emitFlowEvent,
+} from './runtime';
 import { resolveFlow } from './discover';
 import type { FlowEvent, FlowRecord } from './types';
 import type { ReviewArgs, ReviewResult } from './builtin/review';
@@ -23,15 +33,6 @@ import {
   writeFlowRecord,
   flowTaskIds,
 } from './runs';
-import {
-  type FlowHooks,
-  type RunContext,
-  ctxALS,
-  scopeALS,
-  Semaphore,
-  loadAndRun,
-  emitFlowEvent,
-} from './runtime';
 
 // ---------------------------------------------------------------------------
 // executeRun is the journaled orchestrator for the CLI and SDK.
@@ -47,8 +48,8 @@ export interface RunOptions {
   /** Platform credential for built-in integrations; never persisted with the run. */
   integrationToken?: string;
   connections?: RunContext['connections'];
-  /** The agent whose permissions cap every task this run starts. */
-  ceiling?: { agent: string; permissions: string };
+  /** The agent's access, which caps every task this run starts. */
+  access?: Access;
 }
 
 export interface RunSummary {
@@ -355,7 +356,7 @@ function beginRun(
     hooks,
     ...(opts.integrationToken ? { integrationToken: opts.integrationToken } : {}),
     ...(opts.connections ? { connections: opts.connections } : {}),
-    ...(opts.ceiling ? { ceiling: opts.ceiling } : {}),
+    ...(opts.access ? { access: opts.access } : {}),
   };
 
   const markStopped = () => {

@@ -9,6 +9,15 @@ export const commandModelUnalias = command({
   description: 'remove an alias',
   usage: 'Remove a user-defined alias.',
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/settings/models',
+      label: 'Remove the alias',
+      action: 'delete',
+      args: ['name'],
+      button: 'Remove',
+    },
+  },
   args: { name: str('the alias'), workspace: workspaceFlag },
   cli: { positional: ['name'] },
   run: async ({ options, args: [name], cwd }) => {

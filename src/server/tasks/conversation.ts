@@ -13,13 +13,12 @@ import { continueTask, MAX_PROMPT_CHARS, TaskInputError } from './create';
 import { kick } from './kick';
 import { localTask, resumeLocalTask } from './local';
 import { ACTIVE_STATES, addInbox, BatchClaimLost, readInbox, type BatchAdmission } from './queue';
-import { conversationKey } from './thread';
 
 export const CONVERSATION_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** A stopped task waits this long after the last message before it resumes, so a burst wakes it once. */
-export const STEER_BATCH_MS = 5000;
+const STEER_BATCH_MS = 5000;
 /** Reactions in a running task's conversation are gathered this long before they go in as one steer. */
-export const REACTION_BATCH_MS = 30_000;
+const REACTION_BATCH_MS = 30_000;
 /** An unclaimed batch outlives any wait; the next message in its conversation takes it. */
 const BATCH_TTL_MS = 60 * 60 * 1000;
 
@@ -65,7 +64,7 @@ export interface Batch<T = unknown> {
   sending?: { owner: string; count: number; until?: number; more?: number; mustReply?: boolean };
 }
 
-export interface Reaction {
+interface Reaction {
   emoji: string;
   by: string;
   on: string;
@@ -229,7 +228,8 @@ export function directAsk(integration: Integration, event: AgentEvent): boolean 
     on === 'mention' ||
     on === 'command' ||
     event.chat?.thread.isDM === true ||
-    event.chat?.message?.isMention === true
+    event.chat?.message?.isMention === true ||
+    event.mentioned === true
   );
 }
 
@@ -360,6 +360,7 @@ async function steerRunning(
   status: TaskStatus,
   text: string,
   batch?: BatchAdmission,
+  asker?: string | null,
 ): Promise<boolean> {
   if (!ACTIVE_STATES.includes(status.status)) return false;
   // A started local turn that already ended counts as stopped, so a burst after it resumes it once.
@@ -369,7 +370,10 @@ async function steerRunning(
       : undefined;
   if (turn && !ACTIVE_STATES.includes(turn.status)) return false;
 
-  return Boolean(await addInbox(ctx, status, 'steer', { text }, batch));
+  // A message's author, `null` when unknown; only its owner's messages keep a Just me connection this turn.
+  const value = asker === undefined ? { text } : { text, asker };
+
+  return Boolean(await addInbox(ctx, status, 'steer', value, batch));
 }
 
 /** Whether the task runs as a CLI task on this local server. */
@@ -383,9 +387,10 @@ async function resume(
   text: string,
   mustReply: boolean,
   admissions: TaskContext['admissions'],
+  asker: string | undefined,
 ): Promise<boolean> {
   const { task } = status;
-  const context = { mustReply, admissions: { ...task.context?.admissions, ...admissions } };
+  const context = { mustReply, admissions: { ...task.context?.admissions, ...admissions }, asker };
   if (runsHere(ctx, task))
     return resumeLocalTask(ctx, ctx.local!.cwd, task.id, text, undefined, {}, context);
   try {
@@ -413,6 +418,7 @@ interface Steer {
   admission: string;
   event: AgentEvent;
   user?: TaskContext['user'];
+  asker?: string;
 }
 
 function steerDelivery(batch: Steer[]): { text: string; count: number } {
@@ -476,10 +482,14 @@ export async function steerConversation(
   user: TaskContext['user'] | undefined,
   now: () => number,
   state?: ConversationState,
+  asker?: string,
 ): Promise<void> {
   const key = `batch:${keyOf(event)}`;
   const pending = state ? state.batch : await ctx.store.get<Batch>('delivery', key);
-  if (!pending?.items.length && (await steerRunning(ctx, status, eventPrompt([event], user)))) {
+  if (
+    !pending?.items.length &&
+    (await steerRunning(ctx, status, eventPrompt([event], user), undefined, asker ?? null))
+  ) {
     await forgetUnseen(ctx, event);
     await markSeen(ctx, event, status.task.id, now());
     return;
@@ -507,7 +517,7 @@ export async function steerConversation(
   await ctx.store.appendBatch(
     key,
     owner,
-    [{ admission: owner, event: compact, user }],
+    [{ admission: owner, event: compact, user, ...(asker ? { asker } : {}) }],
     now(),
     BATCH_TTL_MS,
   );
@@ -548,7 +558,16 @@ export async function steerConversation(
           const { text, count } = steerDelivery(batch.slice(offset));
           const chunk = batch.slice(offset, offset + count);
           const admission = chunk.at(-1)!.admission;
-          const steered = await steerRunning(ctx, fresh, text, { key, owner, through: admission });
+          const author = chunk.every(steer => steer.asker === chunk[0]!.asker)
+            ? chunk[0]!.asker
+            : undefined;
+          const steered = await steerRunning(
+            ctx,
+            fresh,
+            text,
+            { key, owner, through: admission },
+            author ?? null,
+          );
           const accepted =
             steered ||
             (await resume(
@@ -557,6 +576,7 @@ export async function steerConversation(
               text,
               chunk.some(steer => steer.event.mustReply === true),
               { [kindOf(key)]: admission },
+              chunk.at(-1)!.asker,
             ));
           // A sender past its lease resumed the task first: its turn holds the leading messages, the rest go in as steers.
           if (!accepted && !overtaken) {
@@ -634,4 +654,31 @@ export async function reactToConversation(
       }
     })(),
   );
+}
+
+// Conversation context the receiver gathers before dispatch.
+
+/** A thread Coder started a task in, so later plain messages there are a conversation. */
+export function conversationKey(appId: string, installationId: string, thread: string): string {
+  return `thread:${appId}:${installationId}:${thread}`;
+}
+
+/** Who asked, best-effort. */
+export async function buildContext(
+  ctx: ServerContext,
+  integration: Integration,
+  event: AgentEvent,
+  member?: { id: string; name: string; email: string } | null,
+): Promise<TaskContext> {
+  const context: TaskContext = {};
+  const linked =
+    member === undefined && ctx.auth && event.actor.id
+      ? await ctx.auth.linkedUser(integration.id, event.actor.id).catch(() => undefined)
+      : member;
+  if (linked) {
+    context.user = { name: linked.name, email: linked.email };
+    context.asker = linked.id;
+  }
+
+  return context;
 }

@@ -8,7 +8,7 @@ import path from 'node:path';
 import { connect, serverFor, type ServerOptions } from '../core/remote';
 import { CoderError } from '../core/dispatch';
 import { coderHome, serverTasksDir } from '../core/state';
-import { LocalRunner } from '../server/runners/local';
+import { LocalRunner } from '../server/runners/kinds/local';
 import type { RunnerRow } from '../client/types';
 import { bodyLimit, limitBody, nodeListener } from '../server/routes/http';
 import { safeEqual } from '../utils/crypto';
@@ -40,7 +40,7 @@ const exposeHints = (port: number) => [
   `VS Code: forward port ${port} in the Ports view and set its visibility to Public`,
 ];
 
-export interface RunnerServeOptions extends ServerOptions {
+interface RunnerServeOptions extends ServerOptions {
   port?: number;
   /** The public URL a tunnel gives the local port. */
   url?: string;
@@ -49,7 +49,7 @@ export interface RunnerServeOptions extends ServerOptions {
   runnerUrl?: string;
 }
 
-export type RunnerServeResult = RunnerRow & {
+type RunnerServeResult = RunnerRow & {
   port: number;
   server: string;
   /** Mark the runner offline on the server and stop listening. */

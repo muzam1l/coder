@@ -15,11 +15,17 @@ interface Row {
   createdAt?: string;
   answered?: 'accept' | 'decline' | 'closed' | null;
   deniedReason?: string | null;
+  scope?: string;
+  approvers?: string;
 }
 
 const STATES = { accept: 'approved', decline: 'denied', closed: 'stopped' } as const;
 
 const state = (row: Row) => (row.answered ? STATES[row.answered] : 'pending');
+
+/** Who approves a change request, after its reason. */
+const approvers = (row: Row) =>
+  row.scope ? `  ${outStyle.dim(`${row.approvers} approves this ${row.scope} change`)}` : '';
 
 /** One task's approvals. */
 function printTaskApprovals(taskId: string, items: Row[]): void {
@@ -29,7 +35,7 @@ function printTaskApprovals(taskId: string, items: Row[]): void {
   for (const item of items) {
     const why = item.deniedReason ? `  ${s.dim(`denied: ${item.deniedReason}`)}` : '';
     process.stdout.write(
-      `${s.cyan(item.id)}  ${state(item).padEnd(8)} ${s.light(item.reason)}${why}\n${actionLines(item.actions)}\n`,
+      `${s.cyan(item.id)}  ${state(item).padEnd(8)} ${s.light(item.reason)}${approvers(item)}${why}\n${actionLines(item.actions)}\n`,
     );
   }
 }
@@ -45,7 +51,7 @@ function printApprovals(rows: Row[], denied: boolean): void {
   for (const row of rows) {
     const age = row.createdAt ? `  ${s.dim(formatAge(ageMs(row.createdAt)))}` : '';
     process.stdout.write(
-      `${s.cyan(row.id)}  task ${s.cyan(row.taskId)}${age}  ${s.light(row.reason)}\n${actionLines(row.actions)}\n`,
+      `${s.cyan(row.id)}  task ${s.cyan(row.taskId)}${age}  ${s.light(row.reason)}${approvers(row)}\n${actionLines(row.actions)}\n`,
     );
   }
 }

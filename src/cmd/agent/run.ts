@@ -30,6 +30,7 @@ export const commandAgentRun = command({
   usage:
     "Run a recorded platform event (AgentEvent JSON) through an agent. With --server it goes through your Coder server exactly like a webhook: real app, tokens, runner, and the reply is posted. Without it the engine runs here on the agent's prompt and this checkout, platform tools off, and the reply is printed.",
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     agent: str('the agent id'),
     file: str('the event JSON file'),
@@ -48,10 +49,10 @@ export const commandAgentRun = command({
     ],
   },
   run: async ({ options, args: [name, file], cwd, tool, next }) => {
+    if (options.task) return (await import('../../runner')).runAssignedTask(options.task, cwd);
     const { agents } = await import('../../agent');
     const { remoteAnswer } = await import('../../core/task/remote');
 
-    if (options.task) return agents.runTask(options.task, { cwd });
     const result = await agents.run(name, file, {
       ...options,
       cwd,

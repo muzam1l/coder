@@ -4,13 +4,14 @@ import './list.css';
 
 import type { ComponentChildren } from 'preact';
 import { useRef, useState } from 'preact/hooks';
+import { useSearchParams } from '@wular/pnext/navigation/client';
 
 import { client } from '@/utils/client';
 import { toastFailure } from '@/utils/action';
 import type { Config, ConfigPatch } from '@coder/client/types';
-import { mergePatch } from '@coder/core/defaults';
+import { mergePatch } from '@coder/core/types';
 
-import { iDots } from '@/comps/ui/icons';
+import { iDots, iPlus } from '@/comps/ui/icons';
 import { Button } from '@/comps/ui/button';
 import { Card } from '@/comps/ui/card';
 import { Icon } from '@/comps/ui/icon';
@@ -80,19 +81,31 @@ export function AddRow({
   );
 }
 
-export type Removal = {
+type Removal = {
   title: string;
   body?: string;
   label?: string;
+  /** What a chat's delete link names in `?delete=`, which opens this dialog. */
+  link?: string;
   onRemove: () => Promise<unknown>;
 };
 
 /** A ghost-danger item for a row's ⋯ menu, and the shared dialog that asks before it removes; the dialog sits outside the menu. */
 export function useRemove(removal?: Removal) {
-  const [open, setOpen] = useState(false);
+  const asked = useSearchParams().get('delete');
+  const [open, setOpen] = useState(Boolean(removal?.link && removal.link === asked));
   const [busy, setBusy] = useState(false);
   if (!removal) return {};
   const { title, body, label = 'Remove', onRemove } = removal;
+  // A dialog a delete link opened leaves the address without it once it closes.
+  const close = () => {
+    setOpen(false);
+    if (removal.link && removal.link === asked) {
+      const url = new URL(location.href);
+      url.searchParams.delete('delete');
+      history.replaceState(history.state, '', url);
+    }
+  };
   return {
     item: <MenuItem title={label} danger onClick={() => setOpen(true)} />,
     dialog: open ? (
@@ -102,16 +115,36 @@ export function useRemove(removal?: Removal) {
         body={body}
         confirmLabel={label}
         busy={busy}
-        onClose={() => setOpen(false)}
+        onClose={close}
         onConfirm={() => {
           setBusy(true);
           void onRemove().finally(() => {
             setBusy(false);
-            setOpen(false);
+            close();
           });
         }}
       />
     ) : null,
+  };
+}
+
+/** A list's add dialog and the + Add button that opens it; a chat's `?add=` link opens it filled in, and closing it drops the link's params. */
+export function useAddDialog(params: string[]) {
+  const [open, setOpen] = useState(useSearchParams().has('add'));
+  const close = () => {
+    setOpen(false);
+    const url = new URL(location.href);
+    for (const name of ['add', ...params]) url.searchParams.delete(name);
+    history.replaceState(history.state, '', url);
+  };
+  return {
+    open,
+    close,
+    button: (
+      <Button variant="outline" size="sm" leftIcon={iPlus} onClick={() => setOpen(true)}>
+        Add
+      </Button>
+    ),
   };
 }
 
@@ -148,6 +181,7 @@ export function Row({
   menu,
   alignMenu,
   remove,
+  muted,
 }: {
   title: string;
   badges?: ComponentChildren;
@@ -157,10 +191,12 @@ export function Row({
   /** Show the ⋯ menu even when empty, so rows in one list line up. */
   alignMenu?: boolean;
   remove?: Removal;
+  /** A row of something past, like an ended install. */
+  muted?: boolean;
 }) {
   const removing = useRemove(remove);
   return (
-    <tr>
+    <tr class={muted ? 'muted' : undefined}>
       <td>
         <span class="row-title">
           <b>{title}</b>
@@ -186,16 +222,18 @@ export function Row({
 export function List({
   title,
   count,
+  actions,
   children,
   add,
 }: {
   title: string;
   count: number;
+  actions?: ComponentChildren;
   children: ComponentChildren;
   add?: ComponentChildren;
 }) {
   return (
-    <Card title={title} count={count}>
+    <Card title={title} count={count} actions={actions}>
       <div class="table-scroll">
         <table class="rows settings">
           <tbody>{children}</tbody>

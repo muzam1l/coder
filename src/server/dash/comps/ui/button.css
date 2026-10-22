@@ -83,6 +83,11 @@
   cursor: not-allowed;
   filter: none;
 }
+/* on dark, faded blue still reads as solid, so a disabled primary turns grey */
+.btn:disabled:not(.outline, .ghost, .secondary, .danger) {
+  background: light-dark(var(--deep), var(--line2));
+  border-color: light-dark(var(--deep), transparent);
+}
 .btn-spin {
   flex: none;
   width: 12px;

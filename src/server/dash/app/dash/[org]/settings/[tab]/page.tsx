@@ -3,10 +3,9 @@ import './connections-list.css';
 import './engines-list.css';
 import './credentials-list.css';
 import './list.css';
-import '@/app/dash/[org]/setup/outcome.css';
 import { dynamic } from '@wular/pnext/dynamic';
 import { notFound } from '@wular/pnext/navigation';
-import { DEFAULT_CONFIG } from '@coder/core/defaults';
+import { DEFAULT_CONFIG } from '@coder/core/types';
 
 import { load } from '@/api/load';
 import { Settle, Stream } from '@/comps/frame/stream';
@@ -22,8 +21,6 @@ import {
 } from '@/app/dash/[org]/setup/outcome';
 import { Credentials } from './credentials';
 
-const ADMIN_ROLES = new Set(['owner', 'admin']);
-
 /** What a connection's sign-in says when it comes back with `outcome`. */
 const SIGN_IN_FAILED = 'The sign-in did not finish. Try Reconnect.';
 const SIGN_IN: Record<string, string> = {
@@ -35,8 +32,8 @@ const SIGN_IN: Record<string, string> = {
 
 const ModelsList = dynamic(() => import('./models-list').then(m => m.ModelsList));
 const ConnectionsList = dynamic(() => import('./connections-list').then(m => m.ConnectionsList));
-const OutcomeDialog = dynamic(() =>
-  import('@/app/dash/[org]/setup/outcome-dialog').then(m => m.OutcomeDialog),
+const OutcomeToast = dynamic(() =>
+  import('@/app/dash/[org]/setup/outcome-toast').then(m => m.OutcomeToast),
 );
 const EnginesList = dynamic(() => import('./engines-list').then(m => m.EnginesList));
 const RunnersList = dynamic(() => import('./runners-list').then(m => m.RunnersList));
@@ -93,19 +90,25 @@ export default async function SettingsTabPage({
           return (
             <>
               {outcome ? (
-                <OutcomeDialog
+                <OutcomeToast
                   ok={succeeded(outcome)}
-                  title={outcomeTitle(outcome, outcomeName(outcome, integrations))}
-                  text={outcomeText(outcome, outcomeName(outcome, integrations))}
-                  issues={who.server?.issuesUrl}
+                  title={
+                    succeeded(outcome)
+                      ? `${outcomeName(outcome, integrations)} connected${outcome.account ? ` as ${outcome.account}` : ''}`
+                      : outcomeTitle(outcome, outcomeName(outcome, integrations))
+                  }
+                  text={
+                    succeeded(outcome)
+                      ? SIGN_IN.connected!
+                      : outcomeText(outcome, outcomeName(outcome, integrations))
+                  }
                 />
               ) : null}
               {signIn ? (
-                <OutcomeDialog
+                <OutcomeToast
                   ok={signIn === 'connected'}
                   title={signIn === 'connected' ? 'Signed in' : 'Not signed in'}
                   text={SIGN_IN[signIn] ?? SIGN_IN_FAILED}
-                  issues={who.server?.issuesUrl}
                 />
               ) : null}
               <ConnectionsList

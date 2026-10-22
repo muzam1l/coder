@@ -14,8 +14,7 @@ import {
 import { type ServerContext } from '../context';
 import { INTEGRATIONS } from '../../integrations';
 import { sameToken, serverMode } from '../routes/guards';
-import { notFound, redirect } from '../routes/http';
-import { safeReturnPath } from '../auth/sign-in';
+import { notFound, redirect, safeReturnPath } from '../routes/http';
 
 declare global {
   var __coder: { handle(request: Request): Promise<Response> } | undefined;
@@ -364,7 +363,7 @@ export async function signIn(
   return loginPage(req, ctx);
 }
 
-export function dashRequest(req: Request, ctx: ServerContext): Request {
+function dashRequest(req: Request, ctx: ServerContext): Request {
   const headers = new Headers(req.headers);
   headers.set('x-coder-mode', serverMode(ctx));
   // The page's organization, for its reads.

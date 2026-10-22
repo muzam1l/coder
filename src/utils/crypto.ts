@@ -9,3 +9,10 @@ export function safeEqual(a: string | Buffer, b: string | Buffer): boolean {
 
 export const sha256 = (value: string): string =>
   createHash('sha256').update(value).digest('base64url');
+
+export const encodeJson = (value: unknown): string =>
+  Buffer.from(JSON.stringify(value)).toString('base64url');
+
+/** Throws on input that is not base64url JSON. */
+export const decodeJson = <T>(value: string): T =>
+  JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as T;

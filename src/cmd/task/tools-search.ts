@@ -8,12 +8,15 @@ export const commandToolsSearch = command({
   globalFlags: { json: false, cwd: false },
   mcp: false,
   async run() {
-    const { searchApp, searchServers, TOOL_SEARCH_ENV } =
-      await import('../../core/task/context/tools');
-    const { serve } = await import('contextjsx/serve');
+    const { serveToolSearch } = await import('../../core/tool-search');
+    const { serverCredential } = await import('../../core/task/mcp');
 
-    await (
-      await serve(searchApp(searchServers(process.env[TOOL_SEARCH_ENV])), 'stdio')
-    ).done;
+    await serveToolSearch({
+      credential: endpoint => serverCredential(endpoint),
+      localCredential: async (spec, refused) => {
+        const { localConnectionToken } = await import('../../core/connections');
+        return localConnectionToken(spec.connection ?? spec.name, refused);
+      },
+    });
   },
 });

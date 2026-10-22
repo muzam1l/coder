@@ -1,0 +1,98 @@
+.approval-queue {
+  --max: 420px;
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* a row: its task, who asks and what, with the buttons at its right */
+.queue-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-top: 1px solid var(--line);
+}
+.queue-row:first-child {
+  border-top: 0;
+}
+.queue-row > details {
+  flex: 1;
+  min-width: 0;
+}
+.queue-row summary {
+  display: grid;
+  gap: 2px;
+  cursor: pointer;
+  list-style: none;
+}
+.queue-row summary::-webkit-details-marker {
+  display: none;
+}
+.queue-ask {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.queue-reason {
+  overflow: hidden;
+  font-size: 13px;
+  color: var(--fg);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-task {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  min-width: 0;
+  font-size: 12px;
+}
+.queue-task > a {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-task > a:hover {
+  color: var(--fg);
+}
+.queue-task > a {
+  max-width: 100%;
+}
+.queue-row details[open] .queue-reason {
+  white-space: normal;
+}
+.queue-row .body {
+  display: grid;
+  gap: 10px;
+  padding: 10px 0 0;
+}
+.queue-acts {
+  display: flex;
+  flex: none;
+  gap: 6px;
+}
+@media (max-width: 760px) {
+  .queue-row {
+    flex-wrap: wrap;
+  }
+  .queue-acts {
+    margin-left: auto;
+  }
+  .queue-ask {
+    flex-wrap: wrap;
+  }
+}
+/* the queue keeps the warning border without the card's tint */
+.card.accent:has(> .approval-queue) {
+  background: var(--panel);
+}
+@media (min-width: 761px) {
+  .queue-task > .admin-ask::before {
+    content: '·';
+    margin-right: 10px;
+  }
+}

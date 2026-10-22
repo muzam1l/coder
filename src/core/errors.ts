@@ -4,7 +4,7 @@ export interface FallbackPayload {
   fallback: {
     action: 'run-native-subagent';
     reason: 'no-engine-available';
-    permissions: string;
+    access: string;
     instructions: string;
     note: string;
     appendSystem?: string;

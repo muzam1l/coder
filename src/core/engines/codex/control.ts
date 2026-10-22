@@ -6,11 +6,11 @@ import path from 'node:path';
 import { mailboxId, type MailboxKey } from '../../mailbox';
 import type { ProtocolError } from './app-server';
 
-export interface CodexControlClient {
+interface CodexControlClient {
   request(method: string, params?: unknown): Promise<any>;
 }
 
-export interface CodexControlResult {
+interface CodexControlResult {
   ok: boolean;
   retryable: boolean;
   result?: any;

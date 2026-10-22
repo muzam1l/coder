@@ -161,3 +161,12 @@
 .fields > .picked {
   grid-column: 1 / -1;
 }
+/* hints sit under their labels, and a row's selects line up */
+.vpanel .fields > .field {
+  grid-row: span 2;
+  grid-template-rows: subgrid;
+}
+.vpanel .fields > .field > span:first-child {
+  flex-direction: column;
+  gap: 2px;
+}

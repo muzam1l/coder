@@ -9,6 +9,12 @@ import { describe } from './add';
 
 type Listed = Awaited<ReturnType<typeof connection.list>>;
 
+const STATUS: Record<Listed['connections'][number]['status'], string> = {
+  ok: 'ok',
+  authorize: 'not signed in',
+  reconnect: 'needs reconnecting',
+};
+
 function printConnections({ connections, declared }: Listed): void {
   const s = outStyle;
   process.stdout.write(
@@ -19,14 +25,13 @@ function printConnections({ connections, declared }: Listed): void {
             { header: 'connects', value: row => describe(row), paint: c => s.light(c) },
             {
               header: 'access',
-              value: row =>
-                row.access === 'read' ? 'Read-only' : row.access ? 'Read-write' : 'Default',
+              value: row => (row.access === 'read-only' ? 'Read-only' : 'Auto'),
             },
             {
               header: 'for',
               value: row => (row.mine ? 'you' : row.owner ? row.owner : 'workspace'),
             },
-            { header: 'status', value: row => row.status },
+            { header: 'status', value: row => STATUS[row.status] },
           ],
           connections,
           s,
@@ -64,6 +69,9 @@ export const commandConnectionList = command({
       ...declared
         .filter(row => !row.approved)
         .map(row => `Approve: coder connection approve ${row.name}`),
+      ...connections
+        .filter(row => row.status === 'reconnect')
+        .map(row => `Reconnect: coder connection reconnect ${row.id}`),
       ...(connections.length ? [] : ['Add one: coder connection add <name> --env <NAME>']),
     ]),
   print: printConnections,

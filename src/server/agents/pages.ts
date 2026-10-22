@@ -1,5 +1,5 @@
-/** What Coder shows on a platform: an agent's home page, the installer's welcome, and cards of dashboard links. */
-import type { Card, Integration, Page } from '../../integrations/types';
+/** What Coder shows on a platform: an agent's home page and the installer's welcome. */
+import type { Integration, Page } from '../../integrations/types';
 
 /** An agent as a platform shows it: its current version. */
 export interface AgentSummary {
@@ -9,27 +9,6 @@ export interface AgentSummary {
   /** Platforms its definition wires, with the events on each. */
   listens: Array<{ integration: string; name: string; events: string[] }>;
 }
-
-/** A task as a platform shows it. */
-export interface TaskSummary {
-  id: string;
-  title: string;
-  agent: string;
-  status: string;
-  /** The platform that raised it, or `dashboard`, `cli` or `schedule`. */
-  from: string;
-  /** Epoch milliseconds; when it was queued if it has not started. */
-  startedAt: number;
-}
-
-const STATUS: Record<string, string> = {
-  queued: 'Queued',
-  running: 'Running',
-  waiting: 'Needs approval',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
-};
 
 /** How people reach the app on `integration`, from the events it listens to there. */
 function ways(integration: Integration, handle: string, events: string[]) {
@@ -97,67 +76,4 @@ export function welcomePage(
       { id: 'agent', label: 'Open in Coder', url: open, ...(setup ? {} : { primary: true }) },
     ],
   };
-}
-
-/** The card of one dashboard link: a task or an agent of the installation's workspace, else none. */
-export async function linkCard(
-  integration: Integration,
-  dash: string,
-  url: string,
-  lookup: {
-    agent(slug: string): Promise<AgentSummary | undefined>;
-    task(id: string): Promise<TaskSummary | undefined>;
-  },
-): Promise<Card | undefined> {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return undefined;
-  }
-  const base = new URL(dash);
-  const root = `${base.pathname.replace(/\/$/, '')}/`;
-  if (parsed.origin !== base.origin || !parsed.pathname.startsWith(root)) return undefined;
-  const [kind, id] = parsed.pathname.slice(root.length).split('/');
-  if (!id) return undefined;
-  let key: string;
-  try {
-    key = decodeURIComponent(id);
-  } catch {
-    return undefined;
-  }
-
-  if (kind === 'tasks') {
-    const task = await lookup.task(key);
-    return (
-      task && {
-        title: task.title.length > 150 ? `${task.title.slice(0, 149)}…` : task.title,
-        url,
-        fields: [
-          { label: 'Agent', text: task.agent },
-          { label: 'Status', text: STATUS[task.status] ?? task.status },
-          { label: 'From', text: task.from },
-          { label: 'Started', at: task.startedAt },
-        ],
-        footer: `Coder task ${task.id}`,
-      }
-    );
-  }
-  if (kind === 'agents') {
-    const agent = await lookup.agent(key);
-    if (!agent) return undefined;
-    const onlyHere = agent.listens.length === 1 && agent.listens[0]!.integration === integration.id;
-    const platforms = agent.listens.map(entry => entry.name);
-
-    return {
-      title: agent.name,
-      url,
-      ...(agent.description ? { text: agent.description } : {}),
-      ...(onlyHere
-        ? {}
-        : { fields: [{ label: 'Listens on', text: platforms.join(', ') || 'Nothing yet' }] }),
-      footer: 'Coder agent',
-    };
-  }
-  return undefined;
 }

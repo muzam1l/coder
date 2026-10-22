@@ -111,7 +111,7 @@ export function wrapAnsi(line: string, width: number, rows: number): string[] {
 // Clip a styled line to at most `max` visible columns, preserving ANSI
 // sequences. Live-block lines must never hard-wrap at paint time: a resize
 // reflows wrapped rows in ways the cursor-up erase cannot reliably count.
-export function clipAnsi(line: string, max: number): string {
+function clipAnsi(line: string, max: number): string {
   let visible = 0;
   let out = '';
   for (let i = 0; i < line.length;) {

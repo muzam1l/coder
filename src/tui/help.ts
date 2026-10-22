@@ -73,7 +73,7 @@ export function keyRows(rows: MenuRow[], style: Style, paint = style.cyan): stri
 }
 
 // A titled block preceded by a blank line.
-export function section(title: string, lines: string[], style: Style): string[] {
+function section(title: string, lines: string[], style: Style): string[] {
   return ['', style.bold(`${title}:`), ...lines];
 }
 

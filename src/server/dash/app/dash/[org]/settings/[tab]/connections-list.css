@@ -13,14 +13,10 @@
 .conn-add {
   display: grid;
   gap: 10px;
-  padding: 16px 16px 0;
 }
 .conn-add .seg-btns {
   width: max-content;
   max-width: 100%;
-}
-.conn-add + .add-form {
-  padding-top: 8px;
 }
 /* text fields share the row evenly; a picker keeps its width but never past the card */
 .conn-add + .add-form .add-grid > .field {
@@ -48,10 +44,17 @@
 .conn-add + .add-form .add-grid > div.field:has([aria-label='Scope']) {
   margin-left: auto;
 }
-.add-foot > p {
-  flex: 1 1 240px;
-  align-self: center;
-  font-size: 12px;
+/* an MCP server's access and scope line up under its name and URL */
+.conn-access {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(max(260px, calc(50% - 7px)), 1fr));
+}
+.conn-add + .add-form .conn-access > div.field:has(> .select) {
+  max-width: none;
+  margin-left: 0;
+}
+.conn-access .select {
+  width: 100%;
 }
 .add-form .select:has([aria-label='Platform']) {
   min-width: 160px;

@@ -13,7 +13,7 @@ import http from 'node:http';
 
 import { BRIDGE_HEADERS, endpointCandidates } from '../../config';
 import type { CustomModelConfig } from '../../types';
-import { jsonReplyPrompt } from '../../task/context/prompts';
+import { jsonReplyPrompt } from '../../task/context/turn';
 
 export interface ChatBridge {
   /** Loopback base URL; a custom model's provider base_url is `<url>/v1`. */

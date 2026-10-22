@@ -9,7 +9,7 @@
   flex-direction: column;
   justify-content: flex-end;
   gap: 8px;
-  width: min(340px, calc(100vw - 32px));
+  width: min(420px, calc(100vw - 32px));
   height: auto;
   left: auto;
   margin: 0;
@@ -30,15 +30,7 @@
   background: var(--tile);
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
   pointer-events: auto;
-  cursor: pointer;
   animation: toast-in 0.15s ease-out;
-}
-.toast:hover {
-  background: linear-gradient(var(--wash), var(--wash)), var(--tile);
-}
-.toast:has(.cover:focus-visible) {
-  outline: 2px solid var(--acc);
-  outline-offset: 2px;
 }
 .toast-head {
   display: flex;
@@ -46,7 +38,7 @@
   gap: 10px;
   margin: 0;
 }
-.toast-head .cover {
+.toast-title {
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -54,7 +46,18 @@
   white-space: nowrap;
   color: var(--fg);
   text-decoration: none;
-  outline: none;
+}
+a.toast-title:hover {
+  text-decoration: underline;
+}
+/* only the × dismisses; on the toast's own background its hover needs the stronger wash */
+.toast-head .icon-btn {
+  width: 24px;
+  height: 24px;
+  margin: -4px -8px -4px 0;
+}
+.toast-head .icon-btn:hover {
+  background: var(--wash2);
 }
 .toast-line {
   margin: 0;

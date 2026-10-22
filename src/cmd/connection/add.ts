@@ -5,7 +5,8 @@ import type { ConnectionRow } from '../../client/types';
 import { errStyle, outStyle } from '../../tui/output';
 import * as z from 'zod/mini';
 
-import { CoderError } from '../../core/dispatch';
+import type { Access } from '../../core/config';
+import { CoderError } from '../../core/errors';
 import { flag, serverOptions, str, strList } from '../../utils/args';
 import { command } from '../../cli';
 
@@ -42,12 +43,20 @@ const addCommand = command({
   usage:
     'Connect a platform account by its name (OAuth in the browser), an API key that tasks read from --env, or an MCP server at --url or started by the command after `--`. An API key is kept as a credential. A credential already holding the variable is used, else the value comes from that variable here, or from stdin or a prompt. A remote MCP server is checked for OAuth, open access or a key; a needed key is read from stdin or a prompt. With --key, the key goes in --header (default Authorization) or --env. Signing in needs --server.',
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/settings/connections',
+      label: 'Add the connection',
+      action: 'add',
+      args: ['name', 'url', 'access', 'tools', 'me'],
+    },
+  },
   args: {
     name: z.string().check(
       z.describe('the connection name; a platform name connects that account'),
       z.refine(
-        name => !['coder', 'conversation', 'coder-approval'].includes(name),
-        'The names coder, conversation and coder-approval are reserved for Coder MCP servers.',
+        name => !['coder', 'task', 'conversation', 'coder-approval'].includes(name),
+        'The names coder, task, conversation and coder-approval are reserved for Coder MCP servers.',
       ),
     ),
     command: strList('a stdio MCP server to start; on the command line, the words after `--`'),
@@ -60,8 +69,8 @@ const addCommand = command({
       '<oauth|key|none>',
     ),
     access: str(
-      "read keeps only read-only tools (default: the agent's mode, write for API keys)",
-      '<read|write>',
+      'read-only keeps only read-only tools (default: auto, which follows the task)',
+      '<read-only|auto>',
     ),
     tools: str('tool allowlist; a read-only stdio server needs one', '<a,b>'),
     credential: str('the credential an API key connection reads', '<id>'),
@@ -72,7 +81,7 @@ const addCommand = command({
     positional: ['name'],
     examples: [
       'GROQ_API_KEY=gsk_... coder connection add groq --env GROQ_API_KEY  # an API key from this shell',
-      'pbpaste | coder connection add docs --key --env DOCS_TOKEN --access write -- npx -y docs-mcp  # a stdio server with its key from stdin',
+      'pbpaste | coder connection add docs --key --env DOCS_TOKEN -- npx -y docs-mcp  # a stdio server with its key from stdin',
       'coder connection add github --me --server  # your GitHub account on your Coder server',
     ],
   },
@@ -85,7 +94,7 @@ const addCommand = command({
       cwd,
       command: options.command ?? [],
       auth: options.auth as 'oauth' | 'key' | 'none' | undefined,
-      access: options.access as 'read' | 'write' | undefined,
+      access: options.access as Access | undefined,
       tools: options.tools
         ?.split(',')
         .map(id => id.trim())

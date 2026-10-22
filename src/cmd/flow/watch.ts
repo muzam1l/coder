@@ -30,6 +30,7 @@ export const commandWatch = command({
   usage:
     'Watch a flow run live: replay its progress lines from the start, then keep\nfollowing while it runs (Ctrl-C detaches; it keeps running). Blocks until it\nfinishes; exits 0 on success, 1 otherwise. Defaults to the most recent run.\nFor the result alone, prefer `coder flow result`. Alias: stream.\n\nWith --from <n>, or as a tool, it returns the events from event n on without\nfollowing, and `next`: the command that continues them while the run goes on.',
   access: 'read',
+  approvalPolicy: 'deny',
   args: {
     'run-id': str('the run (default: the most recent)'),
     tail: tailOption('replay only the last n events first (default: all)'),

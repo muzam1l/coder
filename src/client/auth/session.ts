@@ -1,9 +1,12 @@
 /** Sessions `coder auth login` keeps per server, under ~/.coder/session.json. */
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { CoderError } from '../../core/errors';
 import { coderHome } from '../../core/state';
-import { validateUrl } from '..';
+import { withFileLock } from '../../utils/fsx';
+import { validateUrl } from '../http';
 
 export interface Session {
   /** Wular Auth access token for this server. */
@@ -48,7 +51,7 @@ function serverRecords(): Record<string, ServerRecord> {
   }
 }
 
-export const normalizeServer = (url: string) => url.replace(/\/+$/, '');
+const normalizeServer = (url: string) => url.replace(/\/+$/, '');
 
 export const DEFAULT_SERVER = 'https://coder.wular.ai';
 
@@ -61,10 +64,13 @@ export function validateServer(option?: string | true): string {
   return validateUrl(resolveServer(option));
 }
 
-/** The hosted service is trusted by construction; any other origin is confirmed on first use. */
+/** The hosted service and a cloud task's own server are trusted by construction; any other origin is confirmed on first use. */
 export function isKnownServer(server: string): boolean {
   const key = normalizeServer(server);
-  return key === DEFAULT_SERVER || Boolean(serverRecords()[key]);
+  const own = process.env.CODER_MCP_MODE === 'cloud' && process.env.CODER_SERVER;
+  return (
+    key === DEFAULT_SERVER || (own && key === normalizeServer(own)) || Boolean(serverRecords()[key])
+  );
 }
 
 export function rememberServer(server: string): void {
@@ -106,4 +112,53 @@ function writeServerRecords(logins: Record<string, ServerRecord>): void {
     mode: 0o600,
   });
   fs.chmodSync(file, 0o600);
+}
+
+interface Renewal {
+  expiresAt(): number;
+  renew(): Promise<string>;
+}
+
+/** Keeps a saved login's access token fresh, saving every rotation. */
+export function renewal(server: string, login: Session): Renewal {
+  let current = login;
+  let pending: Promise<Session> | undefined;
+  return {
+    expiresAt: () => current.expiresAt,
+    async renew() {
+      if (!pending) {
+        pending = withFileLock(
+          `${sessionFile()}.${createHash('sha256').update(server).digest('hex')}.lock`,
+          () => rotate(server, current),
+        ).finally(() => {
+          pending = undefined;
+        });
+      }
+      current = await pending;
+      return current.token;
+    },
+  };
+}
+
+/** A login another process already rotated is used as is; a refused refresh forgets the login. */
+async function rotate(server: string, login: Session): Promise<Session> {
+  const newer = (saved?: Session) =>
+    saved && saved.refreshToken !== login.refreshToken ? saved : undefined;
+  const saved = newer(savedSessions()[server]);
+  if (saved && saved.expiresAt > login.expiresAt) return saved;
+  const { refreshSignIn } = await import('./sign-in');
+  const next = await refreshSignIn(server, login);
+  const logins = savedSessions();
+  if (next) {
+    const renewed = { ...login, ...next };
+    writeSessions({ ...logins, [server]: renewed });
+    return renewed;
+  }
+  const rotated = newer(logins[server]);
+  if (rotated) return rotated;
+  delete logins[server];
+  writeSessions(logins);
+  throw new CoderError('login-failed', `Signed out of ${server}.`, {
+    hint: 'Sign in again: coder auth login',
+  });
 }

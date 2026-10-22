@@ -3,14 +3,13 @@ import process from 'node:process';
 
 import * as z from 'zod/mini';
 
-import { CoderError } from '../../core/dispatch';
+import { CoderError } from '../../core/errors';
 import type { RunSummary } from '../../flow/executor';
 import type { DetachedRun } from '../../flow/runs';
 import type { FlowHooks } from '../../flow/runtime';
-import type { FlowEvent } from '../../flow/types';
 import { outStyle } from '../../tui/output';
 import { flag, str, strList } from '../../utils/args';
-import { command, nextSteps } from '../../cli';
+import { command } from '../../cli';
 import { FlowStepRenderer, printFollow, printRunSummary, flowNext } from './watch';
 
 // Flags shared by flow run and flow resume.
@@ -81,6 +80,7 @@ export const commandRun = command({
   usage:
     'Run a flow: a TypeScript file that orchestrates many coder tasks with gates,\njournaling, and resume. Prints the run id and orchestrates in the background;\n--wait follows the run in the foreground with live progress (Ctrl-C detaches;\nit keeps running), and `coder flow watch` shows the same lines any time.\nStop a run with `coder flow stop`.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     flow: z.string().check(z.describe('the flow: a discovered name or a path')),
     inputs: strList("the flow's input as bare key=value pairs"),
@@ -143,7 +143,6 @@ export async function finishRun(
 // Live step rows for a run driven in this process (--dry-run; real runs detach).
 function stepHooks(): FlowHooks {
   const renderer = new FlowStepRenderer();
-  const line = (e: FlowEvent) => renderer.emit(e);
   return { onEvent: event => renderer.emit(event) };
 }
 

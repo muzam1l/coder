@@ -21,7 +21,7 @@ import {
   type TurnResultEntry,
 } from '../state';
 import { createJsonlTail, writeJsonFileAtomic } from '../../utils/fsx';
-import { addTokens, logEntry } from './log-view';
+import { logEntry } from './view';
 import { runTurn } from '../engines/codex';
 import { runClaudeTurn } from '../engines/claude';
 import {
@@ -31,20 +31,21 @@ import {
   escalate,
 } from '../approvals';
 import {
-  PERMISSION_MODES,
+  ACCESS_MODES,
   isEndpointModel,
   loadConfig,
   persistModelPatch,
   codexTurnNetwork,
   resolveCodexModel,
+  strictestAccess,
   MACHINE_SANDBOX_ENV,
 } from '../config';
-import { detectWireApi } from '../engines/codex/wire';
+import { detectWireApi } from '../models';
 import { resolveMcpServers } from '../dispatch';
-import { injectedConnectionEnvironment, redactConnectionSecrets } from '../connections';
+import { injectedConnectionEnvironment, redactConnectionSecrets } from '../connection-env';
 import type { Task, ProgressUpdate, TurnResult } from '../types';
 import { gitToolEnvironment } from '../../agent/mcp';
-import { turnToolServers } from './mcp';
+import { promptServers, turnToolServers } from './mcp';
 import { taskSystemPrompt, type SystemPromptParts } from './context/system';
 
 // Agent tasks serve several people in one workspace, so the engine keeps no memories between them.
@@ -60,7 +61,7 @@ type TurnControls = {
 };
 
 /** A turn's MCP servers and the system prompt that lists them. */
-function turnTools(
+async function turnTools(
   cwd: string,
   task: Task,
   onProgress: (update: ProgressUpdate) => void,
@@ -68,20 +69,22 @@ function turnTools(
 ) {
   const onWarning = (message: string) =>
     onProgress({ kind: 'warning', phase: 'starting', message });
-  const access = task.promptParts?.access ?? (task.permissions === 'read-only' ? 'read' : 'write');
+  const access = strictestAccess(task.access, task.promptParts?.access);
   const tools = turnToolServers(
     task,
     resolveTaskDir(cwd, task.id),
     resolveMcpServers(task.mcp, process.env, undefined, { onWarning }),
-    { access, search: parts.toolSearch === 'coder' },
+    { access },
   );
   const systemPrompt = task.promptParts
     ? taskSystemPrompt({
         ...task.promptParts,
         ...parts,
+        access,
         approved: approvedActions(resolveTaskDir(cwd, task.id)),
         tools: tools.tools,
-        ...(tools.lines ? { servers: tools.lines } : {}),
+        servers: await promptServers(tools.listed),
+        ...(tools.dashboard ? { dashboard: tools.dashboard } : {}),
       })
     : task.systemPrompt;
 
@@ -231,11 +234,11 @@ async function executeCodexTurn(
     }
   }
 
-  const mode = PERMISSION_MODES[task.permissions ?? 'auto'] ?? PERMISSION_MODES.auto;
+  const mode = ACCESS_MODES[task.access ?? 'auto'] ?? ACCESS_MODES.auto;
   const auto = mode.approvalMode === 'auto';
   // The allowlist in auto, as on Claude; it matters only where the network is off.
   const network = codexTurnNetwork(
-    task.permissions ?? 'auto',
+    task.access ?? 'auto',
     config.engines.codex?.network,
     auto ? config.approvals.allowedNetworkHosts : [],
   );
@@ -247,7 +250,7 @@ async function executeCodexTurn(
       ? { onApprovalRequest: codexApprovalHandler(event => onProgress(event as TaskLogEntry)) }
       : {}),
   };
-  const tools = turnTools(cwd, task, onProgress, { toolSearch: 'coder' });
+  const tools = await turnTools(cwd, task, onProgress);
   try {
     const result = await runTurn(cwd, {
       availabilityChecked: process.env.CODER_ENGINE_CHECKED === '1',
@@ -298,7 +301,6 @@ async function executeCodexTurn(
     // Clear the owner endpoint after normal completion, client close, or any
     // startup/protocol error. The outer worker catch owns final failure state.
     writeTask(cwd, task.id, { steerEndpoint: null });
-    tools.cleanup();
   }
 }
 
@@ -310,8 +312,8 @@ async function executeClaudeTurn(
   const taskDir = resolveTaskDir(cwd, task.id);
   const config = loadConfig(cwd);
   const onProgress = buildProgressLogger(cwd, task.id, { echo });
-  const mode = PERMISSION_MODES[task.permissions ?? 'auto'] ?? PERMISSION_MODES.auto;
-  const tools = turnTools(cwd, task, onProgress, {
+  const mode = ACCESS_MODES[task.access ?? 'auto'] ?? ACCESS_MODES.auto;
+  const tools = await turnTools(cwd, task, onProgress, {
     declareHosts: mode.approvalMode === 'auto',
   });
   try {
@@ -330,7 +332,7 @@ async function executeClaudeTurn(
       outputSchema: task.outputSchema,
       model: task.model,
       effort: task.effort,
-      permissions: task.permissions,
+      access: task.access,
       approvalTaskId: task.id,
       allowedNetworkHosts: mode.approvalMode === 'auto' ? config.approvals.allowedNetworkHosts : [],
       additionalDirectories: task.addDirs,
@@ -406,7 +408,7 @@ export function executeTurnFor(task: Task) {
         onWarning: () => {},
       }),
     );
-    const writes = current.permissions !== 'read-only';
+    const writes = current.access !== 'read-only';
     const env = { ...git.env, ...(writes ? scratchEnvironment(current) : {}) };
     try {
       const execute = current.engine === 'claude' ? executeClaudeTurn : executeCodexTurn;

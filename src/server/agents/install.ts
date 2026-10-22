@@ -1,4 +1,11 @@
-import { appTokens } from './tokens';
+import {
+  appTokens,
+  type AppsContext,
+  OPERATOR,
+  outcome,
+  platformsPath,
+  backPath,
+} from './platform';
 import { type Params } from '../routes/match';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import { InstallationBoundError, type Store } from '../store/types';
@@ -6,13 +13,13 @@ import { checkBinding } from '../store/memory';
 import { type AgentApp, type Installation } from '../../agent/types';
 import { type Integration, IntegrationError } from '../../integrations/types';
 import { consumeNonce, inspectNonce, issueNonce, nonceOrganization } from '../auth/nonce';
-import { memberOf } from '../auth/connect';
-import { encodeJson } from '../../utils/base64url';
+import { memberOf } from '../auth/members';
+import { linkedOrganizations } from '../context';
+import { encodeJson } from '../../utils/crypto';
 import { agentWithVersion } from './records';
 import { welcomePage } from './pages';
 import { credentialFix, resolveEngine } from '../settings/credentials';
 import { decodeParam, redirect } from '../routes/http';
-import { type AppsContext, OPERATOR, outcome, platformsPath, backPath } from './platform';
 
 /** Write an installation under its lock from its current value; the same app's own installations of accounts it now covers are retired. */
 export function storeInstallation(
@@ -227,8 +234,9 @@ async function bindInstall(
   const session = ctx.session;
   if (result.user && session && ctx.auth)
     await ctx.auth.link(session.user, id!, result.user.id, {
-      organizations: session.organizations.map(o => o.id),
+      ...linkedOrganizations(session.organizations),
       ...(result.user.token ? { token: encryptSecret(ctx.config, result.user.token) } : {}),
+      ...(result.user.login ? { login: result.user.login } : {}),
     });
 
   const existing = await ctx.store.get('installation', installationId);

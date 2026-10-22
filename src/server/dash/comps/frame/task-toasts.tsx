@@ -4,7 +4,7 @@ import './task-toasts.css';
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 
-import { serverEvents } from '@coder/client';
+import { serverEvents } from '@coder/client/http';
 import type {
   RunnersEvent,
   TaskCountEvent,
@@ -17,6 +17,8 @@ import { Link } from '@wular/pnext/link';
 import { usePathname, useRouter } from '@wular/pnext/navigation/client';
 import { Status, STATUS_LABEL } from '@/app/dash/[org]/tasks/list/status';
 import { useOrg } from '@/comps/nav/org';
+import { IconButton } from '@/comps/ui/button';
+import { iX } from '@/comps/ui/icons';
 
 type Watched = { title: string; status: TaskState; at: number; org: string };
 type Live = Pick<TaskRow, 'status' | 'result' | 'error' | 'approval'>;
@@ -328,16 +330,22 @@ function Item({
     };
   }, [paused]);
   return (
-    <div class={toast.tone ? `toast ${toast.tone}` : 'toast'} onClick={() => dismiss(toast.key)}>
+    <div class={toast.tone ? `toast ${toast.tone}` : 'toast'}>
       <p class="toast-head">
         {toast.id ? (
-          <Link class="cover" href="/dash/[org]/tasks/[id]" params={{ org, id: toast.id }}>
+          <Link
+            class="toast-title"
+            href="/dash/[org]/tasks/[id]"
+            params={{ org, id: toast.id }}
+            onClick={() => dismiss(toast.key)}
+          >
             {toast.title}
           </Link>
         ) : (
-          <span class="cover">{toast.title}</span>
+          <span class="toast-title">{toast.title}</span>
         )}
         {toast.status ? <Status status={toast.status} /> : null}
+        <IconButton icon={iX} label="Dismiss" onClick={() => dismiss(toast.key)} />
       </p>
       <p class="toast-line">{toast.line}</p>
     </div>

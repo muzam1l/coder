@@ -3,17 +3,21 @@
  * - server-initiated requests (approvals) can be answered via setServerRequestHandler
  * - coder-specific broker endpoint env + state locations
  */
+import fs from 'node:fs';
 import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
 import process from 'node:process';
 import { spawn, spawnSync } from 'node:child_process';
 import readline from 'node:readline';
+import { createHash } from 'node:crypto';
 
-import { parseBrokerEndpoint } from '../../broker/endpoint';
-import { ensureBrokerSession, loadBrokerSession } from '../../broker/session';
+import { ensureBrokerSession, loadBrokerSession, parseBrokerEndpoint } from '../../broker/session';
 import { processTiming } from '../../../utils/process';
 import { readVersion } from '../../runtime';
 import { connectionEnvironmentKey, engineEnvironment } from '../../connections';
 import { startChatBridge, type ChatBridge } from './chat-bridge';
+import type { AppServerClient } from './turn';
 
 export const BROKER_ENDPOINT_ENV = 'CODER_APP_SERVER_ENDPOINT';
 export const BROKER_BUSY_RPC_CODE = -32001;
@@ -40,14 +44,12 @@ const DEFAULT_CAPABILITIES = {
 };
 
 export type ProtocolError = Error & { data?: unknown; rpcCode?: number };
-export type NotificationHandler = (message: any) => void;
-export type ServerRequestHandler = (method: string, params: any) => Promise<any> | any;
-export type NoticeHandler = (message: string) => void;
+type NotificationHandler = (message: any) => void;
+type ServerRequestHandler = (method: string, params: any) => Promise<any> | any;
+type NoticeHandler = (message: string) => void;
 
-export interface ClientOptions {
+interface ClientOptions {
   env?: NodeJS.ProcessEnv;
-  clientInfo?: Record<string, unknown>;
-  capabilities?: Record<string, unknown>;
   networkAccess?: boolean;
   nativeMcp?: boolean;
   brokerEndpoint?: string | null;
@@ -328,8 +330,8 @@ class SpawnedCodexAppServerClient extends AppServerClientBase {
     });
 
     await this.request('initialize', {
-      clientInfo: this.options.clientInfo ?? defaultClientInfo(),
-      capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES,
+      clientInfo: defaultClientInfo(),
+      capabilities: DEFAULT_CAPABILITIES,
     });
     this.notify('initialized', {});
     processTiming('codex.initialized');
@@ -420,8 +422,8 @@ class BrokerCodexAppServerClient extends AppServerClientBase {
     });
 
     const initialized = await this.request('initialize', {
-      clientInfo: this.options.clientInfo ?? defaultClientInfo(),
-      capabilities: this.options.capabilities ?? DEFAULT_CAPABILITIES,
+      clientInfo: defaultClientInfo(),
+      capabilities: DEFAULT_CAPABILITIES,
     });
     this.bridgeUrl = initialized.bridgeUrl;
     this.notify('initialized', {});
@@ -482,5 +484,134 @@ export class CodexAppServerClient {
       : new SpawnedCodexAppServerClient(cwd, options);
     await client.initialize();
     return client;
+  }
+}
+
+export async function withAppServer<T>(
+  cwd: string,
+  fn: (client: AppServerClient) => Promise<T>,
+  internals: {
+    connect?: typeof CodexAppServerClient.connect;
+    networkAccess?: boolean;
+    nativeMcp?: boolean;
+    disableBroker?: boolean;
+  } = {},
+): Promise<T> {
+  const connect = internals.connect ?? CodexAppServerClient.connect;
+  const clientOptions = {
+    ...(internals.networkAccess === undefined ? {} : { networkAccess: internals.networkAccess }),
+    nativeMcp: internals.nativeMcp ?? false,
+    disableBroker: internals.disableBroker ?? false,
+  };
+  let client: AppServerClient | null = null;
+  try {
+    client = await connect(cwd, clientOptions);
+    const result = await fn(client);
+    await client.close();
+    return result;
+  } catch (error) {
+    const err = error as ProtocolError & NodeJS.ErrnoException;
+    const brokerRequested =
+      client?.transport === 'broker' || Boolean(process.env[BROKER_ENDPOINT_ENV]);
+    const shouldRetryDirect =
+      (client?.transport === 'broker' && err?.rpcCode === BROKER_BUSY_RPC_CODE) ||
+      (brokerRequested && (err?.code === 'ENOENT' || err?.code === 'ECONNREFUSED'));
+
+    if (client) {
+      await client.close().catch(() => {});
+      client = null;
+    }
+
+    if (!shouldRetryDirect) {
+      throw error;
+    }
+
+    const directClient = await connect(cwd, { ...clientOptions, disableBroker: true });
+    try {
+      return await fn(directClient);
+    } finally {
+      await directClient.close();
+    }
+  }
+}
+
+export async function recycleAppServer(client: AppServerClient) {
+  if (client.transport === 'broker') {
+    await client.request(BROKER_RECYCLE_METHOD, {}).catch(() => {});
+  }
+}
+
+// Every refresh failure codex reports starts this way; after an account switch
+// a long-lived app-server still holds the old tokens and hits it on every turn.
+const STALE_AUTH_PATTERN = /access token could not be refreshed/i;
+const UNSUPPORTED_MODEL_PATTERN = /model is not supported|Codex cannot run model/i;
+
+export function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error ?? '');
+}
+
+export function isStaleAuthError(message: string | null | undefined): boolean {
+  return STALE_AUTH_PATTERN.test(message ?? '');
+}
+
+export function isUnsupportedModelError(message: string | null | undefined): boolean {
+  return UNSUPPORTED_MODEL_PATTERN.test(message ?? '');
+}
+
+/** A clear replacement for an "unsupported model" 400, or null for any other error. */
+export function describeUnsupportedModel(
+  message: string | null | undefined,
+  model?: string | null,
+): string | null {
+  if (!isUnsupportedModelError(message) || /Codex cannot run model/.test(message ?? '')) {
+    return null;
+  }
+  const named = /'([^']+)' model/.exec(message ?? '')?.[1] ?? model ?? 'this model';
+  return `Codex cannot run model ${named} on the signed-in account. Run \`codex login\` with an account that has it, or pick another alias (coder model list).`;
+}
+
+function codexAuthFile(env: NodeJS.ProcessEnv = process.env): string {
+  return path.join(env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'auth.json');
+}
+
+function jwtSubject(token: unknown): string {
+  try {
+    const payload = JSON.parse(
+      Buffer.from(String(token).split('.')[1] ?? '', 'base64url').toString('utf8'),
+    );
+    return String(payload.sub ?? payload.email ?? '');
+  } catch {
+    return '';
+  }
+}
+
+/** Account identity; the caller retains its last value across an incomplete write. */
+export function codexAuthFingerprint(
+  env: NodeJS.ProcessEnv = process.env,
+  state?: { file?: string; mtimeMs?: number; fingerprint?: string },
+): string {
+  const file = codexAuthFile(env);
+  let mtimeMs: number;
+  try {
+    mtimeMs = fs.statSync(file).mtimeMs;
+  } catch {
+    return '';
+  }
+  if (state?.file === file && state.mtimeMs === mtimeMs) return state.fingerprint ?? '';
+  try {
+    const auth = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const apiKey = auth.OPENAI_API_KEY
+      ? createHash('sha256').update(String(auth.OPENAI_API_KEY)).digest('hex')
+      : '';
+    const fingerprint = [
+      auth.auth_mode ?? '',
+      auth.tokens?.account_id ?? '',
+      jwtSubject(auth.tokens?.id_token),
+      apiKey,
+    ].join('|');
+    if (state) Object.assign(state, { file, mtimeMs, fingerprint });
+    return fingerprint;
+  } catch {
+    return state?.file === file ? (state.fingerprint ?? '') : '';
   }
 }

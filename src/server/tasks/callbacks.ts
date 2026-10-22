@@ -1,15 +1,16 @@
 import { type Params } from '../routes/match';
-import { type AgentTask } from '../../agent/types';
+import { usageTarget } from './usage';
 import { type Approval } from '../../core/types';
 import { type TaskStatus, type TaskLogLine, type UsageRecord } from '../store/types';
 import { type ServerContext } from '../context';
-import { taskContext, uninstall } from './context';
+import { runModel, taskContext, uninstall } from './context';
+import { effectiveConfig } from '../settings/config';
 import { writeBackCodexAuth } from '../settings/credentials';
-import { storeLogs, taskRedactor } from './logs';
+import { storeLogs, taskRedactor, taskWarnings } from './logs';
 import { stopTaskMachine } from './kick';
-import { taskRunner } from '../runners';
+import { taskRunner } from '../runners/select';
 import { type CallbackState, type InboxAck } from './queue';
-import { taskClaims, taskTokenHash } from './token';
+import { taskClaims, taskTokenHash } from './access';
 import { bearerToken } from '../routes/guards';
 import { json } from '../routes/http';
 import { type EngineLogin } from '../settings/logins';
@@ -45,13 +46,6 @@ export async function authorizeTask(
       { allowCompleted, include },
     )) ?? new Response('Unauthorized', { status: 401 })
   );
-}
-
-export function target(task: AgentTask): string {
-  const event = task.event;
-  if (!event) return task.source;
-  if (event.repo) return `${event.repo.owner}/${event.repo.name}`;
-  return event.chat?.thread.channelId ?? event.integration;
 }
 
 type TaskCallback = {
@@ -190,7 +184,6 @@ export async function reportResult(
   url: URL,
 ): Promise<Response> {
   const id = params.id!;
-  const token = bearerToken(req);
   const authorized = ctx.callbackTask!;
   const runner = authorized.handle ? await taskRunner(ctx, authorized.task) : undefined;
   if (['completed', 'failed', 'cancelled'].includes(authorized.status)) {
@@ -213,6 +206,8 @@ export async function reportResult(
   )
     return json({ error: 'Invalid task result' }, 400);
 
+  // Only the server records a change request; a runner's report never carries one.
+  body.approvals = body.approvals?.map(({ change: _, ...entry }) => entry as Approval);
   const redact = await taskRedactor(ctx, authorized, true);
   Object.assign(
     body,
@@ -293,7 +288,7 @@ export async function reportResult(
           : {}),
         taskId: id,
         agent: authorized.task.agent,
-        target: target(authorized.task),
+        target: usageTarget(authorized.task),
         ...((authorized.task.usage?.engine ?? authorized.task.definition.engine)
           ? {
               engine: authorized.task.usage?.engine ?? authorized.task.definition.engine,
@@ -324,7 +319,7 @@ export async function reportResult(
     await uninstall(ctx.store, `${event.appId}:${event.installationId}`, now);
 
   if (completed && body.machine) {
-    const { reportTaskFailure } = await import('./failures');
+    const { reportTaskFailure } = await import('./events');
     await reportTaskFailure(ctx, authorized.task, body.error ?? 'The machine failed');
   }
 
@@ -447,8 +442,6 @@ export async function refreshCredential(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const token = bearerToken(req);
   const authorized = ctx.callbackTask!;
   const body = (await req.json().catch(() => ({}))) as {
     authJson?: unknown;
@@ -470,18 +463,64 @@ export async function refreshCredential(
   });
 }
 
+/** A turn's OAuth connection token or Just me key on first use, `refused` naming by fingerprint a token its server refused; the refresh token stays here. A Just me one first needs its owner's approval, else is refused with the reason the model reads. One that needs reconnecting answers `needs-auth`, logged once per task. */
+export async function taskConnection(req: Request, ctx: CallbackContext): Promise<Response> {
+  const body = (await req.json().catch(() => undefined)) as
+    | { connection?: unknown; refused?: unknown; url?: unknown; connectionCreatedAt?: unknown }
+    | undefined;
+  if (typeof body?.connection !== 'string' || !body.connection)
+    return json({ error: 'A connection id is required' }, 400);
+  const { task } = ctx.callbackTask!;
+  const { connectionToken, taskAsker, turnConnections } = await import('../connections/resolve');
+  const { findConnection } = await import('../connections/records');
+  const { actAsRefusal } = await import('./changes');
+  const [connection, ids] = await Promise.all([
+    findConnection(ctx, body.connection, taskAsker(task)),
+    turnConnections(ctx, task),
+  ]);
+  if (!connection || !ids.includes(body.connection))
+    return json({ error: 'Unknown connection' }, 404);
+  try {
+    const refusal = connection.owner ? await actAsRefusal(ctx, task, connection) : undefined;
+    if (refusal) return json({ error: refusal }, 403);
+    const { token, name } = await connectionToken(
+      ctx,
+      task,
+      body.connection,
+      typeof body.refused === 'string' ? body.refused : undefined,
+      { url: body.url, connectionCreatedAt: body.connectionCreatedAt },
+    );
+    if (token) return json({ token });
+    const platform = task.event && ctx.integrations[task.event.integration]?.name;
+    await taskWarnings(ctx, task.id, [`${name ?? platform ?? 'A connection'} needs reconnecting.`]);
+
+    return json({ status: 'needs-auth' });
+  } catch (error) {
+    console.error('coder server: connection token failed', error);
+    return json({ error: 'The connection is unavailable' }, 502);
+  }
+}
+
 export async function readContext(
   req: Request,
   ctx: CallbackContext,
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const token = bearerToken(req);
   const authorized = ctx.callbackTask!;
 
   try {
     const { connectionSecrets: _secrets, ...context } = await taskContext(ctx, authorized);
+    // The list shows the model each task runs with, so the turn records it as it starts.
+    const model = runModel(authorized.task, effectiveConfig(ctx, context.config));
+    if (model && model !== authorized.task.usage?.resolvedModel)
+      await ctx.queue.patchTask(
+        ctx.organizationId,
+        authorized.task.id,
+        { resolvedModel: model },
+        (ctx.now ?? Date.now)(),
+        { attempts: authorized.attempts, tokenHash: authorized.tokenHash },
+      );
     return json({
       ...context,
       generation: authorized.generation ?? 0,

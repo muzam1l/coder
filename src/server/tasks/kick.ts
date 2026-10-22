@@ -3,8 +3,9 @@ import { SERVER_LIMITS } from '../limits';
 import { scoped, type ServerContext } from '../context';
 import { loadedStore } from '../store/primed';
 import { machineFirewall } from './context';
-import type { ClaimedTask, TaskFence } from './queue';
-import { taskRunner, type Runner } from '../runners';
+import type { ClaimedTask, RunningTask, TaskFence } from './queue';
+import type { Runner } from '../runners';
+import { taskRunner } from '../runners/select';
 import {
   startQueuedLocalTask,
   inspectLocalTask,
@@ -44,7 +45,7 @@ async function stop(
 
 async function fail(
   ctx: ServerContext,
-  status: TaskStatus,
+  status: RunningTask,
   error: string,
   fence: TaskFence = {},
 ): Promise<boolean> {
@@ -62,16 +63,20 @@ async function fail(
     },
   );
   if (finished) {
-    const { reportTaskFailure } = await import('./failures');
-    await reportTaskFailure(ctx, status.task, error);
+    const { reportTaskFailure } = await import('./events');
+    const failed = await ctx.store.get('task', status.task.id);
+    if (failed) await reportTaskFailure(ctx, failed.task, error);
     await stopTaskMachine(ctx, status, true, runner);
   }
 
   return finished;
 }
 
-async function inspect(ctx: ServerContext, status: TaskStatus, now: number): Promise<boolean> {
-  if (ctx.local && status.handle?.startsWith('cli:')) return inspectLocalTask(ctx, status, now);
+async function inspect(ctx: ServerContext, status: RunningTask, now: number): Promise<boolean> {
+  if (ctx.local && status.handle?.startsWith('cli:')) {
+    const local = await ctx.store.get('task', status.task.id);
+    return local ? inspectLocalTask(ctx, local, now) : false;
+  }
   const runner = status.handle ? await taskRunner(ctx, status.task) : undefined;
   const activity = {
     handle: status.handle ?? null,
@@ -154,7 +159,7 @@ export async function inspectTask(ctx: ServerContext, status: TaskStatus): Promi
 
 export async function stopTaskMachine(
   ctx: ServerContext,
-  status: TaskStatus,
+  status: RunningTask,
   force = false,
   captured?: Runner,
 ): Promise<void> {

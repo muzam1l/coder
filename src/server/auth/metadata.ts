@@ -1,8 +1,9 @@
-import type { ServerContext } from '../context';
-import type { Params } from '../routes/match';
-import { json } from '../routes/http';
 /** Documents Wular reads from this server: client metadata (CIMD) and protected resource metadata (RFC 9728). */
 import type { JWK } from 'jose';
+
+import type { ServerContext } from '../context';
+import { json } from '../routes/http';
+import type { Params } from '../routes/match';
 
 export const CALLBACK_PATH = '/api/auth/callback' as const;
 export const WEB_CLIENT_PATH = '/.well-known/oauth-client.json' as const;

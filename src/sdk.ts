@@ -18,10 +18,11 @@ import { flowSdk as flow } from './flow';
 import { review } from './flow/executor';
 import type { FlowEvent, FlowStep } from './flow/types';
 import { runners as runner } from './runner';
-import { serverAppLink } from './server/agents/apps';
-import { rotateKey } from './server/maintenance';
-import { actionsWorkflow } from './server/runners/github-actions';
-import { serve, serverHandler } from './server/serve';
+import { requireBunServer } from './server/env';
+import { actionsWorkflow } from './server/runners/kinds/github-actions';
+import type { serve as Serve, serverHandler as ServerHandler } from './server/serve';
+import type { rotateKey as RotateKey } from './server/maintenance';
+import type { serverAppLink as ServerAppLink } from './server/agents/apps';
 
 /** Run and control coder tasks. Mirrors `coder task`. */
 export const task = tasks;
@@ -50,15 +51,35 @@ export { review } from './flow/executor';
 /** Sign in and manage saved sessions. Mirrors `coder auth`. */
 export const auth = sessions;
 
+/** The serverless request handler; the server code loads with its first call. */
+function serverHandler(
+  ...args: Parameters<typeof ServerHandler>
+): ReturnType<typeof ServerHandler> {
+  requireBunServer();
+  const handler = import('./server/serve').then(({ serverHandler }) => serverHandler(...args));
+
+  return Object.assign(
+    async (request: Request, waitUntil?: (work: Promise<unknown>) => void) =>
+      (await handler)(request, waitUntil),
+    {
+      scheduled: async () => (await handler).scheduled(),
+      close: async () => (await handler).close(),
+    },
+  );
+}
+
 /** Run and host a Coder server. Mirrors `coder server`. */
 export const server = {
-  serve,
-  rotateKey,
+  serve: async (...args: Parameters<typeof Serve>) =>
+    (await import('./server/serve')).serve(...args),
+  rotateKey: async (...args: Parameters<typeof RotateKey>) =>
+    (await import('./server/maintenance')).rotateKey(...args),
   /** The GitHub Actions workflow the `github-actions` runner dispatches. */
   workflow: actionsWorkflow,
   app: {
     /** A link, valid 10 minutes, to the page that creates the built-in agent's public app on a platform. */
-    create: serverAppLink,
+    create: async (...args: Parameters<typeof ServerAppLink>) =>
+      (await import('./server/agents/apps')).serverAppLink(...args),
   },
   handler: serverHandler,
 };

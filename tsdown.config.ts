@@ -18,14 +18,13 @@ const builtinFlowEntries = Object.fromEntries(
 // (vs tsc's one-d.ts-per-module mirror of src/).
 // `bun run build` stages into CODER_DIST and moves it into dist.
 const OUT = process.env.CODER_DIST ?? 'dist';
-export default defineConfig({
+const main = defineConfig({
   entry: {
     cli: 'src/cli.ts',
     'lib/broker': 'src/core/broker/main.ts',
     sdk: 'src/sdk.ts',
     schema: 'src/server/store/pg/schema.ts',
     'schema.config': 'src/server/store/pg/push.config.ts',
-    zod: 'src/flow/zod.ts',
     'flow/index': 'src/flow/index.ts',
     ...builtinFlowEntries,
   },
@@ -53,3 +52,9 @@ export default defineConfig({
   exports: false,
   outExtensions: () => ({ js: '.js', dts: '.d.ts' }),
 });
+
+// Flows' full Zod builds alone: a chunk shared with the CLI would load every Zod locale on each command.
+export default defineConfig([
+  main,
+  { ...main, entry: { zod: 'src/flow/zod.ts' }, copy: undefined },
+]);

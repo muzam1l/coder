@@ -61,6 +61,7 @@ export function Select({
   disabled,
   headings,
   subs,
+  unavailable,
   icons,
   action,
 }: {
@@ -70,6 +71,8 @@ export function Select({
   headings?: Record<string, string>;
   /** A second, muted line under an option, clipped from the start, for paths. */
   subs?: Record<string, string>;
+  /** Options shown but never picked, with why under their label. */
+  unavailable?: Record<string, string>;
   /** A mark before an option's label, like a platform's logo; the button shows the picked one's. */
   icons?: Record<string, ComponentChildren>;
   /** One last row that acts instead of selecting, like "Add models"; it joins hover and keyboard like an option. */
@@ -112,6 +115,7 @@ export function Select({
       return;
     }
     const next = options[index]?.[0];
+    if (next !== undefined && unavailable?.[next]) return;
     close();
     if (next === undefined || next === current) return;
     if (value === undefined) setOwn(next);
@@ -158,7 +162,8 @@ export function Select({
       event.stopPropagation();
       close();
     } else if (key === 'Tab') {
-      pick(active);
+      if (unavailable?.[options[active]?.[0] ?? '']) close(false);
+      else pick(active);
       return;
     } else if (key.length === 1 && !event.ctrlKey && !event.metaKey) {
       const found = seek(key, active);
@@ -221,7 +226,8 @@ export function Select({
                 selected={index === selected}
                 check
                 icon={icons?.[key]}
-                sub={subs?.[key] ? <bdi dir="ltr">{subs[key]}</bdi> : null}
+                aria-disabled={unavailable?.[key] ? 'true' : undefined}
+                sub={unavailable?.[key] ?? (subs?.[key] ? <bdi dir="ltr">{subs[key]}</bdi> : null)}
                 onPointerMove={() => index !== active && setActive(index)}
                 // Picks without letting a wrapping label re-open the list.
                 onClick={event => {

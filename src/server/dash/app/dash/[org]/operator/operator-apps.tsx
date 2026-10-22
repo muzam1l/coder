@@ -4,10 +4,13 @@ import '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/page.css';
 
 import { useState } from 'preact/hooks';
 
+import { useRouter } from '@wular/pnext/navigation/client';
 import { client } from '@/utils/client';
-import { toastFailure } from '@/utils/action';
+import { toastFailure, useAction } from '@/utils/action';
 import { ClientError } from '@coder/client';
-import type { OperatorAppRow, OperatorApps as Apps } from '@coder/client/types';
+import type { AppCheck, OperatorAppRow, OperatorApps as Apps } from '@coder/client/types';
+import { showToast } from '@/comps/frame/task-toasts';
+import { UpdateDialog } from '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/platform-actions';
 import { Badge } from '@/comps/ui/badge';
 import { Field } from '@/comps/ui/field';
 import { Button } from '@/comps/ui/button';
@@ -88,9 +91,25 @@ function SetUpDialog({
   );
 }
 
-/** One shared app per platform for the built-in agent in every workspace; Set up opens its create dialog. */
+/** One shared app per platform for the built-in agent in every workspace; Set up opens its create dialog, Update brings it up to date as an agent's Platforms tab does. */
 export function OperatorApps({ first }: { first: Apps }) {
+  const nav = useRouter();
   const [open, setOpen] = useState<OperatorAppRow>();
+  const [updating, setUpdating] = useState<{ row: OperatorAppRow; check: AppCheck }>();
+  const action = useAction();
+
+  const update = (row: OperatorAppRow) =>
+    void action.run(row.integration, async () => {
+      if (row.appUpdate !== 'push')
+        return setUpdating({ row, check: await client.operator.drift(row.integration) });
+      await client.operator.update(row.integration);
+      showToast(
+        `${row.name} app updated`,
+        `${row.app!.name} now matches the built-in agent.`,
+        'success',
+      );
+      nav.refresh();
+    });
 
   return (
     <>
@@ -99,20 +118,48 @@ export function OperatorApps({ first }: { first: Apps }) {
           <Row
             key={row.integration}
             title={row.name}
-            badges={row.app ? <Badge tone="ok">set up</Badge> : null}
+            badges={
+              row.app?.changed ? (
+                <Badge tone="warn">update needed</Badge>
+              ) : row.app ? (
+                <Badge tone="ok">set up</Badge>
+              ) : null
+            }
             sub={
               row.app ? row.app.name : 'Not set up. Workspaces cannot add the built-in agent here.'
             }
             actions={
-              row.app ? null : (
+              !row.app ? (
                 <Button variant="secondary" size="sm" onClick={() => setOpen(row)}>
                   Set up
                 </Button>
-              )
+              ) : row.appUpdate ? (
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  disabled={Boolean(action.pending)}
+                  loading={action.pending === row.integration}
+                  onClick={() => update(row)}
+                >
+                  Update
+                </Button>
+              ) : null
             }
           />
         ))}
       </List>
+      {updating ? (
+        <UpdateDialog
+          app={updating.row.app!}
+          name={updating.row.name}
+          check={updating.check}
+          confirmed={() => client.operator.update(updating.row.integration)}
+          onClose={() => {
+            setUpdating(undefined);
+            nav.refresh();
+          }}
+        />
+      ) : null}
       {open ? (
         <SetUpDialog
           row={open}

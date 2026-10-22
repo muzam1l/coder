@@ -1,11 +1,11 @@
-/** What every table adapter shares: the `Kind` shape, column conversions, and id and secret lookups. */
-import { and, eq, getTableColumns, type SQL } from 'drizzle-orm';
+/** What every table adapter shares: the `Kind` shape, column conversions, secret rows and usage rows. */
+import { eq, getTableColumns, inArray, sql, type SQL } from 'drizzle-orm';
 import { CasingCache } from 'drizzle-orm/casing';
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core';
 
-import { CASING } from '../client';
+import { CASING, type Db } from '../client';
 
-import type { AgentRecord, AgentVersionRecord, TaskStatus } from '../../types';
+import type { AgentRecord, AgentVersionRecord, TaskStatus, UsageRecord } from '../../types';
 import {
   agent,
   agentVersion,
@@ -14,43 +14,7 @@ import {
   secret,
   task,
 } from '../schema';
-import { secretKeyVersion } from '../../secrets';
-import type { DrizzleStore } from '../store';
-
-export function storedTaskContext(value: TaskStatus['task']) {
-  return value.connections === undefined && !value.engineChain && !value.engineCredentials
-    ? value.context
-    : {
-        ...value.context,
-        connections: value.connections,
-        engineChain: value.engineChain,
-        engineCredentials: value.engineCredentials,
-      };
-}
-
-export function readTaskContext(value: TaskStatus['task']['context'] | null) {
-  const { connections, runnerLogs, engineChain, engineCredentials, ...context } = (value ??
-    {}) as NonNullable<TaskStatus['task']['context']> & {
-    connections?: string[];
-    engineChain?: string[];
-    engineCredentials?: Record<string, string>;
-    runnerLogs?: {
-      at?: number;
-      complete?: boolean;
-      handle?: string;
-      attempts?: number;
-      generation?: number;
-    };
-  };
-
-  return {
-    connections,
-    runnerLogs,
-    engineChain,
-    engineCredentials,
-    context: Object.keys(context).length ? context : undefined,
-  };
-}
+import { usageTarget } from '../../../tasks/usage';
 
 /** Postgres requests acquire their organization from a session, app, or task. */
 export const UNSCOPED_ORGANIZATION = '';
@@ -100,7 +64,7 @@ export const agentValue = (r: typeof agent.$inferSelect): AgentRecord =>
     repo: r.repo,
     path: r.path,
     currentVersion: r.currentVersion,
-    settings: r.settings,
+    settings: r.engineSettings,
     createdAt: ms(r.createdAt),
     updatedAt: ms(r.updatedAt),
   }) as AgentRecord;
@@ -157,32 +121,40 @@ export function fromJson<T extends PgTable>(
 
 /** A `task` row as the `TaskStatus` record the rest of the server reads. */
 export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
-  const context = readTaskContext(r.context);
-
   return defined({
     task: defined({
       id: r.publicId,
       source: r.source,
       agent: r.agent,
       flow: r.flow,
-      runner: r.runner as TaskStatus['task']['runner'],
-      permissions: r.permissions,
+      runner: r.runnerKind as TaskStatus['task']['runner'],
+      access: r.access,
       event: r.event,
+      name: r.name,
+      cwd: r.cwd,
       prompt: r.prompt,
       args: r.args,
       mcp: r.mcp,
-      connections: context.connections,
+      appendSystem: r.appendSystem,
+      addDirs: r.addDirs,
+      connections: r.connections,
       author: r.author,
       definition: r.definition,
       credential: r.credential,
-      engineChain: context.engineChain,
-      engineCredentials: context.engineCredentials,
-      requester: r.requester,
+      engineChain: r.engineChain,
+      engineCredentials: r.engineCredentials,
+      requestedBy: r.requestedBy,
+      audience: r.audience,
+      space: r.space,
+      parent: r.parent,
       runnerId: r.runnerId,
-      usage: r.usage,
+      usage: r.engineSettings,
       tools: r.tools,
-      context: context.context,
+      context: r.context,
       files: r.files,
+      failureReply: r.failureReply,
+      taskUrl: r.taskUrl,
+      settingsUrl: r.settingsUrl,
     }),
     status: r.status,
     attempts: r.attempts,
@@ -198,11 +170,7 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
     logCursor: r.logCursor ?? undefined,
     logSeq: r.logSeq ?? undefined,
     logBytes: r.logBytes ?? undefined,
-    ...((context.runnerLogs?.handle ?? null) === r.handle &&
-    context.runnerLogs?.attempts === r.attempts &&
-    context.runnerLogs?.generation === r.generation
-      ? { logsComplete: context.runnerLogs?.complete }
-      : {}),
+    logsComplete: r.logsComplete,
     archivedAt: optionalMs(r.archivedAt),
     approval: r.approval,
     answer: Array.isArray(r.answer) ? r.answer : undefined,
@@ -214,51 +182,76 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
   });
 }
 
-function secretParts(s: DrizzleStore, value: string) {
-  if (value.startsWith('plain.'))
-    return {
-      iv: 'plain',
-      tag: '',
-      ciphertext: value.slice(6),
-      keyVersion: 0,
-    };
-  const [iv, tag, ciphertext] = value.split('.');
-  if (!iv || !tag || !ciphertext) throw new Error('Invalid encrypted secret');
-  return {
-    iv,
-    tag,
-    ciphertext,
-    keyVersion: secretKeyVersion(s.encryption, value),
-  };
-}
-
+/** A sealed value as one opaque string: `plain.<base64>` or `<iv>.<tag>.<ciphertext>`. */
 export function opaque(value: { iv: string; tag: string; ciphertext: string }): string {
   return value.iv === 'plain'
     ? `plain.${value.ciphertext}`
     : `${value.iv}.${value.tag}.${value.ciphertext}`;
 }
 
-export async function addSecret(
-  s: DrizzleStore,
-  kind: 'app' | 'installation' | 'engine' | 'runner',
-  value: string,
-): Promise<number> {
-  const [created] = await s.db
-    .insert(secret)
-    .values({
-      organizationId: s.organizationId,
-      kind,
-      ...secretParts(s, value),
-    })
-    .returning({ id: secret.id });
-  return created!.id;
+/** The parts of an opaque sealed string. */
+export function sealedParts(value: string): { iv: string; tag: string; ciphertext: string } {
+  if (value.startsWith('plain.')) return { iv: 'plain', tag: '', ciphertext: value.slice(6) };
+  const [iv, tag, ciphertext] = value.split('.');
+  if (!iv || !tag || !ciphertext) throw new Error('Invalid encrypted secret');
+  return { iv, tag, ciphertext };
 }
 
-export async function setSecret(s: DrizzleStore, id: number, value: string): Promise<void> {
-  await s.db
-    .update(secret)
-    .set({ ...secretParts(s, value), updatedAt: s.at() })
-    .where(and(s.mine(secret.organizationId), eq(secret.id, id)));
+/** A new secret row's id. */
+export async function addSecret(db: Db, value: string): Promise<number> {
+  const [row] = await db.insert(secret).values({ value }).returning({ id: secret.id });
+  return row!.id;
+}
+
+export async function setSecret(db: Db, id: number, value: string): Promise<void> {
+  await db.update(secret).set({ value }).where(eq(secret.id, id));
+}
+
+/** Deletes the secret rows of owners deleted in this transaction, except one a shared app still points at. */
+export async function dropSecrets(db: Db, ids: Array<number | null | undefined>): Promise<void> {
+  const found = ids.filter((id): id is number => typeof id === 'number');
+  if (!found.length) return;
+  await db
+    .delete(secret)
+    .where(
+      sql`${inArray(secret.id, found)} and not exists (select 1 from ${integrationApp} where ${integrationApp.credentialsSecretId} = ${secret.id})`,
+    );
+}
+
+/** A row's JSON with its secret row's value under `secret`, for one statement reads. */
+export const withSecret = (row: SQL, value: SQL) =>
+  sql`${row} || jsonb_strip_nulls(jsonb_build_object('secret', ${value}))`;
+
+/** A finished task's usage row, as the `usage` kind lists it; undefined while it has not run. */
+export function usageRecord(
+  r: Pick<
+    typeof task.$inferSelect,
+    | 'publicId'
+    | 'agent'
+    | 'source'
+    | 'event'
+    | 'engine'
+    | 'model'
+    | 'credential'
+    | 'runnerMs'
+    | 'usageTokens'
+    | 'finishedAt'
+  >,
+  installationKey: string | null,
+): UsageRecord | undefined {
+  if (r.runnerMs === null || !r.finishedAt) return undefined;
+  return defined({
+    installationId: installationKey,
+    taskId: r.publicId,
+    agent: r.agent,
+    target: usageTarget({ event: r.event ?? undefined, source: r.source }),
+    engine: r.engine,
+    model: r.model,
+    credential: r.credential ?? 'unknown',
+    runnerElapsedMs: r.runnerMs,
+    tokens: r.usageTokens,
+    at: ms(r.finishedAt),
+  });
 }
 
 export const statePrefix = (organizationId: string, kind: string) =>

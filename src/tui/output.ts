@@ -5,7 +5,7 @@ import type { Style, TokenUsage } from '../core/types';
 import { termCols } from './live';
 
 /** Failure detail: an exit code, or a code plus dimmed next-step hint line(s). */
-export type FailOptions = number | { code?: number; hint?: string | string[] };
+type FailOptions = number | { code?: number; hint?: string | string[] };
 
 // ANSI stylers, one per stream (TTY-gated, honoring NO_COLOR and FORCE_COLOR;
 // FORCE_COLOR wins, as in Node). Computed once: isTTY is stable for the
@@ -160,7 +160,7 @@ export interface TableGroup<T> {
 
 // Aligned table: widths follow the values (capped by `max`), header bold and
 // light, cells two spaces apart. Groups are opt-in via `{ header, rows }`.
-export interface TableOptions {
+interface TableOptions {
   style?: Style;
   /** Box-drawing frame with a rule between rows; cells wrap to the terminal width. */
   border?: boolean;

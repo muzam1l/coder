@@ -16,7 +16,7 @@ const flag = z.pipe(
 );
 
 /** Where the dashboard sends bug reports unless `ISSUES_URL` says otherwise. */
-export const ISSUES_URL = 'https://github.com/muzam1l/coder/issues/new';
+const ISSUES_URL = 'https://github.com/muzam1l/coder/issues/new';
 
 const url = (valid: (url: URL) => boolean, message: string) =>
   z.string().check(

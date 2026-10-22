@@ -12,6 +12,7 @@ export const commandModelAlias = command({
   usage:
     'Save an alias for an engine spec, e.g. fast -> codex:luna. An alias may reuse a\nbuilt-in name to override it.',
   access: 'write',
+  approvalPolicy: 'ask',
   args: {
     name: str('the alias'),
     spec: str('the engine spec, such as codex:luna'),
@@ -22,7 +23,7 @@ export const commandModelAlias = command({
     const { models } = await import('../../core/models');
     return models.alias(name, spec, { ...options, cwd });
   },
-  print: printModelAlias,
+  print: result => 'alias' in result && printModelAlias(result),
 });
 
 function printModelAlias(result: {

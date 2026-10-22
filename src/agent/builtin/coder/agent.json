@@ -5,8 +5,7 @@
     "github": {
       "events": {
         "pull_request": {
-          "flow": "review",
-          "permissions": "read-only"
+          "flow": "review"
         },
         "mention": true,
         "issue": true,
@@ -19,7 +18,6 @@
       "events": {
         "mention": true,
         "dm": true,
-        "command": true,
         "channel": {
           "match": "[Cc]oder"
         }

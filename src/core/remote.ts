@@ -1,15 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
-import { loadAgents } from '../agent/load';
-import { folderFiles } from '../agent/files';
-import { INTEGRATIONS } from '../integrations';
+import { folderFiles, loadAgents } from '../agent/load';
 import { CoderError } from './errors';
-import { ServerClient, isLoopbackServer } from '../client';
-import { renewal } from '../client/auth/renewal';
+import { ServerClient } from '../client';
+import { isLoopbackServer } from '../client/http';
 import {
   isKnownServer,
   rememberServer,
+  renewal,
   savedSession,
   validateServer,
 } from '../client/auth/session';
@@ -104,7 +103,9 @@ export function coderClient(
   const saved = savedSession(target);
   const login = saved?.token;
   const admin = process.env.ADMIN_TOKEN;
-  const bearer = token ?? login ?? admin;
+  // Inside a cloud task, the task's own attempt token; never a person's session.
+  const task = process.env.CODER_MCP_MODE === 'cloud' ? process.env.CODER_TASK_TOKEN : undefined;
+  const bearer = token ?? task ?? login ?? admin;
   if (bearer && bearer === admin && !isLoopbackServer(target))
     throw new CoderError('invalid-option', 'ADMIN_TOKEN cannot be sent to a non-loopback server.');
   if (!bearer)
@@ -126,6 +127,7 @@ export async function pushAgents(
   cwd: string,
   id?: string,
 ): Promise<PushResult[]> {
+  const { INTEGRATIONS } = await import('../integrations');
   const local = (await loadAgents(cwd, INTEGRATIONS)).filter(agent => !agent.builtin);
   const selected = id ? local.filter(agent => agent.id === id) : local;
   if (id && !selected.length)
@@ -155,7 +157,7 @@ async function stdinValue(): Promise<string> {
   return value.replace(/\r?\n$/, '');
 }
 
-export interface CredentialAddOptions extends ServerOptions {
+interface CredentialAddOptions extends ServerOptions {
   /** The variable whose key this is; `value` (`-` reads stdin) gives the key, else this environment. */
   env?: string;
   value?: string;
@@ -181,7 +183,7 @@ export async function addCredential(
   });
 }
 
-export interface CredentialLoginOptions extends ServerOptions {
+interface CredentialLoginOptions extends ServerOptions {
   /** Gets a cancel for the started sign-in. */
   onStart?(cancel: () => Promise<unknown>): void;
   /** Shows the sign-in link and code once the runner has them. */

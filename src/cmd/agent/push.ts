@@ -11,6 +11,7 @@ export const commandAgentPush = command({
   usage:
     'Upload one workspace agent, or every agent in .coder/agents when no id is given. The server creates a new immutable version only when its definition, prompt, or files changed.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: { id: str('the agent (default: every workspace agent)'), ...serverOptions },
   cli: { positional: ['id'], examples: ['coder agent push helper  # upload helper'] },
   run: async ({ options, args: [id], cwd }) => {
@@ -28,7 +29,7 @@ export const commandAgentPush = command({
         if (app.error) process.stderr.write(`${app.error}\n`);
         else if (app.drift)
           process.stderr.write(
-            `${app.name} needs changes on ${app.integration}; see Update on the agent's Platforms tab.\n`,
+            `${app.name} needs changes on ${app.integration}; open it on the agent's Platforms tab and click Update.\n`,
           );
     }
   },

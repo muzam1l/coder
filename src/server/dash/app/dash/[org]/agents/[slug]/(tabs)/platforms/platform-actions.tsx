@@ -1,23 +1,23 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { useRouter } from '@wular/pnext/navigation/client';
+import { useParams, useRouter } from '@wular/pnext/navigation/client';
 
 import type { AppCheck, CreateStart } from '@coder/client/types';
 import type { CreateField, CreateStep, PlatformPost } from '@coder/integrations/types';
 import { client } from '@/utils/client';
 import { useAction } from '@/utils/action';
-import { iDots, iDown, iOut, iPlus, iSpark, iSteer, iUpload, iX } from '@/comps/ui/icons';
+import { iDots, iDown, iOut, iPlus, iSliders, iSteer, iUpload, iX } from '@/comps/ui/icons';
 import { Modal } from '@/comps/ui/modal';
 import { reasonText } from '@/utils/format';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 import { Badge } from '@/comps/ui/badge';
-import { Button } from '@/comps/ui/button';
+import { Button, type Look } from '@/comps/ui/button';
 import { CopyButton, CopyLine } from '@/comps/ui/copy';
 import { Field } from '@/comps/ui/field';
 import { Icon } from '@/comps/ui/icon';
 import { Menu } from '@/comps/ui/menu';
-import { MenuItem } from '@/comps/ui/menu-items';
+import { MenuItem, MenuLink } from '@/comps/ui/menu-items';
 import { Segmented } from '@/comps/ui/segmented';
 import { Select } from '@/comps/ui/select';
 import { showToast, toastError } from '@/comps/frame/task-toasts';
@@ -64,7 +64,7 @@ const uiNames = (text: string) =>
 const focusShown = (input: HTMLInputElement | null) => input?.focus();
 
 /** Posts the platform's own create form, such as GitHub's app manifest. */
-export function postTo({ url, fields }: PlatformPost) {
+function postTo({ url, fields }: PlatformPost) {
   const form = Object.assign(document.createElement('form'), { method: 'post', action: url });
   for (const [name, value] of Object.entries(fields))
     form.append(Object.assign(document.createElement('input'), { type: 'hidden', name, value }));
@@ -119,12 +119,12 @@ function useInstall() {
   return { busy: Boolean(action.pending), install };
 }
 
-/** One install button, for the next steps of a flow's outcome. */
-export function InstallButton({ app, label }: { app: string; label: string }) {
+/** One install button, for the next steps of a flow's outcome and an app's page. */
+export function InstallButton({ app, label, ...look }: Look & { app: string; label: string }) {
   const { busy, install } = useInstall();
 
   return (
-    <Button loading={busy} onClick={() => install(app)}>
+    <Button {...look} loading={busy} onClick={() => install(app)}>
       {label}
     </Button>
   );
@@ -143,12 +143,12 @@ function RemoveDialog({
   name: string;
   onClose: () => void;
 }) {
-  const action = useAction({ toast: 'Not removed', refresh: true, leaves: true });
+  const action = useAction({ toast: 'Not removed', leaves: true });
   const remove = () =>
     void action.run('remove', async () => {
       await client.apps.remove(app.id);
-      // An outcome in the address belongs to the removed app.
-      history.replaceState(history.state, '', location.pathname);
+      // Up to the Platforms tab, loaded fresh: a copy cached on the way here still lists the app.
+      location.replace(location.pathname.replace(/\/[^/]*$/, ''));
     });
 
   return (
@@ -178,6 +178,113 @@ function RemoveDialog({
       onConfirm={remove}
       onClose={onClose}
     />
+  );
+}
+
+/** An install by `app`'s name. */
+type InstallChoice = { id: string; app: string; account: string };
+
+/** Asks before the app is uninstalled from `install`'s account on the platform; a refusal links where to do it by hand. */
+function UninstallDialog({
+  install,
+  name,
+  onClose,
+}: {
+  install: InstallChoice;
+  /** The platform's display name. */
+  name: string;
+  onClose: () => void;
+}) {
+  const [manual, setManual] = useState<string>();
+  const action = useAction({ toast: 'Not uninstalled', refresh: true, leaves: true });
+  const uninstall = () =>
+    void action.run('uninstall', async () => {
+      await client.installations.uninstall(install.id).catch((reason: unknown) => {
+        setManual((reason as { hint?: string }).hint);
+        throw reason;
+      });
+      showToast(
+        `Uninstalled from ${install.account}`,
+        `${install.app} no longer answers there.`,
+        'success',
+      );
+    });
+
+  return (
+    <ConfirmDialog
+      open
+      title={`Uninstall ${install.app} from ${install.account}?`}
+      body={
+        <>
+          The agent stops answering on {install.account}. Installing again works any time.
+          {manual ? (
+            <>
+              <br />
+              {name} did not uninstall it, so uninstall it{' '}
+              <a class="link" href={manual} target="_blank" rel="noreferrer">
+                on {name}
+              </a>{' '}
+              instead.
+            </>
+          ) : null}
+        </>
+      }
+      confirmLabel="Uninstall"
+      busy={Boolean(action.pending)}
+      onConfirm={uninstall}
+      onClose={onClose}
+    />
+  );
+}
+
+/** Uninstall from one account, asked in its dialog first. */
+export function UninstallButton({ install, name }: { install: InstallChoice; name: string }) {
+  // By id: after the refresh this button may stand for the next install.
+  const [asked, setAsked] = useState<string>();
+
+  return (
+    <>
+      <Button variant="outline" size="sm" onClick={() => setAsked(install.id)}>
+        Uninstall
+      </Button>
+      {asked === install.id ? (
+        <UninstallDialog install={install} name={name} onClose={() => setAsked(undefined)} />
+      ) : null}
+    </>
+  );
+}
+
+/** Drops a chat link's `name` from the address once the dialog it opened closes. */
+function dropParam(name: string) {
+  const url = new URL(location.href);
+  url.searchParams.delete(name);
+  history.replaceState(history.state, '', url);
+}
+
+/** Remove the app, asked in its dialog first; a chat's `?delete=` link opens the dialog. */
+export function RemoveButton({
+  app,
+  name,
+  asked = false,
+}: {
+  app: AppChoice;
+  /** The platform's display name. */
+  name: string;
+  asked?: boolean;
+}) {
+  const [open, setOpen] = useState(asked);
+  const close = () => {
+    setOpen(false);
+    dropParam('delete');
+  };
+
+  return (
+    <>
+      <Button variant="outline" danger size="sm" onClick={() => setOpen(true)}>
+        Remove
+      </Button>
+      {open ? <RemoveDialog app={app} name={name} onClose={close} /> : null}
+    </>
   );
 }
 
@@ -414,16 +521,19 @@ function WhereDialog({
 }
 
 /** What to change on the platform for an app Coder cannot push; values confirmed by hand where the platform cannot be read. */
-function UpdateDialog({
+export function UpdateDialog({
   app,
   name,
   check,
+  confirmed,
   onClose,
 }: {
-  app: AppChoice;
+  app: Pick<AppChoice, 'name'>;
   /** The platform's display name. */
   name: string;
   check: AppCheck;
+  /** Records that the values were entered on the platform. */
+  confirmed: () => Promise<unknown>;
   onClose: () => void;
 }) {
   const action = useAction({ toast: `${name} app not updated`, leaves: true });
@@ -432,7 +542,7 @@ function UpdateDialog({
   const confirm = (event: MouseEvent) => {
     const dialog = (event.currentTarget as HTMLElement).closest('dialog')!;
     void action.run('confirm', async () => {
-      await client.apps.update(app.id);
+      await confirmed();
       dialog.close();
     });
   };
@@ -499,6 +609,65 @@ function UpdateDialog({
   );
 }
 
+/** Brings the app up to date: Coder pushes it, or its dialog lists what to change on the platform; a chat's `?update=1` link arrives with `check` read, so the dialog opens at once. */
+export function UpdateButton({
+  app,
+  name,
+  appUpdate,
+  check: asked,
+}: {
+  app: AppChoice;
+  /** The platform's display name. */
+  name: string;
+  appUpdate: 'push' | 'drift' | 'confirm';
+  check?: AppCheck;
+}) {
+  const nav = useRouter();
+  const action = useAction({ toast: `${name} app not updated` });
+  const [check, setCheck] = useState(asked);
+  const update = () =>
+    appUpdate === 'push'
+      ? void action.run(
+          'update',
+          async () => {
+            await client.apps.update(app.id);
+            showToast(`${name} app updated`, `${app.name} now matches the agent.`, 'success');
+          },
+          { refresh: true },
+        )
+      : void action.run('update', async () => setCheck(await client.apps.drift(app.id)), {
+          toast: `Not read from ${name}`,
+        });
+
+  return (
+    <>
+      <Button
+        variant={app.changed ? 'primary' : 'outline'}
+        size="sm"
+        leftIcon={iUpload}
+        loading={Boolean(action.pending)}
+        onClick={update}
+      >
+        Update on {name}
+      </Button>
+      {check ? (
+        <UpdateDialog
+          app={app}
+          name={name}
+          check={check}
+          confirmed={() => client.apps.update(app.id)}
+          // What the check stored shows on the page.
+          onClose={() => {
+            setCheck(undefined);
+            dropParam('update');
+            nav.refresh();
+          }}
+        />
+      ) : null}
+    </>
+  );
+}
+
 /** The update dialog of each app a publish left needing changes on its platform, one at a time. */
 export function DriftQueue({ apps }: { apps: Array<AppChoice & { platform: string }> }) {
   const nav = useRouter();
@@ -527,7 +696,13 @@ export function DriftQueue({ apps }: { apps: Array<AppChoice & { platform: strin
   useEffect(() => open(apps), []);
 
   return app && check ? (
-    <UpdateDialog app={app} name={app.platform} check={check} onClose={() => open(left.slice(1))} />
+    <UpdateDialog
+      app={app}
+      name={app.platform}
+      check={check}
+      confirmed={() => client.apps.update(app.id)}
+      onClose={() => open(left.slice(1))}
+    />
   ) : null;
 }
 
@@ -560,30 +735,10 @@ function FailedDialog({
   );
 }
 
-/** The one next step for a platform, and the rarer ones in its row menu. */
-export function PlatformActions({
-  integration,
-  name,
-  apps,
-  installed,
-  reinstall,
-  createUrl,
-  create,
-  unreachable,
-  publicApps = false,
-  organizationApps = false,
-  shared = false,
-  appUpdate,
-  split = false,
-  failed,
-}: {
+export type CreateOptions = {
   integration: string;
   /** The platform's display name. */
   name: string;
-  apps: AppChoice[];
-  installed: boolean;
-  /** The app whose every install was removed on the platform. */
-  reinstall?: string;
   createUrl: string;
   /** The form that creates the app here; without one, creation happens on the platform. */
   create?: CreateStep;
@@ -592,24 +747,21 @@ export function PlatformActions({
   publicApps?: boolean;
   /** Apps may live under an organization; Create app asks which. */
   organizationApps?: boolean;
-  /** The apps are this server's shared ones, installed but never created here. */
-  shared?: boolean;
-  /** How apps are brought up to date: Coder pushes them, or shows what to change on the platform. */
-  appUpdate?: 'push' | 'drift' | 'confirm';
-  /** Another row's Install has a menu, so this one keeps the same split shape. */
-  split?: boolean;
-  /** The platform's last setup failed, on `app` when it was an install; `title` and `text` say how, else it was unexpected. */
-  failed?: { name: string; app?: string; issues?: string; title?: string; text?: string };
-}) {
-  const nav = useRouter();
-  const { busy, install } = useInstall();
+};
+
+/** Creating an app on the platform: who can install it first when the platform lets you pick, then its form or the platform's own. */
+function useCreate({
+  integration,
+  name,
+  createUrl,
+  create,
+  unreachable,
+  publicApps = false,
+  organizationApps = false,
+}: CreateOptions) {
   const [leaving, setLeaving] = useState(false);
   const [creating, setCreating] = useState<{ state: Record<string, string>; step: CreateStep }>();
   const [asking, setAsking] = useState(false);
-  const [removing, setRemoving] = useState<AppChoice>();
-  const [updating, setUpdating] = useState<{ app: AppChoice; check: AppCheck }>();
-  const asks = publicApps || organizationApps;
-  const main = apps.find(app => app.id === reinstall) ?? apps[0];
   // Creation on the platform: the browser posts the platform's own form, such as GitHub's manifest.
   const createThere = (state: Record<string, string>) => {
     setLeaving(true);
@@ -645,48 +797,90 @@ export function PlatformActions({
           })
         : createNow(state);
   const start = () =>
-    asks
+    publicApps || organizationApps
       ? setAsking(true)
       : void begin(createState(createUrl)).catch(reason =>
           toastError('App not created', reasonText(reason)),
         );
-  const dialog = creating ? (
-    <CreateDialog
-      integration={integration}
-      step={creating.step}
-      start={() => client.apps.create(integration, creating.state)}
-      unreachable={unreachable}
-      onClose={() => setCreating(undefined)}
-    />
-  ) : null;
-  const where = asking ? (
-    <WhereDialog
-      integration={integration}
-      name={name}
-      publicApps={publicApps}
-      organizationApps={organizationApps}
-      unreachable={unreachable}
-      onSubmit={(owner, isPublic) => begin(createState(createUrl, owner, isPublic))}
-      onClose={() => setAsking(false)}
-    />
-  ) : null;
-  const update = (app: AppChoice) =>
-    appUpdate === 'push'
-      ? void client.apps
-          .update(app.id)
-          .then(() => {
-            showToast(`${name} app updated`, `${app.name} now matches the agent.`, 'success');
-            nav.refresh();
-          })
-          .catch(reason => toastError(`${name} app not updated`, reasonText(reason)))
-      : void client.apps
-          .drift(app.id)
-          .then(check => setUpdating({ app, check }))
-          .catch(reason => toastError(`Not read from ${name}`, reasonText(reason)));
-  // Gone once the refreshed list no longer holds the app.
-  const removal =
-    removing && apps.some(app => app.id === removing.id) ? (
-      <RemoveDialog app={removing} name={name} onClose={() => setRemoving(undefined)} />
+
+  return {
+    leaving,
+    start,
+    dialogs: (
+      <>
+        {creating ? (
+          <CreateDialog
+            integration={integration}
+            step={creating.step}
+            start={() => client.apps.create(integration, creating.state)}
+            unreachable={unreachable}
+            onClose={() => setCreating(undefined)}
+          />
+        ) : null}
+        {asking ? (
+          <WhereDialog
+            integration={integration}
+            name={name}
+            publicApps={publicApps}
+            organizationApps={organizationApps}
+            unreachable={unreachable}
+            onSubmit={(owner, isPublic) => begin(createState(createUrl, owner, isPublic))}
+            onClose={() => setAsking(false)}
+          />
+        ) : null}
+      </>
+    ),
+  };
+}
+
+/** Create another app on the platform, a separate one with its own name. */
+export function CreateButton(options: CreateOptions) {
+  const { leaving, start, dialogs } = useCreate(options);
+
+  return (
+    <>
+      <Button variant="outline" size="sm" loading={leaving} onClick={start}>
+        Create another {options.name} app
+      </Button>
+      {dialogs}
+    </>
+  );
+}
+
+/** The one next step for a platform, and its installs in the row menu, which ends at each app's page. */
+export function PlatformActions({
+  apps,
+  installed,
+  installs = [],
+  reinstall,
+  shared = false,
+  failed,
+  ...options
+}: CreateOptions & {
+  apps: AppChoice[];
+  installed: boolean;
+  /** Live installs the viewer may uninstall. */
+  installs?: InstallChoice[];
+  /** The app whose every install was removed on the platform. */
+  reinstall?: string;
+  /** The apps are this server's shared ones, installed but never created here. */
+  shared?: boolean;
+  /** The platform's last setup failed, on `app` when it was an install; `title` and `text` say how, else it was unexpected. */
+  failed?: { name: string; app?: string; issues?: string; title?: string; text?: string };
+}) {
+  const { org, slug } = useParams<'/dash/[org]/agents/[slug]/platforms'>();
+  const { busy, install } = useInstall();
+  const { leaving, start, dialogs } = useCreate(options);
+  const [uninstalling, setUninstalling] = useState<InstallChoice>();
+  const { integration, name, create } = options;
+  const main = apps.find(app => app.id === reinstall) ?? apps[0];
+  const uninstallation =
+    uninstalling && installs.some(install => install.id === uninstalling.id) ? (
+      <UninstallDialog
+        install={uninstalling}
+        name={name}
+        onClose={() => setUninstalling(undefined)}
+      />
     ) : null;
   const failure = failed ? (
     <FailedDialog
@@ -703,38 +897,10 @@ export function PlatformActions({
         <Button size="sm" loading={leaving} onClick={start}>
           {create && !create.fields.length ? create.submit : 'Create app'}
         </Button>
-        {dialog}
-        {where}
+        {dialogs}
         {failure}
       </>
     );
-  // Installing is the only action: a plain button, or the split shape with a disabled caret when other rows' Install has a menu.
-  if (shared && !installed && apps.length === 1) {
-    const installButton = (
-      <Button size="sm" loading={busy} onClick={() => install(main!.id)}>
-        {reinstall ? 'Reinstall' : 'Install'}
-      </Button>
-    );
-
-    return (
-      <>
-        {split ? (
-          <span class="split">
-            {installButton}
-            <span class="menu">
-              <Button size="sm" class="split-more" disabled aria-label="No more actions">
-                <Icon d={iDown} />
-              </Button>
-            </span>
-          </span>
-        ) : (
-          installButton
-        )}
-        {where}
-        {failure}
-      </>
-    );
-  }
   return (
     <>
       <span class="split">
@@ -768,54 +934,34 @@ export function PlatformActions({
               />
             );
           })}
-          {shared ? null : (
+          {installs.map(install => (
             <MenuItem
-              icon={iSpark}
-              onClick={start}
-              title={`Create another ${name} app`}
-              sub="A separate app with its own name."
+              key={`uninstall ${install.id}`}
+              icon={iX}
+              title={
+                apps.length > 1
+                  ? `Uninstall ${install.app} from ${install.account}`
+                  : `Uninstall from ${install.account}`
+              }
+              danger
+              onClick={() => setUninstalling(install)}
             />
-          )}
-          {shared || !appUpdate
-            ? null
-            : apps.map(app => (
-                <MenuItem
-                  key={`update ${app.id}`}
-                  icon={iUpload}
-                  title={apps.length > 1 ? `Update ${app.name} on ${name}` : `Update on ${name}`}
-                  sub={app.changed ? 'Changed since last update' : undefined}
-                  onClick={() => update(app)}
-                />
-              ))}
-          {shared
-            ? null
-            : apps.map(app => (
-                <MenuItem
-                  key={`remove ${app.id}`}
-                  icon={iX}
-                  title={`Remove ${app.name}`}
-                  danger
-                  onClick={() => setRemoving(app)}
-                />
-              ))}
+          ))}
+          {apps.map(app => (
+            <MenuLink
+              key={`manage ${app.id}`}
+              icon={iSliders}
+              href="/dash/[org]/agents/[slug]/platforms/[app]"
+              params={{ org, slug, app: app.id }}
+            >
+              {apps.length > 1 ? `Manage ${app.name}` : 'Manage app'}
+            </MenuLink>
+          ))}
         </Menu>
       </span>
-      {dialog}
-      {where}
-      {removal}
+      {dialogs}
+      {uninstallation}
       {failure}
-      {updating ? (
-        <UpdateDialog
-          app={updating.app}
-          name={name}
-          check={updating.check}
-          // What the check stored shows in the row menu.
-          onClose={() => {
-            setUpdating(undefined);
-            nav.refresh();
-          }}
-        />
-      ) : null}
     </>
   );
 }

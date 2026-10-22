@@ -2,16 +2,41 @@
 import path from 'node:path';
 import process from 'node:process';
 
-import type { AgentPicks } from '../../agent';
-import type { AgentDefinition, Preset } from '../../agent/types';
+import type { AgentPicks } from '../../agent/load';
+import type { Access } from '../../core/config';
 import { outStyle } from '../../tui/output';
 import { ask, canPrompt, pick, pickDetailed } from '../../tui/prompt';
-import { flag, str } from '../../utils/args';
+import { flag, regexError, str } from '../../utils/args';
 import { command, nextSteps } from '../../cli';
+import { CoderError } from '../../core/errors';
 
-const PRESET_LABELS: Record<Preset, string> = {
-  read: 'Read-only',
-  write: 'Read-write',
+/** A comma list flag as its items. */
+export const list = (value?: string) =>
+  (value ?? '')
+    .split(',')
+    .map(item => item.trim())
+    .filter(Boolean);
+
+/** `--match` as event to regex, checked. */
+export function parseMatches(value?: string): Record<string, string> {
+  return Object.fromEntries(
+    list(value).map(pair => {
+      const at = pair.indexOf('=');
+      if (at < 1) throw new CoderError('invalid-option', `Bad --match "${pair}"; use event=regex.`);
+      const regex = pair.slice(at + 1);
+      if (regexError(regex))
+        throw new CoderError(
+          'invalid-option',
+          `Bad --match for ${pair.slice(0, at)}: ${regexError(regex)}`,
+        );
+      return [pair.slice(0, at), regex];
+    }),
+  );
+}
+
+const ACCESS_LABELS: Record<Access, string> = {
+  auto: 'Auto',
+  'read-only': 'Read-only',
 };
 
 /** What it made and the next steps. */
@@ -36,13 +61,13 @@ function agentInitNext(
           `2. Run it on a server: coder dash on this machine reads it from this repo; a cloud server imports it from the dashboard or with coder agent push.`,
           `3. On the dashboard, create the agent's app on each platform it uses (${ids.join(', ')}) from its Platforms tab, and install it.`,
           `4. Fire an event by hand, or leave --server out to run it offline: coder agent run ${id} ${samples[0] ?? '<event.json>'} --server <url>`,
-          'Guide: https://github.com/muzam1l/coder/blob/main/docs/agents/index.md',
+          '[Read the agent guide](https://github.com/muzam1l/coder/blob/main/docs/agents/index.md)',
           'Agents: coder docs agents',
         ]
       : [
           `1. Write ${rel}/system.md. Try it with no server: coder task run --agent ${id} "<task>"`,
           `2. Give the agent a platform under "integrations" in ${rel}/agent.json, then run init again or follow the guide: coder agent integrations list`,
-          'Guide: https://github.com/muzam1l/coder/blob/main/docs/agents/index.md',
+          '[Read the agent guide](https://github.com/muzam1l/coder/blob/main/docs/agents/index.md)',
           'Agents: coder docs agents',
         ],
   );
@@ -52,9 +77,7 @@ function agentInitNext(
 
 /** Interactive picks when nothing was passed and a person is on the other end. */
 async function askPicks(id: string): Promise<AgentPicks> {
-  const { regexError } = await import('../../agent');
   const { INTEGRATIONS } = await import('../../integrations');
-  const { PRESETS } = await import('../../agent/types');
 
   const s = outStyle;
   process.stdout.write(
@@ -96,11 +119,14 @@ async function askPicks(id: string): Promise<AgentPicks> {
     events[integrationId] = picked.values;
     matches[integrationId] = picked.inputs as Record<string, string>;
   }
-  const [access] = await pick<Preset>({
+  const [access] = await pick<Access>({
     title: 'Access',
-    hint: 'What the agent may do on its platforms and connections; Read-write allows every tool.',
-    selected: ['write'],
-    options: PRESETS.map(value => ({ value, label: PRESET_LABELS[value] })),
+    hint: 'What every task of the agent may do; Auto lets the engine review what leaves the sandbox, Read-only allows only reads and read-only tools.',
+    selected: ['auto'],
+    options: (Object.keys(ACCESS_LABELS) as Access[]).map(value => ({
+      value,
+      label: ACCESS_LABELS[value],
+    })),
   });
   const name = await ask('Display name', id, undefined, 'Shown in replies and app names.');
   return { ...(name !== id ? { name } : {}), integrations, events, matches, access: access! };
@@ -112,6 +138,15 @@ export const commandAgentInit = command({
   usage:
     'Create .coder/agents/<id>/ with an agent.json built from the integration catalog, a system.md to write the prompt in, and one sample event per integration for `coder agent run`. Asks for the id, integrations, events, and access when run in a terminal without them.',
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/agents/new',
+      label: 'Create agent',
+      action: 'create',
+      args: ['id', 'name', 'description', 'integrations', 'events', 'access', 'match'],
+      button: 'Create agent',
+    },
+  },
   args: {
     id: str('the agent id: its folder under .coder/agents'),
     integrations: str(
@@ -122,10 +157,12 @@ export const commandAgentInit = command({
       'events that start tasks, applied to each integration that has them (default: mention)',
       '<a,b>',
     ),
-    access: str('read or write, on its platforms and connections (default: write)', '<mode>'),
+    access: str(
+      'read-only or auto, for its tasks, platforms and connections (default: auto)',
+      '<read-only|auto>',
+    ),
     name: str('display name used in replies (default: the id)', '<text>'),
     description: str('one line for agent list', '<text>'),
-    permissions: str('engine permission mode (default: auto)', '<mode>'),
     match: str(
       'start tasks only for event text matching a regex, as event=regex pairs',
       '<a=re,b=re>',
@@ -136,7 +173,7 @@ export const commandAgentInit = command({
     positional: ['id'],
     examples: [
       'coder agent init  # answer the questions, id included',
-      'coder agent init triage --integrations github --events issue,mention --access read  # no questions',
+      'coder agent init triage --integrations github --events issue,mention --access read-only  # no questions',
     ],
   },
   run: async ({ options, args: [id], cwd, tool }) => {
@@ -144,9 +181,13 @@ export const commandAgentInit = command({
 
     const interactive = !tool && canPrompt() && !options.yes;
     return agents.init(id, {
-      ...options,
+      name: options.name,
+      description: options.description,
+      access: options.access,
+      integrations: list(options.integrations),
+      events: list(options.events),
+      matches: parseMatches(options.match),
       cwd,
-      permissions: options.permissions as AgentDefinition['permissions'],
       ...(interactive
         ? {
             askId: validate =>

@@ -12,7 +12,6 @@ import {
   EFFORTS,
   ENGINES,
   ENGINE_NAMES,
-  PERMISSIONS,
   defaultLabel,
 } from '@/app/dash/[org]/settings/model-options';
 import { useConfig, List, Row, AddRow } from './list';
@@ -35,19 +34,16 @@ export function EnginesList({
     ...ENGINES.filter(name => !chain.includes(name)),
   ];
   // What an unset select resolves to: the inherited value, else the built-in default.
-  const resolved = (name: string, key: 'effort' | 'permissions') =>
+  const resolved = (name: string, key: 'effort') =>
     (first.config.engines?.[name]?.[key] ? undefined : first.effective.engines?.[name]?.[key]) ??
     defaults[name]?.[key];
-  const pick = (name: string, key: 'effort' | 'permissions', options: Option[]) => (
+  const pick = (name: string, key: 'effort', options: Option[]) => (
     <label>
       {key}
       <Select
         label={`${ENGINE_NAMES[name]} ${key}`}
         value={config.value.engines?.[name]?.[key] ?? ''}
-        options={[
-          ['', defaultLabel(resolved(name, key) ?? (key === 'permissions' ? 'auto' : undefined))],
-          ...options,
-        ]}
+        options={[['', defaultLabel(resolved(name, key))], ...options]}
         onChange={value => void config.patch({ engines: { [name]: { [key]: value || null } } })}
       />
     </label>
@@ -65,12 +61,7 @@ export function EnginesList({
                 {chain.includes(name) ? null : <Badge>off</Badge>}
               </>
             }
-            sub={
-              <span class="inline-picks">
-                {pick(name, 'effort', EFFORTS)}
-                {pick(name, 'permissions', PERMISSIONS)}
-              </span>
-            }
+            sub={<span class="inline-picks">{pick(name, 'effort', EFFORTS)}</span>}
             actions={
               chain[0] === name ? null : (
                 <Button

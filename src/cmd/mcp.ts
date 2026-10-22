@@ -1,5 +1,10 @@
-/** `coder mcp`: Coder's commands as MCP tools over stdio. */
+/** `coder mcp`: Coder's commands as MCP tools over stdio, shaped for the local or the cloud context. */
+import process from 'node:process';
+
 import { command } from '../cli';
+
+/** Whether `coder mcp` serves the context bound to the conversation's cloud credentials. */
+const isCloudContext = () => process.env.CODER_MCP_MODE === 'cloud';
 
 export const commandMcp = command({
   name: 'mcp',
@@ -7,6 +12,7 @@ export const commandMcp = command({
   usage:
     "Serve Coder's commands as MCP tools over stdio, so a harness can run them.\n\nCommands return their JSON payloads and next steps. Load guides with load_skill;\nblocking commands keep their CLI flags and behavior, subject to the client's tool timeout.",
   access: 'write',
+  approvalPolicy: 'deny',
   globalFlags: { json: false, cwd: false },
   mcp: false,
   cli: { examples: ['claude mcp add coder -- coder mcp  # run Coder from Claude Code'] },
@@ -18,9 +24,9 @@ export const commandMcp = command({
       );
       return;
     }
-    const { app } = await import('../context');
+    const { app, cloudApp } = await import('../context');
     const { serve } = await import('contextjsx/serve');
 
-    await serve(app, 'stdio');
+    await serve(isCloudContext() ? cloudApp : app, 'stdio');
   },
 });

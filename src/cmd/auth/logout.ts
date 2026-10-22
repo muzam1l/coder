@@ -10,6 +10,7 @@ export const commandLogout = command({
   description: 'sign out and forget the saved session',
   usage: 'Revoke the saved session for that server at Wular Auth and forget its tokens.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     server: optStr('sign out of this Coder server (default: the hosted one)', '[url]'),
     yes: flag('connect to a server used for the first time without asking'),

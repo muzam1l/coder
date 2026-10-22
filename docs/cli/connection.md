@@ -19,7 +19,7 @@ Connect a platform account by its name (OAuth in the browser), an API key that t
 - `--header <header>` the header a remote server reads its key from (default: Authorization)
 - `--key` read a key from stdin or a prompt, never from a flag value
 - `--auth <auth>` override MCP authentication (default: detected for --url, none for a command)
-- `--access <access>` read keeps only read-only tools (default: the agent's mode, write for API keys)
+- `--access <access>` read-only keeps only read-only tools (default: auto, which follows the task)
 - `--tools <tools>` tool allowlist; a read-only stdio server needs one
 - `--credential <credential>` the credential an API key connection reads
 - `--me` your own connection instead of the workspace's
@@ -31,7 +31,7 @@ Connect a platform account by its name (OAuth in the browser), an API key that t
 
 ```sh
 GROQ_API_KEY=gsk_... coder connection add groq --env GROQ_API_KEY  # an API key from this shell
-pbpaste | coder connection add docs --key --env DOCS_TOKEN --access write -- npx -y docs-mcp  # a stdio server with its key from stdin
+pbpaste | coder connection add docs --key --env DOCS_TOKEN -- npx -y docs-mcp  # a stdio server with its key from stdin
 coder connection add github --me --server  # your GitHub account on your Coder server
 ```
 

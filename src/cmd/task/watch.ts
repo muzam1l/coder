@@ -179,6 +179,7 @@ export const commandWatch = command({
   usage:
     "Stream a running task's transcript live (for you/debugging), then print its\nfinal answer. Replays the last line first so the current step is visible;\n--tail <n> replays the last n lines (--tail all for the whole transcript).\nBlocks until it finishes; exits 0 on success, 1 otherwise. For the answer\nalone, prefer `coder result`. Alias: stream.\n\nWith --from <n>, or as a tool, it returns the log from event n on without\nfollowing, and `next`: the command that continues it while the task runs.",
   access: 'read',
+  approvalPolicy: 'deny',
   args: {
     'task-id': str('the task (default: the most recent)'),
     tail: tailOption('replay the last n log lines first (default: 1)'),

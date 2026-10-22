@@ -16,7 +16,7 @@ export const strList = (description?: string, value?: string) =>
 export const optStr = (description?: string, value?: string) =>
   arg(z.optional(z.union([z.string(), z.literal(true)])), description, value);
 /** `--server` on a command that always talks to a server: absent means the default one. */
-export const serverOnly = (description?: string) =>
+const serverOnly = (description?: string) =>
   arg(z._default(z.optional(z.union([z.string(), z.literal(true)])), true), description, '[url]');
 /** --limit <n|all>: a positive integer, or 'all' for no cap (task list, flow list). */
 export const limitOption = (description?: string) =>
@@ -62,3 +62,13 @@ export const credentialServerOptions = {
   server: serverOnly('act on your Coder server, in the saved workspace'),
   yes: flag('connect to a server used for the first time without asking'),
 };
+
+/** Why a `--match` regex is invalid, if it is. */
+export function regexError(value: string): string | undefined {
+  try {
+    new RegExp(value);
+    return undefined;
+  } catch {
+    return 'Not a valid regular expression.';
+  }
+}

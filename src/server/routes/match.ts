@@ -1,8 +1,9 @@
 import type { ServerContext } from '../context';
+import type { ChangeKind } from '../tasks/changes';
 import { notAllowed } from './http';
 
 export type Params = Record<string, string>;
-export type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
 type Names<P extends string> = P extends `${infer Head}/${infer Tail}`
   ? Names<Head> | Names<Tail>
   : P extends `:${infer Name}`
@@ -12,13 +13,17 @@ type Names<P extends string> = P extends `${infer Head}/${infer Tail}`
       : never;
 type Values<P extends string> = string extends P ? Params : Record<Names<P>, string>;
 type Arguments<P extends string = string> = [Request, ServerContext, Values<P>, URL];
-export type Handler<P extends string = string> = (
+type Handler<P extends string = string> = (
   ...args: Arguments<P>
 ) => Response | undefined | Promise<Response | undefined>;
 export type Guard = (
   ...args: Arguments
 ) => ServerContext | Response | Promise<ServerContext | Response>;
-export type Route = { method: Method; pattern: string; handler: Handler; guard?: Guard };
+/** A route's guard, and whether a task may call it: `allow`, or `ask` a person to approve `change` first; without it a task is refused. */
+export type RouteOptions = { guard?: Guard } & (
+  { approvalPolicy?: 'allow' } | { approvalPolicy: 'ask'; change: ChangeKind }
+);
+type Route = { method: Method; pattern: string; handler: Handler } & RouteOptions;
 
 const METHODS: Method[] = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'];
 
@@ -26,9 +31,9 @@ export function route<P extends string>(
   method: Method,
   pattern: P,
   handler: Handler<P>,
-  guard?: Guard,
+  options: RouteOptions = {},
 ): Route {
-  return { method, pattern, handler: handler as unknown as Handler, ...(guard ? { guard } : {}) };
+  return { method, pattern, handler: handler as unknown as Handler, ...options };
 }
 
 /** Routes under `prefix`; `guard` applies to entries without their own. */
@@ -43,7 +48,7 @@ export function group(prefix: string, routes: readonly Route[], guard?: Guard): 
 /** A handler that owns everything under `prefix`, any method: SSR pages and third-party handlers. */
 export function mount(prefix: string, handler: Handler, guard?: Guard): Route[] {
   return [prefix, `${prefix}/*`].flatMap(pattern =>
-    METHODS.map(method => route(method, pattern, handler, guard)),
+    METHODS.map(method => route(method, pattern, handler, { guard })),
   );
 }
 

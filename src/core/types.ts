@@ -1,26 +1,65 @@
-/**
- * Shared domain types for the coder runtime. Kept in one place so the CLI, the
- * config layer, the state store, and the engine adapters all agree on the shape
- * of a task, a config, and a turn result.
- */
+/** Shared domain types and config defaults; type-only imports, so the dashboard reads it at runtime. */
 
 // Config domain types are inferred from the zod schemas in config.ts.
-import type { Engine, Effort, Permission } from './config';
-import type { TokenUsage } from './task/log-view';
+import type { Access, CoderConfig, Engine, Effort } from './config';
+import type { TokenUsage } from './task/view';
 import type { SystemPromptParts } from './task/context/system';
-export type { TokenUsage } from './task/log-view';
+export type { TokenUsage } from './task/view';
 
 export type {
   Engine,
   EngineConfig,
   AliasModelConfig,
-  ApprovalsConfig,
   CoderConfig,
   CustomModelConfig,
   Effort,
   ModelEntry,
-  Permission,
+  Access,
 } from './config';
+
+/** Built-in config every file and flag merges over; import-free so the shipped dashboard can read it. */
+export const DEFAULT_CONFIG: CoderConfig = {
+  // Agents are tried in order; the next one is the fallback when the previous
+  // fails to start (missing binary, auth, quota, rate limit).
+  chain: ['codex', 'claude', 'custom'],
+  engines: {
+    codex: {
+      model: 'gpt-6.1-sol',
+      effort: 'high',
+    },
+    claude: {
+      model: 'opus',
+      effort: 'medium',
+    },
+  },
+  models: {},
+  approvals: {
+    allowedNetworkHosts: [],
+  },
+};
+
+/** The engine an agent runs on when its settings name none. */
+export const DEFAULT_ENGINE = DEFAULT_CONFIG.chain[0]!;
+
+/** RFC 7396 merge patch: objects merge, null deletes, anything else replaces; `__proto__` stays a plain key. */
+export function mergePatch<T>(target: T, patch: unknown): T {
+  if (!patch || typeof patch !== 'object' || Array.isArray(patch)) return patch as T;
+  const result: Record<string, unknown> =
+    target && typeof target === 'object' && !Array.isArray(target)
+      ? Object.fromEntries(Object.entries(target))
+      : {};
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === null) delete result[key];
+    else
+      Object.defineProperty(result, key, {
+        value: mergePatch(Object.hasOwn(result, key) ? result[key] : undefined, value),
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      });
+  }
+  return result as T;
+}
 
 export const NOT_REINVOKED = 'Background processes will not re-invoke you.';
 export const SHELL_WAIT =
@@ -44,18 +83,28 @@ export interface McpServerSpec {
   headers?: Record<string, string>;
   /** Credential destination supplied by the connection resolver, removed before persistence. */
   credentialFields?: { env?: string; header?: string };
+  /** Where `connection`'s token goes; the tool search asks for it on first use. */
+  credentialOnUse?: { env?: string; header?: string };
+  /** When `connection` was created; its token is given only to the same row at the same `url`. */
+  connectionCreatedAt?: number;
   /** Tool allowlist; omit or empty for every tool the server offers. */
   tools?: string[];
   /** Schemas load before the first prompt instead of behind tool search or the hub. */
   alwaysLoad?: boolean;
+  /** When the tool search connects it: at turn start, its instructions and tool names in the prompt, or on first use (default). */
+  connect?: 'start' | 'first-use';
   /** Only tools the server marks read-only may be called. */
   readOnly?: boolean;
   /** The integration a platform tool server reaches, and the account of its installation. */
   integration?: string;
   account?: string;
+  /** A Just me connection's member, as `Connection.owner`; its first use asks them. */
+  owner?: string;
   /** What the server reaches and the access it allows, as the prompt lists it. */
   description?: string;
-  access?: 'read' | 'write';
+  /** What the server's own tools do, for a server that sends no instructions. */
+  instructions?: string;
+  access?: Access;
 }
 
 export type TaskStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
@@ -83,7 +132,7 @@ export interface Task {
   systemPrompt?: string;
   model?: string | null;
   effort?: Effort | null;
-  permissions?: Permission;
+  access?: Access;
   resumeThreadId?: string | null;
   cwd?: string;
   pid?: number | null;
@@ -141,7 +190,7 @@ export interface ResolvedTaskOptions {
   engine: Engine;
   model: string | null;
   effort: Effort | null;
-  permissions: Permission;
+  access: Access;
 }
 
 /**

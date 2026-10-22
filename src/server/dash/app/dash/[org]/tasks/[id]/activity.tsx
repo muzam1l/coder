@@ -9,7 +9,7 @@ import {
   windowScroll,
 } from '@tanstack/virtual-core';
 
-import type { TaskDisplayRow } from '@coder/core/task/log-view';
+import type { TaskDisplayRow } from '@coder/core/task/view';
 import {
   iActivity,
   iAlert,
@@ -330,7 +330,7 @@ function Step({
   return (
     <button
       type="button"
-      class={`act step ${row.kind}${waiting ? ' warning' : failed ? ' error' : ''}`}
+      class={`act step ${row.kind}${waiting || row.tone === 'warning' ? ' warning' : failed ? ' error' : ''}`}
       onClick={onOpen}
     >
       {running && !waiting ? <i class="spin" /> : <Icon d={icon} />}
@@ -360,9 +360,17 @@ export function RunPreview({
 }) {
   useTick(true);
   const running = runningIn(rows, true);
-  const steps = rows.flatMap((row, index) =>
-    STEPS.has(row.kind) ? [{ row, running: running(row, index) }] : [],
+  // Before its first step the run shows its starting lines, a skipped engine or a connection to reconnect, in the same two lines.
+  const first = rows.findIndex(row => STEPS.has(row.kind));
+  const starting = (first < 0 ? rows : rows.slice(0, first)).filter(
+    row => row.kind === 'status' || row.kind === 'error',
   );
+  const steps = [
+    ...starting.map(row => ({ row, running: false })),
+    ...rows.flatMap((row, index) =>
+      STEPS.has(row.kind) ? [{ row, running: running(row, index) }] : [],
+    ),
+  ];
   const waiting = steps.filter(step => step.running && step.row.state === 'waiting');
   const rest = steps.filter(step => !waiting.includes(step));
   const shown = [...waiting, ...rest.slice(Math.max(0, rest.length - 2 + waiting.length))].slice(

@@ -13,6 +13,7 @@ export const commandServerAppCreate = command({
   usage:
     "Open the page that creates the built-in agent's public app on a platform, once per server. Every workspace then connects it from its dashboard with one click. Run it where the server's environment is set.",
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     integration: z.string().check(z.describe('the platform, such as github')),
     org: str('create it under this organization instead of your own account'),

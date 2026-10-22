@@ -1,7 +1,7 @@
 /** `coder flow result`: a run's record, steps and result. */
 import process from 'node:process';
 
-import { CoderError } from '../../core/dispatch';
+import { CoderError } from '../../core/errors';
 import { TERMINAL_STATUSES } from '../../core/types';
 import type { RunResult } from '../../flow/runs';
 import { formatJson, outStyle, paintStatus } from '../../tui/output';
@@ -25,6 +25,7 @@ export const commandResult = command({
   usage:
     "Show a flow run's status and result, with its tasks, gates, and token ledger.\n--tail <n> caps the step rows (0 for the result alone). Defaults to the most\nrecent run. To watch a run live, prefer `coder flow watch`.",
   access: 'read',
+  approvalPolicy: 'deny',
   args: {
     'run-id': str('the run (default: the most recent)'),
     tail: tailOption('show the last n step rows (default: all; 0 hides them)'),

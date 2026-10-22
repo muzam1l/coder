@@ -11,6 +11,7 @@ export const commandDocs = command({
   usage:
     "Print bundled documentation. With no topic, list the available topics; with a\ntopic, print that doc's raw markdown to stdout (unstyled, for an agent to\nconsume). Topics with sub-pages list them as `<topic>/<page>` (also accepted as\n`<topic>-<page>`). `coder docs skill` prints the host skill so an engine can\nload it once per session (--claude for the Claude Code flavor).",
   access: 'read',
+  approvalPolicy: 'deny',
   args: {
     topic: str('the doc to print (default: list the topics)'),
     claude: flag('with the skill topic: print the Claude Code flavor'),

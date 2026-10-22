@@ -2,6 +2,7 @@ import {
   accountAllowed,
   adminGuard,
   adminOnly,
+  agentSettingsAllowed,
   apiAllowed,
   connectionOAuthAllowed,
   contextGuard,
@@ -24,26 +25,27 @@ import {
   requireWorkspaceAdmin,
   secretsGuard,
   signInAllowed,
+  taskAccess,
+  taskCreateAllowed,
   taskGuard,
-  tokenLinkAllowed,
 } from './guards';
 import { group, mount, route, type Params } from './match';
 import { dashboard, dashboardToken, home, loginPage, signIn } from '../dash/serve';
 import { health, metrics } from '../health';
-import { meRoute } from '../auth/account';
 import { json, notFound } from './http';
 import {
   ackMessages,
   heartbeat,
   readContext,
   readMessages,
+  taskConnection,
   refreshCredential,
   reportResult,
   reportLogs,
   sendReaction,
   sendReply,
 } from '../tasks/callbacks';
-import { listHistory, readHistory, saveHistory } from '../tasks/history';
+import { listHistory, readHistory, saveHistory } from '../tasks/logs';
 import {
   answerLogin,
   cancelLogin,
@@ -70,13 +72,12 @@ import {
   createStart,
 } from '../agents/create';
 import { completeInstall, installPage } from '../agents/install';
-import { completeOAuth, confirmTokenLink, startOAuth, startTokenLink } from '../auth/connect';
+import { completeOAuth, meRoute, startOAuth } from '../auth/members';
 import { MCP_CLIENT_PATH, oauthCallback, oauthClientDocument } from '../connections/oauth';
 import { hook, listFlows, listPulls, review, runFlow } from '../tasks/flows';
 import { type ServerContext } from '../context';
 import { readUsage, readUsageTotals } from '../tasks/usage';
 import { checkFolder, cloneFolder, localFolders, pickFolder } from '../settings/folders';
-import { composerOptions } from '../tasks/composer';
 import { engineStatus } from '../tasks/local';
 import {
   createCredential,
@@ -93,6 +94,7 @@ import {
   listInstallations,
   readDrift,
   removeApp,
+  uninstallApp,
   updateApp,
 } from '../agents/connections';
 import { importAgent, previewImport } from '../agents/import';
@@ -104,6 +106,7 @@ import {
   archiveTask,
   askTask,
   cancelTask,
+  composerOptions,
   listTasks,
   readTask,
   removeTask,
@@ -111,6 +114,7 @@ import {
   taskLogs,
 } from '../tasks/admin';
 import { taskEvents, taskStream } from '../tasks/stream';
+import { decideRequest, listPendingApprovals } from '../tasks/changes';
 import { patchConfiguration, readConfig } from '../settings/config';
 import {
   aliasModel,
@@ -120,6 +124,7 @@ import {
   enableModel,
   listModels,
   probe,
+  updateModel,
 } from '../settings/models';
 import { mcpRegistry } from '../settings/mcp';
 import {
@@ -130,7 +135,7 @@ import {
   authorizeConnection,
   connectionAllowed,
 } from '../connections/records';
-import { auditLog, operatorApps, setUpApp } from '../operator';
+import { auditLog, operatorApps, setUpApp, sharedAppDrift, updateSharedApp } from '../operator';
 import {
   CLI_CLIENT_PATH,
   RESOURCE_PATH,
@@ -140,19 +145,19 @@ import {
   webDocument,
 } from '../auth/metadata';
 
-import { runnerPackage } from '../runners';
+import { runnerPackage } from '../runners/package';
 
 const pagesRoutes = [
   route('GET', '/runner/:file', runnerPackage),
   route('GET', MCP_CLIENT_PATH, oauthClientDocument),
-  route('GET', WEB_CLIENT_PATH, webDocument, metadataAllowed),
-  route('GET', CLI_CLIENT_PATH, cliDocument, metadataAllowed),
-  route('GET', RESOURCE_PATH, resourceDocument, metadataAllowed),
+  route('GET', WEB_CLIENT_PATH, webDocument, { guard: metadataAllowed }),
+  route('GET', CLI_CLIENT_PATH, cliDocument, { guard: metadataAllowed }),
+  route('GET', RESOURCE_PATH, resourceDocument, { guard: metadataAllowed }),
   route('GET', '/health', (req, ctx) => health(ctx)),
-  route('GET', '/', home, pageSession),
-  route('GET', '/login', signIn, signInAllowed),
+  route('GET', '/', home, { guard: pageSession }),
+  route('GET', '/login', signIn, { guard: signInAllowed }),
   ...mount('/login', loginPage, signInAllowed).filter(entry => entry.method !== 'GET'),
-  route('POST', '/dash/token', dashboardToken, dashboardTokenAllowed),
+  route('POST', '/dash/token', dashboardToken, { guard: dashboardTokenAllowed }),
   ...mount('/dash/:org/operator', dashboard, operatorPageAllowed),
   ...mount('/dash', dashboard, dashboardAllowed),
 ];
@@ -160,59 +165,58 @@ const pagesRoutes = [
 const authRoutes = [
   route('GET', '/api/auth/capabilities', (req, ctx) => json({ wular: ctx.auth?.issuer ?? null })),
   ...mount('/api/auth', (req, ctx) => ctx.auth!.handler(req), apiAllowed),
-  route('GET', '/me', meRoute, accountAllowed),
+  route('GET', '/me', meRoute, { guard: accountAllowed }),
 ];
 
 const callbacksRoutes = [
   ...group('/tasks', [
-    route('GET', '/:id/messages', readMessages, inboxGuard),
-    route('POST', '/:id/ack', ackMessages, inboxGuard),
-    route('POST', '/:id/heartbeat', heartbeat, inboxGuard),
-    route('POST', '/:id/logs', reportLogs, logsGuard),
-    route('POST', '/:id/result', reportResult, secretsGuard),
-    route('POST', '/:id/credential', refreshCredential, secretsGuard),
-    route('POST', '/:id/reply', sendReply, taskGuard),
-    route('POST', '/:id/react', sendReaction, taskGuard),
-    route('GET', '/:id/history', listHistory, taskGuard),
-    route('GET', '/:id/history/:conversation', readHistory, taskGuard),
-    route('POST', '/:id/history', saveHistory, secretsGuard),
-    route('GET', '/:id', readContext, contextGuard),
+    route('GET', '/:id/messages', readMessages, { guard: inboxGuard }),
+    route('POST', '/:id/ack', ackMessages, { guard: inboxGuard }),
+    route('POST', '/:id/heartbeat', heartbeat, { guard: inboxGuard }),
+    route('POST', '/:id/logs', reportLogs, { guard: logsGuard }),
+    route('POST', '/:id/result', reportResult, { guard: secretsGuard }),
+    route('POST', '/:id/credential', refreshCredential, { guard: secretsGuard }),
+    route('POST', '/:id/connection', taskConnection, { guard: taskGuard }),
+    route('POST', '/:id/reply', sendReply, { guard: taskGuard }),
+    route('POST', '/:id/react', sendReaction, { guard: taskGuard }),
+    route('GET', '/:id/history', listHistory, { guard: taskGuard }),
+    route('GET', '/:id/history/:conversation', readHistory, { guard: taskGuard }),
+    route('POST', '/:id/history', saveHistory, { guard: secretsGuard }),
+    route('GET', '/:id', readContext, { guard: contextGuard }),
   ]),
   ...group('/logins', [
-    route('GET', '/:id/input', takeLoginInput, loginGuard),
-    route('GET', '/:id', readLoginEngine, loginGuard),
-    route('POST', '/:id', reportLogin, loginGuard),
+    route('GET', '/:id/input', takeLoginInput, { guard: loginGuard }),
+    route('GET', '/:id', readLoginEngine, { guard: loginGuard }),
+    route('POST', '/:id', reportLogin, { guard: loginGuard }),
   ]),
   ...group('/runners', [route('POST', '/register', registerRunner)]),
 ];
 
 const provisionRoutes = [
   ...group('/create', [
-    route('GET', '/:id', createPage, createAllowed),
-    route('POST', '/:id', createStart, createAllowed),
-    route('GET', '/:id/callback', completeCreate, createAllowed),
-    route('POST', '/:id/callback', completeCreateForm, createAllowed),
+    route('GET', '/:id', createPage, { guard: createAllowed }),
+    route('POST', '/:id', createStart, { guard: createAllowed }),
+    route('GET', '/:id/callback', completeCreate, { guard: createAllowed }),
+    route('POST', '/:id/callback', completeCreateForm, { guard: createAllowed }),
   ]),
   ...group('/install', [
-    route('GET', '/:id', installPage, installAllowed),
-    route('POST', '/:id', installPage, installAllowed),
-    route('GET', '/:id/callback', completeInstall, installAllowed),
-    route('POST', '/:id/callback', completeInstall, installAllowed),
+    route('GET', '/:id', installPage, { guard: installAllowed }),
+    route('POST', '/:id', installPage, { guard: installAllowed }),
+    route('GET', '/:id/callback', completeInstall, { guard: installAllowed }),
+    route('POST', '/:id/callback', completeInstall, { guard: installAllowed }),
   ]),
 ];
 
 const connectRoutes = group('/connect', [
-  route('GET', '', startTokenLink, tokenLinkAllowed),
-  route('POST', '', confirmTokenLink, tokenLinkAllowed),
-  route('GET', '/:integration', startOAuth, oauthAllowed),
-  route('GET', '/:integration/callback', completeOAuth, oauthAllowed),
+  route('GET', '/:integration', startOAuth, { guard: oauthAllowed }),
+  route('GET', '/:integration/callback', completeOAuth, { guard: oauthAllowed }),
 ]);
 
 const known = (req: Request, ctx: ServerContext, params: Params) =>
   ctx.integrations[params['*']!] ? ctx : notFound();
 
 const hooksRoutes = group('/hooks', [
-  route('POST', '/*', (req, ctx, params) => hook(req, ctx, params['*']!), known),
+  route('POST', '/*', (req, ctx, params) => hook(req, ctx, params['*']!), { guard: known }),
 ]);
 
 const platformRoutes = [...hooksRoutes, ...provisionRoutes, ...connectRoutes];
@@ -222,10 +226,10 @@ const usageRoutes = [
     'GET',
     '/metrics',
     async (req, ctx) => json(await metrics(ctx), 200, { 'cache-control': 'no-store' }),
-    adminOnly,
+    { guard: adminOnly },
   ),
-  route('GET', '/usage', readUsage),
-  route('GET', '/usage/totals', readUsageTotals),
+  route('GET', '/usage', readUsage, { approvalPolicy: 'allow' }),
+  route('GET', '/usage/totals', readUsageTotals, { approvalPolicy: 'allow' }),
 ];
 
 const foldersRoutes = group(
@@ -265,11 +269,17 @@ const appsRoutes = [
   route('GET', '/apps/:id/drift', readDrift),
   route('POST', '/apps/:id/update', updateApp),
   route('GET', '/installations', listInstallations),
-  route('GET', '/connections', listConnections, connectionAllowed),
-  route('POST', '/connections', createConnection, connectionAllowed),
-  route('PATCH', '/connections/:id', updateConnection, connectionAllowed),
-  route('DELETE', '/connections/:id', deleteConnection, connectionAllowed),
-  route('POST', '/connections/:id/authorize', authorizeConnection, connectionAllowed),
+  route('DELETE', '/installations/:id', uninstallApp, {
+    guard: (req, ctx) => requireWorkspaceAdmin(ctx, 'Only an owner or admin can uninstall an app.'),
+  }),
+  route('GET', '/connections', listConnections, {
+    guard: connectionAllowed,
+    approvalPolicy: 'allow',
+  }),
+  route('POST', '/connections', createConnection, { guard: connectionAllowed }),
+  route('PATCH', '/connections/:id', updateConnection, { guard: connectionAllowed }),
+  route('DELETE', '/connections/:id', deleteConnection, { guard: connectionAllowed }),
+  route('POST', '/connections/:id/authorize', authorizeConnection, { guard: connectionAllowed }),
   route('GET', '/integrations', (req, ctx, params, url) => integrationCatalog(ctx, url)),
   route('GET', '/repositories', (req, ctx) => adminRepositories(ctx)),
   route('POST', '/repositories/refresh', (req, ctx) => adminRepositories(ctx, true)),
@@ -278,50 +288,68 @@ const appsRoutes = [
 const agentsRoutes = [
   route('GET', '/agents/import', previewImport),
   route('POST', '/agents/import', importAgent),
-  route('GET', '/agents', listAgents),
-  route('PATCH', '/agents/:slug/settings', updateSettings),
+  route('GET', '/agents', listAgents, { approvalPolicy: 'allow' }),
+  route('PATCH', '/agents/:slug/settings', updateSettings, {
+    guard: agentSettingsAllowed,
+    approvalPolicy: 'ask',
+    change: 'agent-settings',
+  }),
   route('GET', '/agents/:slug/versions', listVersions),
-  route('GET', '/agents/:slug/versions/:version', readVersion),
-  route('GET', '/agents/:slug', readAgent),
-  route('DELETE', '/agents/:slug', deleteAgent, (req, ctx) =>
-    requireWorkspaceAdmin(ctx, 'Only an owner or admin can delete an agent.'),
-  ),
-  route('PUT', '/agents/:slug', publish),
+  route('GET', '/agents/:slug/versions/:version', readVersion, { approvalPolicy: 'allow' }),
+  route('GET', '/agents/:slug', readAgent, { approvalPolicy: 'allow' }),
+  route('DELETE', '/agents/:slug', deleteAgent, {
+    guard: (req, ctx) => requireWorkspaceAdmin(ctx, 'Only an owner or admin can delete an agent.'),
+  }),
+  route('PUT', '/agents/:slug', publish, { approvalPolicy: 'ask', change: 'agent-version' }),
 ];
 
 const credentialsRoutes = [
-  route('GET', '/credentials', listCredentials),
-  route('POST', '/credentials', createCredential, credentialAllowed),
+  route('GET', '/credentials', listCredentials, { approvalPolicy: 'allow' }),
+  route('POST', '/credentials', createCredential, { guard: credentialAllowed }),
   route('DELETE', '/credentials/:name', deleteCredential),
-  route('POST', '/logins', createLogin, loginAllowed),
-  route('GET', '/logins/:id', readLogin, loginAllowed),
-  route('POST', '/logins/:id', answerLogin, loginAllowed),
-  route('DELETE', '/logins/:id', cancelLogin, loginAllowed),
+  route('POST', '/logins', createLogin, { guard: loginAllowed }),
+  route('GET', '/logins/:id', readLogin, { guard: loginAllowed }),
+  route('POST', '/logins/:id', answerLogin, { guard: loginAllowed }),
+  route('DELETE', '/logins/:id', cancelLogin, { guard: loginAllowed }),
 ];
 
 const runnersRoutes = [
-  route('GET', '/runners', listRunners),
+  route('GET', '/runners', listRunners, { approvalPolicy: 'allow' }),
   route('POST', '/runners', createRunner),
   route('POST', '/runners/pair', pairRunner),
   route('POST', '/runners/:id/test', checkRunner),
-  route('PATCH', '/runners/:id', updateRunner),
+  route('PATCH', '/runners/:id', updateRunner, {
+    approvalPolicy: 'ask',
+    change: 'runner-default',
+  }),
   route('DELETE', '/runners/:id', deleteRunner),
 ];
 
 const tasksRoutes = [
   route('GET', '/composer', composerOptions),
-  route('GET', '/tasks', listTasks),
-  route('POST', '/tasks', adminCreate),
-  route('GET', '/tasks/:id', readTask),
-  route('DELETE', '/tasks/:id', removeTask),
-  route('GET', '/tasks/:id/logs', taskLogs),
-  route('GET', '/tasks/:id/stream', taskStream),
-  route('POST', '/tasks/:id/steer', steerTask),
-  route('POST', '/tasks/:id/ask', askTask),
-  route('POST', '/tasks/:id/approve', approveTask),
-  route('POST', '/tasks/:id/cancel', cancelTask),
-  route('POST', '/tasks/:id/archive', archiveTask),
-  route('GET', '/events', taskEvents),
+  route('GET', '/tasks', listTasks, { approvalPolicy: 'allow' }),
+  route('POST', '/tasks', adminCreate, { guard: taskCreateAllowed, approvalPolicy: 'allow' }),
+  route('GET', '/tasks/:id', readTask, { guard: taskAccess(), approvalPolicy: 'allow' }),
+  route('DELETE', '/tasks/:id', removeTask, { guard: taskAccess() }),
+  route('GET', '/tasks/:id/logs', taskLogs, { guard: taskAccess(), approvalPolicy: 'allow' }),
+  route('GET', '/tasks/:id/stream', taskStream, { guard: taskAccess(), approvalPolicy: 'allow' }),
+  route('POST', '/tasks/:id/steer', steerTask, {
+    guard: taskAccess(true),
+    approvalPolicy: 'allow',
+  }),
+  route('POST', '/tasks/:id/ask', askTask, { guard: taskAccess(true), approvalPolicy: 'allow' }),
+  route('POST', '/tasks/:id/approve', approveTask, {
+    guard: taskAccess(true),
+    approvalPolicy: 'allow',
+  }),
+  route('POST', '/tasks/:id/requests/:approval', decideRequest, { guard: taskAccess() }),
+  route('GET', '/approvals/pending', (req, ctx) => listPendingApprovals(ctx), { guard: adminOnly }),
+  route('POST', '/tasks/:id/cancel', cancelTask, { guard: taskAccess(), approvalPolicy: 'allow' }),
+  route('POST', '/tasks/:id/archive', archiveTask, {
+    guard: taskAccess(),
+    approvalPolicy: 'allow',
+  }),
+  route('GET', '/events', taskEvents, { approvalPolicy: 'allow' }),
 ];
 
 const configRoutes = [
@@ -331,12 +359,25 @@ const configRoutes = [
 
 const modelsRoutes = [
   route('POST', '/models/probe', (req, ctx) => probe(req, ctx)),
-  route('GET', '/models', listModels),
+  route('GET', '/models', listModels, { approvalPolicy: 'allow' }),
   route('POST', '/models', createModel),
   route('DELETE', '/models/:name', deleteModel),
-  route('POST', '/models/:name/alias', aliasModel),
-  route('POST', '/models/:name/disable', disableModel),
-  route('POST', '/models/:name/enable', enableModel),
+  route('PATCH', '/models/:name', updateModel, {
+    approvalPolicy: 'ask',
+    change: 'model-update',
+  }),
+  route('POST', '/models/:name/alias', aliasModel, {
+    approvalPolicy: 'ask',
+    change: 'model-alias',
+  }),
+  route('POST', '/models/:name/disable', disableModel, {
+    approvalPolicy: 'ask',
+    change: 'model-disable',
+  }),
+  route('POST', '/models/:name/enable', enableModel, {
+    approvalPolicy: 'ask',
+    change: 'model-enable',
+  }),
 ];
 
 const mcpRoutes = [
@@ -348,6 +389,8 @@ const operatorRoutes = group(
   [
     route('GET', '/apps', operatorApps),
     route('POST', '/apps/:integration', setUpApp),
+    route('GET', '/apps/:integration/drift', sharedAppDrift),
+    route('POST', '/apps/:integration/update', updateSharedApp),
     route('GET', '/audit', auditLog),
   ],
   operatorOnly,
@@ -376,14 +419,14 @@ export const adminTable = group('/admin', [
   ...flowsRoutes,
   ...operatorRoutes,
 ]);
-const adminRoutes = adminTable.map(entry => ({ ...entry, guard: adminGuard(entry.guard) }));
+const adminRoutes = adminTable.map(entry => ({ ...entry, guard: adminGuard(entry.guard, entry) }));
 
 export const routes = [
   route(
     'GET',
     '/connections/oauth/callback',
     (req, ctx, params, url) => oauthCallback(req, ctx, url),
-    connectionOAuthAllowed,
+    { guard: connectionOAuthAllowed },
   ),
   ...callbacksRoutes,
   ...adminRoutes,

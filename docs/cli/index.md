@@ -2,7 +2,7 @@
 
 # coder CLI
 
-Delegate a coding task to the best available engine and steer it while it runs.
+Coder turns any model into an agent you own: tasks on this machine, from your code, or always on in Coder Cloud.
 
 - [task](task.md): run, follow and steer coding tasks
 - [flow](flow.md): orchestrate many coder tasks from one TypeScript file
@@ -14,7 +14,7 @@ Delegate a coding task to the best available engine and steer it while it runs.
 - [model](model.md): manage models: built-ins, aliases, custom endpoints
 - [connection](connection.md): platform accounts, API keys and MCP servers tasks use
 
-## `review [--base <base>] [--head <head>] [--pr <pr>] [--since <since>] [--path <path>] [--exclude <exclude>] [--post] [--md] [--engine <engine>] [--model <model>] [--effort <effort>] [--json] [--cwd <cwd>]`
+## `review [--base <base>] [--head <head>] [--pr <pr>] [--since <since>] [--path <path>] [--exclude <exclude>] [--post] [--md] [--model <model>] [--effort <effort>] [--json] [--cwd <cwd>]`
 
 review changed code with a built-in flow
 
@@ -34,8 +34,7 @@ Related: `coder flow watch`, `coder docs review`.
 - `--exclude <exclude>` leave this path out, relative to cwd (repeatable)
 - `--post` post deduplicated inline comments and sticky PR summary
 - `--md` markdown output (the default)
-- `--engine <engine>` codex, claude, or custom
-- `--model <model>` model for the review task
+- `--model <model>` model alias, custom name or engine:model for the review task
 - `--effort <effort>` reasoning effort and review depth (default: medium depth)
 - `--json` JSON output
 - `--cwd <cwd>` workspace directory; default current

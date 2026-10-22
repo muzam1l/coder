@@ -7,7 +7,6 @@ import process from 'node:process';
 import { spawn } from 'node:child_process';
 import { engineEnvironment } from '../connections';
 import { fileURLToPath } from 'node:url';
-import { createBrokerEndpoint, parseBrokerEndpoint } from './endpoint';
 import { resolveStateDir } from '../state';
 import { readVersion } from '../runtime';
 
@@ -31,7 +30,7 @@ export interface BrokerSession {
 
 type KillProcess = (pid: number) => void;
 
-export function createBrokerSessionDir(prefix = 'coder-') {
+function createBrokerSessionDir(prefix = 'coder-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
@@ -60,7 +59,7 @@ export async function waitForBrokerEndpoint(endpoint: string, timeoutMs = 2000) 
   );
 }
 
-export interface SpawnBrokerProcessOptions {
+interface SpawnBrokerProcessOptions {
   scriptPath: string;
   cwd: string;
   endpoint: string;
@@ -212,13 +211,11 @@ async function isBrokerEndpointReady(endpoint: string | null | undefined) {
   }
 }
 
-export interface EnsureBrokerSessionOptions {
+interface EnsureBrokerSessionOptions {
   env?: NodeJS.ProcessEnv;
   connectionKey?: string;
   networkAccess?: boolean;
   killProcess?: KillProcess | null;
-  createBrokerEndpoint?: (sessionDir: string, platform?: NodeJS.Platform) => string;
-  platform?: NodeJS.Platform;
   scriptPath?: string;
   timeoutMs?: number;
 }
@@ -256,8 +253,7 @@ export async function ensureBrokerSession(
   }
 
   const sessionDir = createBrokerSessionDir();
-  const endpointFactory = options.createBrokerEndpoint ?? createBrokerEndpoint;
-  const endpoint = endpointFactory(sessionDir, options.platform);
+  const endpoint = createBrokerEndpoint(sessionDir);
   const pidFile = path.join(sessionDir, 'broker.pid');
   const logFile = path.join(sessionDir, 'broker.log');
 
@@ -298,7 +294,7 @@ export async function ensureBrokerSession(
   return session;
 }
 
-export interface TeardownBrokerSessionOptions {
+interface TeardownBrokerSessionOptions {
   endpoint?: string | null;
   pidFile?: string | null;
   logFile?: string | null;
@@ -354,3 +350,49 @@ export function teardownBrokerSession({
 }
 
 export const brokerLifecycleTestInternals = { resolveBrokerStateFile };
+
+function sanitizePipeName(value: string) {
+  return String(value ?? '')
+    .replace(/[^A-Za-z0-9._-]/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+type BrokerEndpointKind = 'pipe' | 'unix';
+
+interface BrokerEndpointTarget {
+  kind: BrokerEndpointKind;
+  path: string;
+}
+
+export function createBrokerEndpoint(sessionDir: string): string {
+  if (process.platform === 'win32') {
+    const pipeName = sanitizePipeName(`${path.win32.basename(sessionDir)}-codex-app-server`);
+    return `pipe:\\\\.\\pipe\\${pipeName}`;
+  }
+
+  return `unix:${path.join(sessionDir, 'broker.sock')}`;
+}
+
+export function parseBrokerEndpoint(endpoint: string | null | undefined): BrokerEndpointTarget {
+  if (typeof endpoint !== 'string' || endpoint.length === 0) {
+    throw new Error('Missing broker endpoint.');
+  }
+
+  if (endpoint.startsWith('pipe:')) {
+    const pipePath = endpoint.slice('pipe:'.length);
+    if (!pipePath) {
+      throw new Error('Broker pipe endpoint is missing its path.');
+    }
+    return { kind: 'pipe', path: pipePath };
+  }
+
+  if (endpoint.startsWith('unix:')) {
+    const socketPath = endpoint.slice('unix:'.length);
+    if (!socketPath) {
+      throw new Error('Broker Unix socket endpoint is missing its path.');
+    }
+    return { kind: 'unix', path: socketPath };
+  }
+
+  throw new Error(`Unsupported broker endpoint: ${endpoint}`);
+}

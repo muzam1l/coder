@@ -14,6 +14,7 @@ export const commandList = command({
   usage:
     'List recent flow runs, most recent first: running runs plus ones that ended\nwithin the last 30 minutes. Older runs auto-archive and move to --archived.',
   access: 'read',
+  approvalPolicy: 'deny',
   args: {
     archived: flag('show archived runs (auto-archived or via flow archive)'),
     limit: limitOption('show at most n runs (default all)'),

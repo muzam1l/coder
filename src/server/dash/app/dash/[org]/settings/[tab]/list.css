@@ -45,29 +45,14 @@
 .add-grid + .add-grid {
   margin-top: 12px;
 }
+/* add dialogs: room for a row of fields, and the dialog's own padding instead of the card's */
+dialog.modal.add-modal {
+  width: min(720px, calc(100vw - 32px));
+}
+.add-modal .add-form {
+  padding: 0;
+}
 /* room for the longest option, so a pick never shifts the row */
-/* Advanced and the button share a row; an open Advanced takes the row and the button drops under it */
-.add-foot {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  gap: 12px;
-  margin-top: 12px;
-}
-.add-foot > .add-more {
-  flex: 1 1 auto;
-}
-.add-foot > .add-more[open] {
-  flex-basis: 100%;
-}
-.add-foot > .btn {
-  margin-left: auto;
-}
-@media (max-width: 760px) {
-  .add-foot > .btn {
-    margin-left: 0;
-  }
-}
 .add-form .select:has([aria-label="Kind"]),
 .add-form .select:has([aria-label="Engine"]) {
   min-width: 190px;

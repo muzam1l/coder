@@ -60,7 +60,7 @@ function AgentCard({ agent, catalog }: { agent: AgentCardRow; catalog: Integrati
 }
 
 /** Agent kinds a list filters by. */
-export const KINDS: Array<[string, string]> = [
+const KINDS: Array<[string, string]> = [
   ['', 'All agents'],
   ['dashboard', 'Dashboard agents'],
   ['repository', 'Repository agents'],

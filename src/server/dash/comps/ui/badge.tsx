@@ -17,7 +17,7 @@ export function Badge({
   class: cls,
   children,
 }: {
-  tone?: 'acc' | 'ok' | 'warn' | 'solid';
+  tone?: 'acc' | 'ok' | 'warn' | 'bad' | 'solid';
   title?: string;
   onClick?: () => void;
   href?: string;

@@ -13,7 +13,7 @@
 - **Clean context.** Your conversation stays about intent and orchestration; implementation details live in the subagents.
 - **Fast dispatch.** Handoffs are instant, and light enough to spin up a large number of subagents at once.
 - **Steerable tasks.** Full visibility into every task, from live progress to mid-run course corrections.
-- **Unified permissions.** Three modes across all engines: _Read-only_, _Workspace-write_, and _Auto_.
+- **One access setting.** _Auto_ or _Read-only_, the same on every engine.
 
 ## Get started
 
@@ -58,8 +58,8 @@ Machine defaults live in `~/.coder/config.json`; a `coder.config.json` in a repo
 {
   "chain": ["codex", "claude"],
   "engines": {
-    "codex": { "model": "sol", "effort": "high", "permissions": "auto" },
-    "claude": { "model": "opus", "effort": "medium", "permissions": "auto" }
+    "codex": { "model": "sol", "effort": "high" },
+    "claude": { "model": "opus", "effort": "medium" }
   },
   "models": {
     "qwen": { "baseUrl": "http://localhost:11434/v1", "model": "qwen2.5-coder:32b" }

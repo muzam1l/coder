@@ -180,7 +180,7 @@ export function AgentPills({
       )}
       {agent.settings?.disabled ? <DisabledBadge /> : null}
       {agent.problems?.length ? (
-        <Badge tone="warn" title={agent.problems.join('\n')} {...fix}>
+        <Badge tone="bad" title={agent.problems.join('\n')} {...fix}>
           not running
         </Badge>
       ) : null}

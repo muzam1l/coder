@@ -56,6 +56,15 @@
 .composer-line .quiet:hover {
   background: var(--wash);
 }
+.run-picks .dim {
+  color: var(--dim);
+}
+/* a phone names only the model */
+@media (max-width: 760px) {
+  .run-picks > :not(:first-child) {
+    display: none;
+  }
+}
 .composer-line .send {
   flex: none;
   margin-left: 4px;

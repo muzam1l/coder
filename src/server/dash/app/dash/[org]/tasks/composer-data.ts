@@ -4,7 +4,7 @@ import type { RunnerRow } from '@coder/client/types';
 import { localServer } from '@/api/types';
 import { modelsByEngine } from '@/app/dash/[org]/settings/model-options';
 import type { Choice, Defaults, Lists } from './composer';
-import { DEFAULT_ENGINE } from '@coder/core/defaults';
+import { DEFAULT_ENGINE } from '@coder/core/types';
 
 export const PLACEHOLDER = 'What should the agent do? Type / for flows and reviews.';
 
@@ -15,7 +15,7 @@ export const CHOICE: Choice = {
   engine: '',
   model: '',
   effort: '',
-  permissions: '',
+  access: 'auto',
   runner: '',
 };
 

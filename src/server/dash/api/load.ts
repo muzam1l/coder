@@ -1,11 +1,25 @@
 import { ServerClient, ClientError } from '@coder/client';
 import { CoderError } from '@coder/core/errors';
-import type { StoredRow } from '@coder/client/types';
-import { DEFAULT_ENGINE } from '@coder/core/defaults';
+import type { AgentRow, AppRow, StoredRow } from '@coder/client/types';
+import { DEFAULT_ENGINE } from '@coder/core/types';
 import { NO_MODELS, modelsByEngine } from '@/app/dash/[org]/settings/model-options';
 
 export function encodeDefinition(definition: unknown): string {
   return Buffer.from(JSON.stringify(definition), 'utf8').toString('base64url');
+}
+
+/** Where creating `agent`'s app on `integration` starts; a repo agent's app follows its apps' branch. */
+export function createUrl(agent: AgentRow, apps: AppRow[], integration: string) {
+  const params = new URLSearchParams({
+    agent: agent.id,
+    def: agent.definition ? encodeDefinition(agent.definition) : '',
+  });
+  if (agent.source === 'repo' && agent.repo) {
+    params.set('repo', agent.repo);
+    params.set('branch', apps.find(app => app.branch)?.branch ?? 'main');
+  }
+
+  return `/create/${encodeURIComponent(integration)}?${params}`;
 }
 
 const clientKey = Symbol('coder.dashboard.client');

@@ -1,5 +1,6 @@
-import { AsyncLocalStorage } from 'node:async_hooks';
 /** Postgres connection for the server: one driver, drizzle on top. */
+import { AsyncLocalStorage } from 'node:async_hooks';
+import { randomUUID } from 'node:crypto';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import type { SQL } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
@@ -7,7 +8,73 @@ import type { PgDatabase, PgQueryResultHKT } from 'drizzle-orm/pg-core';
 import postgres from 'postgres';
 
 import { tables } from './schema';
-import { DatabaseProfile } from './profile';
+
+export function sqlShape(query: string): string {
+  return query
+    .replace(
+      /\$(\w*)\$[\s\S]*?\$\1\$|[eE]'(?:\\.|''|[^'])*'|'(?:''|[^'])*'|--[^\n]*|\/\*[\s\S]*?\*\//g,
+      value => (value.startsWith('--') || value.startsWith('/*') ? ' ' : '?'),
+    )
+    .replace(/\b\d+(?:\.\d+)?\b/g, '?')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+export class DatabaseProfile {
+  private readonly requests = new AsyncLocalStorage<string>();
+
+  request<T>(inProcess: boolean, work: (requestId?: string) => T): T {
+    if (process.env.CODER_DB_PROFILE !== '1') return work();
+    const id = (inProcess && this.requests.getStore()) || randomUUID();
+    return this.requests.run(id, () => work(id));
+  }
+
+  statement(statement: string, requestId = this.requests.getStore() ?? 'background') {
+    const start = performance.now();
+    return (rows: number | null, failed = false, shape = statement) =>
+      console.info(
+        JSON.stringify({
+          type: 'coder.db',
+          requestId,
+          sql: sqlShape(shape),
+          start,
+          ms: performance.now() - start,
+          rows,
+          failed,
+        }),
+      );
+  }
+
+  /** Observes lazy queries without executing them before their caller. */
+  query<T extends PromiseLike<unknown>>(query: T, statement: string): T {
+    if (process.env.CODER_DB_PROFILE !== '1') return query;
+    const profile = this;
+    const requestId = this.requests.getStore() ?? 'background';
+    let observed: Promise<unknown> | undefined;
+    return new Proxy(query, {
+      get(target, key, receiver) {
+        if (key !== 'then') return Reflect.get(target, key, receiver);
+        return (resolve?: (value: unknown) => unknown, reject?: (reason: unknown) => unknown) => {
+          observed ??= (() => {
+            const log = profile.statement(statement, requestId);
+            return Promise.resolve(target).then(
+              result => {
+                const rows = result as { count?: number; length?: number } | undefined;
+                log(rows?.count ?? rows?.length ?? null);
+                return result;
+              },
+              error => {
+                log(null, true);
+                throw error;
+              },
+            );
+          })();
+          return observed.then(resolve, reject);
+        };
+      },
+    });
+  }
+}
 
 /** Any drizzle Postgres database (postgres-js in production, pglite in tests). */
 export type Db = PgDatabase<PgQueryResultHKT, typeof tables>;
@@ -65,7 +132,25 @@ export async function pipeline<T extends postgres.Row>(
   const dialect = new PgDialect({ casing: CASING });
   const logger = (db._.session as { logger?: { logQuery(query: string, params: unknown[]): void } })
     .logger;
-  const reserved = prepared(await client.reserve(), client.options.prepare, client.profile);
+  const results = await reservedTransaction(client, client.options.prepare, client.profile, sql =>
+    [...locks, statement].map(query => {
+      const compiled = dialect.sqlToQuery(query);
+      logger?.logQuery(compiled.sql, compiled.params);
+      return sql.unsafe<T[]>(compiled.sql, compiled.params as postgres.ParameterOrJSON<never>[]);
+    }),
+  );
+
+  return results[results.length - 1] as T[];
+}
+
+/** Runs `queries` between `BEGIN` and `COMMIT` on one reserved connection in one round trip, resolving to their results. */
+async function reservedTransaction(
+  pool: postgres.Sql,
+  prepare: boolean,
+  profile: DatabaseProfile,
+  queries: (sql: postgres.ReservedSql) => PromiseLike<unknown>[],
+): Promise<unknown[]> {
+  const reserved = prepared(await pool.reserve(), prepare, profile);
   // The connection behind the reservation; a drop mid-flight rejects here, since postgres.js forgets the queries still queued on it.
   let connection: { onclose?: (error: Error) => void } | undefined;
   let dropped = false;
@@ -82,14 +167,7 @@ export async function pipeline<T extends postgres.Row>(
     },
   } as postgres.UnsafeQueryOptions);
   try {
-    const sent = [...locks, statement].map(query => {
-      const compiled = dialect.sqlToQuery(query);
-      logger?.logQuery(compiled.sql, compiled.params);
-      return reserved.unsafe<T[]>(
-        compiled.sql,
-        compiled.params as postgres.ParameterOrJSON<never>[],
-      );
-    });
+    const sent = queries(reserved);
     const settled = await Promise.race([
       Promise.allSettled([begin, ...sent, reserved.unsafe('commit')]),
       closed,
@@ -97,7 +175,7 @@ export async function pipeline<T extends postgres.Row>(
     const failed = settled.find(result => result.status === 'rejected');
     if (failed) throw failed.reason;
 
-    return (settled[settled.length - 2] as PromiseFulfilledResult<T[]>).value;
+    return settled.slice(1, -1).map(result => (result as PromiseFulfilledResult<unknown>).value);
   } finally {
     if (connection) connection.onclose = undefined;
     // A dropped connection is already back in the pool's closed set; releasing it would hand out a dead socket.
@@ -168,6 +246,7 @@ function retryDead(
   sql: postgres.Sql,
   reads: AsyncLocalStorage<boolean>,
   bounds: AsyncLocalStorage<number>,
+  profile: DatabaseProfile,
 ): postgres.Sql {
   const begin = sql.begin;
   // An explicit transaction keeps the driver's reserved connection, outside per-statement bounds.
@@ -183,17 +262,13 @@ function retryDead(
     const again = () =>
       bound
         ? // Postgres's own statement_timeout, set for this statement alone in one pipelined round trip.
-          bounds
-            .exit(() =>
-              sql.begin(tx => [
-                tx.unsafe(`set local statement_timeout = ${Math.ceil(bound)}`),
-                modes.reduce(
-                  (query, mode) => query[mode](),
-                  (tx.unsafe as unknown as (...args: unknown[]) => Query)(...args),
-                ),
-              ]),
-            )
-            .then(results => (results as unknown[])[1])
+          reservedTransaction(sql, sql.options.prepare, profile, reserved => [
+            reserved.unsafe(`set local statement_timeout = ${Math.ceil(bound)}`),
+            modes.reduce(
+              (query, mode) => query[mode](),
+              (reserved.unsafe as unknown as (...args: unknown[]) => Query)(...args),
+            ),
+          ]).then(results => results[1])
         : modes.reduce((query, mode) => query[mode](), unsafe(...args));
     // After a macrotask, so postgres.js has closed every connection the same drop took.
     const retry = () => new Promise(resolve => setTimeout(resolve)).then(again);
@@ -242,10 +317,13 @@ export function connect(databaseUrl: string, options: PoolOptions = {}): Connect
   const profile = new DatabaseProfile();
   const reads = new AsyncLocalStorage<boolean>();
   const bounds = new AsyncLocalStorage<number>();
-  const sql = Object.assign(retryDead(prepared(raw, raw.options.prepare, profile), reads, bounds), {
-    reads,
-    profile,
-  });
+  const sql = Object.assign(
+    retryDead(prepared(raw, raw.options.prepare, profile), reads, bounds, profile),
+    {
+      reads,
+      profile,
+    },
+  );
   return {
     db: drizzle(sql, { schema: tables, casing: CASING }),
     profile,

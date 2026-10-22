@@ -1,7 +1,7 @@
 /** `coder auth login`: sign in with Wular and pick a workspace. */
 import process from 'node:process';
 
-import { CoderError } from '../../core/dispatch';
+import { CoderError } from '../../core/errors';
 import { outStyle } from '../../tui/output';
 import { canPrompt, openUrl, pick } from '../../tui/prompt';
 import { flag, serverOptions } from '../../utils/args';
@@ -20,6 +20,7 @@ export const commandLogin = command({
   usage:
     'Sign in with Wular Auth in your browser. The CLI keeps the tokens in ~/.coder/session.json, and commands that talk to a server then act as you.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     ...serverOptions,
     device: flag('show a code to approve on another device; the default without a local browser'),

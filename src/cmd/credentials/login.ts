@@ -33,6 +33,14 @@ export const commandCredentialsLogin = command({
   usage:
     "Runs the official claude or codex sign-in on the server's runner, prints the sign-in link or device code, and waits. Claude asks you to paste the code the sign-in page shows. The result replaces your subscription for that engine. Needs CLAUDE_SUBSCRIPTIONS=1 or CODEX_SUBSCRIPTIONS=1 on the server.",
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/settings/credentials',
+      label: 'Connect the engine',
+      action: 'engine',
+      args: ['engine'],
+    },
+  },
   args: {
     engine: z.optional(z.string()).check(z.describe('claude or codex')),
     ...credentialServerOptions,

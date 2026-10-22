@@ -33,7 +33,11 @@ export function Credentials({ request }: { request: Request }) {
           );
         return rows.then(credentials => (
           <>
-            <CredentialsList rows={credentials} me={who} focus={params.get('engine') ?? ''} />
+            <CredentialsList
+              rows={credentials}
+              me={who}
+              focus={params.get('engine') ?? params.get('add') ?? ''}
+            />
             {list}
           </>
         ));

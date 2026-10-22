@@ -9,6 +9,7 @@ export const commandStatus = command({
   description: 'show where you are signed in',
   usage: 'List saved sessions with their server, user, and workspace.',
   access: 'read',
+  approvalPolicy: 'deny',
   globalFlags: { cwd: false },
   cli: { env: [['CODER_SERVER', 'the server to use instead of https://coder.wular.ai']] },
   run: async () => {

@@ -10,7 +10,7 @@ export function processTiming(stage: string, data?: Record<string, unknown>): vo
 }
 
 /** Options accepted by runCommand and friends. */
-export interface RunCommandOptions {
+interface RunCommandOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   input?: string;
@@ -19,7 +19,7 @@ export interface RunCommandOptions {
 }
 
 /** The normalized result of a spawnSync call. */
-export interface CommandResult {
+interface CommandResult {
   command: string;
   args: string[];
   status: number;
@@ -29,7 +29,7 @@ export interface CommandResult {
   error: (Error & { code?: string }) | null;
 }
 
-export function runCommand(
+function runCommand(
   command: string,
   args: string[] = [],
   options: RunCommandOptions = {},
@@ -75,7 +75,7 @@ export function binaryAvailable(
   return { available: true, detail: result.stdout.trim() || result.stderr.trim() || 'ok' };
 }
 
-export interface RerunResult {
+interface RerunResult {
   error?: NodeJS.ErrnoException;
   status: number | null;
   signal: NodeJS.Signals | null;

@@ -1,27 +1,37 @@
 /** Chat SDK per app and request: the app's adapter, its own slice of chat state, and the handlers that raise Coder events. */
 import { createHash } from 'node:crypto';
 
-import { Chat, Message, type SerializedMessage, type SerializedThread, type Thread } from 'chat';
+import type { Chat, Message, SerializedMessage, SerializedThread, Thread } from 'chat';
 
 import { definitionEvents, eventOptions } from '../agent/definition';
 import { postReplyParts, reactToMessage } from '../agent/exec';
 import { type AgentApp, type AgentEvent } from '../agent/types';
 import { agentWithVersion } from './agents/records';
 import { syncLocalAgents } from './store/local';
-import type { AdapterContext, ChatRoute, Integration, TokenBound } from '../integrations/types';
+import type {
+  AdapterContext,
+  ChatRoute,
+  Space,
+  Integration,
+  TokenBound,
+} from '../integrations/types';
 import { forInstallation, type ServerContext } from './context';
 import { appChatState, LocalChatState } from './store/chat';
 import { decryptSecret } from './store/secrets';
 import { updateMetadata } from './store';
 import { installationToken, uninstall } from './tasks/context';
-import { DELIVERY_TTL_MS, dispatchEvent, type Replies } from './tasks/events';
-import { conversationKey } from './tasks/thread';
-import { knownKey, reactToConversation, recordUnseen } from './tasks/conversation';
-import { dashPath, organizationSlug } from './auth/account';
+import {
+  DELIVERY_TTL_MS,
+  dispatchEvent,
+  dropped,
+  recordFailure,
+  type Replies,
+} from './tasks/events';
+import { conversationKey, knownKey, reactToConversation, recordUnseen } from './tasks/conversation';
+import { dashPath, organizationSlug } from './auth/members';
 import { kick } from './tasks/kick';
-import { recordFailure } from './tasks/failures';
 import { answersShown } from './tasks/approvals';
-import { homePage, linkCard, type AgentSummary, type TaskSummary } from './agents/pages';
+import { homePage, type AgentSummary } from './agents/pages';
 
 /** The installation a webhook names, and its repository when it has one. */
 export interface Target {
@@ -29,10 +39,12 @@ export interface Target {
   repo?: NonNullable<AgentEvent['repo']>;
   /** The app's own platform user. */
   self?: string;
-  /** The covered account it happened in. */
-  within?: string;
+  /** The platform account it happened in. */
+  account?: string;
   /** The message's position in its conversation, when the webhook states it. */
   index?: number;
+  /** Where it happened, when the webhook tells. */
+  space?: Space;
 }
 
 /** One of the app's installations in the workspace it is bound to; a removed one is none. */
@@ -165,17 +177,26 @@ export async function deliver(
   replies: Replies,
   accepted?: () => Promise<void>,
 ): Promise<string | undefined> {
-  if (app.builtin && !integration.app.shareable) return;
+  if (app.builtin && !integration.app.shareable) {
+    dropped(event, `the built-in app does not serve ${integration.name}`, 'error');
+    return;
+  }
   const key = `${app.id}:${event.installationId}`;
   const tenant = await forInstallation(ctx, key);
   // A workspace's own app only ever serves that workspace.
-  if (!tenant || (!app.builtin && tenant.organizationId !== ctx.organizationId)) return;
+  if (!tenant || (!app.builtin && tenant.organizationId !== ctx.organizationId)) {
+    dropped(event, `installation ${key} is not bound to the app's workspace`, 'error');
+    return;
+  }
   const installation =
     tenant.boundInstallation?.installation.id === key
       ? tenant.boundInstallation.installation
       : await tenant.store.get('installation', key);
   // An installation that covers several accounts acts only in the ones granted to it.
-  if (installation?.covers && !installation.covers.includes(event.within ?? '')) return;
+  if (installation?.covers && !installation.covers.includes(event.account ?? '')) {
+    dropped(event, `installation ${key} is not granted ${event.account ?? 'its account'}`);
+    return;
+  }
   const dispatched = await dispatchEvent(
     tenant,
     integration,
@@ -194,7 +215,7 @@ export async function deliver(
 }
 
 /** Replies through a Chat SDK thread: public posts as Markdown in parts the platform accepts, and private ones only where the platform has them. */
-export function threadReplies(
+function threadReplies(
   thread: Thread,
   user?: Message['author'] | string,
   message?: Message | string,
@@ -320,8 +341,9 @@ function chatEvent(
     },
     text,
     chat: { thread: stored(thread.toJSON()), message: stored(message.toJSON()) },
+    ...(target.space ? { space: target.space } : {}),
     ...(target.index !== undefined ? { conversation: { index: target.index } } : {}),
-    ...(target.within ? { within: target.within } : {}),
+    ...(target.account ? { account: target.account } : {}),
     ...(target.repo ? { repo: target.repo } : {}),
     ...extra,
   };
@@ -358,7 +380,7 @@ async function workspace(ctx: ServerContext, app: AgentApp, target: Target) {
   const { tenant, installation } = await boundInstallation(ctx, app, target.id);
   const allowed =
     (app.builtin || tenant?.organizationId === ctx.organizationId) &&
-    (!installation?.covers || installation.covers.includes(target.within ?? ''));
+    (!installation?.covers || installation.covers.includes(target.account ?? ''));
 
   return installation && allowed ? tenant : undefined;
 }
@@ -370,7 +392,7 @@ export async function dashUrl(ctx: ServerContext): Promise<string | undefined> {
   return base && `${base}${dashPath(await organizationSlug(ctx))}`;
 }
 
-/** What an app's integration gets for one request: tokens, and with a target, its home page and link cards; `dash` for their links. */
+/** What an app's integration gets for one request: tokens and, with a target, its home page; `dash` for its links. */
 export function adapterContext(
   ctx: ServerContext,
   integration: Integration,
@@ -424,13 +446,6 @@ export function adapterContext(
 
             return homePage(integration, { home: base, dash }, app.name, agent);
           },
-          preview: async url =>
-            dash
-              ? linkCard(integration, dash, url, {
-                  agent: slug => agentSummary(ctx, app, target, slug),
-                  task: id => taskSummary(ctx, app, target, id),
-                })
-              : undefined,
         }
       : {}),
     privateState: () => new LocalChatState(),
@@ -442,10 +457,9 @@ export async function agentSummary(
   ctx: ServerContext,
   app: AgentApp,
   target: Target,
-  slug?: string,
 ): Promise<AgentSummary | undefined> {
   const tenant = await workspace(ctx, app, target);
-  const { record, version } = tenant ? await agentWithVersion(tenant.store, slug ?? app.agent) : {};
+  const { record, version } = tenant ? await agentWithVersion(tenant.store, app.agent) : {};
   if (!record || !version) return undefined;
   const { definition } = version;
   const description = record.description ?? definition.description;
@@ -462,33 +476,6 @@ export async function agentSummary(
   };
 }
 
-/** A task of the workspace the installation is bound to; none for any other. */
-async function taskSummary(
-  ctx: ServerContext,
-  app: AgentApp,
-  target: Target,
-  id: string,
-): Promise<TaskSummary | undefined> {
-  const tenant = await workspace(ctx, app, target);
-  const row = tenant && (await tenant.store.get('task', id));
-  if (!row) return undefined;
-  const { task } = row;
-  const from = task.event?.integration;
-
-  return {
-    id: task.id,
-    title:
-      task.name?.trim() ||
-      task.prompt?.trim() ||
-      task.event?.text?.trim() ||
-      `${task.event?.type ?? 'task'} on ${task.agent}`,
-    agent: task.agent,
-    status: row.status,
-    from: (from && ctx.integrations[from]?.name) || task.source,
-    startedAt: row.startedAt ?? row.createdAt,
-  };
-}
-
 /** A Chat for one app, built per request so no adapter cache outlives it. */
 export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target): Promise<Chat> {
   const integration = ctx.integrations[app.integration];
@@ -497,7 +484,7 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
   ctx = {
     ...ctx,
     fetch:
-      integration.requestFetch?.(ctx.fetch ?? fetch, target?.within ?? target?.id) ?? ctx.fetch,
+      integration.requestFetch?.(ctx.fetch ?? fetch, target?.account ?? target?.id) ?? ctx.fetch,
     syncAgent: slug => {
       if (!synced.has(slug))
         synced.set(slug, syncLocalAgents(ctx.store, ctx.local!.cwd, ctx.integrations, slug));
@@ -509,6 +496,7 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
     adapterContext(ctx, integration, app, credentials, target),
   );
   const state = appChatState(ctx.chatState ?? new LocalChatState(), app.id);
+  const { Chat } = await import('chat');
   const chat = new Chat({
     userName: app.name,
     adapters: { [integration.id]: adapter },
@@ -559,7 +547,7 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
       actor: { id: reaction.user.userId, login: reaction.user.userName },
       text: '',
       chat: { thread: stored(thread.toJSON()) },
-      ...(target.within ? { within: target.within } : {}),
+      ...(target.account ? { account: target.account } : {}),
     };
     const work = reactToConversation(
       tenant,
@@ -572,33 +560,6 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
       ctx.now ?? Date.now,
     );
     later(ctx, app, event, work);
-  });
-  // `/setup` is the one command Coder registers.
-  chat.onSlashCommand('/setup', async command => {
-    const type = raisedBy(integration, 'command');
-    if (!type) return;
-    const whisper = (text: string) =>
-      command.channel.postEphemeral(command.user, text, { fallbackToDM: false });
-    const event: AgentEvent = {
-      integration: integration.id,
-      type,
-      appId: app.id,
-      installationId: target.id,
-      deliveryId: createHash('sha256')
-        .update(
-          `${app.id}\n${target.id}\n${command.channel.id}\n${command.triggerId ?? command.text}`,
-        )
-        .digest('base64url')
-        .slice(0, 22),
-      actor: {
-        id: command.user.userId,
-        ...(command.user.userName ? { login: command.user.userName } : {}),
-      },
-      text: command.text.trim(),
-      ...(target.within ? { within: target.within } : {}),
-    };
-    const replies = { post: whisper, problem: whisper, whisper };
-    later(ctx, app, event, deliver(ctx, integration, app, credentials, event, replies), replies);
   });
   return chat;
 }

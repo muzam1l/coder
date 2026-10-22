@@ -57,17 +57,26 @@ export async function tokenGrant(
   };
 }
 
-/** A usable access token from stored token JSON, refreshed and saved when it is about to expire. */
+/** A usable access token from stored token JSON, refreshed and saved when it is about to expire, or when `force`d after the platform refused it. */
 export async function freshToken(
   stored: string | undefined,
   refresh: (refreshToken: string) => Promise<StoredToken>,
   save?: (token: string) => Promise<string | void>,
   now = Date.now(),
+  force = false,
 ): Promise<string> {
   if (!stored) throw new Error('The installation has no token; connect it again');
   const token = JSON.parse(stored) as StoredToken;
-  if (!token.refreshToken || (token.expiresAt ?? Infinity) - 5 * 60_000 > now)
+  if (!token.refreshToken) {
+    if (force)
+      throw new IntegrationError(
+        'platform-error',
+        'invalid_token',
+        'The refused token has no refresh token',
+      );
     return token.accessToken;
+  }
+  if (!force && (token.expiresAt ?? Infinity) - 5 * 60_000 > now) return token.accessToken;
   const { idToken: _idToken, ...next } = (await refresh(token.refreshToken)) as StoredToken & {
     idToken?: string;
   };

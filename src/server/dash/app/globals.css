@@ -282,9 +282,6 @@ h1 {
 .head .lead {
   margin-top: 4px;
   max-width: none;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .actions {
   display: flex;
@@ -438,6 +435,10 @@ th.num a {
 .acts {
   text-align: right;
   white-space: nowrap;
+}
+/* a row's buttons sit in its middle, however many lines its title takes */
+td.acts {
+  vertical-align: middle;
 }
 input:not([type='checkbox']):not([type='radio']),
 select,

@@ -2,8 +2,8 @@ import { randomBytes } from 'node:crypto';
 import process from 'node:process';
 
 import { enabledIntegrations } from '../../integrations';
-import { createRunners, runnerSnapshots } from '../runners';
-import { nearestRegion } from '../runners/vercel-sandbox';
+import { createRunners } from '../runners';
+import { nearestRegion, runnerSnapshots } from '../runners/kinds/vercel-sandbox';
 import type { RunnerKind } from '../../agent/types';
 import { CoderError } from '../../core/dispatch';
 import { seedBuiltinAgents } from '../agents/records';
@@ -13,7 +13,6 @@ import { handleRequest } from '../routes';
 import { DashboardHosts } from '../dash/serve';
 import { ServerLimits } from '../limits';
 import { RegistryIndex } from '../settings/mcp';
-import { sql } from 'drizzle-orm';
 import { createBackend } from '../store';
 import { engineStatus, recoverLocalTasks, stopLocalTasks, syncLocalUsage } from '../tasks/local';
 import { LogWatcher, TaskWatcher } from '../tasks/stream';
@@ -128,7 +127,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
     const limits = new ServerLimits();
     const registry = new RegistryIndex();
     const contexts = new Map<string, ServerContext>();
-    const requestScopes = new Map<string, import('../routes').RequestScope>();
+    const requestScopes = new Map<string, import('../routes/guards').RequestScope>();
     const taskWatcher = new TaskWatcher();
     const logWatcher = new LogWatcher();
     const context = (organizationId: string): ServerContext => {
@@ -142,6 +141,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
         ...(backend.connection
           ? {
               databaseHealth: async () => {
+                const { sql } = await import('drizzle-orm');
                 await backend.connection!.db.execute(sql`select 1`);
               },
               statementTimeout: backend.connection.statementTimeout,

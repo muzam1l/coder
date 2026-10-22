@@ -10,6 +10,7 @@ export const commandRunnerDefault = command({
   description: 'set the default in its scope',
   usage: 'Use this runner by default within its scope.',
   access: 'write',
+  approvalPolicy: 'ask',
   args: { id: z.string().check(z.describe('the runner')), ...credentialServerOptions },
   globalFlags: { cwd: false },
   cli: { positional: ['id'] },

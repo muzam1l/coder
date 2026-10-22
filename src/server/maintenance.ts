@@ -1,12 +1,11 @@
 /** Re-seal the server's stored secrets with the current encryption key. */
 import process from 'node:process';
 
-import { eq, isNotNull, like } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { CoderError } from '../core/dispatch';
 import { reseal } from './settings/credentials';
-import { platformLink, secret, chatState } from './store/pg/schema';
-import { stateKey } from './store/pg/tables/shared';
+import { secret } from './store/pg/schema';
 import { loadServerConfig } from './env';
 import { decryptSecret, encryptSecret, keyVersion, secretKeyVersion } from './store/secrets';
 import { createBackend } from './store';
@@ -24,7 +23,7 @@ async function asServerError<T>(work: () => Promise<T>): Promise<T> {
   }
 }
 
-/** Re-seal every stored secret with the current encryption key. */
+/** Re-seal every stored secret with the current encryption key: one pass over the `secret` table, or the memory store's records. */
 export function rotateKey(options: MaintenanceOptions = {}): Promise<{ moved: number }> {
   return asServerError(async () => {
     const config = loadServerConfig(options.env ?? process.env);
@@ -35,66 +34,19 @@ export function rotateKey(options: MaintenanceOptions = {}): Promise<{ moved: nu
 
     const backend = await createBackend(config);
     try {
-      const organizationIds = new Set<string>([backend.defaultOrganizationId]);
-      if (backend.connection) {
-        const db = backend.connection.db;
-        const [secrets, configs, connections] = await Promise.all([
-          db.selectDistinct({ id: secret.organizationId }).from(secret),
-          db
-            .select({ key: chatState.key })
-            .from(chatState)
-            .where(like(chatState.key, 'o:%,"config"]:workspace')),
-          db
-            .select({ key: chatState.key })
-            .from(chatState)
-            .where(like(chatState.key, 'o:%,"connection"]:%')),
-        ]);
-        for (const row of secrets) organizationIds.add(row.id);
-        for (const row of configs) {
-          let scope: unknown;
-          try {
-            scope = JSON.parse(row.key.slice(2, -10));
-          } catch {
-            continue;
-          }
-          if (
-            Array.isArray(scope) &&
-            scope.length === 2 &&
-            typeof scope[0] === 'string' &&
-            scope[1] === 'config' &&
-            row.key === stateKey(scope[0], 'config', 'workspace')
-          )
-            organizationIds.add(scope[0]);
-        }
-        for (const row of connections) {
-          const end = row.key.lastIndexOf(',"connection"]:');
-          try {
-            const scope: unknown = JSON.parse(row.key.slice(2, end + ',"connection"]'.length));
-            if (
-              Array.isArray(scope) &&
-              scope.length === 2 &&
-              typeof scope[0] === 'string' &&
-              scope[1] === 'connection'
-            )
-              organizationIds.add(scope[0]);
-          } catch {}
-        }
-      }
-      let moved = 0;
-      for (const id of organizationIds) moved += await reseal(backend.store(id), config);
-
       const db = backend.connection?.db;
+      if (!db) return { moved: await reseal(backend.store(backend.defaultOrganizationId), config) };
       const current = keyVersion(config.encryptionKey);
-      for (const link of db
-        ? await db.select().from(platformLink).where(isNotNull(platformLink.token))
-        : []) {
-        if (secretKeyVersion(config, link.token!) === current) continue;
-        await db!
-          .update(platformLink)
-          .set({ token: encryptSecret(config, decryptSecret(config, link.token!)) })
-          .where(eq(platformLink.id, link.id));
+      let moved = 0;
+      for (const row of await db.select().from(secret)) {
+        if (secretKeyVersion(config, row.value) === current) continue;
+        await db
+          .update(secret)
+          .set({ value: encryptSecret(config, decryptSecret(config, row.value)) })
+          .where(eq(secret.id, row.id));
         moved++;
       }
+
       return { moved };
     } finally {
       await backend.close();

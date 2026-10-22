@@ -1,13 +1,13 @@
 /** The server's request context and its configuration, and scoping it to one organization. */
 import type { StateAdapter } from 'chat';
 import type { JWK } from 'jose';
-
 import type { Integration } from '../../integrations/types';
 import type { Agent, AgentApp, AgentEvent, Installation, RunnerKind } from '../../agent/types';
 import type { Runner } from '../runners';
-import type { AgentRecord, AgentVersionRecord, Store } from '../store/types';
+import type { AgentRecord, AgentVersionRecord, Store, TaskStatus } from '../store/types';
 import type { TokenSource } from '../tasks/context';
 import type { TaskQueue } from '../tasks/queue';
+import type { TaskPrincipal } from '../tasks/access';
 
 /** An agent's record and version, as one read loaded them, and the store that read holds repository files in. */
 export interface LoadedAgent {
@@ -86,10 +86,20 @@ export function chosenOrganization(info: SessionInfo, wanted: string): SessionIn
 /** What a link remembers besides the user: their workspaces then, and the encrypted platform user token. */
 export interface LinkExtra {
   organizations?: string[];
+  /** The user's role in each of `organizations`. */
+  roles?: Record<string, string>;
   token?: string;
+  /** The platform's own handle for the user (GitHub login), when the link learned it. */
+  login?: string;
 }
 
-/** What the server needs from the sign-in layer; `src/server/auth/index.ts` builds it over Wular. */
+/** The workspaces and roles a link remembers. */
+export const linkedOrganizations = (organizations: OrganizationInfo[]) => ({
+  organizations: organizations.map(org => org.id),
+  roles: Object.fromEntries(organizations.map(org => [org.id, org.role])),
+});
+
+/** What the server needs from the sign-in layer; `src/server/auth.ts` builds it over Wular. */
 export interface AuthApi {
   /** Wular's issuer URL. */
   issuer: string;
@@ -121,7 +131,12 @@ export interface AuthApi {
     userId: string,
     store?: Store,
   ): Promise<
-    Array<{ platform: string; platformUserId: string; name: string; email: string } & LinkExtra>
+    Array<
+      { platform: string; platformUserId: string; name: string; email: string } & LinkExtra & {
+          /** When the platform refused the token's refresh. */
+          refusedAt?: number;
+        }
+    >
   >;
   unlink?(userId: string, platform: string, platformUserId: string, store?: Store): Promise<void>;
   refreshLinkedToken?(
@@ -132,6 +147,14 @@ export interface AuthApi {
     next: string,
     store?: Store,
   ): Promise<boolean>;
+  /** Marks the link refused while it still holds `token`. */
+  refuseLinkedToken?(
+    userId: string,
+    platform: string,
+    platformUserId: string,
+    token: string,
+    store?: Store,
+  ): Promise<void>;
   linkedUser(
     platform: string,
     platformUserId: string,
@@ -147,8 +170,8 @@ export interface ServerContext {
   settings?: ServerSettings;
   authorizedRequest?: Request;
   dashboardHosts?: import('../dash/serve').DashboardHosts;
-  requestScopes?: Map<string, import('../routes').RequestScope>;
-  dbProfile?: import('../store/pg/profile').DatabaseProfile;
+  requestScopes?: Map<string, import('../routes/guards').RequestScope>;
+  dbProfile?: import('../store/pg/client').DatabaseProfile;
   /** Task changes for every open `/admin/events` stream, read once a second. */
   taskWatcher?: import('../tasks/stream').TaskWatcher;
   /** Task logs for every open `/admin/tasks/:id/stream`, read once a second per task. */
@@ -190,6 +213,10 @@ export interface ServerContext {
   taskOrganization?(taskId: string, tokenHash: string): Promise<string | undefined>;
   /** The signed-in user behind this request, once resolved. */
   session?: SessionInfo;
+  /** The running task whose Coder server made this request; its reach is its children and its agent. */
+  taskPrincipal?: TaskPrincipal;
+  /** The task row a `/tasks/:id` route's guard read, so its handler need not read it again. */
+  routeTask?: TaskStatus;
   integrations: Record<string, Integration>;
   runners: Partial<Record<RunnerKind, Runner>>;
   store: Store;
@@ -225,7 +252,7 @@ export interface ServerSettings {
   runnerInstances?: Map<string, { signature: string; runner: Runner }>;
   configUpdate?: Promise<unknown>;
   registry?: import('../settings/mcp').RegistryIndex;
-  probes?: import('./cache').MemoryCache<import('../../client/types').ProbeResult>;
+  probes?: import('../settings/models').MemoryCache<import('../../client/types').ProbeResult>;
 }
 
 /** The same server context, scoped to one organization. */

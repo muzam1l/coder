@@ -1,14 +1,16 @@
-import type { ComponentChildren } from 'preact';
+import { Fragment, type ComponentChildren } from 'preact';
 import { dynamic } from '@wular/pnext/dynamic';
 
-import { iGit, iPencil, iPlus } from '@/comps/ui/icons';
+import { iAlert, iGit, iPencil, iPlus } from '@/comps/ui/icons';
+import { Icon } from '@/comps/ui/icon';
+import { Notice } from '@/comps/ui/notice';
 import { load, orgOf } from '@/api/load';
-import type { AgentRow, TasksPage } from '@coder/client/types';
+import type { AgentRow, Me, TasksPage } from '@coder/client/types';
 import { Back, Page } from '@/comps/frame/page-head';
 import { Button, LinkButton } from '@/comps/ui/button';
 import { Stream } from '@/comps/frame/stream';
 import { LoadingTabs, Tabs } from '@/comps/ui/tabs';
-import { editableAgent } from '@/api/types';
+import { editableAgent, isAdmin } from '@/api/types';
 import { LoadingHero, Hero } from '@/app/dash/[org]/agents/agent/hero';
 import { loadAgent } from '@/api/load';
 import { loadTasks } from '@/app/dash/[org]/tasks/list/tasks-section';
@@ -57,6 +59,49 @@ const TABS = [
   ['/dash/[org]/agents/[slug]/settings', 'Settings'],
 ] as const;
 
+/** Why the agent answers no events, and where its definition is fixed. */
+function NotRunning({ agent, org, admin }: { agent: AgentRow; org: string; admin: boolean }) {
+  return (
+    <Notice tone="error">
+      <Icon d={iAlert} />
+      <span class="grow">
+        Not running until its definition is fixed.
+        {agent.problems!.map(problem => (
+          <Fragment key={problem}>
+            <br />
+            {problem}
+          </Fragment>
+        ))}
+      </span>
+      {!admin ? (
+        <span class="muted">Ask an admin to fix it.</span>
+      ) : editableAgent(agent) ? (
+        <LinkButton
+          variant="secondary"
+          size="sm"
+          href="/dash/[org]/agents/[slug]/edit"
+          params={{ org, slug: agent.id }}
+        >
+          Fix in editor
+        </LinkButton>
+      ) : agent.source === 'repo' && agent.sourceUrl ? (
+        <Button variant="outline" size="sm" href={agent.sourceUrl} external>
+          Open in repository
+        </Button>
+      ) : (
+        <LinkButton
+          variant="outline"
+          size="sm"
+          href="/dash/[org]/agents/[slug]/settings"
+          params={{ org, slug: agent.id }}
+        >
+          Settings
+        </LinkButton>
+      )}
+    </Notice>
+  );
+}
+
 /** The agent's header and tabs while its record loads. */
 function LoadingAgentHead({ back }: { back: ComponentChildren }) {
   return (
@@ -76,12 +121,14 @@ function LoadingAgentHead({ back }: { back: ComponentChildren }) {
 
 function AgentHead({
   agent,
+  me,
   org,
   tasks,
   backPath,
   back,
 }: {
   agent: AgentRow;
+  me: Me;
   org: string;
   tasks?: TasksPage;
   backPath: string | null;
@@ -105,6 +152,7 @@ function AgentHead({
           count: counts[href],
         }))}
       />
+      {agent.problems?.length ? <NotRunning agent={agent} org={org} admin={isAdmin(me)} /> : null}
     </>
   );
 }
@@ -132,12 +180,22 @@ export default function AgentTabsLayout({
         load={() =>
           Promise.all([
             loadAgent(request, slug),
+            load(request)
+              .me()
+              .catch((): Me => ({})),
             (url.pathname.endsWith('/tasks')
               ? loadTasks(request, slug).first
               : lastTask(request, slug)
             ).catch(() => undefined),
-          ]).then(([agent, tasks]) => (
-            <AgentHead agent={agent} org={org} tasks={tasks} backPath={backPath} back={back} />
+          ]).then(([agent, me, tasks]) => (
+            <AgentHead
+              agent={agent}
+              me={me}
+              org={org}
+              tasks={tasks}
+              backPath={backPath}
+              back={back}
+            />
           ))
         }
       />

@@ -36,6 +36,10 @@ export const CLI_PATH = fs.existsSync(path.join(PACKAGE_ROOT, 'dist/cli.js'))
   ? path.join(PACKAGE_ROOT, 'dist/cli.js')
   : path.join(PACKAGE_ROOT, 'src/cli.ts');
 
+export const CODER_APP_NAME = 'coder';
+export const CODER_DESCRIPTION =
+  'Coder turns any model into an agent you own: tasks on this machine, from your code, or always on in Coder Cloud.';
+
 export function readVersion(): string {
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, 'package.json'), 'utf8')) as {

@@ -1,16 +1,15 @@
-import { localHostAllowed } from './guards';
+import { localHostAllowed, requestScope } from './guards';
 import { dispatch } from './match';
-import { bodyLimit, limitBody, notFound } from './http';
-import { chosenOrganization, type ServerContext, type SessionInfo } from '../context';
+import { bodyLimit, limitBody, notFound, untilSent, withCookies } from './http';
+import { type ServerContext } from '../context';
 import { dashboard, DashboardHosts } from '../dash/serve';
-import { randomUUID } from 'node:crypto';
 import { ServerLimits, admit, type Admitted } from '../limits';
 import { scheduleKick } from '../tasks/kick';
 import { scheduleInbox } from '../tasks/queue';
 import { routes } from './routes';
 import { LogWatcher, TaskWatcher } from '../tasks/stream';
 
-export async function serve(
+async function serve(
   req: Request,
   ctx: ServerContext,
   admitted: Admitted,
@@ -20,77 +19,6 @@ export async function serve(
   if (admitted.scope instanceof Response) return admitted.scope;
   ctx = admitted.scope ?? ctx;
   return (await dispatch(routes, req, ctx, url)) ?? dashboard(req, ctx);
-}
-
-export const REQUEST_SCOPE_HEADER = 'x-coder-request-scope';
-
-export type RequestScope = {
-  sessions: Map<string, Promise<SessionInfo | undefined>>;
-  operators: Map<string, Promise<string | undefined>>;
-  /** Refreshed or cleared session cookies the response carries. */
-  cookies: string[];
-};
-
-function shareSessions(
-  ctx: ServerContext,
-  { sessions, operators, cookies }: RequestScope,
-): ServerContext {
-  const auth = ctx.auth;
-  if (!auth) return ctx;
-  return {
-    ...ctx,
-    auth: {
-      ...auth,
-      // One lookup per credential; an organization the request names is picked from it.
-      session(headers, fresh) {
-        const key = JSON.stringify([
-          ...['cookie', 'authorization'].map(name => headers.get(name)),
-          Boolean(fresh),
-        ]);
-        let found = sessions.get(key);
-        if (!found) {
-          const own = new Headers(headers);
-          own.delete('x-coder-organization');
-          found = auth.session(own, fresh, cookies);
-          sessions.set(key, found);
-        }
-        const wanted = headers.get('x-coder-organization');
-        return wanted
-          ? found.then(info => info && (info.stale ? info : chosenOrganization(info, wanted)))
-          : found;
-      },
-      setOrganization: (headers, slug) => auth.setOrganization(headers, slug, cookies),
-      operator(headers) {
-        const key = headers.get('cookie') ?? '';
-        let found = operators.get(key);
-        if (!found) {
-          found = auth.operator(headers, cookies);
-          operators.set(key, found);
-        }
-        return found;
-      },
-    },
-  };
-}
-
-function requestScope(req: Request, ctx: ServerContext, inProcess: boolean) {
-  const scopes = (ctx.requestScopes ??= new Map());
-  const given = req.headers.get(REQUEST_SCOPE_HEADER);
-  const live = inProcess && given ? scopes.get(given) : undefined;
-  if (live) return { req, ctx: shareSessions(ctx, live), end() {} };
-  const headers = new Headers(req.headers);
-  headers.delete(REQUEST_SCOPE_HEADER);
-  if (!ctx.auth) return { req: given ? new Request(req, { headers }) : req, ctx, end() {} };
-  const id = randomUUID();
-  const scope: RequestScope = { sessions: new Map(), operators: new Map(), cookies: [] };
-  scopes.set(id, scope);
-  headers.set(REQUEST_SCOPE_HEADER, id);
-  return {
-    req: new Request(req, { headers }),
-    ctx: shareSessions(ctx, scope),
-    cookies: scope.cookies,
-    end: () => scopes.delete(id),
-  };
 }
 
 export async function handleRequest(
@@ -162,38 +90,4 @@ async function request(
   } finally {
     if (!streamed) scope.end();
   }
-}
-
-function withCookies(response: Response, cookies: string[] = []): Response {
-  if (!cookies.length) return response;
-  const headers = new Headers(response.headers);
-  for (const cookie of cookies) headers.append('set-cookie', cookie);
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-}
-
-function untilSent(response: Response, end: () => void): Response {
-  const reader = response.body!.getReader();
-  const body = new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      try {
-        const { done, value } = await reader.read();
-        if (done) {
-          end();
-          controller.close();
-        } else controller.enqueue(value);
-      } catch (error) {
-        end();
-        controller.error(error);
-      }
-    },
-    cancel(reason) {
-      end();
-      return reader.cancel(reason);
-    },
-  });
-  return new Response(body, response);
 }

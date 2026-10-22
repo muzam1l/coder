@@ -1,15 +1,16 @@
 'use client';
 
 import './editor.css';
-import type { ComponentChildren } from 'preact';
 // The preview is the same card the agents list draws.
 import '@/app/dash/[org]/agents/(list)/page.css';
 
+import { Fragment } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
 import { useAction } from '@/utils/action';
-import { iDown, iPlus, iShuffle, iUpload } from '@/comps/ui/icons';
+import { iAlert, iDown, iPlus, iShuffle, iUpload } from '@/comps/ui/icons';
+import { Notice } from '@/comps/ui/notice';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Link } from '@wular/pnext/link';
@@ -37,9 +38,9 @@ import { Search } from '@/comps/ui/toolbar';
 import { ImportPicker } from './import-picker';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
 import {
+  ACCESS,
   EFFORTS,
   ENGINE_NAMES,
-  PERMISSIONS,
   defaultLabel,
   modelHeadings,
   modelOptions,
@@ -48,30 +49,24 @@ import {
 } from '@/app/dash/[org]/settings/model-options';
 import { suggestName } from './names';
 
-const NEVER_ASKS = 'never asks you; anything outside its sandbox fails';
-const PERMISSION_HINTS: Record<string, string> = {
-  'read-only': `reads the repository and changes nothing; ${NEVER_ASKS}`,
-  'workspace-write': `edits files inside the repository; ${NEVER_ASKS}`,
-  auto: 'edits files, reaches the network, and asks you when it needs more',
-};
-const PERMISSION_OPTIONS = PERMISSIONS.map(([key, label]): [string, ComponentChildren] =>
-  key === 'auto'
-    ? [
-        key,
-        <>
-          {label} <Badge tone="acc">escalates</Badge>
-        </>,
-      ]
-    : [key, label],
-);
-const ACCESS: Array<[string, string]> = [
-  ['read', 'Read-only'],
-  ['write', 'Read-write'],
-];
 const ACCESS_HINTS: Record<string, string> = {
-  read: 'reads its platforms and connections; replies and reacts in the conversation',
-  write: 'also changes things there, like opening pull requests',
+  auto: 'changes things too, like opening pull requests; the engine reviews what leaves the sandbox',
+  'read-only': 'reads files, platforms and connections; replies and reacts in the conversation',
 };
+/** The form section of the field a definition problem names first. */
+const PROBLEM_FIELDS: Record<string, string> = {
+  name: 'agent-name',
+  description: 'agent-name',
+  integrations: 'agent-platforms',
+  engine: 'agent-run',
+  model: 'agent-run',
+  effort: 'agent-run',
+  access: 'agent-run',
+  permissions: 'agent-run',
+  runner: 'agent-run',
+};
+const fieldOf = (problem: string) => PROBLEM_FIELDS[problem.split(/[\s:.]/)[0]!];
+
 const TEMPLATES: Array<[Template, string, string]> = [
   ['blank', 'Blank', 'start from nothing'],
   ['helper', 'Slack helper', 'answers questions in chat'],
@@ -80,9 +75,9 @@ const TEMPLATES: Array<[Template, string, string]> = [
 /** A search over platforms shows once the catalog is longer than this. */
 const SEARCH_FROM = 6;
 const REVIEWER =
-  'Review each pull request for bugs, risky changes and missing tests.\nComment on the lines that matter and keep it short.\nWhen mentioned, answer questions about the code and cite file paths.';
+  "You review this team's pull requests.\nPoint at what matters, skip nits, keep it short.\nWhen mentioned, answer plainly and cite the code.";
 const HELPER =
-  "Answer the team's questions in the thread.\nRead the code before you answer, cite file paths, and say when you are unsure.\nIf asked to change code, describe the change and stop.";
+  "You are the team's helper in Slack.\nBe warm, brief and direct. Say when you are unsure.\nWhen asked for work, say what you will do, do it, and link what you made.";
 
 export type Template = 'import' | 'reviewer' | 'helper' | 'blank';
 
@@ -101,7 +96,6 @@ interface Draft {
   events: Record<string, string[]>;
   match: Record<string, Record<string, string>>;
   access: string;
-  permissions: string;
   systemPrompt: string;
   engine: string;
   model: string;
@@ -114,6 +108,8 @@ function draftOf(
   catalog: IntegrationInfo[],
 ): Draft {
   const definition = agent?.definition;
+  // Renamed to access; the stricter of the two carries over.
+  const permissions = (definition as Record<string, unknown> | undefined)?.permissions;
   const draft: Draft = {
     name: agent?.name ?? suggested,
     id: agent?.id ?? slug(suggested),
@@ -121,8 +117,7 @@ function draftOf(
     platforms: [],
     events: {},
     match: {},
-    access: definition?.access ?? 'write',
-    permissions: definition?.permissions ?? 'auto',
+    access: permissions === 'read-only' ? 'read-only' : (definition?.access ?? 'auto'),
     systemPrompt: agent?.systemPrompt ?? '',
     engine: definition?.engine ?? '',
     model: definition?.model ?? '',
@@ -176,6 +171,42 @@ function fromTemplate(template: Template, catalog: IntegrationInfo[]): Partial<D
   return { platforms: [], events: {}, match: {}, description: '', systemPrompt: '' };
 }
 
+/** What a chat's create link asks for: `create` is the id, with its name, platforms, events, access and matches. */
+function fromLink(asked: Record<string, string>, catalog: IntegrationInfo[]): Partial<Draft> {
+  const list = (key: string) =>
+    (asked[key] ?? '')
+      .split(',')
+      .map(item => item.trim())
+      .filter(Boolean);
+  const platforms = list('integrations').filter(id => catalog.some(info => info.id === id));
+  const wanted = list('events');
+  const match = Object.fromEntries(
+    list('match').flatMap(pair => {
+      const at = pair.indexOf('=');
+      return at > 0 ? [[pair.slice(0, at), pair.slice(at + 1)]] : [];
+    }),
+  );
+  const events = (id: string) => {
+    const info = catalog.find(entry => entry.id === id);
+    const offered = wanted.filter(name => name in (info?.events ?? {}));
+    return offered.length ? offered : defaultEvents(info);
+  };
+
+  return {
+    id: asked.create!,
+    name: asked.name || asked.create!,
+    ...(asked.description ? { description: asked.description } : {}),
+    ...(asked.access === 'read-only' || asked.access === 'auto' ? { access: asked.access } : {}),
+    ...(platforms.length
+      ? {
+          platforms,
+          events: Object.fromEntries(platforms.map(id => [id, events(id)])),
+          match: Object.fromEntries(platforms.map(id => [id, match])),
+        }
+      : {}),
+  };
+}
+
 /** One platform's events: a plain list unless an event carries options, which are kept. */
 function eventsFor(
   previous: NonNullable<AgentDefinition['integrations']>[string] | undefined,
@@ -199,7 +230,7 @@ function eventsFor(
 }
 
 /** The workspace's run settings for whatever the agent leaves unset. */
-export interface RunDefaults {
+interface RunDefaults {
   engine: string;
   engines: NonNullable<Config['engines']>;
   builtin: ModelsShape['builtin'];
@@ -218,6 +249,7 @@ export function AgentEditor({
   connectLabel = 'Connect',
   tunnel = false,
   port = '',
+  asked,
 }: {
   catalog: IntegrationInfo[];
   agent?: AgentRow;
@@ -233,16 +265,24 @@ export function AgentEditor({
   /** Platforms cannot reach this server yet, so connecting starts with a tunnel. */
   tunnel?: boolean;
   port?: string;
+  /** The page's query, which a chat's create link fills. */
+  asked?: Record<string, string>;
 }) {
   const nav = useRouter();
   const org = useOrg();
   const creating = !agent;
   const [template, setTemplate] = useState<Template>(first ?? 'blank');
+  const linked = creating && asked?.create ? fromLink(asked, catalog) : undefined;
   const [draft, setDraft] = useState(() => ({
     ...draftOf(agent, suggested, catalog),
     ...(creating ? fromTemplate(first ?? 'blank', catalog) : {}),
+    ...linked,
   }));
-  const [idTouched, setIdTouched] = useState(false);
+  const [idTouched, setIdTouched] = useState(Boolean(linked));
+  // Keys the stored definition has that Coder renamed, carried over, or no longer reads, removed here.
+  const renamed = Object.entries(agent?.stale?.renamed ?? {});
+  const [removed, setRemoved] = useState<string[]>([]);
+  const unknown = (agent?.stale?.unknown ?? []).filter(key => !removed.includes(key));
   const [writing, setWriting] = useState('write');
   const [query, setQuery] = useState('');
   const action = useAction({
@@ -264,8 +304,6 @@ export function AgentEditor({
   ]
     .filter(Boolean)
     .join(' · ');
-  const permission = PERMISSIONS.find(([key]) => key === draft.permissions);
-  const repoAccess = permission?.[1].toLowerCase();
   const run = creating
     ? 'you can change these later in its settings'
     : (draft.engine || draft.model || draft.effort
@@ -273,9 +311,8 @@ export function AgentEditor({
             ENGINE_NAMES[engine] ?? engine,
             draft.model || aliasOf(engine, base.model),
             draft.effort || base.effort,
-            repoAccess,
           ]
-        : ['Default models', repoAccess]
+        : ['Default models']
       )
         .filter(Boolean)
         .join(' · ');
@@ -299,7 +336,6 @@ export function AgentEditor({
     }));
   const togglePlatform = (id: string, on: boolean) =>
     setDraft(current => {
-      const names = Object.keys(catalog.find(entry => entry.id === id)?.events ?? {});
       return {
         ...current,
         platforms: on
@@ -351,11 +387,14 @@ export function AgentEditor({
           draft.match[id] ?? {},
         ),
       };
+    // Renamed and removed keys leave the definition.
+    const dropped = [...Object.keys(agent?.stale?.renamed ?? {}), ...removed];
     const definition: AgentDefinition = {
-      ...agent?.definition,
+      ...Object.fromEntries(
+        Object.entries(agent?.definition ?? {}).filter(([key]) => !dropped.includes(key)),
+      ),
       integrations,
-      permissions: draft.permissions,
-      access: draft.access,
+      access: draft.access as AgentDefinition['access'],
     };
     for (const key of ['name', 'description', 'engine', 'model', 'effort'] as const) {
       const value = draft[key].trim();
@@ -415,7 +454,8 @@ export function AgentEditor({
       <Button
         type="submit"
         leftIcon={creating ? iPlus : iUpload}
-        disabled={!draft.name.trim() || template === 'import'}
+        disabled={!draft.name.trim() || template === 'import' || unknown.length > 0}
+        title={unknown.length ? 'Remove the settings Coder no longer reads first' : undefined}
         loading={busy}
       >
         {creating ? 'Create agent' : 'Publish new version'}
@@ -492,6 +532,49 @@ export function AgentEditor({
     >
       {head}
       {templates}
+      {renamed.length || unknown.length ? (
+        <Notice tone="warning">
+          <Icon d={iAlert} />
+          <span class="grow stale">
+            {renamed.map(([from, to]) => (
+              <span key={from}>
+                {from} is now {to}, set to {String(draft[to as keyof Draft] ?? '')}.
+              </span>
+            ))}
+            {unknown.map(key => (
+              <span key={key}>
+                {key} is not an agent setting, so publishing waits until it is removed.
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => setRemoved(current => [...current, key])}
+                >
+                  Remove
+                </Button>
+              </span>
+            ))}
+          </span>
+        </Notice>
+      ) : agent?.problems?.length ? (
+        <Notice tone="error">
+          <Icon d={iAlert} />
+          <span class="grow">
+            Fix these before publishing.
+            {agent.problems.map(problem => (
+              <Fragment key={problem}>
+                <br />
+                {fieldOf(problem) ? (
+                  <a class="link" href={`#${fieldOf(problem)}`}>
+                    {problem}
+                  </a>
+                ) : (
+                  problem
+                )}
+              </Fragment>
+            ))}
+          </span>
+        </Notice>
+      ) : null}
       <div class="agent-form">
         <div class="agent-main">
           <section id="agent-name" class="form-part">
@@ -720,17 +803,6 @@ export function AgentEditor({
                   />
                 </Field>
               </div>
-              <Field label="Repository access" group>
-                <p class={draft.permissions === 'auto' ? 'access-note' : 'access-note warn-hint'}>
-                  {PERMISSION_HINTS[draft.permissions]}
-                </p>
-                <Segmented
-                  label="Repository access"
-                  options={PERMISSION_OPTIONS}
-                  value={draft.permissions}
-                  onChange={value => set('permissions', value)}
-                />
-              </Field>
             </div>
           </details>
         </div>

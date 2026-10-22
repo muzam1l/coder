@@ -25,12 +25,13 @@ import {
   BROKER_RECYCLE_METHOD,
   CodexAppServerClient,
   ProtocolError,
+  codexAuthFingerprint,
+  errorText,
 } from '../engines/codex/app-server';
-import { codexAuthFingerprint, errorText } from '../engines/codex/errors';
 import { startChatBridge } from '../engines/codex/chat-bridge';
-import { parseBrokerEndpoint } from './endpoint';
-import { clearBrokerSession, loadBrokerSession } from './session';
-import { connectionEnvironmentKey, redactConnectionSecrets } from '../connections';
+import { clearBrokerSession, loadBrokerSession, parseBrokerEndpoint } from './session';
+import { connectionEnvironmentKey } from '../connections';
+import { redactConnectionSecrets } from '../connection-env';
 
 /** A JSON-RPC frame passing through the broker (request, response, or notification). */
 interface JsonRpcMessage {

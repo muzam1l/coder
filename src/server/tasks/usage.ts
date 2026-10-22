@@ -1,5 +1,6 @@
 import { type Params } from '../routes/match';
 import { builtinDefinitions, loadAgents } from '../../agent/load';
+import type { AgentTask } from '../../agent/types';
 import { type ServerContext } from '../context';
 import { syncLocalUsage } from './local';
 import { json, decodeCursor, page, pageLimit, paged } from '../routes/http';
@@ -11,12 +12,32 @@ import {
   type UsageTotalRow,
 } from '../store/types';
 
+/** Where a task's usage is counted: its repository, its channel, or its source. */
+export function usageTarget(task: Pick<AgentTask, 'event' | 'source'>): string {
+  const event = task.event;
+  if (!event) return task.source;
+  if (event.repo) return `${event.repo.owner}/${event.repo.name}`;
+  return event.chat?.thread.channelId ?? event.integration;
+}
+
 /** A recorded token usage's `total`, else every number in it summed; arrays are not counted. */
-function countTokens(value: unknown): number {
+export function countTokens(value: unknown): number {
   if (typeof value === 'number') return value;
   if (!value || typeof value !== 'object' || Array.isArray(value)) return 0;
   if ('total' in value && typeof value.total === 'number') return value.total;
   return Object.values(value).reduce<number>((sum, entry) => sum + countTokens(entry), 0);
+}
+
+/** Two recorded token usages summed field by field; a field whose type changed keeps the newer value. */
+export function addTokens(left: unknown, right: unknown): unknown {
+  if (typeof right === 'number') return (typeof left === 'number' ? left : 0) + right;
+  if (!right || typeof right !== 'object' || Array.isArray(right)) return left;
+  const out: Record<string, unknown> =
+    left && typeof left === 'object' && !Array.isArray(left)
+      ? { ...(left as Record<string, unknown>) }
+      : {};
+  for (const [key, value] of Object.entries(right)) out[key] = addTokens(out[key], value);
+  return out;
 }
 
 /** A known IANA zone, or UTC. */
@@ -95,7 +116,7 @@ export async function sumUsageTotals(store: Store, query: UsageQuery): Promise<U
 }
 
 /** The agents broken out of a report's rows, leading first. */
-export function leaders(rows: UsageTotalRow[], by: keyof UsageAmount): string[] {
+function leaders(rows: UsageTotalRow[], by: keyof UsageAmount): string[] {
   const sums = new Map<string, number>();
   for (const row of rows)
     for (const [agent, part] of Object.entries(row.parts ?? {}))
@@ -111,17 +132,6 @@ export type UsageTotals = {
   since: number;
   totals: UsageTotal[] | Record<UsageGroup, UsageTotal[]>;
 };
-
-function addTokens(left: unknown, right: unknown): unknown {
-  if (typeof right === 'number') return (typeof left === 'number' ? left : 0) + right;
-  if (!right || typeof right !== 'object' || Array.isArray(right)) return left;
-  const out: Record<string, unknown> =
-    left && typeof left === 'object' && !Array.isArray(left)
-      ? { ...(left as Record<string, unknown>) }
-      : {};
-  for (const [key, value] of Object.entries(right)) out[key] = addTokens(out[key], value);
-  return out;
-}
 
 function groupTotals(rows: UsageRecord[], by: UsageGroup): UsageTotal[] {
   const totals = new Map<string, UsageTotal>();
@@ -169,7 +179,7 @@ const USAGE_SORT: Record<string, (row: UsageTotalRow) => number | string> = {
   name: row => row.key,
 };
 
-export async function usageReport(ctx: ServerContext, url: URL): Promise<Response> {
+async function usageReport(ctx: ServerContext, url: URL): Promise<Response> {
   const param = (name: string) => url.searchParams.get(name);
   const since = Number(param('since') ?? 0);
   const until = param('until') === null ? undefined : Number(param('until'));

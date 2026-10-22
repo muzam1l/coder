@@ -2,9 +2,12 @@ import './task-view.css';
 import { dynamic } from '@wular/pnext/dynamic';
 
 import { zoneOf } from '@/utils/format';
+import { ClientError } from '@coder/client';
+import type { Me } from '@coder/client/types';
 import { load } from '@/api/load';
 import { Page } from '@/comps/frame/page-head';
 import { Settle } from '@/comps/frame/stream';
+import { TaskMissing } from './task-missing';
 
 // Hydrates with the page: the reply box is focused and the activity follows the run at once.
 const TaskView = dynamic(() => import('./task-view').then(m => m.TaskView));
@@ -20,11 +23,24 @@ export default async function TaskPage({
   const { id: raw } = await params;
   const id = Array.isArray(raw) ? raw[0]! : raw!;
   const task = load(request).tasks.get(id);
+  const me = load(request)
+    .me()
+    .catch((): Me => ({}));
   const tz = zoneOf(request);
 
   return (
     <Page>
-      <Settle load={() => task.then(row => <TaskView initial={row} tz={tz} />)} />
+      <Settle
+        load={() =>
+          Promise.all([task, me]).then(
+            ([row, who]) => <TaskView initial={row} tz={tz} me={who} />,
+            error => {
+              if (error instanceof ClientError && error.status === 404) return <TaskMissing />;
+              throw error;
+            },
+          )
+        }
+      />
     </Page>
   );
 }

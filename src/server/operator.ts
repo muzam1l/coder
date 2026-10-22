@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 
 import type { AuditRow, OperatorAppRow } from '../client/types';
 import { serverAppUrl } from './agents/apps';
+import { appUpdateOf, changedApps, readDrift, updateApp } from './agents/connections';
 import { scoped, type ServerContext } from './context';
 import { LOOPBACK } from './routes/guards';
 import { json } from './routes/http';
@@ -34,21 +35,40 @@ export async function audit(ctx: ServerContext, action: string, target: string) 
   await serverScope(ctx).store.put('snapshot', auditKey(at), entry);
 }
 
+/** The server's built-in app on `integration`, its id, or a 404. */
+async function sharedApp(server: ServerContext, integration: string) {
+  const apps = await server.store.list('app');
+  const app = apps.find(({ value }) => value.builtin && value.integration === integration)?.value;
+
+  return app?.id ?? json({ error: `No built-in ${integration} app on this server.` }, 404);
+}
+
 export async function operatorApps(req: Request, ctx: ServerContext): Promise<Response> {
-  const apps = await serverScope(ctx).store.list('app');
+  const server = serverScope(ctx);
+  const apps = await server.store.list('app');
+  const shared = apps.map(({ value }) => value).filter(app => app.builtin);
+  const changed = await changedApps(server, shared, true);
   const platforms: OperatorAppRow[] = Object.values(ctx.integrations)
     .filter(integration => integration.app.shareable)
     .map(integration => {
-      const app = apps.find(
-        ({ value }) => value.builtin && value.integration === integration.id,
-      )?.value;
+      const app = shared.find(value => value.integration === integration.id);
 
       return {
         integration: integration.id,
         name: integration.name,
         brand: integration.brand,
         organizationApps: integration.organizationApps === true,
-        ...(app ? { app: { id: app.id, name: app.name, createdAt: app.createdAt } } : {}),
+        ...appUpdateOf(integration),
+        ...(app
+          ? {
+              app: {
+                id: app.id,
+                name: app.name,
+                createdAt: app.createdAt,
+                ...(changed.has(app.id) ? { changed: true as const } : {}),
+              },
+            }
+          : {}),
       };
     });
 
@@ -80,6 +100,27 @@ export async function setUpApp(req: Request, ctx: ServerContext, params: Params)
   await audit(ctx, 'Started setting up a shared app', `${name} on ${integration.name}`);
 
   return json({ url });
+}
+
+/** `GET /admin/operator/apps/<integration>/drift`: what to change by hand on the platform for the built-in app. */
+export async function sharedAppDrift(req: Request, ctx: ServerContext, params: Params, url: URL) {
+  const server = serverScope(ctx);
+  const id = await sharedApp(server, params.integration!);
+
+  return typeof id === 'string' ? readDrift(req, server, { id }, url, true) : id;
+}
+
+/** `POST /admin/operator/apps/<integration>/update`: pushes the built-in app, or records its values were entered by hand. */
+export async function updateSharedApp(req: Request, ctx: ServerContext, params: Params, url: URL) {
+  const server = serverScope(ctx);
+  const id = await sharedApp(server, params.integration!);
+  if (typeof id !== 'string') return id;
+
+  const response = await updateApp(req, server, { id }, url, true);
+  if (response.ok)
+    await audit(ctx, 'Updated a shared app', ctx.integrations[params.integration!]?.name ?? id);
+
+  return response;
 }
 
 export async function auditLog(req: Request, ctx: ServerContext): Promise<Response> {

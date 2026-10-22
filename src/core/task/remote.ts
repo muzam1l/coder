@@ -1,14 +1,22 @@
 /** A server task in the shapes this machine's tasks answer with, so every task command reads the same over `--server`. */
 import type { TaskLogLine, TaskStatus } from '../../server/store/types';
-import type { TaskLogEntry, TurnResultEntry } from '../state';
-import type { Engine, Task, TokenUsage, TurnResult } from '../types';
-import { logEntry } from './log-view';
+import { ageMs, STALL_MS, type TaskLogEntry, type TurnResultEntry } from '../state';
+import {
+  ACTIVE_STATUSES,
+  type Engine,
+  type Task,
+  type TokenUsage,
+  type TurnResult,
+} from '../types';
+import { logEntry } from './view';
+import { APPROVERS } from '../approvals';
+import type { TaskInspection } from '.';
 
 export const iso = (ms: number | undefined) =>
   ms === undefined ? undefined : new Date(ms).toISOString();
 
 /** The agent's reply from a finished default-flow task, if its output ended in the JSON result line. */
-export function replyOf(output: string | undefined): string | undefined {
+function replyOf(output: string | undefined): string | undefined {
   const lines = (output ?? '').trim().split('\n');
   for (let i = lines.length - 1; i >= 0; i -= 1) {
     const line = lines[i]!.trim();
@@ -69,9 +77,15 @@ export function remoteTask(status: TaskStatus): Task {
     name: task.name ?? null,
     engine: (task.usage?.engine ?? task.definition?.engine) as Engine | undefined,
     prompt: task.prompt ?? task.event?.text,
-    model: remoteResult(status)?.model ?? task.usage?.model ?? task.definition?.model ?? null,
+    model:
+      task.usage?.resolvedModel ??
+      remoteResult(status)?.model ??
+      task.usage?.model ??
+      task.definition?.model ??
+      status.model ??
+      null,
     effort: task.usage?.effort ?? null,
-    ...(task.permissions ? { permissions: task.permissions } : {}),
+    ...(task.access ? { access: task.access } : {}),
     ...(task.cwd ? { cwd: task.cwd } : {}),
     ...(task.appendSystem ? { appendSystem: task.appendSystem } : {}),
     ...(task.addDirs?.length ? { addDirs: task.addDirs } : {}),
@@ -89,18 +103,23 @@ export function remoteApprovals(status: TaskStatus) {
   const pending = status.approval;
   const list = status.approvals ?? (pending?.id ? [pending] : []);
 
-  return list.map(approval => ({
-    id: approval.id,
-    reason: approval.reason,
-    actions: approval.actions,
-    createdAt: approval.createdAt,
-    answered: approval.response?.decision ?? null,
-    deniedReason:
-      approval.response?.decision === 'decline' ? (approval.response.reason ?? null) : null,
-  }));
+  return list.map(approval => {
+    const scope = (approval.change as { scope?: keyof typeof APPROVERS } | undefined)?.scope;
+
+    return {
+      id: approval.id,
+      reason: approval.reason,
+      actions: approval.actions,
+      createdAt: approval.createdAt,
+      answered: approval.response?.decision ?? null,
+      deniedReason:
+        approval.response?.decision === 'decline' ? (approval.response.reason ?? null) : null,
+      ...(scope ? { scope, approvers: APPROVERS[scope] } : {}),
+    };
+  });
 }
 
-export function remoteTurns(status: TaskStatus): TurnResultEntry[] {
+function remoteTurns(status: TaskStatus): TurnResultEntry[] {
   return (status.turns ?? [])
     .filter(turn => turn.finishedAt !== undefined)
     .map(turn => {
@@ -143,5 +162,34 @@ export function remoteStep(line: TaskLogLine): TaskLogEntry {
     ...(line.entry ??
       logEntry(line.line) ?? { kind: line.level === 'err' ? 'error' : 'info', message: line.line }),
     at: line.entry?.at ?? new Date(line.at).toISOString(),
+  };
+}
+
+/** A server task as `result` inspects a local one. */
+export function remoteInspection(status: TaskStatus, steps: TaskLogEntry[]): TaskInspection {
+  const task = remoteTask(status);
+  const pending = remoteApprovals(status)
+    .filter(approval => !approval.answered)
+    .map(({ id, reason, actions }) => ({ id, reason, actions }));
+  const running = ACTIVE_STATUSES.includes(task.status);
+  const lastActivity = iso(status.lastActivityAt ?? status.updatedAt);
+  const idle = ageMs(lastActivity);
+
+  return {
+    taskId: task.id,
+    status: running && pending.length ? 'waiting-approval' : task.status,
+    task,
+    result: remoteResult(status),
+    steps,
+    turns: remoteTurns(status),
+    pendingApprovals: pending,
+    ...(running
+      ? {
+          idleMs: idle,
+          lastActivityAt: lastActivity ?? null,
+          stalled: pending.length === 0 && idle > STALL_MS,
+          liveTokens: null,
+        }
+      : {}),
   };
 }

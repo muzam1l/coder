@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as z from 'zod/mini';
 
 /** What an OAuth connection's sealed secret holds. */
@@ -27,7 +28,7 @@ const tokenSchema = z.object({
   preferred_username: z.optional(text),
   email: z.optional(text),
 });
-const errorSchema = z.object({ error: text });
+const errorSchema = z.object({ error: text, error_description: z.optional(z.string()) });
 
 export function secureUrl(value: string): URL {
   const url = new URL(value);
@@ -103,6 +104,7 @@ export async function tokens(fetcher: typeof fetch, secret: OAuthSecret, body: U
   const value: unknown = await response.json();
   if (!response.ok) {
     const error = errorSchema.safeParse(value);
+    const cause = { status: response.status, ...(error.success ? error.data : {}) };
     if (
       body.get('grant_type') === 'refresh_token' &&
       response.status >= 400 &&
@@ -110,8 +112,8 @@ export async function tokens(fetcher: typeof fetch, secret: OAuthSecret, body: U
       error.success &&
       ['invalid_grant', 'invalid_client'].includes(error.data.error)
     )
-      throw new OAuthRevoked('The OAuth connection must be reconnected.');
-    throw new Error('OAuth token request failed.');
+      throw new OAuthRevoked('The OAuth connection must be reconnected.', { cause });
+    throw new Error('OAuth token request failed.', { cause });
   }
 
   return tokenSchema.parse(value);
@@ -156,6 +158,24 @@ export async function oauthAccessToken(input: {
   await input.save(next);
 
   return next.accessToken!;
+}
+
+/** A short digest naming a token without carrying it, so a refusal report names the token it is about. */
+export const tokenFingerprint = (token: string) =>
+  createHash('sha256').update(token).digest('hex').slice(0, 16);
+
+/** Why a token refresh was refused or failed, with the platform's own code and description; never a token. */
+export function refreshFailure(target: Record<string, string | undefined>, error: unknown) {
+  return {
+    ...target,
+    ...(error instanceof Error && 'error' in error && typeof error.error === 'string'
+      ? { code: error.error }
+      : {}),
+    ...(error instanceof Error && error.cause && typeof error.cause === 'object'
+      ? error.cause
+      : {}),
+    reason: error instanceof Error ? error.message : String(error),
+  };
 }
 
 /** The refresh token was refused or revoked; the connection needs reconnecting. */

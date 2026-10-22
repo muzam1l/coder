@@ -13,7 +13,7 @@ You dispatch coding tasks through the `coder` runtime instead of implementing th
 
 ## Overview
 
-Coder delegates coding to supervised subagents of any model - Codex, Claude, or any OpenAI-compatible or local endpoint - from one runtime on every host. Implementation details live in the subagents, so your context stays clean and handoffs are instant. Every task runs sandboxed under unified permissions (read-only, workspace-write, auto), is steerable mid-run, and falls back down the configured chain when an engine cannot start.
+Coder delegates coding to supervised subagents of any model - Codex, Claude, or any OpenAI-compatible or local endpoint - from one runtime on every host. Implementation details live in the subagents, so your context stays clean and handoffs are instant. Every task runs sandboxed under one access setting (read-only or auto), is steerable mid-run, and falls back down the configured chain when an engine cannot start.
 
 ## Setup
 

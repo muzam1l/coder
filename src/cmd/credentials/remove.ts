@@ -12,6 +12,15 @@ export const commandCredentialsRemove = command({
   description: 'remove the key of one variable',
   usage: 'Remove the key of one environment variable.',
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/settings/credentials',
+      label: 'Remove the credential',
+      action: 'delete',
+      args: ['NAME'],
+      button: 'Remove',
+    },
+  },
   args: {
     NAME: z.string().check(z.describe('the variable')),
     workspace: flag('the workspace key of that variable'),

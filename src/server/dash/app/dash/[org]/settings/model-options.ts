@@ -8,10 +8,9 @@ export const EFFORTS: Array<[string, string]> = [
   ['medium', 'Medium'],
   ['high', 'High'],
 ];
-export const PERMISSIONS: Array<[string, string]> = [
-  ['read-only', 'Read only'],
-  ['workspace-write', 'Edit files'],
+export const ACCESS: Array<[string, string]> = [
   ['auto', 'Auto'],
+  ['read-only', 'Read-only'],
 ];
 export const SCOPES: Array<[string, string]> = [
   ['personal', 'Just me'],
@@ -82,7 +81,7 @@ export const modelHeadings = (byEngine: Record<string, string[]>): Record<string
     ]),
   );
 
-export interface CustomProvider {
+interface CustomProvider {
   id: string;
   name: string;
   baseUrl: string;

@@ -26,13 +26,13 @@ export interface PluginResult {
 }
 
 /** Outcome of the codex auto-update check; null when nothing to do. */
-export type CodexUpdateResult =
+type CodexUpdateResult =
   { updated: true; from: string } | { updated: false; from: string; note: string } | null;
 
 // Install through the claude CLI's plugin commands, exactly what a user would
 // type by hand. Re-adding refreshes both the marketplace snapshot and the
 // cached plugin copy (claude caches installs per version).
-export function installClaudePlugin(marketplaceDir: string): PluginResult {
+function installClaudePlugin(marketplaceDir: string): PluginResult {
   spawnSync('claude', ['plugin', 'marketplace', 'remove', 'coder-plugins'], { encoding: 'utf8' });
   const addMarketplace = spawnSync('claude', ['plugin', 'marketplace', 'add', marketplaceDir], {
     encoding: 'utf8',
@@ -56,13 +56,13 @@ export function installClaudePlugin(marketplaceDir: string): PluginResult {
  * install path for all of them, codex included. The copy is inert until a
  * harness reads it.
  */
-export function agentsSkillDir(): string {
+function agentsSkillDir(): string {
   return path.join(os.homedir(), '.agents', 'skills', 'coder');
 }
 
 // Version stamped into the installed copy's frontmatter, so `coder upgrade`
 // can show the transition and future checks can detect a stale copy.
-export function readAgentsSkillVersion(): string | null {
+function readAgentsSkillVersion(): string | null {
   try {
     const content = fs.readFileSync(path.join(agentsSkillDir(), 'SKILL.md'), 'utf8');
     return /^\s*version:\s*(\S+)/m.exec(content)?.[1] ?? null;
@@ -75,7 +75,7 @@ export function readAgentsSkillVersion(): string | null {
 // copy - no host CLI is invoked and no harness needs to be installed yet; the
 // copy is overwritten unconditionally so re-running refreshes it (same spirit
 // as the marketplace re-add for codex/claude).
-export function installAgentsSkill(marketplaceDir: string): PluginResult {
+function installAgentsSkill(marketplaceDir: string): PluginResult {
   const dest = agentsSkillDir();
   try {
     const src = path.join(marketplaceDir, 'plugins', 'agents', 'skills', 'coder');
@@ -102,7 +102,7 @@ export function installAgentsSkill(marketplaceDir: string): PluginResult {
 }
 
 /** Registers the stdio server without replacing an existing host entry. */
-export function registerCodexMcp(): PluginResult {
+function registerCodexMcp(): PluginResult {
   const marketplace = 'codex';
   const existing = spawnSync('codex', ['mcp', 'get', 'coder'], { encoding: 'utf8' });
   if (existing.status === 0)
@@ -125,7 +125,7 @@ export function registerCodexMcp(): PluginResult {
   };
 }
 
-export function registerCursorMcp(): PluginResult {
+function registerCursorMcp(): PluginResult {
   const marketplace = path.join(os.homedir(), '.cursor', 'mcp.json');
   try {
     const config = fs.existsSync(marketplace)
@@ -171,7 +171,7 @@ export function registerCursorMcp(): PluginResult {
 }
 
 /** Outcome of an on-demand codex install; null when codex was already present. */
-export type CodexInstallResult = { installed: boolean; note: string } | null;
+type CodexInstallResult = { installed: boolean; note: string } | null;
 
 // Custom (OpenAI-compatible) models run on the codex engine, but users who set
 // them up may never have installed Codex. It needs no login for third-party
@@ -197,7 +197,7 @@ export function ensureCodexInstalled(availability: Availability): CodexInstallRe
 // Newer models are gated on the CLI version: older codex returns "requires a
 // newer version of Codex", so setup keeps codex current for the default model.
 // (compareVersions ignores prerelease tags, so an alpha reads as >= this.)
-export const MIN_CODEX_VERSION = '0.159.1';
+const MIN_CODEX_VERSION = '0.159.1';
 
 // First release that runs each model: openai/codex releases, anthropics/claude-code CHANGELOG.md.
 const MODEL_MIN_VERSIONS: Record<'codex' | 'claude', Record<string, string>> = {

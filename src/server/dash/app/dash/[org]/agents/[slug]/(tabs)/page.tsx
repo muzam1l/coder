@@ -1,23 +1,18 @@
 import './page.css';
-import { Fragment } from 'preact';
 import { dynamic } from '@wular/pnext/dynamic';
 
 import { formatDay, zoneOf } from '@/utils/format';
 import { Button, LinkButton } from '@/comps/ui/button';
-import { load, orgOf } from '@/api/load';
+import { load, orgOf, loadAgent } from '@/api/load';
 import type { AgentRow, VersionRow, Paged } from '@coder/client/types';
 import { Card, Empty } from '@/comps/ui/card';
 import { Settle } from '@/comps/frame/stream';
-import { loadAgent } from '@/api/load';
 import { editableAgent } from '@/api/types';
 import { LIST_PAGE } from '@/utils/paged';
 import { defaultLabel } from '@/app/dash/[org]/settings/model-options';
 import type { Defaults } from '@/app/dash/[org]/tasks/composer';
-import { DEFAULT_ENGINE } from '@coder/core/defaults';
+import { DEFAULT_ENGINE } from '@coder/core/types';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
-import { Notice } from '@/comps/ui/notice';
-import { Icon } from '@/comps/ui/icon';
-import { iAlert } from '@/comps/ui/icons';
 
 const VersionsList = dynamic(() => import('./versions-list').then(m => m.VersionsList), {
   load: 'visible',
@@ -34,48 +29,6 @@ const KIND: Record<string, string> = {
   repo: 'Repository agent',
   home: 'Local agent',
 };
-
-/** Why the agent answers no events, and where its definition is fixed. */
-function NotRunning({ agent, org }: { agent: AgentRow; org: string }) {
-  return (
-    <Notice tone="error">
-      <Icon d={iAlert} />
-      <span class="grow">
-        Not running until its definition is fixed.
-        {agent.problems!.map(problem => (
-          <Fragment key={problem}>
-            <br />
-            {problem}
-          </Fragment>
-        ))}
-      </span>
-      {editableAgent(agent) ? (
-        <LinkButton
-          variant="outline"
-          size="sm"
-          href="/dash/[org]/agents/[slug]/edit"
-          params={{ org, slug: agent.id }}
-          search={{ section: 'platforms' }}
-        >
-          Edit
-        </LinkButton>
-      ) : agent.source === 'repo' && agent.sourceUrl ? (
-        <Button variant="outline" size="sm" href={agent.sourceUrl} external>
-          Open in repository
-        </Button>
-      ) : (
-        <LinkButton
-          variant="outline"
-          size="sm"
-          href="/dash/[org]/agents/[slug]/settings"
-          params={{ org, slug: agent.id }}
-        >
-          Settings
-        </LinkButton>
-      )}
-    </Notice>
-  );
-}
 
 /** Details, instructions and version history: the agent and its versions. */
 function OverviewBody({
@@ -121,12 +74,6 @@ function OverviewBody({
           <div>
             <dt>Effort</dt>
             <dd>{agent.settings?.effort ?? definition?.effort ?? defaultLabel(base?.effort)}</dd>
-          </div>
-          <div>
-            <dt>Permissions</dt>
-            <dd>
-              {agent.settings?.permissions ?? definition?.permissions ?? defaultLabel('auto')}
-            </dd>
           </div>
           {agent.local ? (
             agent.commit && (
@@ -209,7 +156,6 @@ export default async function AgentPage({
       load={() =>
         Promise.all([agent, versions, config]).then(([row, history, shown]) => (
           <>
-            {row.problems?.length ? <NotRunning agent={row} org={orgOf(request)} /> : null}
             {row.needsModel ? (
               <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
             ) : null}

@@ -15,10 +15,10 @@ import type { Approval } from './types';
 
 /** What the engine gets when its reviewer could not decide and asked Coder. */
 export const NOT_ALLOWED =
-  'Not allowed here. If the task truly needs this, call the escalate tool with the exact command and why, then continue or end your turn; the decision arrives as a message, in this turn if it is still running.';
+  'Not allowed here. If the task truly needs this, escalate it with the exact command and why, then continue or end your turn; the decision arrives as a message, in this turn while it runs, else in a new one.';
 
 /** An escalation as the task raises it. */
-export interface ApprovalRequest {
+interface ApprovalRequest {
   /** One short sentence: what the actions are for. */
   reason: string;
   /** The exact commands, as the task will run them. */
@@ -26,7 +26,7 @@ export interface ApprovalRequest {
 }
 
 /** An answer to an escalation; `closed` when the task was stopped before anyone answered. */
-export interface ApprovalAnswer {
+interface ApprovalAnswer {
   decision: 'accept' | 'decline' | 'closed';
   reason?: string;
   answeredAt: string;
@@ -35,6 +35,13 @@ export interface ApprovalAnswer {
   /** Set once the task has the decision: steered, queued or resumed with it. */
   deliveredAt?: string;
 }
+
+/** Who approves a Confirm request, by the scope it applies to. */
+export const APPROVERS = {
+  agent: 'a linked member',
+  workspace: 'a workspace admin',
+  personal: 'the member who asked',
+} as const;
 
 const approvalsDir = (taskDir: string) => path.join(taskDir, 'approvals');
 
@@ -225,6 +232,9 @@ export function restoreApprovals(taskDir: string, approvals: Approval[]): void {
 
 /** The known list updated by a reported one: an answer, once given anywhere, stays; the newer one wins. */
 export function mergeApprovals(known: Approval[], reported: Approval[]): Approval[] {
+  // A change request is the server's own: only a write carrying its change, which runner reports never do, updates it.
+  const owned = new Set(known.filter(approval => approval.change).map(approval => approval.id));
+  reported = reported.filter(approval => !owned.has(approval.id) || approval.change);
   const answers = new Map(known.map(approval => [approval.id, approval.response]));
   const ids = new Set(reported.map(approval => approval.id));
   // Known and reported answers: a closed one stays, else the later `answeredAt` wins, the reported one on a tie.
@@ -237,10 +247,24 @@ export function mergeApprovals(known: Approval[], reported: Approval[]): Approva
   return [
     ...reported.map(approval => ({
       ...approval,
-      response: newer(answers.get(approval.id), approval.response) ?? null,
+      // The server's own write of a change request is its answer as it is, so a failed change reopens it; a closed one stays.
+      response:
+        (owned.has(approval.id) && answers.get(approval.id)?.decision !== 'closed'
+          ? approval.response
+          : newer(answers.get(approval.id), approval.response)) ?? null,
     })),
     ...known.filter(approval => !ids.has(approval.id)),
   ].sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+}
+
+/** The message a task gets for a decision on its change request, naming who decided. */
+export function changeDecisionMessage(approval: Approval): string {
+  const { decision, reason, by } = approval.response!;
+  const who = by ? ` by ${by}` : '';
+
+  return decision === 'accept'
+    ? `Approved${who} and applied: ${approval.reason}`
+    : `Denied${who}: ${approval.reason}${reason ? ` ${reason}` : ''}`;
 }
 
 /** The message the task gets for an answer; `Approved` tells it to retry the action. */

@@ -1,17 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import net from 'node:net';
-import { eventOptions } from '../../agent/definition';
 import { decryptCredential, decryptSecret, encryptSecret } from '../store/secrets';
 import {
   BROKERED,
   BROKERED_PLACEHOLDER,
   engineHosts,
   type BrokerRule,
-} from '../runners/vercel-sandbox';
+} from '../runners/kinds/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
 import type { AgentEvent, Installation } from '../../agent/types';
 import type { EngineCredential, Store, TaskStatus } from '../store/types';
-import { dropKey, heldKey, type HeldToken } from '../store/tokens';
+import { dropKey, heldKey, type HeldToken } from '../store/types';
 import type { ServerContext } from '../context';
 import type { CoderConfig } from '../../core/config';
 import { taskConfig } from '../settings/config';
@@ -19,16 +18,19 @@ import { resolveCredential } from '../settings/credentials';
 import {
   resolvedTaskConnections,
   connectionSecretValues,
+  taskAsker,
   taskConnectionSecrets,
   readTaskConnectionSecrets,
+  turnConnections,
 } from '../connections/resolve';
 import type { McpServerSpec } from '../../core/types';
 import { taskWarnings } from './logs';
 import { LocalStore } from '../store/local';
 import { mcpSecretValue } from '../../core/mcp';
-import { findConnection, nativeCredential, nativeApp } from '../connections/records';
+import { findConnection } from '../connections/records';
 import { updateMetadata } from '../store';
 import { handleKey } from '../../agent/mcp';
+import { dashPath, organizationSlug } from '../auth/members';
 
 /** Installation tokens are encrypted at rest; integrations see plaintext only in memory. */
 export function unsealed(ctx: ServerContext, installation: Installation): Installation {
@@ -43,14 +45,6 @@ export function unsealed(ctx: ServerContext, installation: Installation): Instal
 /** A held token is reused only while more than this remains. */
 const REUSE_MARGIN_MS = 5 * 60 * 1000;
 
-export {
-  dropKey,
-  heldKey,
-  type HeldToken,
-  type HeldWrite,
-  type TokenDrop,
-  type TokenState,
-} from '../store/tokens';
 /** Outlives any mint in flight when tokens are dropped. */
 const DROP_FENCE_TTL_MS = 60 * 60 * 1000;
 
@@ -154,56 +148,7 @@ export interface PlatformAccess {
 export type TokenSource = (integration: string) => Promise<PlatformAccess | undefined>;
 
 /** An event's access, with every token it minted. */
-export type EventTokens = TokenSource & { minted: string[] };
-
-/** The linked member's own platform token, refreshed and stored again when it had expired. */
-export async function requesterToken(
-  ctx: ServerContext,
-  integration: Integration,
-  event: AgentEvent,
-  credentials: unknown,
-): Promise<string | undefined> {
-  if (!integration.auth.user || !ctx.auth) return undefined;
-  const user = await ctx.auth.linkedUser(integration.id, event.actor.id);
-  if (!user?.token || !user.organizations?.includes(ctx.organizationId)) return undefined;
-  const stored = nativeCredential(ctx.config, user.token);
-  const needsApp = stored.app && stored.app !== event.appId;
-  const app = needsApp ? await nativeApp(ctx, integration.id, stored.app) : undefined;
-  if (needsApp && !app) return undefined;
-  const access = await integration.auth.user.access(
-    stored.token,
-    app ? decryptSecret(ctx.config, app.credentials) : credentials,
-    { fetch: ctx.fetch ?? fetch, now: (ctx.now ?? Date.now)() },
-  );
-  if (access.refreshed)
-    await ctx.auth.link(user, integration.id, event.actor.id, {
-      token: encryptSecret(
-        ctx.config,
-        stored.app ? { app: stored.app, token: access.refreshed } : access.refreshed,
-      ),
-    });
-  return access.accessToken;
-}
-
-/** A task's platform token: the requester's own when its trigger acts as them, else the installation's narrowed to `bound`. */
-export async function taskToken(
-  ctx: ServerContext,
-  integration: Integration,
-  installation: Installation,
-  event: AgentEvent,
-  credentials: unknown,
-  bound: TokenBound,
-  actAs?: 'requester',
-): Promise<string> {
-  const own =
-    actAs === 'requester'
-      ? await requesterToken(ctx, integration, event, credentials).catch(() => undefined)
-      : undefined;
-  return (
-    own ??
-    installationToken(ctx, integration, installation, credentials, bound, ctx.config.taskTimeoutMs)
-  );
-}
+type EventTokens = TokenSource & { minted: string[] };
 
 /** Dispatch's access: the event installation's read token, minted once when asked for. */
 export function dispatchTokens(
@@ -221,7 +166,7 @@ export function dispatchTokens(
     fetch: ctx.fetch ?? fetch,
     token: () =>
       (token ??= installationToken(ctx, integration, installation, credentials, {
-        tools: integration.tools.presets.read,
+        tools: integration.tools.presets['read-only'],
       }).then(value => {
         minted.push(value);
         return value;
@@ -234,7 +179,7 @@ export function dispatchTokens(
 }
 
 /** The live installations of the agent's apps, read once per task start and shared by its readers for a minute. */
-export function agentInstallations(
+function agentInstallations(
   ctx: ServerContext,
   task: Pick<TaskStatus['task'], 'id' | 'agent'>,
 ): Promise<Installation[]> {
@@ -258,36 +203,43 @@ const tokenFailed = (id: string) => (error: unknown) => {
   return undefined;
 };
 
-/** The task's tokens by handle: the event installation's, then one per other installation of the agent's apps. */
+/** The task's tokens by handle: the event installation's, then one per other installation of the agent's apps; a task with no event has them only as a child. */
 export async function eventTokens(
   ctx: ServerContext,
   task: TaskStatus['task'],
 ): Promise<Record<string, string>> {
-  const event = task.event!;
-  const integration = ctx.integrations[event.integration];
-  if (!integration) throw new Error(`Unknown integration "${event.integration}"`);
+  const tokens: Record<string, string> = {};
+  const event = task.event;
+  if (!event && !task.parent) return tokens;
 
-  const [app, installation] = await Promise.all([
-    ctx.store.get('app', event.appId),
-    ctx.store.get('installation', `${event.appId}:${event.installationId}`),
-  ]);
-  if (!app) throw new Error(`Unknown app "${event.appId}"`);
-  if (!installation || installation.deletedAt) throw new Error('Installation is gone');
+  let installation: Installation | undefined;
+  if (event) {
+    const integration = ctx.integrations[event.integration];
+    if (!integration) throw new Error(`Unknown integration "${event.integration}"`);
+    const [app, found] = await Promise.all([
+      ctx.store.get('app', event.appId),
+      ctx.store.get('installation', `${event.appId}:${event.installationId}`),
+    ]);
+    if (!app) throw new Error(`Unknown app "${event.appId}"`);
+    if (!found || found.deletedAt) throw new Error('Installation is gone');
+    installation = found;
 
-  // A review that posts needs the comment scope and nothing more.
-  const posts = task.flow === 'review' && task.args?.post === true;
-  const eventToken = await taskToken(
-    ctx,
-    integration,
-    installation,
-    event,
-    decryptSecret(ctx.config, app.credentials),
-    { tools: task.tools[event.integration] ?? (posts ? integration.tools.presets.read : []) },
-    taskActAs(task),
-  );
-  const tokens: Record<string, string> = { [event.integration]: eventToken };
+    // A review that posts needs the comment scope and nothing more.
+    const posts = task.flow === 'review' && task.args?.post === true;
+    tokens[event.integration] = await installationToken(
+      ctx,
+      integration,
+      installation,
+      decryptSecret(ctx.config, app.credentials),
+      {
+        tools:
+          task.tools[event.integration] ?? (posts ? integration.tools.presets['read-only'] : []),
+      },
+      ctx.config.taskTimeoutMs,
+    );
+  }
   const others = (await agentInstallations(ctx, task)).filter(
-    other => other.id !== installation.id && other.integration in task.tools,
+    other => other.id !== installation?.id && other.integration in task.tools,
   );
   const apps = new Map(
     (await ctx.store.getApps([...new Set(others.map(other => other.app))])).map(row => [
@@ -315,12 +267,11 @@ export async function eventTokens(
   return tokens;
 }
 
-/** A personal token only in a 1:1 conversation; in a shared one anyone may steer, so the task acts as the app. */
-function taskActAs(task: TaskStatus['task']) {
-  const event = task.event!;
-  return event.chat && !event.chat.thread.isDM
-    ? undefined
-    : eventOptions(task.definition.integrations[event.integration], event.type)?.actAs;
+/** The workspace's dashboard on this server's public URL, where a task's Coder tools link. */
+export async function taskDashboard(ctx: ServerContext): Promise<string | undefined> {
+  const base = ctx.config.publicUrl?.replace(/\/$/, '');
+
+  return base ? `${base}${dashPath(await organizationSlug(ctx))}` : undefined;
 }
 
 export async function taskContext(
@@ -329,7 +280,7 @@ export async function taskContext(
 ): Promise<{
   task: TaskStatus['task'];
   tokens: Record<string, string>;
-  nativeTokens: Record<string, string>;
+  dashboard?: string;
   postToken?: string;
   credential: EngineCredential;
   engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
@@ -344,7 +295,7 @@ export async function taskContext(
     Partial<CoderConfig>,
     EngineCredential,
   ] = await Promise.all([
-    task.event ? eventTokens(ctx, status.task) : {},
+    eventTokens(ctx, status.task),
     ctx.local ? {} : taskConfig(ctx.store),
     taskCredential(ctx, task),
   ]);
@@ -353,13 +304,10 @@ export async function taskContext(
   const event = task.event;
   if (task.flow === 'default' && event?.chat && task.source === event.integration) {
     const integration = ctx.integrations[event.integration]!;
-    const read = integration.tools.presets.read;
+    const read = integration.tools.presets['read-only'];
     const tools = task.tools[event.integration] ?? [];
     // The app's tool token posts too when its scopes are exactly the read scopes.
-    const shared =
-      !taskActAs(task) &&
-      tools.length === read.length &&
-      read.every(scope => tools.includes(scope));
+    const shared = tools.length === read.length && read.every(scope => tools.includes(scope));
     if (shared) postToken = tokens[event.integration];
     else {
       const [app, installation] = await Promise.all([
@@ -379,7 +327,11 @@ export async function taskContext(
     }
   }
 
-  const resolved = await resolvedTaskConnections(ctx, status, tokens);
+  const { actAsRefusal } = await import('./changes');
+  const resolved = await resolvedTaskConnections(ctx, status, tokens, connection =>
+    actAsRefusal(ctx, task, connection),
+  );
+  const dashboard = await taskDashboard(ctx);
   const engineCredentials = task.engineChain?.length
     ? await taskEngineCredentials(ctx, task)
     : undefined;
@@ -394,8 +346,14 @@ export async function taskContext(
     delete connectionEnv[name];
     warnings.push(`${name} is temporarily unavailable; skipped for this task.`);
   }
-  const currentSecrets = await connectionSecretValues(ctx, task);
-  const safeTask = { ...task, tools: resolved.tools };
+  const currentSecrets = resolved.saved ? [] : await connectionSecretValues(ctx, task);
+  // A task stored before its settings link was kept gets the agent's settings page from here.
+  const safeTask = {
+    ...task,
+    ...(!task.settingsUrl && dashboard
+      ? { settingsUrl: `${dashboard}/agents/${encodeURIComponent(task.agent)}/settings` }
+      : {}),
+  };
   const connectionSecrets = await taskConnectionSecrets(ctx, task.id, [
     ...resolved.secrets,
     ...currentSecrets,
@@ -409,7 +367,7 @@ export async function taskContext(
   const common = {
     task: safeTask,
     tokens: { ...resolved.tokens, ...tokens },
-    nativeTokens: resolved.nativeTokens,
+    ...(dashboard ? { dashboard } : {}),
     ...(postToken ? { postToken } : {}),
     credential,
     ...(engineCredentials ? { engineCredentials } : {}),
@@ -445,6 +403,14 @@ export async function taskContext(
   };
 }
 
+/** The model a task's turn starts with: its own pick, else the default of its engine, the first of its chain when none is pinned. */
+export function runModel(task: TaskStatus['task'], config: CoderConfig) {
+  const picked = { ...task.definition, ...task.usage };
+  const engine = picked.engine ?? task.engineChain?.[0] ?? config.chain[0];
+
+  return picked.model ?? config.engines?.[engine as keyof CoderConfig['engines']]?.model;
+}
+
 /** The task's engine credential; a member's own runner falls back to the machine's logins. */
 export async function taskCredential(
   ctx: ServerContext,
@@ -455,7 +421,7 @@ export async function taskCredential(
     'claude') as EngineCredential['engine'];
   const selected = task.credential
     ? await ctx.store.get('credential', task.credential)
-    : (await resolveCredential(ctx, engine, task.requester, { model: task.usage?.model }))?.value;
+    : (await resolveCredential(ctx, engine, task.requestedBy, { model: task.usage?.model }))?.value;
   if (selected) return { engine, ...decryptCredential(ctx.config, selected) };
   if (!task.runnerId && !ctx.local) throw new Error('no-credential');
 
@@ -470,7 +436,7 @@ export async function taskEngineCredentials(ctx: ServerContext, task: TaskStatus
     remaining.map(async engine => {
       const id = task.engineCredentials?.[engine];
       const value = id ? await ctx.store.get('credential', id) : undefined;
-      return value && (!value.owner || value.owner === task.requester)
+      return value && (!value.owner || value.owner === task.requestedBy)
         ? {
             id: id!,
             credential: {
@@ -525,7 +491,7 @@ export async function taskHosts(
   task: TaskStatus['task'],
   credential: EngineCredential,
 ): Promise<string[] | undefined> {
-  if (task.permissions === 'auto') return undefined;
+  if (task.access === 'auto') return undefined;
   const config: Partial<CoderConfig> = ctx.local ? {} : await taskConfig(ctx.store);
   const integrations = new Set([
     ...(task.event ? [task.event.integration] : []),
@@ -536,8 +502,8 @@ export async function taskHosts(
     for (const entry of Object.values(config.models ?? {}))
       if ('baseUrl' in entry) hosts.push(...hostOf(entry.baseUrl));
 
-  for (const id of task.connections ?? []) {
-    const connection = await findConnection(ctx, id, task.requester);
+  for (const id of await turnConnections(ctx, task)) {
+    const connection = await findConnection(ctx, id, taskAsker(task));
     if (connection?.provider === 'mcp') hosts.push(...hostOf(connection.endpoint?.url));
     else if (connection) integrations.add(connection.provider);
   }

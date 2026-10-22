@@ -11,7 +11,8 @@ export function publishAgent(
   s: DrizzleStore,
   desired: AgentRecord,
   content: AgentVersionRecord,
-): Promise<AgentPublication> {
+  expected?: Pick<AgentRecord, 'currentVersion'>,
+): Promise<AgentPublication | undefined> {
   return s.db.transaction(async tx => {
     const [locked] = await tx
       .insert(agent)
@@ -30,6 +31,7 @@ export function publishAgent(
       .onConflictDoUpdate({ target: [agent.organizationId, agent.slug], set: { slug: desired.id } })
       .returning();
     const existing = agentValue(locked!);
+    if (expected && existing.currentVersion !== expected.currentVersion) return;
     // A fresh statement sees the version committed by a publisher we waited for.
     const [row] = existing.currentVersion
       ? await tx
@@ -99,7 +101,7 @@ export function agents(s: DrizzleStore): Kind<AgentRecord> {
         repo: value.repo ?? null,
         path: value.path ?? null,
         currentVersion: value.currentVersion,
-        settings: value.settings ?? null,
+        engineSettings: value.settings ?? null,
         createdAt: date(value.createdAt),
         updatedAt: date(value.updatedAt),
       };

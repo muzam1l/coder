@@ -14,6 +14,15 @@ import type {
   DispatchState,
   MetadataKind,
   UsageQuery,
+  CredentialScope,
+  CredentialWork,
+  DeliveryLease,
+  TaskStatus,
+  Store,
+  StoreKind,
+  StoreRecords,
+  LoginPatch,
+  LoginFence,
 } from './types';
 import {
   dropKey,
@@ -22,14 +31,14 @@ import {
   type HeldWrite,
   type TokenDrop,
   type TokenState,
-} from './tokens';
+  agentOrderKey,
+  BATCH_LEASE_MS,
+  InstallationBoundError,
+  postDue,
+} from './types';
 import type { AgentApp, Installation } from '../../agent/types';
 import type { StoredCredential } from '../settings/credentials';
-import { agentOrderKey, BATCH_LEASE_MS, InstallationBoundError } from './types';
-import type { CredentialScope, CredentialWork, DeliveryLease, TaskStatus } from './types';
-import type { Store, StoreKind, StoreRecords, LoginPatch, LoginFence } from './types';
 import type { ApprovalPost } from '../tasks/approvals';
-import { postDue } from './types';
 import { type EngineLogin } from '../settings/logins';
 
 export function matchesStoreRow(
@@ -340,11 +349,16 @@ export class MemoryStore implements Store {
       .map(({ id, value: { systemPrompt, files, ...value } }) => ({ id, value }));
   }
 
-  async publishAgent(record: AgentRecord, version: AgentVersionRecord): Promise<AgentPublication> {
+  async publishAgent(
+    record: AgentRecord,
+    version: AgentVersionRecord,
+    expected?: Pick<AgentRecord, 'currentVersion'>,
+  ): Promise<AgentPublication | undefined> {
     const { publishVersion } = await import('../agents/records');
     return this.withAppLock(`agent:${record.id}`, async () => {
       const loaded: { record?: AgentRecord; version?: AgentVersionRecord } =
         (await this.listAgentsWithVersions(record.id))[0] ?? {};
+      if (expected && (loaded.record?.currentVersion ?? 0) !== expected.currentVersion) return;
       const next = await publishVersion(
         this,
         {

@@ -1,4 +1,4 @@
-import { appTokens } from './tokens';
+import { appTokens, appSpec } from './platform';
 /** Agents that live in a repository: reading it through an installed app, importing its versions, and loading one app's agent. */
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -19,7 +19,6 @@ import type { AgentVersionRecord, Store } from '../store/types';
 import type { ServerConfig, ServerContext } from '../context';
 import type { PlatformAccess, TokenSource } from '../tasks/context';
 import { decryptSecret, encryptSecret } from '../store/secrets';
-import { appSpec } from './platform';
 import {
   agentWithVersion,
   getVersion,
@@ -234,7 +233,7 @@ async function repositoryAccess(
       return {
         contents: integration as Contents,
         token: await integration.auth.token(plain, decryptSecret(options.config, app.credentials), {
-          tools: integration.tools.presets.read,
+          tools: integration.tools.presets['read-only'],
         }),
         app,
         installation,
@@ -519,7 +518,7 @@ export async function checkApp(
 }
 
 /** An app a sync pushed or checked, or the error it failed with. */
-export type AppSynced = { app: AgentApp; error?: string; check?: AppCheck };
+type AppSynced = { app: AgentApp; error?: string; check?: AppCheck };
 
 /** Sync each app under its store lock, retaining failed versions for a publish retry; `force` pushes that one app even when it looks synced. */
 export async function syncApps(

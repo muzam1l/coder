@@ -20,12 +20,12 @@ import {
 } from './config';
 import { CoderError } from './dispatch';
 import { ensureCodexInstalled } from './hosts';
-import { detectWireApi } from './engines/codex/wire';
 import type { AliasModelConfig, CoderConfig, CustomModelConfig, ModelEntry } from './types';
 import type { ProbeResult } from '../client/types';
 import { writeConfigFile } from './config';
+import { connect, type ServerOptions } from './remote';
 
-export const RESERVED = new Set(['codex', 'claude', 'custom']);
+const RESERVED = new Set(['codex', 'claude', 'custom']);
 
 /**
  * Probe an OpenAI-compatible endpoint: GET <baseUrl>/models, bearer-authed
@@ -177,7 +177,7 @@ function writeModels(targetFile: string, mutate: (models: Record<string, ModelEn
 
 // Compute the model-list rows shared by the text and JSON views (and the SDK):
 // the per-provider rows, the custom endpoints, and any bare toggles.
-export function buildModelRows(config: CoderConfig) {
+function buildModelRows(config: CoderConfig) {
   const models = config.models ?? {};
   const endpoints = Object.entries(models).filter((pair): pair is [string, CustomModelConfig] =>
     isEndpointModel(pair[1]),
@@ -242,19 +242,22 @@ export function buildModelRows(config: CoderConfig) {
   return { models, endpoints, providerRows, toggledSlugs, disabled };
 }
 
-// Print-free core: the full model inventory with custom endpoints probed.
-export async function modelListData(cwd: string) {
-  const { endpoints, providerRows, toggledSlugs } = buildModelRows(loadConfig(cwd));
+// Print-free core: the full model inventory, this machine's custom endpoints probed, or a server's as it lists them.
+async function modelListData(cwd: string, server?: ServerOptions) {
+  const listed = server ? await connect(server).models.list() : undefined;
+  const { endpoints, providerRows, toggledSlugs } = buildModelRows(
+    listed ? ({ models: listed.models } as CoderConfig) : loadConfig(cwd),
+  );
   const probed = await Promise.all(
     endpoints.map(async ([alias, entry]) => ({
       name: alias,
       ...entry,
-      probe: await probeEndpoint(entry),
+      ...(listed ? {} : { probe: await probeEndpoint(entry) }),
     })),
   );
   return {
-    codex: providerRows('codex', CODEX_MODELS),
-    claude: providerRows('claude', CLAUDE_MODELS),
+    codex: providerRows('codex', listed?.builtin.codex ?? CODEX_MODELS),
+    claude: providerRows('claude', listed?.builtin.claude ?? CLAUDE_MODELS),
     custom: probed,
     ...(toggledSlugs.length ? { toggles: toggledSlugs } : {}),
   };
@@ -274,7 +277,7 @@ export interface PersistedModel {
 
 // Print-free core shared by add/update and the SDK: detect the wire protocol,
 // persist the entry, probe the endpoint, ensure the codex engine, report state.
-export async function persistModel(
+async function persistModel(
   name: string,
   entry: CustomModelConfig,
   targetFile: string,
@@ -351,7 +354,7 @@ export interface ModelWriteOptions {
 }
 
 // Print-free core: add a custom (OpenAI-compatible) endpoint model.
-export async function modelAddCore(
+async function modelAddCore(
   cwd: string,
   name: string | undefined,
   opts: ModelWriteOptions,
@@ -381,7 +384,7 @@ export async function modelAddCore(
 }
 
 // Print-free core: update an existing custom endpoint model.
-export async function modelUpdateCore(
+async function modelUpdateCore(
   cwd: string,
   name: string | undefined,
   opts: ModelWriteOptions,
@@ -419,7 +422,7 @@ export async function modelUpdateCore(
 }
 
 // Print-free core: remove a configured model entry.
-export function modelRemoveCore(
+function modelRemoveCore(
   cwd: string,
   name: string | undefined,
   opts: { workspace?: boolean } = {},
@@ -439,7 +442,7 @@ export function modelRemoveCore(
 }
 
 // Print-free core: alias a name to a codex/claude model spec.
-export function modelAliasCore(
+function modelAliasCore(
   cwd: string,
   name: string | undefined,
   spec: string | undefined,
@@ -493,7 +496,7 @@ export function modelAliasCore(
 }
 
 // Print-free core: remove an alias entry.
-export function modelUnaliasCore(
+function modelUnaliasCore(
   cwd: string,
   name: string | undefined,
   opts: { workspace?: boolean } = {},
@@ -514,7 +517,7 @@ export function modelUnaliasCore(
 }
 
 // Print-free core shared by disable/enable: flip a model's `disabled` flag.
-export function modelToggleCore(
+function modelToggleCore(
   cwd: string,
   name: string | undefined,
   disable: boolean,
@@ -552,28 +555,118 @@ export function modelToggleCore(
   return { name, disabled: disable, file: targetFile };
 }
 
+/** Where a model write lands: this machine's config under `cwd`, or the workspace's on `server`. */
+type ModelServer = { cwd?: string; server?: ServerOptions['server'] };
+
 export const models = {
   /** Register a custom OpenAI-compatible endpoint model. */
   add: (name: string, opts: ModelWriteOptions & { cwd?: string }) =>
     modelAddCore(path.resolve(opts.cwd ?? '.'), name, opts),
-  /** Update fields of a configured model entry. */
-  update: (name: string, opts: ModelWriteOptions & { cwd?: string }) =>
-    modelUpdateCore(path.resolve(opts.cwd ?? '.'), name, opts),
+  /** Update fields of a configured model entry; with `server`, the workspace's there. */
+  update: (name: string, opts: ModelWriteOptions & ModelServer) =>
+    opts.server === undefined
+      ? modelUpdateCore(path.resolve(opts.cwd ?? '.'), name, opts)
+      : connect({ server: opts.server }).models.update(name, {
+          ...(opts.baseUrl ? { baseUrl: opts.baseUrl } : {}),
+          ...(opts.model ? { model: opts.model } : {}),
+          ...(opts.envKey ? { envKey: opts.envKey } : {}),
+          ...(opts.contextWindow ? { contextWindow: opts.contextWindow } : {}),
+        }),
   /** Remove a configured model entry. */
   remove: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
     modelRemoveCore(path.resolve(opts.cwd ?? '.'), name, opts),
-  /** Every dispatchable model: built-ins, aliases, custom endpoints. */
-  list: (opts: { cwd?: string } = {}) => modelListData(path.resolve(opts.cwd ?? '.')),
+  /** Every dispatchable model: built-ins, aliases, custom endpoints; with `server`, the workspace's there. */
+  list: ({
+    cwd,
+    workspace,
+    ...server
+  }: { cwd?: string; workspace?: string } & ServerOptions = {}) =>
+    modelListData(
+      path.resolve(cwd ?? '.'),
+      server.server === undefined
+        ? undefined
+        : { ...server, organization: server.organization ?? workspace },
+    ),
   /** Alias a name to an engine spec, e.g. alias('fast', 'codex:luna'). */
-  alias: (name: string, spec: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
-    modelAliasCore(path.resolve(opts.cwd ?? '.'), name, spec, opts),
+  alias: (name: string, spec: string, opts: { workspace?: boolean } & ModelServer = {}) =>
+    opts.server === undefined
+      ? modelAliasCore(path.resolve(opts.cwd ?? '.'), name, spec, opts)
+      : connect({ server: opts.server }).models.alias(name, spec),
   /** Remove a user-defined alias. */
   unalias: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
     modelUnaliasCore(path.resolve(opts.cwd ?? '.'), name, opts),
   /** Disable a model name (built-in, alias, or raw slug) without removing it. */
-  disable: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
-    modelToggleCore(path.resolve(opts.cwd ?? '.'), name, true, opts),
+  disable: (name: string, opts: { workspace?: boolean } & ModelServer = {}) =>
+    opts.server === undefined
+      ? modelToggleCore(path.resolve(opts.cwd ?? '.'), name, true, opts)
+      : connect({ server: opts.server }).models.disable(name),
   /** Re-enable a disabled model name. */
-  enable: (name: string, opts: { workspace?: boolean; cwd?: string } = {}) =>
-    modelToggleCore(path.resolve(opts.cwd ?? '.'), name, false, opts),
+  enable: (name: string, opts: { workspace?: boolean } & ModelServer = {}) =>
+    opts.server === undefined
+      ? modelToggleCore(path.resolve(opts.cwd ?? '.'), name, false, opts)
+      : connect({ server: opts.server }).models.enable(name),
 };
+
+/** Wire-protocol detection for custom models: POST /responses at each candidate base; auth or validation errors still prove the route exists. */
+type WireDetection =
+  // The route was found at baseUrl (e.g. with /v1 appended): responses means
+  // codex hits `<baseUrl>/responses` directly, chat means the bridge fronts
+  // `<baseUrl>/chat/completions`. Persisting both fields pins the endpoint so
+  // later turns do no guessing.
+  | { wireApi: 'responses' | 'chat'; baseUrl: string }
+  // Reachable, but neither route proven (or nothing answered when reachable is
+  // false when the endpoint is down or has no network. Do not persist a baseUrl.
+  | { wireApi: 'chat'; baseUrl?: undefined }
+  | null;
+
+// Does POSTing `route` at some candidate base prove the route exists?
+// (404/405/501 means no such route. Any other response, including auth or
+// validation errors, proves it.) Returns the base it was found at.
+async function probeRoute(
+  entry: CustomModelConfig,
+  route: string,
+  body: Record<string, unknown>,
+): Promise<{ baseUrl: string } | { reachable: boolean }> {
+  const key = entry.envKey ? process.env[entry.envKey] : undefined;
+  let reachable = false;
+  for (const url of endpointCandidates(entry.baseUrl, route)) {
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          ...(key ? { Authorization: `Bearer ${key}` } : {}),
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(5_000),
+      });
+      reachable = true;
+      if (response.status !== 404 && response.status !== 405 && response.status !== 501) {
+        return { baseUrl: url.slice(0, -(route.length + 1)) };
+      }
+    } catch {
+      // unreachable candidate; keep trying the rest
+    }
+  }
+  return { reachable };
+}
+
+export async function detectWireApi(entry: CustomModelConfig): Promise<WireDetection> {
+  const responses = await probeRoute(entry, 'responses', {
+    model: entry.model,
+    input: [],
+    stream: false,
+  });
+  if ('baseUrl' in responses) {
+    return { wireApi: 'responses', baseUrl: responses.baseUrl };
+  }
+  const chat = await probeRoute(entry, 'chat/completions', {
+    model: entry.model,
+    messages: [],
+    stream: false,
+  });
+  if ('baseUrl' in chat) {
+    return { wireApi: 'chat', baseUrl: chat.baseUrl };
+  }
+  return responses.reachable || chat.reachable ? { wireApi: 'chat' } : null;
+}

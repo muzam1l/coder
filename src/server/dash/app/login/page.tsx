@@ -2,7 +2,7 @@ import './page.css';
 
 import { AuthPanel } from '@/comps/frame/auth-panel';
 import { Button } from '@/comps/ui/button';
-import { safeReturnPath } from '@coder/server/auth/sign-in';
+import { safeReturnPath } from '@coder/server/routes/http';
 
 const WULAR_LOGO = (
   <svg class="logo" viewBox="6 12 52 36" aria-hidden="true">

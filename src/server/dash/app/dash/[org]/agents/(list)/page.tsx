@@ -1,8 +1,7 @@
 import './page.css';
 import { dynamic } from '@wular/pnext/dynamic';
 
-import { load, orgOf } from '@/api/load';
-import type { IntegrationInfo } from '@coder/client/types';
+import { load } from '@/api/load';
 import { Page } from '@/comps/frame/page-head';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
 import { Settle } from '@/comps/frame/stream';
@@ -17,21 +16,6 @@ const AgentsGrid = dynamic(() => import('./agents-grid').then(m => m.AgentsGrid)
   load: 'visible',
   ssr: true,
 });
-const ConnectApps = dynamic(() => import('./connect-apps').then(m => m.ConnectApps));
-
-/** Built-in apps this workspace has not installed, labelled in each platform's words. */
-function connectable(
-  apps: Array<{ id: string; integration: string; agent: string }>,
-  integrations: IntegrationInfo[],
-) {
-  return apps.map(value => ({
-    id: value.id,
-    agent: value.agent,
-    label:
-      integrations.find(entry => entry.id === value.integration)?.installLabel ??
-      `Connect ${value.integration}`,
-  }));
-}
 
 export default function AgentsPage({ request }: { request?: Request }) {
   if (!request) return null;
@@ -45,7 +29,6 @@ export default function AgentsPage({ request }: { request?: Request }) {
   const agents = load(request).agents.list({
     cursor: '',
     limit: AGENT_PAGE,
-    connect: true,
     ...filters,
   });
   const missing = credentialMissing(load(request));
@@ -56,23 +39,19 @@ export default function AgentsPage({ request }: { request?: Request }) {
       <Settle
         load={() =>
           Promise.all([agents, missing, catalog.catch(() => [])]).then(
-            ([first, needsCredential, integrations]) => {
-              const connect = connectable(first.connectable ?? [], integrations);
-              return (
-                <AgentsGrid
-                  limit={AGENT_PAGE}
-                  first={first}
-                  filters={filters}
-                  catalog={integrations}
-                  head={HEADS.agents}
-                >
-                  {connect.length ? <ConnectApps apps={connect} /> : null}
-                  {needsCredential ? (
-                    <NeedsCredential reason="Agents need a model credential to run." />
-                  ) : null}
-                </AgentsGrid>
-              );
-            },
+            ([first, needsCredential, integrations]) => (
+              <AgentsGrid
+                limit={AGENT_PAGE}
+                first={first}
+                filters={filters}
+                catalog={integrations}
+                head={HEADS.agents}
+              >
+                {needsCredential ? (
+                  <NeedsCredential reason="Agents need a model credential to run." />
+                ) : null}
+              </AgentsGrid>
+            ),
           )
         }
       />

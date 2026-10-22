@@ -12,6 +12,7 @@ export const commandStop = command({
   usage:
     'Stop a running flow: signal the orchestrator so it stops dispatching, stamp the\nrun stopped, and stop its still-running tasks. Defaults to the most recent run;\nthe journal stays ready for `coder flow resume`.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     'run-id': str('the run (default: the most recent)'),
     'keep-tasks': flag("leave the run's still-running tasks running"),

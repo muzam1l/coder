@@ -31,17 +31,17 @@
   .head:has(.fact) .title-row > h1 {
     flex-basis: 100%;
   }
-  .head:has(.fact) .actions {
+  .head:has(.fact) > .actions {
     position: absolute;
     top: 10px;
     right: 16px;
     width: auto;
     flex-wrap: nowrap;
   }
-  .head.stuck:has(.fact) .actions {
+  .head.stuck:has(.fact) > .actions {
     position: static;
   }
-  .head.stuck:has(.fact) .actions > .menu {
+  .head.stuck:has(.fact) > .actions > .menu {
     display: inline;
   }
   .head.stuck:has(.fact) .title-row > h1 {
@@ -341,7 +341,7 @@ pre.json {
 /* an approval's exact actions, folded under their count */
 .approval-actions > summary {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 9px;
   width: fit-content;
   font-size: 12px;
@@ -379,28 +379,25 @@ pre.json {
   word-break: break-word;
 }
 
-/* Deny's optional reason, its buttons beside the field, under it on a phone */
-.deny-why {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-end;
-  gap: 8px;
-}
-.deny-why > .field {
-  flex: 1 1 240px;
-}
-.deny-why-actions {
-  display: flex;
-  gap: 6px;
-  margin-left: auto;
+/* a decision where its buttons were */
+.bar-r .decided {
+  font-size: 12px;
 }
 
-/* a pending approval leads the conversation and stays in view under the tabs; a phone has no room to keep it */
+/* a pending approval leads the conversation and stays in view under the tabs; a phone keeps only its buttons in view */
 @media (min-width: 761px) {
   .tabs + .card.accent {
     position: sticky;
     top: var(--stuck);
     z-index: 8;
+  }
+}
+@media (max-width: 760px) {
+  .tabs + .card.accent > .bar {
+    position: sticky;
+    top: var(--stuck);
+    z-index: 8;
+    background: inherit;
   }
 }
 
@@ -562,4 +559,79 @@ form.reply {
 /* the toggle sits as close to the card edge as it does on the agent page */
 .turn .collapse:not(.open) {
   margin-bottom: -12px;
+}
+
+/* a requested change, line by line */
+.change-diff {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--wash);
+  font: 12px/1.6 var(--mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.approval-actions > .change-diff {
+  margin-top: 8px;
+}
+.change-diff > span {
+  display: block;
+}
+/* who asks and for whom: the agent and the person as one joined pill */
+.asker {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--line2);
+  font: 11px/1.6 var(--mono);
+  color: var(--muted);
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+.asker > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+}
+.asker > span + span {
+  border-left: 1px solid var(--line2);
+}
+.asker .ic {
+  width: 11px;
+  height: 11px;
+}
+p.approval {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 8px;
+}
+.approve-off {
+  display: inline-flex;
+}
+.admin-ask {
+  font-size: 12px;
+  color: var(--muted);
+}
+.admin-ask > .link {
+  padding: 0;
+  background: none;
+  font: inherit;
+  cursor: pointer;
+}
+.change-diff > .add {
+  color: var(--ok);
+}
+.change-diff > .del {
+  color: var(--bad);
+}
+.request .seg-btns {
+  align-self: flex-start;
+}
+/* a task that is gone or hidden: an empty page with the way back */
+.task-missing {
+  display: grid;
+  align-content: center;
+  min-height: calc(100dvh - 160px);
 }

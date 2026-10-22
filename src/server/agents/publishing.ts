@@ -6,11 +6,14 @@ import { type ServerContext } from '../context';
 import { getAgent, getVersion, publishAgent, setAgentSettings, toAgent } from './records';
 import { syncApps } from './repo';
 import { deleteLocalAgent, syncLocalAgents, writeLocalAgent } from '../store/local';
-import { updateConfig } from '../settings/config';
-import { json, notFound } from '../routes/http';
+import { effectiveConfig, shownConfig, updateConfig } from '../settings/config';
+import { resolveTaskOptions } from '../../core/dispatch';
+import { modelProblem } from '../settings/credentials';
+import { json } from '../routes/http';
 import { prepareAgent } from './catalog';
+import { CoderError } from '../../core/errors';
 import type { AppSync } from '../../client/types';
-import type { AgentVersionRecord } from '../store/types';
+import type { AgentRecord, AgentVersionRecord } from '../store/types';
 
 const FILE_LIMIT = 256 * 1024;
 
@@ -48,47 +51,62 @@ async function publishedApps(ctx: ServerContext, version: AgentVersionRecord): P
   });
 }
 
+/** An agent's settings in the shape they are saved in: engine and model resolved from the model's alias or `engine:model`, refused unless a workspace credential runs them. */
+export async function agentSettings(ctx: ServerContext, slug: string, body: unknown) {
+  const parsed = parseAgentsUsage({ [slug]: body })[slug];
+  if (!parsed || typeof parsed !== 'object') throw new Error('settings must be an object');
+  if (parsed.model) {
+    const selected = resolveTaskOptions(
+      { engine: parsed.engine, model: parsed.model, effort: parsed.effort },
+      { ...effectiveConfig(ctx, await shownConfig(ctx)), engines: {} },
+    );
+    parsed.engine = selected.engine;
+    parsed.model = selected.model ?? undefined;
+    parsed.effort = selected.effort ?? undefined;
+  }
+  const problem = await modelProblem(ctx, parsed, Boolean(ctx.taskPrincipal));
+  if (problem) throw new Error(problem);
+
+  return parsed;
+}
+
+/** Saves an agent's settings, for the dashboard and an approved task change alike: the repo's config on a local server, else its record. */
+export async function saveAgentSettings(ctx: ServerContext, slug: string, body: unknown) {
+  const { loadCurrent } = await prepareAgent(ctx, slug);
+  const { disabled, ...usage } = await agentSettings(ctx, slug, body);
+  const settings = disabled ? { ...usage, disabled } : usage;
+
+  const { record, version } = await loadCurrent();
+  if (!record || !version) throw new Error(`No agent named "${slug}".`);
+  toAgent({ ...record, settings: undefined }, version, usage, ctx.integrations);
+  if (!ctx.local) return setAgentSettings(ctx.store, slug, settings, (ctx.now ?? Date.now)());
+
+  const file = repoAgentOverride(ctx.local.cwd, slug, !!disabled);
+  if (file)
+    throw new CoderError(
+      'server',
+      `Agent "${slug}" is ${disabled ? 'enabled' : 'disabled'} by agents.${slug} in ${file}. Change it there.`,
+      { status: 409 },
+    );
+  await updateConfig(ctx, config => {
+    config.agents = { ...config.agents, [slug]: settings };
+  });
+  await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
+
+  return (await getAgent(ctx.store, slug))!;
+}
+
 export async function updateSettings(
   req: Request,
   ctx: ServerContext,
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const slug = params.slug!;
-  const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
   const body = await req.json().catch(() => undefined);
 
-  try {
-    const parsed = parseAgentsUsage({ [slug]: body })[slug];
-    if (!parsed || typeof parsed !== 'object') throw new Error('settings must be an object');
-    const { disabled, ...usage } = parsed;
-    const settings = disabled ? { ...usage, disabled } : usage;
-
-    const { record, version } = await loadCurrent();
-    if (!record || !version) throw new Error(`No agent named "${slug}".`);
-    toAgent({ ...record, settings: undefined }, version, usage, ctx.integrations);
-    if (ctx.local) {
-      const file = repoAgentOverride(ctx.local.cwd, slug, !!disabled);
-      if (file)
-        return json(
-          {
-            error: `Agent "${slug}" is ${disabled ? 'enabled' : 'disabled'} by agents.${slug} in ${file}. Change it there.`,
-          },
-          409,
-        );
-
-      await updateConfig(ctx, config => {
-        config.agents = { ...config.agents, [slug]: settings };
-      });
-      await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
-
-      return json(await getAgent(ctx.store, slug));
-    }
-
-    return json(await setAgentSettings(ctx.store, slug, settings, (ctx.now ?? Date.now)()));
-  } catch (error) {
-    return json({ error: error instanceof Error ? error.message : String(error) }, 400);
-  }
+  return saveAgentSettings(ctx, params.slug!, body).then(json, (error: Error) =>
+    json({ error: error.message }, error instanceof CoderError ? (error.status ?? 400) : 400),
+  );
 }
 
 export async function deleteAgent(
@@ -98,7 +116,7 @@ export async function deleteAgent(
   url: URL,
 ): Promise<Response> {
   const slug = params.slug!;
-  const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
+  const { loadCurrent } = await prepareAgent(ctx, slug);
   const { record } = await loadCurrent();
   if (!record) return json({ error: `No agent named "${slug}"` }, 404);
   if (record.source === 'builtin')
@@ -110,23 +128,23 @@ export async function deleteAgent(
   return json({ ok: true });
 }
 
-export async function publish(
-  req: Request,
+/** An agent's uploaded contents: what a publish takes. */
+export interface AgentUpload {
+  definition?: unknown;
+  systemPrompt?: unknown;
+  files?: unknown;
+  name?: unknown;
+  description?: unknown;
+}
+
+/** Publishes an upload as the agent's next version, for the dashboard, the CLI and an approved task change alike; nothing new when unchanged. */
+export async function publishUpload(
   ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  const slug = params.slug!;
-  const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
-  const body = (await req.json().catch(() => undefined)) as
-    | {
-        definition?: unknown;
-        systemPrompt?: unknown;
-        files?: unknown;
-        name?: unknown;
-        description?: unknown;
-      }
-    | undefined;
+  slug: string,
+  body: AgentUpload | undefined,
+  expected?: Pick<AgentRecord, 'currentVersion'>,
+) {
+  await prepareAgent(ctx, slug);
   if (
     !body ||
     typeof body.systemPrompt !== 'string' ||
@@ -134,73 +152,72 @@ export async function publish(
     (body.name !== undefined && typeof body.name !== 'string') ||
     (body.description !== undefined && typeof body.description !== 'string')
   )
-    return json(
-      {
-        error: 'definition and systemPrompt are required; files must contain strings',
+    throw new Error('definition and systemPrompt are required; files must contain strings');
+  assertNotReserved([slug]);
+
+  const [validated] = agentsFromSources(
+    {
+      definitions: { [slug]: { json: body.definition, builtin: false } },
+      usage: undefined,
+    },
+    ctx.integrations,
+  );
+  if (!validated) throw new Error(`No agent named "${slug}".`);
+
+  const before = ctx.local ? await getAgent(ctx.store, slug) : undefined;
+  const previous = ctx.local && before ? await getVersion(ctx.store, slug) : undefined;
+  const files = body.files as Record<string, string> | undefined;
+  if (ctx.local) {
+    await writeLocalAgent(ctx.local.cwd, ctx.integrations, slug, {
+      definition: {
+        ...(body.definition as object),
+        ...(body.name !== undefined ? { name: body.name } : {}),
+        ...(body.description !== undefined ? { description: body.description } : {}),
       },
-      400,
-    );
-
-  try {
-    assertNotReserved([slug]);
-
-    const [validated] = agentsFromSources(
-      {
-        definitions: { [slug]: { json: body.definition, builtin: false } },
-        usage: undefined,
-      },
-      ctx.integrations,
-    );
-    if (!validated) throw new Error(`No agent named "${slug}".`);
-
-    const before = ctx.local ? await getAgent(ctx.store, slug) : undefined;
-    const previous = ctx.local && before ? await getVersion(ctx.store, slug) : undefined;
-    const files = body.files as Record<string, string> | undefined;
-    if (ctx.local) {
-      await writeLocalAgent(ctx.local.cwd, ctx.integrations, slug, {
-        definition: {
-          ...(body.definition as object),
-          ...(body.name !== undefined ? { name: body.name } : {}),
-          ...(body.description !== undefined ? { description: body.description } : {}),
-        },
-        systemPrompt: body.systemPrompt,
-        ...(files ? { files } : {}),
-      });
-      await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
-    }
-
-    const published = ctx.local
-      ? undefined
-      : await publishAgent(
-          ctx.store,
-          {
-            id: slug,
-            name: body.name ?? validated.name,
-            description: body.description ?? validated.definition.description,
-            source: 'upload',
-            definition: validated.definition,
-            systemPrompt: body.systemPrompt,
-            files,
-            importedFrom: 'upload',
-          },
-          (ctx.now ?? Date.now)(),
-        );
-    const version = published?.version ?? (await getVersion(ctx.store, slug))!;
-    const unchanged =
-      published?.unchanged ??
-      isDeepStrictEqual(previous && { ...previous, createdAt: 0 }, { ...version, createdAt: 0 });
-    const apps = await publishedApps(ctx, version);
-
-    const record = published?.record ?? (await getAgent(ctx.store, slug))!;
-
-    return json({
-      ...record,
-      definition: version.definition,
-      version: version.version,
-      unchanged,
-      apps,
+      systemPrompt: body.systemPrompt,
+      ...(files ? { files } : {}),
     });
-  } catch (error) {
-    return json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
   }
+
+  const published = ctx.local
+    ? undefined
+    : await publishAgent(
+        ctx.store,
+        {
+          id: slug,
+          name: (body.name as string | undefined) ?? validated.name,
+          description: (body.description as string | undefined) ?? validated.definition.description,
+          source: 'upload',
+          definition: validated.definition,
+          systemPrompt: body.systemPrompt,
+          files,
+          importedFrom: 'upload',
+        },
+        (ctx.now ?? Date.now)(),
+        expected,
+      );
+  if (!ctx.local && !published) return undefined;
+  const version = published?.version ?? (await getVersion(ctx.store, slug))!;
+  const unchanged =
+    published?.unchanged ??
+    isDeepStrictEqual(previous && { ...previous, createdAt: 0 }, { ...version, createdAt: 0 });
+  const apps = await publishedApps(ctx, version);
+
+  const record = published?.record ?? (await getAgent(ctx.store, slug))!;
+
+  return { ...record, definition: version.definition, version: version.version, unchanged, apps };
+}
+
+export async function publish(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+  url: URL,
+): Promise<Response> {
+  const body = (await req.json().catch(() => undefined)) as AgentUpload | undefined;
+
+  return publishUpload(ctx, params.slug!, body).then(json, (error: Error) =>
+    json({ error: error.message }, 400),
+  );
 }

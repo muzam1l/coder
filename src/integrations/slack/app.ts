@@ -1,12 +1,12 @@
 /** Slack app creation from a manifest plus the OAuth install dance for that app. */
-import { isIP } from 'node:net';
-
 import {
   IntegrationError,
+  type Access,
   type AppSpec,
   type AppTokens,
   type IntegrationApp,
-  type Preset,
+  type IntegrationAuth,
+  type IntegrationUserAuth,
 } from '../types';
 
 type Fetcher = typeof fetch;
@@ -38,12 +38,11 @@ export function slackManifest(
     description?: string;
     scopes: string[];
     events: string[];
-    /** `slackManifestExtras(...)`: slash commands and the agent view. */
-    extras?: { slash_commands?: unknown; agent_view?: unknown };
+    /** `slackManifestExtras(...)`: the agent view. */
+    extras?: { agent_view?: unknown };
   },
 ): Record<string, unknown> {
   const base = baseUrl(publicUrl);
-  const host = new URL(base).hostname;
   return {
     display_information: {
       name,
@@ -56,16 +55,15 @@ export function slackManifest(
         messages_tab_enabled: true,
         messages_tab_read_only_enabled: false,
       },
-      // Slack unfurls only named domains, never an IP address or a host without a dot.
-      ...(host.includes('.') && !isIP(host) ? { unfurl_domains: [host] } : {}),
       ...extras,
     },
     oauth_config: {
-      redirect_urls: [`${base}/install/slack/callback`],
-      scopes: { bot: scopes },
+      redirect_urls: [`${base}/install/slack/callback`, `${base}/connect/slack/callback`],
+      scopes: { bot: scopes, user: USER_SCOPES },
     },
     settings: {
       org_deploy_enabled: true,
+      is_mcp_enabled: true,
       event_subscriptions: {
         request_url: `${base}/hooks/slack`,
         bot_events: events,
@@ -116,11 +114,11 @@ function specManifest(publicUrl: string, name: string, spec: AppSpec) {
     description: spec.description,
     scopes: specScopes(spec),
     events: slackAppEvents(spec.events),
-    extras: slackManifestExtras(publicUrl, spec),
+    extras: slackManifestExtras(spec),
   });
 }
 
-export interface SlackConfigToken {
+interface SlackConfigToken {
   configToken: string;
   configRefreshToken: string;
   configTokenExpires: number;
@@ -129,7 +127,7 @@ export interface SlackConfigToken {
 }
 
 /** `tooling.tokens.rotate`: config tokens expire after 12 hours. */
-export async function rotateConfigToken(
+async function rotateConfigToken(
   refreshToken: string,
   request: Fetcher = fetch,
 ): Promise<SlackConfigToken> {
@@ -208,6 +206,30 @@ export function oauthInstallUrl(
   return `https://slack.com/oauth/v2/authorize?${params}`;
 }
 
+/** `oauth.v2.access`: a code exchanged at the redirect it was issued for. */
+async function oauthAccess<T>(
+  code: string,
+  credentials: Pick<SlackAppCredentials, 'clientId' | 'clientSecret'>,
+  redirectUri: string,
+  request: Fetcher,
+): Promise<T & { ok?: boolean; error?: string }> {
+  const response = await request('https://slack.com/api/oauth.v2.access', {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: credentials.clientId,
+      client_secret: credentials.clientSecret,
+      code,
+      redirect_uri: redirectUri,
+    }),
+  });
+  const value = (await response.json()) as T & { ok?: boolean; error?: string };
+  if (!response.ok || !value.ok)
+    throw new IntegrationError('platform-error', value.error ?? String(response.status));
+
+  return value;
+}
+
 async function oauthCallback(
   code: string,
   credentials: Pick<SlackAppCredentials, 'clientId' | 'clientSecret'>,
@@ -222,29 +244,17 @@ async function oauthCallback(
   /** Slack user who installed; receives the welcome DM. */
   installer?: string;
 }> {
-  const response = await request('https://slack.com/api/oauth.v2.access', {
-    method: 'POST',
-    headers: { 'content-type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      client_id: credentials.clientId,
-      client_secret: credentials.clientSecret,
-      code,
-      redirect_uri: `${baseUrl(publicUrl)}/install/slack/callback`,
-    }),
-  });
-  const value = (await response.json()) as {
-    ok?: boolean;
-    error?: string;
+  const value = await oauthAccess<{
     access_token?: string;
     team?: { id?: string; name?: string } | null;
     enterprise?: { id?: string; name?: string } | null;
     is_enterprise_install?: boolean;
     authed_user?: { id?: string };
-  };
+  }>(code, credentials, `${baseUrl(publicUrl)}/install/slack/callback`, request);
   const org = value.is_enterprise_install === true;
   const owner = org ? value.enterprise : value.team;
-  if (!response.ok || !value.ok || !value.access_token || !owner?.id || !owner.name)
-    throw new IntegrationError('platform-error', value.error ?? String(response.status));
+  if (!value.access_token || !owner?.id || !owner.name)
+    throw new IntegrationError('platform-error');
   return {
     id: owner.id,
     name: owner.name,
@@ -253,6 +263,50 @@ async function oauthCallback(
     ...(value.authed_user?.id ? { installer: value.authed_user.id } : {}),
   };
 }
+
+const connectRedirect = (publicUrl: string) => `${baseUrl(publicUrl)}/connect/slack/callback`;
+
+/** A member's own Slack account, by user scopes only; Slack user tokens do not expire unless the app turns on token rotation. */
+export const slackUserAuth: IntegrationUserAuth = {
+  authorizeUrl(credentials, { publicUrl, state }) {
+    const params = new URLSearchParams({
+      client_id: (credentials as SlackAppCredentials).clientId,
+      user_scope: USER_SCOPES.join(','),
+      redirect_uri: connectRedirect(publicUrl),
+      state,
+    });
+    return `https://slack.com/oauth/v2/authorize?${params}`;
+  },
+  async exchange(req, credentials, { publicUrl, fetch: request }) {
+    const code = new URL(req.url).searchParams.get('code');
+    if (!code) throw new IntegrationError('missing-code');
+    const { authed_user: user } = await oauthAccess<{
+      authed_user?: { id?: string; access_token?: string; token_type?: string };
+    }>(code, credentials as SlackAppCredentials, connectRedirect(publicUrl), request);
+    if (!user?.id || !user.access_token || user.token_type !== 'user')
+      throw new IntegrationError('platform-error');
+    // `auth.test` needs no scope and names the token's user.
+    const identity = await slackApi<{ user_id?: string; user?: string }>(
+      'auth.test',
+      {},
+      user.access_token,
+      request,
+    );
+    if (identity.user_id !== user.id) throw new IntegrationError('platform-error', 'invalid_auth');
+
+    return {
+      id: user.id,
+      ...(identity.user ? { login: identity.user } : {}),
+      token: JSON.stringify({ accessToken: user.access_token }),
+    };
+  },
+  async access(stored, _credentials, { force }) {
+    if (force)
+      throw new IntegrationError('platform-error', 'invalid_token', 'Slack refused the user token');
+
+    return { accessToken: (JSON.parse(stored) as { accessToken: string }).accessToken };
+  },
+};
 
 /** Workspaces an org-wide token reaches, through every `auth.teams.list` page. */
 async function grantedTeams(token: string, request: Fetcher): Promise<string[]> {
@@ -384,10 +438,21 @@ export const slackApp: IntegrationApp = {
   },
   settingsUrl: (_app, credentials) =>
     `https://api.slack.com/apps/${encodeURIComponent((credentials as SlackAppCredentials).appId)}`,
+  async uninstall(installation, credentials, { fetch: request }) {
+    const { clientId, clientSecret } = credentials as SlackAppCredentials;
+    const token = await slackToken(installation, credentials);
+    await slackApi(
+      'apps.uninstall',
+      { client_id: clientId, client_secret: clientSecret },
+      token,
+      request,
+    );
+  },
+  installationUrl: () => 'https://slack.com/help/articles/360003125231',
   // Slack's authorize page needs the scopes on the URL; an app created before they were saved asks for the write set.
   installUrl(_app, credentials, { publicUrl, state }) {
     const current = credentials as SlackAppCredentials;
-    return oauthInstallUrl(current, publicUrl, state, current.scopes ?? slackAppScopes('write'));
+    return oauthInstallUrl(current, publicUrl, state, current.scopes ?? slackAppScopes('auto'));
   },
   async installCallback(req, { app, credentials, publicUrl, fetch: request, tokens }) {
     const code = new URL(req.url).searchParams.get('code');
@@ -424,6 +489,28 @@ export const slackApp: IntegrationApp = {
   },
 };
 
+/** The Slack MCP server's tool scopes a member's Just me connection asks for: search, reads, and sending messages as them. */
+const USER_SCOPES = [
+  'search:read.public',
+  'search:read.private',
+  'search:read.mpim',
+  'search:read.im',
+  'search:read.files',
+  'search:read.users',
+  'channels:history',
+  'groups:history',
+  'mpim:history',
+  'im:history',
+  'channels:read',
+  'groups:read',
+  'mpim:read',
+  'im:read',
+  'users:read',
+  'users:read.email',
+  'files:read',
+  'chat:write',
+];
+
 const SCOPES = [
   'app_mentions:read',
   'channels:history',
@@ -439,15 +526,9 @@ const SCOPES = [
   'usergroups:read',
   'reactions:read',
   'reactions:write',
-  'commands',
-  'links:read',
-  'links:write',
 ];
 /** Both modes can reply, react and upload files, and `dm` reads group DMs. */
-export function slackAppScopes(
-  tools: Preset | string[] = 'write',
-  events: string[] = [],
-): string[] {
+export function slackAppScopes(tools: Access | string[] = 'auto', events: string[] = []): string[] {
   return [
     ...SCOPES,
     ...(events.includes('dm') ? ['mpim:history'] : []),
@@ -455,7 +536,7 @@ export function slackAppScopes(
     'files:write',
     'im:write',
     'assistant:write',
-    ...((Array.isArray(tools) ? tools.includes('write') : tools === 'write')
+    ...((Array.isArray(tools) ? tools.includes('write') : tools === 'auto')
       ? ['channels:join', 'channels:manage', 'groups:write', 'mpim:write', 'usergroups:write']
       : []),
   ];
@@ -467,39 +548,50 @@ const APP_EVENTS: Record<string, string[]> = {
 };
 /** Events that make conversations; reactions in them steer the task, so each subscribes `reaction_added` too. */
 const CONVERSATION_EVENTS = ['mention', 'dm', 'channel'];
-/** Slack manifest agent events for catalog event names, plus the workspace grants of an org install, the Home tab and shared links. */
+/** Slack manifest agent events for catalog event names, plus the workspace grants of an org install and the Home tab. */
 export function slackAppEvents(events: string[]): string[] {
   const converses = events.some(event => CONVERSATION_EVENTS.includes(event));
   return [
     ...new Set([
       ...events.flatMap(event => APP_EVENTS[event] ?? []),
-      ...(converses ? ['reaction_added'] : []),
+      ...(converses ? ['reaction_added', 'member_joined_channel', 'member_left_channel'] : []),
     ]),
     'team_access_granted',
     'team_access_revoked',
     'app_uninstalled',
     'tokens_revoked',
     'app_home_opened',
-    'link_shared',
   ];
 }
 
-/** Manifest pieces beyond scopes and events: the spec's slash commands and the agent view. */
-export function slackManifestExtras(
-  publicUrl: string,
-  spec: Pick<AppSpec, 'name' | 'description' | 'commands'>,
-): {
-  slash_commands: Array<Record<string, string>>;
+/** The agent view beyond scopes and events. */
+export function slackManifestExtras(spec: Pick<AppSpec, 'name' | 'description'>): {
   agent_view: { agent_description: string };
 } {
-  const base = publicUrl.replace(/\/$/, '');
   return {
-    slash_commands: (spec.commands ?? []).map(({ command, description, usage }) => ({
-      command,
-      url: `${base}/hooks/slack`,
-      description,
-      ...(usage ? { usage_hint: usage } : {}),
-    })),
     agent_view: { agent_description: spec.description ?? `${spec.name} in your workspace.` },
   };
 }
+
+/** How people reach the agent in Slack, from the Slack events it listens to; none when nothing wakes it. */
+export function slackWays(
+  name: string,
+  events: string[],
+  direct = 'send it a direct message',
+): string | undefined {
+  const all = [
+    events.includes('mention') && `mention @${name} in a channel`,
+    events.includes('dm') && direct,
+    events.includes('channel') && 'write in a channel it is in',
+  ].filter((way): way is string => Boolean(way));
+  if (!all.length) return undefined;
+  const text = all.length > 1 ? `${all.slice(0, -1).join(', ')}, or ${all.at(-1)}` : all[0]!;
+
+  return `${text[0]!.toUpperCase()}${text.slice(1)}.`;
+}
+
+export const slackToken: IntegrationAuth['token'] = async installation => {
+  if (!installation.token)
+    throw new Error(`Slack installation ${installation.id} has no bot token`);
+  return installation.token;
+};

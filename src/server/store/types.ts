@@ -1,4 +1,5 @@
 import type { ApprovalPost } from '../tasks/approvals';
+import type { PendingApproval } from '../tasks/changes';
 
 /** Whether an approval post needs another platform call now: its retry is due, or it was never shown for `staleMs`. */
 export const postDue = (post: ApprovalPost, now: number, staleMs: number) =>
@@ -17,15 +18,14 @@ import type { Approval } from '../../core/types';
 import { type EngineLogin } from '../settings/logins';
 import type { StoredCredential } from '../settings/credentials';
 import type { StoredConfig } from '../settings/config';
-import type { InboxEntry } from '../tasks/queue';
+import type { InboxEntry, TaskQueue } from '../tasks/queue';
 import type { LocalCompletion, LocalStart } from '../tasks/local';
 import type { PendingHandoff } from '../tasks/events';
 import type { SinceMessage } from '../../integrations/types';
 import type { Batch, Conversation, ConversationState, Unseen } from '../tasks/conversation';
 import { type PairingRecord } from '../settings/runners';
-import type { SnapshotState } from '../runners/vercel-sandbox';
+import type { SnapshotState } from '../runners/kinds/vercel-sandbox';
 import type { RepoFile, RepoPush, SyncMarker } from '../agents/repo';
-import type { HeldToken, HeldWrite, TokenDrop, TokenState } from './tokens';
 
 /** A crashed batch sender releases its reservation after this lease. */
 export const BATCH_LEASE_MS = 30_000;
@@ -87,7 +87,8 @@ export type DeliveryRecord =
   /** How Wular names the organization, under `workspace`, for links made without a session. */
   | { slug: string; name: string; pending?: never }
   | (FailedDelivery & { pending?: never })
-  | (ApprovalPost & { pending?: never });
+  | (ApprovalPost & { pending?: never })
+  | (PendingApproval & { pending?: never });
 
 /** A platform event Coder failed to handle, kept a day under `failed:<agent>:<delivery>`. */
 export interface FailedDelivery {
@@ -192,7 +193,7 @@ export interface DispatchLoaded {
   files: Record<string, RepoFile>;
   conversation: ConversationState;
   /** The member the actor is linked to, whose own credentials, runners and connections came along. */
-  requester?: string;
+  member?: { id: string; name: string; email: string };
   credentials: Array<{ id: string; value: StoredCredential }>;
   runners: Array<{ id: string; value: RunnerRecord }>;
   connections: Connection[];
@@ -236,6 +237,8 @@ export interface Store {
   completionWatches?: Map<string, { stopped: boolean; work: Promise<void> }>;
   handoffs?: Map<string, Promise<unknown>>;
   withAppLock<T>(id: string, work: (store: Store) => Promise<T>): Promise<T>;
+  /** The task queue on this store's own connection, so a locked store's queue writes join its transaction. */
+  queue?(): TaskQueue;
   /** Approval posts due for another platform call (`retryAt` reached, or never shown and older than `staleMs`), in every organization. */
   approvalPostsDue(
     now: number,
@@ -248,7 +251,12 @@ export interface Store {
     id: string,
     work: CredentialWork<K>,
   ): Promise<boolean>;
-  publishAgent(record: AgentRecord, version: AgentVersionRecord): Promise<AgentPublication>;
+  /** None when the agent's current version is no longer `expected`'s. */
+  publishAgent(
+    record: AgentRecord,
+    version: AgentVersionRecord,
+    expected?: Pick<AgentRecord, 'currentVersion'>,
+  ): Promise<AgentPublication | undefined>;
   completeLogin(
     id: string,
     tokenHash: string,
@@ -499,6 +507,8 @@ export interface TaskStatus {
   /** Derived for task rows returned by the server. */
   lastActivityAt?: number;
   lastTurnMs?: number;
+  /** Derived for task rows returned by the server: its own pick, else its engine's default. */
+  model?: string;
   /** A read-only row for a task the CLI ran on this machine. */
   local?: true;
   turns?: TaskTurn[];
@@ -556,4 +566,33 @@ export interface RunnerRecord {
   lastSeen?: number;
   createdAt: number;
   updatedAt: number;
+}
+
+/** A platform token held for reuse, sealed. */
+export interface HeldToken {
+  token: string;
+  expiresAt: number;
+  mintedAt: number;
+}
+
+/** An installation's or app's latest token drop. */
+export interface TokenDrop {
+  drop: string;
+}
+
+export const heldKey = (id: string, key = '') => `token:${id}:${key}`;
+export const dropKey = (id: string) => `token-drop:${id}`;
+
+/** An installation's held tokens and the drops of it and its app, read in one go. */
+export interface TokenState {
+  held: Map<string, HeldToken>;
+  drops: Map<string, string | undefined>;
+}
+
+/** A minted token to hold, as long as the drops it was read under still stand. */
+export interface HeldWrite {
+  key: string;
+  value: HeldToken;
+  ttlMs: number;
+  drops: Array<{ key: string; drop?: string }>;
 }

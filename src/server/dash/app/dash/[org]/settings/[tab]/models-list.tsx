@@ -3,14 +3,16 @@
 import { client } from '@/utils/client';
 import type { ComponentChildren } from 'preact';
 import { useRef, useState } from 'preact/hooks';
+import { useSearchParams } from '@wular/pnext/navigation/client';
 
-import { Card, FoldCard, Loading } from '@/comps/ui/card';
+import { Loading } from '@/comps/ui/card';
 import { Field } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
 import { Button } from '@/comps/ui/button';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { Select } from '@/comps/ui/select';
 import { Combo } from '@/comps/ui/combo';
+import { Modal } from '@/comps/ui/modal';
 import {
   CUSTOM_PROVIDERS,
   EFFORTS,
@@ -22,7 +24,7 @@ import {
 import { reasonText } from '@/utils/format';
 import { useAction } from '@/utils/action';
 import { toastError } from '@/comps/frame/task-toasts';
-import { List, Row, replaceTitle, useConfig, useReplace } from './list';
+import { List, Row, replaceTitle, useAddDialog, useConfig, useReplace } from './list';
 import type {
   Config,
   ConfigShape,
@@ -58,7 +60,7 @@ const slug = (id: string) =>
 const unused = (names: string[], taken: Record<string, unknown>) =>
   names.find(name => !(name in taken));
 
-/** A short name for a Claude or Codex model id, or an OpenAI-compatible endpoint. Enter adds. */
+/** A short name for a Claude or Codex model id, or an OpenAI-compatible endpoint, in a dialog. Enter adds. */
 function AddModel({
   builtin,
   credentials,
@@ -66,6 +68,7 @@ function AddModel({
   taken,
   efforts,
   onAdd,
+  onClose,
 }: {
   builtin: ModelsShape['builtin'];
   credentials: CredentialRow[] | null;
@@ -75,6 +78,7 @@ function AddModel({
   /** Every model name in use. */
   taken: Record<string, unknown>;
   onAdd: (act: () => Promise<Config>) => Promise<boolean>;
+  onClose: () => void;
 }) {
   const [kind, setKind] = useState('endpoint');
   const kindField = (
@@ -85,12 +89,11 @@ function AddModel({
   const [engine, setEngine] = useState('claude');
   const [effort, setEffort] = useState('');
   const [busy, setBusy] = useState(false);
-  const [round, setRound] = useState(0);
   const replace = useReplace();
   const known = builtin[engine] ?? {};
   const example = known[EXAMPLES[engine]!] ?? Object.values(known)[0];
 
-  const add = async (form: HTMLFormElement, values: Record<string, string>) => {
+  const add = async (values: Record<string, string>) => {
     setBusy(true);
     const added =
       kind === 'alias'
@@ -116,23 +119,19 @@ function AddModel({
             });
           });
     setBusy(false);
-    if (!added) return;
-
-    form.reset();
-    setRound(round + 1);
+    if (added) onClose();
   };
 
   return (
-    <FoldCard
-      title="Add a model"
-      note="A short name for an engine model, or an OpenAI-compatible endpoint"
-    >
-      <form
-        class="add-form"
-        method="post"
+    <>
+      <Modal
+        class="add-modal"
+        title="Add a model"
+        dismiss
+        busy={busy}
         onSubmit={event => {
           event.preventDefault();
-          const form = event.currentTarget;
+          const form = event.currentTarget as HTMLFormElement;
           const values = Object.fromEntries(
             [...new FormData(form)].map(([key, value]) => [key, String(value).trim()]),
           );
@@ -145,51 +144,55 @@ function AddModel({
             values.key &&
             credentials?.some(row => row.name === envKey && row.scope === scope)
           )
-            return replace.ask(replaceTitle(envKey, scope), () => void add(form, values));
-          void add(form, values);
+            return replace.ask(replaceTitle(envKey, scope), () => void add(values));
+          void add(values);
         }}
+        onClose={onClose}
+        actions={
+          <Button type="submit" loading={busy}>
+            Add model
+          </Button>
+        }
       >
-        {kind === 'alias' ? (
-          <div class="add-grid">
-            {kindField}
-            <Field label="Engine" group>
-              <Select label="Engine" options={ALIAS_ENGINES} value={engine} onChange={setEngine} />
-            </Field>
-            <Field label="Model id">
-              <input name="model" placeholder={example ?? 'model id'} autocomplete="off" />
-            </Field>
-            <Field label="Short name" hint="used as --model">
-              <input
-                name="name"
-                placeholder={unused(['fast', 'deep', 'quick'], taken)}
-                autocomplete="off"
-                pattern="[a-z0-9][a-z0-9\-]*"
-              />
-            </Field>
-            <Field label="Effort" hint="optional" group>
-              <Select
-                label="Effort"
-                options={[['', defaultLabel(efforts[engine])], ...EFFORTS]}
-                value={effort}
-                onChange={setEffort}
-              />
-            </Field>
-            <Button type="submit" loading={busy}>
-              Add
-            </Button>
-          </div>
-        ) : (
-          <CustomFields
-            key={round}
-            kind={kindField}
-            credentials={credentials}
-            admin={admin}
-            busy={busy}
-          />
-        )}
-      </form>
+        <div class="add-form">
+          {kind === 'alias' ? (
+            <div class="add-grid">
+              {kindField}
+              <Field label="Engine" group>
+                <Select
+                  label="Engine"
+                  options={ALIAS_ENGINES}
+                  value={engine}
+                  onChange={setEngine}
+                />
+              </Field>
+              <Field label="Model id">
+                <input name="model" placeholder={example ?? 'model id'} autocomplete="off" />
+              </Field>
+              <Field label="Short name" hint="used as --model">
+                <input
+                  name="name"
+                  placeholder={unused(['fast', 'deep', 'quick'], taken)}
+                  autocomplete="off"
+                  pattern="[a-z0-9][a-z0-9\-]*"
+                />
+              </Field>
+              <Field label="Effort" hint="optional" group>
+                <Select
+                  label="Effort"
+                  options={[['', defaultLabel(efforts[engine])], ...EFFORTS]}
+                  value={effort}
+                  onChange={setEffort}
+                />
+              </Field>
+            </div>
+          ) : (
+            <CustomFields kind={kindField} credentials={credentials} admin={admin} />
+          )}
+        </div>
+      </Modal>
       {replace.dialog}
-    </FoldCard>
+    </>
   );
 }
 
@@ -198,25 +201,30 @@ function CustomFields({
   kind,
   credentials,
   admin,
-  busy,
 }: {
   kind: ComponentChildren;
   /** Null on the local server, where keys come from this machine's environment. */
   credentials: CredentialRow[] | null;
   admin: boolean;
-  busy: boolean;
 }) {
-  const [preset, setPreset] = useState(providers[0] ?? OTHER);
-  const [baseUrl, setBaseUrl] = useState(preset.baseUrl);
-  const [envKey, setEnvKey] = useState(preset.envKey);
+  // A chat's link fills the form in.
+  const asked = useSearchParams();
+  const askedUrl = asked.get('base-url') ?? '';
+  const [preset, setPreset] = useState(
+    askedUrl
+      ? (providers.find(provider => provider.baseUrl === askedUrl) ?? OTHER)
+      : (providers[0] ?? OTHER),
+  );
+  const [baseUrl, setBaseUrl] = useState(askedUrl || preset.baseUrl);
+  const [envKey, setEnvKey] = useState(asked.get('env-key') ?? preset.envKey);
   const [key, setKey] = useState('');
   const [scope, setScope] = useState(admin ? 'workspace' : 'personal');
   const [probe, setProbe] = useState<ProbeResult | null>(null);
   const latest = useRef(0);
   // One toast per failure; a probe that works again clears it.
   const failed = useRef('');
-  const [model, setModel] = useState('');
-  const [contextWindow, setContextWindow] = useState<string | null>(null);
+  const [model, setModel] = useState(asked.get('model') ?? '');
+  const [contextWindow, setContextWindow] = useState(asked.get('context-window'));
   const reported = probe?.contextWindows?.[model];
   const has = (name: string, where: string) =>
     Boolean(name) && Boolean(credentials?.some(row => row.name === name && row.scope === where));
@@ -354,6 +362,7 @@ function CustomFields({
         <Field label="Short name" hint="used as --model; defaults to the model id">
           <input
             name="name"
+            defaultValue={asked.get('add') ?? undefined}
             placeholder={slug(model) || 'kimi'}
             autocomplete="off"
             pattern="[a-z0-9][a-z0-9\-]*"
@@ -370,52 +379,47 @@ function CustomFields({
       ) : (
         keyRow
       )}
-      <div class="add-foot">
-        <details class="add-more" open={preset.id === 'other' || undefined}>
-          <summary>Advanced</summary>
-          <div class="add-grid">
-            <Field label="Base URL">
-              <input
-                name="baseUrl"
-                type="url"
-                placeholder="http://localhost:11434/v1"
-                autocomplete="off"
-                value={baseUrl}
-                onInput={event => {
-                  setBaseUrl(event.currentTarget.value);
-                  checkSoon(event.currentTarget.value, envKey, key);
-                }}
-              />
-            </Field>
-            <Field label="Key variable">
-              <input
-                name="envKey"
-                class="mono"
-                placeholder="OPENAI_API_KEY"
-                autocomplete="off"
-                pattern="[A-Za-z_][A-Za-z0-9_]*"
-                value={envKey}
-                onInput={event => setEnvKey(event.currentTarget.value)}
-              />
-            </Field>
-            <Field label="Context window" hint="tokens; empty uses Codex's default, 272000">
-              <input
-                name="contextWindow"
-                type="number"
-                min="1"
-                step="1"
-                placeholder="272000"
-                autocomplete="off"
-                value={contextWindow ?? (reported ? String(reported) : '')}
-                onInput={event => setContextWindow(event.currentTarget.value)}
-              />
-            </Field>
-          </div>
-        </details>
-        <Button type="submit" loading={busy}>
-          Add model
-        </Button>
-      </div>
+      <details class="add-more" open={preset.id === 'other' || undefined}>
+        <summary>Advanced</summary>
+        <div class="add-grid">
+          <Field label="Base URL">
+            <input
+              name="baseUrl"
+              type="url"
+              placeholder="http://localhost:11434/v1"
+              autocomplete="off"
+              value={baseUrl}
+              onInput={event => {
+                setBaseUrl(event.currentTarget.value);
+                checkSoon(event.currentTarget.value, envKey, key);
+              }}
+            />
+          </Field>
+          <Field label="Key variable">
+            <input
+              name="envKey"
+              class="mono"
+              placeholder="OPENAI_API_KEY"
+              autocomplete="off"
+              pattern="[A-Za-z_][A-Za-z0-9_]*"
+              value={envKey}
+              onInput={event => setEnvKey(event.currentTarget.value)}
+            />
+          </Field>
+          <Field label="Context window" hint="tokens; empty uses Codex's default, 272000">
+            <input
+              name="contextWindow"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="272000"
+              autocomplete="off"
+              value={contextWindow ?? (reported ? String(reported) : '')}
+              onInput={event => setContextWindow(event.currentTarget.value)}
+            />
+          </Field>
+        </div>
+      </details>
     </>
   );
 }
@@ -433,6 +437,7 @@ export function ModelsList({
   admin: boolean;
 }) {
   const [models, setModels] = useState(first);
+  const adding = useAddDialog(['base-url', 'model', 'env-key', 'context-window']);
   const action = useAction();
   const settings = useConfig(config.config);
   const send = (act: () => Promise<Config>, toast?: string) =>
@@ -484,24 +489,13 @@ export function ModelsList({
     .filter(([, list]) => list.length);
   return (
     <>
-      <AddModel
-        builtin={models.builtin}
-        credentials={credentials}
-        admin={admin}
-        taken={{
-          ...models.models,
-          ...Object.assign({}, ...Object.values(models.builtin)),
-        }}
-        efforts={Object.fromEntries(
-          ENGINES.map(engine => [
-            engine,
-            settings.value.engines?.[engine]?.effort ?? config.effective.engines?.[engine]?.effort,
-          ]),
-        )}
-        onAdd={act => send(act, 'Not saved')}
-      />
-      {groups.map(([engine, list]) => (
-        <List key={engine} title={ENGINE_NAMES[engine] ?? engine} count={list.length}>
+      {groups.map(([engine, list], index) => (
+        <List
+          key={engine}
+          title={ENGINE_NAMES[engine] ?? engine}
+          count={list.length}
+          actions={index === 0 ? adding.button : undefined}
+        >
           {list.map(({ name, target, entry, removable }) => {
             const isDefault = [name, target].includes(defaultOf(engine) ?? '');
             return (
@@ -523,7 +517,7 @@ export function ModelsList({
                 actions={
                   isDefault || entry?.disabled ? null : (
                     <Button
-                      variant="ghost"
+                      variant="secondary"
                       size="sm"
                       onClick={() =>
                         void settings.patch({ engines: { [engine]: { model: name } } })
@@ -546,6 +540,7 @@ export function ModelsList({
                     ? {
                         title: `Remove ${name}?`,
                         body: 'Tasks that ask for it stop running.',
+                        link: name,
                         onRemove: () => send(() => client.models.remove(name)),
                       }
                     : undefined
@@ -555,6 +550,26 @@ export function ModelsList({
           })}
         </List>
       ))}
+      {adding.open ? (
+        <AddModel
+          builtin={models.builtin}
+          credentials={credentials}
+          admin={admin}
+          taken={{
+            ...models.models,
+            ...Object.assign({}, ...Object.values(models.builtin)),
+          }}
+          efforts={Object.fromEntries(
+            ENGINES.map(engine => [
+              engine,
+              settings.value.engines?.[engine]?.effort ??
+                config.effective.engines?.[engine]?.effort,
+            ]),
+          )}
+          onAdd={act => send(act, 'Not saved')}
+          onClose={adding.close}
+        />
+      ) : null}
     </>
   );
 }

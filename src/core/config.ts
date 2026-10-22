@@ -3,19 +3,19 @@
  * defaults -> ~/.coder/config.json -> <workspace>/coder.config.json -> CLI flags.
  */
 import fs from 'node:fs';
-import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
 
 import * as z from 'zod/mini';
 
-import { DEFAULT_CONFIG } from './defaults';
+import { ACCESS, type Access } from '../integrations/types';
+import { DEFAULT_CONFIG } from './types';
 import { coderHome, resolveWorkspaceRoot } from './state';
 import { markRepositoryMcp } from './mcp';
 
-export { DEFAULT_CONFIG };
+export { ACCESS, DEFAULT_CONFIG, type Access };
 
-export interface PermissionMode {
+interface AccessMode {
   sandbox: 'read-only' | 'workspace-write';
   approvalPolicy: 'never' | 'on-request' | 'on-failure' | 'untrusted';
   approvalMode: 'auto' | null;
@@ -39,23 +39,16 @@ export const CLAUDE_MODELS: Record<string, string> = {
 export const CLAUDE_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
 
 /**
- * The one permission surface, mapped per engine.
+ * The one access setting, mapped per engine.
  *
  * Codex (OS-enforced sandbox + approval policy):
  * - read-only:       sandbox read-only,       approvals never
- * - workspace-write: sandbox workspace-write, approvals never (escapes fail, not asked)
  * - auto:            sandbox workspace-write, approvals on-request, reviewed by Codex's auto review
  *                    (`approvalsReviewer`); what it refuses the task may escalate (core/approvals).
  */
-export const PERMISSION_MODES: Record<Permission, PermissionMode> = {
+export const ACCESS_MODES: Record<Access, AccessMode> = {
   'read-only': {
     sandbox: 'read-only',
-    approvalPolicy: 'never',
-    approvalMode: null,
-    approvalsReviewer: null,
-  },
-  'workspace-write': {
-    sandbox: 'workspace-write',
     approvalPolicy: 'never',
     approvalMode: null,
     approvalsReviewer: null,
@@ -84,11 +77,10 @@ export const PUBLIC_REGISTRY_HOSTS = [
  * Claude (claude CLI print mode):
  * - read-only:       edit/write tools disallowed; Bash runs inside the native OS sandbox
  *                    (see claudeTurnSettings), so reads work while writes are blocked
- * - workspace-write: edits auto-accepted, everything else denied
  * - auto:            Claude's own classifier reviews actions, unsandboxed retries included; what
  *                    still prompts goes to Coder's prompt tool, which denies and points at `escalate`
  */
-export const CLAUDE_PERMISSION_FLAGS: Record<Permission, string[]> = {
+export const CLAUDE_ACCESS_FLAGS: Record<Access, string[]> = {
   'read-only': [
     '--permission-mode',
     'dontAsk',
@@ -98,7 +90,6 @@ export const CLAUDE_PERMISSION_FLAGS: Record<Permission, string[]> = {
     'MultiEdit',
     'NotebookEdit',
   ],
-  'workspace-write': ['--permission-mode', 'acceptEdits'],
   auto: ['--permission-mode', 'auto'],
 };
 
@@ -183,18 +174,18 @@ export function claudeAutoMode(local: boolean, allowedNetworkHosts: string[]) {
  * two documented forms of the same grant, and a working directory the CLI does
  * not register is a hard read denial ("Path is outside allowed working
  * directories"), so it is worth not depending on one of them. Read-only also
- * denies writes there; other modes let them follow the mode like cwd.
+ * denies writes there; auto lets them follow cwd.
  *
  * Without the OS sandbox the machine is the boundary, so Bash runs unprompted as it did sandboxed.
  *
- * The scratch folder is writable in the writing modes, and git writes work only there: the
+ * The scratch folder is writable in auto, and git writes work only there: the
  * checkout's and the extra directories' `.git` are write-denied, and the rest of the temp directory
  * is not writable by default (a deny there would also close the scratch inside it). In auto a
  * command may still leave the sandbox when auto mode's classifier approves the retry, or when the
  * approval hook finds it among the task's approved actions.
  */
 export function claudeTurnSettings(
-  permissions: Permission,
+  access: Access,
   cwd: string,
   allowedNetworkHosts: string[] = [],
   additionalDirectories: string[] = [],
@@ -209,13 +200,11 @@ export function claudeTurnSettings(
       permissions: {
         additionalDirectories,
         allow: ['Bash'],
-        ...(permissions === 'read-only'
-          ? { deny: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] }
-          : {}),
+        ...(access === 'read-only' ? { deny: ['Edit', 'Write', 'MultiEdit', 'NotebookEdit'] } : {}),
       },
       sandbox: { enabled: false },
     });
-  if (permissions === 'read-only') {
+  if (access === 'read-only') {
     const domains = claudeAllowedDomains(allowedNetworkHosts);
 
     return JSON.stringify({
@@ -233,23 +222,19 @@ export function claudeTurnSettings(
       },
     });
   }
-  // auto/workspace-write: sandboxed commands skip the permission prompt; only escapes reach the
-  // permission layer. The allowlist is reachable with no review. In auto, other hosts Claude names
-  // on the command for its classifier, which also reviews unsandboxed retries; workspace-write refuses both.
-  const domains = [
-    ...claudeAllowedDomains(allowedNetworkHosts),
-    ...(permissions === 'auto' ? PUBLIC_REGISTRY_HOSTS : []),
-  ];
+  // Sandboxed commands skip the permission prompt; only escapes reach the permission layer. The
+  // allowlist is reachable with no review; other hosts Claude names on the command for its
+  // classifier, which also reviews unsandboxed retries.
+  const domains = [...claudeAllowedDomains(allowedNetworkHosts), ...PUBLIC_REGISTRY_HOSTS];
 
   return JSON.stringify({
     ...(directories.length ? { permissions: { additionalDirectories: directories } } : {}),
     sandbox: {
       enabled: true,
-      allowUnsandboxedCommands: permissions === 'auto',
+      allowUnsandboxedCommands: true,
       autoAllowBashIfSandboxed: true,
       network: {
-        ...(permissions === 'auto' ? {} : { strictAllowlist: true }),
-        ...(domains.length ? { allowedDomains: domains } : {}),
+        allowedDomains: domains,
         // An allowlisted loopback host also lets commands serve on it (macOS only), so a local dev server runs sandboxed.
         ...(allowedNetworkHosts.some(host => LOOPBACK_HOSTS.has(host))
           ? { allowLocalBinding: true }
@@ -260,14 +245,14 @@ export function claudeTurnSettings(
         denyWrite: [cwd, ...directories].map(directory => path.join(directory, '.git')),
       },
     },
-    ...(permissions === 'auto' ? { autoMode: claudeAutoMode(local, allowedNetworkHosts) } : {}),
+    autoMode: claudeAutoMode(local, allowedNetworkHosts),
     // Allows only a call that exactly matches an approved action; silent otherwise, so the classifier judges.
-    ...(permissions === 'auto' && approvalHook
+    ...(approvalHook
       ? {
-          hooks: {
-            PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: approvalHook }] }],
-          },
-        }
+        hooks: {
+          PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: approvalHook }] }],
+        },
+      }
       : {}),
   });
 }
@@ -283,21 +268,19 @@ export function claudeTurnSettings(
 const providerSchema = z.enum(['codex', 'claude']);
 const engineSchema = z.enum(['codex', 'claude', 'custom']);
 const effortSchema = z.enum(['low', 'medium', 'high']);
-const permissionSchema = z.enum(['read-only', 'workspace-write', 'auto']);
+export const accessSchema = z.enum(ACCESS, { error: 'Use read-only or auto' });
 const engineEntrySchema = z.partial(
   z.strictObject({
     model: z.string().check(z.minLength(1)),
     effort: effortSchema,
-    permissions: permissionSchema,
   }),
 );
 // Codex alone exposes network access as its own switch; it defaults to the
-// permission mode (`auto` allows the network, the stricter modes deny it).
+// access (`auto` allows the network, `read-only` denies it).
 const codexEngineEntrySchema = z.partial(
   z.strictObject({
     model: z.string().check(z.minLength(1)),
     effort: effortSchema,
-    permissions: permissionSchema,
     network: z.boolean(),
   }),
 );
@@ -330,7 +313,6 @@ const modelEntrySchema = z.union([customModelSchema, aliasModelSchema, toggleMod
 const approvalsSchema = z.strictObject({
   allowedNetworkHosts: z.array(z.string()),
 });
-const agentPresetSchema = z.enum(['read', 'write']);
 // Agent and flow names reach shell commands inside runners, so keep them to safe slugs.
 const agentNameSchema = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
 // `agents` holds usage only: how this repo runs an agent. What an agent IS lives in
@@ -344,8 +326,7 @@ const agentUsageSchema = z.union([
     engine: z.optional(z.string()),
     model: z.optional(z.string()),
     effort: z.optional(effortSchema),
-    permissions: z.optional(permissionSchema),
-    access: z.optional(agentPresetSchema),
+    access: z.optional(accessSchema),
     runner: z.optional(z.enum(['local', 'local-docker', 'vercel-sandbox', 'github-actions'])),
     integrations: z.optional(z.record(z.string(), agentUsageIntegrationSchema)),
     connections: z.optional(z.array(z.string())),
@@ -369,14 +350,15 @@ export const mcpEntrySchema = z
     headers: z.optional(z.record(z.string(), z.string())),
     tools: z.optional(z.array(z.string())),
     description: z.optional(z.string()),
+    connect: z.optional(z.enum(['start', 'first-use'])),
   })
   .check(
     z.refine(
       entry =>
         entry.connection
           ? [entry.url, entry.command, entry.args, entry.env, entry.headers, entry.type].every(
-              value => value === undefined,
-            )
+            value => value === undefined,
+          )
           : Boolean(entry.command) !== Boolean(entry.url),
       'Use a connection alone, without url, command, args, env, headers or type; otherwise supply one of command or url',
     ),
@@ -410,10 +392,8 @@ const configSchema = z.partial(
   z.extend(effectiveConfigSchema, { approvals: z.partial(approvalsSchema) }),
 );
 
-export type Provider = z.infer<typeof providerSchema>;
 export type Engine = z.infer<typeof engineSchema>;
 export type Effort = z.infer<typeof effortSchema>;
-export type Permission = z.infer<typeof permissionSchema>;
 export type EngineConfig = z.infer<typeof engineEntrySchema>;
 export type CustomModelConfig = z.infer<typeof customModelSchema>;
 export type AliasModelConfig = z.infer<typeof aliasModelSchema>;
@@ -428,22 +408,22 @@ export function isEndpointModel(entry: ModelEntry): entry is CustomModelConfig {
 export function isAliasModel(entry: ModelEntry): entry is AliasModelConfig {
   return 'provider' in entry;
 }
-export type ApprovalsConfig = z.infer<typeof approvalsSchema>;
 export type CoderConfig = z.infer<typeof effectiveConfigSchema>;
 
+/** The strictest of the given levels: read-only when any is, else auto. */
+export function strictestAccess(...levels: (Access | null | undefined)[]): Access {
+  return levels.includes('read-only') ? 'read-only' : 'auto';
+}
+
 /** Codex network access: the explicit `engines.codex.network` override, else `auto` only. */
-export function resolveCodexNetworkAccess(permissions: Permission, override?: boolean): boolean {
-  return override ?? permissions === 'auto';
+export function resolveCodexNetworkAccess(access: Access, override?: boolean): boolean {
+  return override ?? access === 'auto';
 }
 
 /** A Codex turn's network: its mode's, or, when that is off, on behind Codex's
  * network proxy with only the given hosts allowed (subdomains too; loopback and IPs exact). */
-export function codexTurnNetwork(
-  permissions: Permission,
-  override: boolean | undefined,
-  hosts: string[],
-) {
-  const networkAccess = resolveCodexNetworkAccess(permissions, override);
+export function codexTurnNetwork(access: Access, override: boolean | undefined, hosts: string[]) {
+  const networkAccess = resolveCodexNetworkAccess(access, override);
   if (networkAccess || !hosts.length) return { networkAccess, configOverrides: {} };
   const domains = hosts.map(host => {
     const name = host.replace(/^\[(.*)\](?::\d+)?$/, '$1').replace(/^([^:]+):\d+$/, '$1');
@@ -482,15 +462,28 @@ export function removeModel(
     if (entry?.model === name) delete entry.model;
 }
 
+/** One line per schema issue, each union branch's included, without a loaded Zod locale. */
+export function schemaIssues(
+  issues: ReadonlyArray<z.core.$ZodIssue>,
+  prefix: PropertyKey[] = [],
+): string[] {
+  return issues.flatMap(issue =>
+    issue.code === 'invalid_union'
+      ? issue.errors.flatMap(branch => schemaIssues(branch, [...prefix, ...issue.path]))
+      : [
+          `${[...prefix, ...issue.path].map(String).join('.') || '(root)'}: ${
+            issue.code === 'unrecognized_keys'
+              ? `Unrecognized ${issue.keys.length === 1 ? 'key' : 'keys'}: ${issue.keys.map(key => JSON.stringify(key)).join(', ')}`
+              : issue.message
+          }`,
+        ],
+  );
+}
+
 /** Returns human-readable errors; empty array means valid. */
 export function validateConfig(candidate: unknown): string[] {
   const result = configSchema.safeParse(candidate);
-  if (!result.success) {
-    return result.error.issues.map(issue => {
-      const where = issue.path.join('.') || 'config';
-      return `${where}: ${issue.message}`;
-    });
-  }
+  if (!result.success) return schemaIssues(result.error.issues);
   const config = deepMerge(DEFAULT_CONFIG, result.data);
   const errors: string[] = [];
   for (const [index, host] of (result.data.approvals?.allowedNetworkHosts ?? []).entries()) {
@@ -674,7 +667,7 @@ export function persistModelPatch(
 }
 
 /** Did the user paste a full endpoint URL rather than an API base? */
-export function hasExplicitEndpoint(baseUrl: string): boolean {
+function hasExplicitEndpoint(baseUrl: string): boolean {
   return /\/(chat\/completions|completions|responses)\/*$/.test(baseUrl);
 }
 
@@ -700,7 +693,7 @@ export const BRIDGE_HEADERS = {
 };
 
 /** Codex-engine overrides for one custom model: provider id and config. */
-export interface CustomModelResolution {
+interface CustomModelResolution {
   modelProvider: string;
   configOverrides: Record<string, unknown>;
 }
@@ -752,7 +745,7 @@ export function isBuiltinAlias(name: string): boolean {
 }
 
 /** Disabled via its entry's `disabled` flag (any entry kind, incl. toggles). */
-export function isModelDisabled(config: CoderConfig, name?: string | null): boolean {
+function isModelDisabled(config: CoderConfig, name?: string | null): boolean {
   return Boolean(name && config.models?.[name]?.disabled);
 }
 
@@ -851,7 +844,7 @@ export function writeUserConfig(config: CoderConfig): string {
   return filePath;
 }
 
-export function getPath(object: unknown, dotted: string): unknown {
+function getPath(object: unknown, dotted: string): unknown {
   return dotted
     .split('.')
     .reduce<unknown>(
@@ -868,7 +861,7 @@ export function configTargetFile(cwd: string, workspace?: boolean): string {
 
 // Print-free core: the whole effective config, or one dotted-path value
 // (undefined when unset).
-export function configGet(cwd: string, key?: string): unknown {
+function configGet(cwd: string, key?: string): unknown {
   const cfg = loadConfig(cwd);
   return key ? getPath(cfg, key) : cfg;
 }

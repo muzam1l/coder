@@ -4,10 +4,10 @@ import { type ServerContext } from '../context';
 import { json } from '../routes/http';
 import { type AgentTask, type RunnerKind } from '../../agent/types';
 import { decryptSecret, encryptCredential, encryptSecret } from '../store/secrets';
-import { createTaskToken } from '../tasks/token';
+import { createTaskToken } from '../tasks/access';
 import { type CredentialAccount } from './credentials';
 import { type CallbackContext } from '../tasks/callbacks';
-import { ENGINE_HOSTS } from '../runners/vercel-sandbox';
+import { ENGINE_HOSTS } from '../runners/kinds/vercel-sandbox';
 
 export async function createLogin(
   req: Request,
@@ -16,7 +16,6 @@ export async function createLogin(
   url: URL,
 ): Promise<Response> {
   const user = ctx.session!.user.id;
-  const id = params.id ?? '';
   const body = (await req.json().catch(() => ({}))) as {
     engine?: string;
   };
@@ -91,7 +90,6 @@ export async function readLogin(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const user = ctx.session!.user.id;
   const id = params.id ?? '';
   if (!url.searchParams.has('state')) {
     const login = id && !id.includes('/') ? await own(ctx, id) : undefined;
@@ -122,7 +120,6 @@ export async function answerLogin(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const user = ctx.session!.user.id;
   const id = params.id ?? '';
   const login = id && !id.includes('/') ? await own(ctx, id) : undefined;
   if (!login) return json({ error: 'This sign-in is gone. Start again.' }, 404);
@@ -153,7 +150,6 @@ export async function cancelLogin(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const user = ctx.session!.user.id;
   const id = params.id ?? '';
   const login = id && !id.includes('/') ? await own(ctx, id) : undefined;
   if (!login) return json({ error: 'This sign-in is gone. Start again.' }, 404);
@@ -188,7 +184,7 @@ const ENGINES = new Set<string>(['claude', 'codex']);
 
 const now = (ctx: ServerContext) => (ctx.now ?? Date.now)();
 
-export function saveLogin(ctx: ServerContext, id: string, login: EngineLogin) {
+function saveLogin(ctx: ServerContext, id: string, login: EngineLogin) {
   return ctx.store.put('login', id, login, {
     ttlMs: Math.max(1, login.expiresAt - now(ctx)),
   });

@@ -1,6 +1,7 @@
 import './status.css';
 import type { TaskRow, TaskState } from '@coder/client/types';
-import { awaitsApproval } from '@coder/core/defaults';
+import { awaitsApproval } from '@coder/core/task/view';
+import { Badge } from '@/comps/ui/badge';
 
 /** A task's state; an open escalation reads as needing approval whatever its turn does. */
 export function Status({
@@ -19,6 +20,9 @@ export function Status({
     </span>
   );
 }
+
+/** A task that ran with read-only access, on its page head and its list row. */
+export const ReadOnlyBadge = () => <Badge title="Ran with read-only access">read-only</Badge>;
 
 export const STATUS_LABEL: Record<TaskState, string> = {
   queued: 'waiting for slot',

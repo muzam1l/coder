@@ -11,7 +11,7 @@ import {
 import { parseCredentialId } from '../settings/credentials';
 import { type Params } from '../routes/match';
 import { type ServerContext } from '../context';
-import { removeTaskWork, taskRunner } from '../runners';
+import { taskRunner } from '../runners/select';
 import {
   answerLocalApproval,
   inspectLocalTask,
@@ -22,6 +22,7 @@ import {
   startLocalTask,
 } from './local';
 import { scheduleKick } from './kick';
+import { changeOf, decideChange, sessionApprover } from './changes';
 import { readLog } from './logs';
 import { inspectTask, scheduleCancel } from './kick';
 import {
@@ -44,11 +45,19 @@ import {
 import { randomUUID } from 'node:crypto';
 import { queueRowWins } from '../../core/state';
 import { decryptSecret } from '../store/secrets';
-import { type AgentEvent, type TaskSource } from '../../agent/types';
+import { type AgentApp, type AgentEvent, type AgentTask, type TaskSource } from '../../agent/types';
+import type { Integration } from '../../integrations/types';
 import { eventReplies } from '../chat';
 import { dispatchEvent } from './events';
 import { start } from './flows';
-import { ConfigError } from '../settings/config';
+import { ConfigError, effectiveConfig, shownConfig } from '../settings/config';
+import { type ComposerOptions } from '../../client/types';
+import { defaultAgent } from '../../agent/load';
+import { builtinFlowsDir, flowsIn } from '../../flow/discover';
+import { agentRecords, prepareAgent } from '../agents/catalog';
+import { localFolders } from '../settings/folders';
+import { modelList } from '../settings/models';
+import { removeTaskWork, runnerItems } from '../settings/runners';
 import {
   ApprovalRefusedError,
   approvalMessage,
@@ -61,9 +70,13 @@ import {
 import { resolveTaskDir } from '../../core/state';
 import { syncApprovals } from './approvals';
 import { type Approval } from '../../core/types';
-import { awaitsApproval } from '../../core/defaults';
+import { awaitsApproval } from '../../core/task/view';
+import { viewer } from './access';
 
 export const DONE = new Set<TaskStatus['status']>(['completed', 'failed', 'cancelled']);
+
+/** The most open approvals the Tasks page's queue carries. */
+const APPROVAL_QUEUE_ROWS = 50;
 
 export function taskError(error: unknown): Response {
   if (error instanceof ConfigError) return json({ error: error.message }, 400);
@@ -72,8 +85,16 @@ export function taskError(error: unknown): Response {
   throw error;
 }
 
-export function summarizeTask(status: TaskStatus) {
-  const { id, name, source, agent, flow, event, cwd } = status.task;
+/** The model a task runs with, as its turn recorded when it started, else its own pick; tasks from before the record show only their pick. */
+function runModel(status: TaskStatus) {
+  const model =
+    status.task.usage?.resolvedModel ?? status.task.usage?.model ?? status.task.definition?.model;
+
+  return model ? { model } : {};
+}
+
+function summarizeTask(status: TaskStatus) {
+  const { id, name, source, agent, flow, event, cwd, access, context, requestedBy } = status.task;
   const { engine, model, effort } = { ...status.task.definition, ...status.task.usage };
   // The first turn's prompt titles the task; a follow-up or a decision is a later turn.
   const prompt = status.task.context?.turns?.[0]?.prompt ?? status.task.prompt;
@@ -85,14 +106,25 @@ export function summarizeTask(status: TaskStatus) {
       agent,
       flow,
       ...(cwd ? { cwd } : {}),
+      ...(access ? { access } : {}),
       ...(prompt ? { prompt } : {}),
       ...(event
-        ? { event: { integration: event.integration, type: event.type, text: event.text } }
+        ? {
+            event: {
+              integration: event.integration,
+              type: event.type,
+              text: event.text,
+              actor: event.actor,
+            },
+          }
         : {}),
+      ...(context?.user ? { context: { user: context.user } } : {}),
+      ...(requestedBy ? { requestedBy } : {}),
       ...(engine
         ? { usage: { engine, ...(model ? { model } : {}), ...(effort ? { effort } : {}) } }
         : {}),
     },
+    ...runModel(status),
     status: status.status,
     ...(status.status === 'queued' ? { statusReason: 'Waiting for a task slot' } : {}),
     attempts: status.attempts,
@@ -133,9 +165,12 @@ async function target(
   | { status?: never; cwd: string; answer?: TaskStatus['answer'] }
   | Response
 > {
-  const status = await ctx.store.get('task', id);
+  // The route's guard has read the row.
+  const status = ctx.routeTask?.task.id === id ? ctx.routeTask : await ctx.store.get('task', id);
   if (status && !(ctx.local && status.handle?.startsWith('cli:') && status.task.flow === 'default'))
     return { status };
+  // A task reaches only its children, never another CLI task by its folder.
+  if (!status && ctx.taskPrincipal) return json({ error: `No task "${id}"` }, 404);
   const cwd = status?.task.cwd ?? ctx.local?.cwd;
 
   return cwd ? { cwd, answer: status?.answer } : json({ error: `No task "${id}"` }, 404);
@@ -168,7 +203,9 @@ export async function readTask(
     });
   }
 
-  return json({ ...redactTask(await inspectTask(ctx, status)), logs: await stored! });
+  const inspected = await inspectTask(ctx, status);
+
+  return json({ ...redactTask(inspected), ...runModel(inspected), logs: await stored! });
 }
 
 export async function removeTask(
@@ -178,7 +215,8 @@ export async function removeTask(
   url: URL,
 ): Promise<Response> {
   const taskId = params.id!;
-  const found = await target(ctx, taskId);
+  // A delete fences on the row as it is now, after any claim since the guard read it.
+  const found = await target({ ...ctx, routeTask: undefined }, taskId);
   if (found instanceof Response) return found;
   const { status, cwd } = found;
   if (!status) {
@@ -275,20 +313,31 @@ export async function steerTask(
   const body = await req.json().catch(() => undefined);
   // A finished task resumes on the same id; a live one takes the follow-up in its inbox.
   if (DONE.has(status.status)) {
-    const { text, outputSchema, model, effort, permissions } = (body ?? {}) as Record<string, any>;
+    const { text, outputSchema, model, effort, access } = (body ?? {}) as Record<string, any>;
+    // The member continuing it asks this turn.
+    const context = { ...status.task.context, asker: ctx.session?.user.id };
     try {
-      const next = await continueTask(ctx, status, String(text ?? ''), outputSchema, {
-        model,
-        effort,
-        permissions,
-      });
+      const next = await continueTask(
+        ctx,
+        { ...status, task: { ...status.task, context } },
+        String(text ?? ''),
+        outputSchema,
+        {
+          model,
+          effort,
+          access,
+        },
+      );
       scheduleKick(ctx, true);
       return json(redactTask(next));
     } catch (error) {
       return taskError(error);
     }
   }
-  const entry = await addInbox(ctx, status, 'steer', body);
+  const entry = await addInbox(ctx, status, 'steer', {
+    ...body,
+    asker: ctx.session?.user.id ?? null,
+  });
 
   return entry ? json(entry) : json({ error: `Task "${taskId}" is no longer active` }, 409);
 }
@@ -296,14 +345,14 @@ export async function steerTask(
 function inboxAction(kind: 'ask' | 'approve') {
   return async (req: Request, ctx: ServerContext, params: Params): Promise<Response> => {
     const id = params.id!;
-    const found = await target(ctx, id);
-    if (found instanceof Response) return found;
-    const { status, cwd } = found;
     if (kind === 'approve') {
       const value = (await req.json().catch(() => undefined)) as
         Record<string, unknown> | undefined;
-      return decideApproval(ctx, id, value ?? {}, ctx.session?.user.name);
+      return decideApproval(ctx, id, value ?? {}, (await sessionApprover(ctx))?.name);
     }
+    const found = await target(ctx, id);
+    if (found instanceof Response) return found;
+    const { status, cwd } = found;
     if (!status) return localTaskAction(req, cwd, id, kind, ctx);
     if (status.task.flow !== 'default')
       return json({ error: `${kind} is available only for default-flow tasks` }, 409);
@@ -336,20 +385,25 @@ export async function decideApproval(
         : pendingApprovals(resolveTaskDir(cwd, id))[0]?.id) ??
       '',
   );
+  const requested = status?.task.context?.approvals?.find(entry => entry.id === approvalId);
+  if (status && changeOf(requested))
+    return decideChange(ctx, status, approvalId, value, await sessionApprover(ctx));
   const decision = value.decision === 'deny' || value.decision === 'decline' ? 'decline' : 'accept';
   const answer = { ...value, approvalId, decision, ...(by ? { by } : {}) };
-  const response = status
+  const { response, task } = status
     ? await answerApproval(ctx, status, answer)
-    : await answerLocalApproval(cwd, id, answer, ctx);
+    : {
+        response: await answerLocalApproval(cwd, id, answer, ctx),
+        task: (await ctx.store.get('task', id))?.task,
+      };
   if (!response.ok) return response;
 
-  const current = await ctx.store.get('task', id);
   const approvals = status
-    ? (current?.task.context?.approvals ?? [])
+    ? (task?.context?.approvals ?? [])
     : listApprovals(resolveTaskDir(cwd, id));
-  if (current)
+  if (task)
     (ctx.waitUntil ?? (() => {}))(
-      syncApprovals(ctx, current.task, approvals).catch(error =>
+      syncApprovals(ctx, task, approvals).catch(error =>
         console.error(`coder server: could not show the decision on approval ${approvalId}`, error),
       ),
     );
@@ -357,12 +411,12 @@ export async function decideApproval(
   return response;
 }
 
-/** Answer an approval, pending or denied, any time: a live task hears it in its inbox, a finished one resumes with it as a new turn. */
+/** Answer an approval, pending or denied, any time: a live task hears it in its inbox, a finished one resumes with it as a new turn; `task` holds the answer once it landed. */
 async function answerApproval(
   ctx: ServerContext,
   status: TaskStatus,
   value: Record<string, unknown>,
-): Promise<Response> {
+): Promise<{ response: Response; task?: AgentTask }> {
   const id = status.task.id;
   const known = status.task.context?.approvals ?? [];
   const pending = status.approval as Approval | undefined;
@@ -370,11 +424,12 @@ async function answerApproval(
   const approval =
     known.find(entry => entry.id === approvalId) ??
     (pending?.id === approvalId ? pending : undefined);
-  if (!approval) return json({ error: `Task "${id}" has no approval "${approvalId}"` }, 409);
+  if (!approval)
+    return { response: json({ error: `Task "${id}" has no approval "${approvalId}"` }, 409) };
   if (approval.response?.decision === 'accept')
-    return json({ error: `Approval "${approvalId}" is already approved` }, 409);
+    return { response: json({ error: `Approval "${approvalId}" is already approved` }, 409) };
   if (approval.response?.decision === 'closed')
-    return json({ error: stoppedMessage(approvalId) }, 409);
+    return { response: json({ error: stoppedMessage(approvalId) }, 409) };
   const decision = value.decision as 'accept' | 'decline';
   const answered: Approval = {
     ...approval,
@@ -393,24 +448,25 @@ async function answerApproval(
         approvalMessage(answered),
       );
       scheduleKick(ctx, true);
-      return json(redactTask(next));
+      return { response: json(redactTask(next)), task: next.task };
     } catch (error) {
-      return taskError(error);
+      return { response: taskError(error) };
     }
   }
   if (!ACTIVE_STATES.includes(status.status))
-    return json({ error: `Task "${id}" is not active` }, 409);
+    return { response: json({ error: `Task "${id}" is not active` }, 409) };
   // The answer and its inbox entry land in one write, checked against the record under the queue's lock.
   let entry;
   try {
     entry = await addInbox(ctx, status, 'approve', value, undefined, [answered]);
   } catch (error) {
-    if (error instanceof ApprovalRefusedError) return json({ error: error.message }, 409);
+    if (error instanceof ApprovalRefusedError)
+      return { response: json({ error: error.message }, 409) };
     throw error;
   }
-  if (!entry) return json({ error: `Task "${id}" is no longer active` }, 409);
+  if (!entry) return { response: json({ error: `Task "${id}" is no longer active` }, 409) };
 
-  return json(entry);
+  return { response: json(entry), task: withApprovals(status.task, [answered]) };
 }
 
 export const askTask = inboxAction('ask');
@@ -440,19 +496,14 @@ export async function cancelTask(
   const open = (status.task.context?.approvals ?? []).filter(approval => !approval.response);
   if (cancelled && open.length) {
     const response = closedResponse(new Date(now).toISOString());
-    await ctx.queue.patchTask(
-      ctx.organizationId,
-      taskId,
-      { approvals: open.map(approval => ({ ...approval, response })) },
-      now,
+    const approvals = open.map(approval => ({ ...approval, response }));
+    await ctx.queue.patchTask(ctx.organizationId, taskId, { approvals }, now);
+    const task = withApprovals(status.task, approvals);
+    (ctx.waitUntil ?? (() => {}))(
+      syncApprovals(ctx, task, task.context?.approvals ?? []).catch(error =>
+        console.error(`coder server: could not show the stop on ${taskId}`, error),
+      ),
     );
-    const current = await ctx.store.get('task', taskId);
-    if (current)
-      (ctx.waitUntil ?? (() => {}))(
-        syncApprovals(ctx, current.task, current.task.context?.approvals ?? []).catch(error =>
-          console.error(`coder server: could not show the stop on ${taskId}`, error),
-        ),
-      );
   }
   if (cancelled && status.status !== 'queued') {
     await pushInbox(ctx, taskId);
@@ -490,22 +541,16 @@ export async function archiveTask(
   return json({ ok: true });
 }
 
-export async function adminEvent(
-  body: { agent?: string; event?: AgentEvent },
+/** The integration, app and event an event posted to the API dispatches as, or why there is none. */
+export async function eventTarget(
   ctx: ServerContext,
-): Promise<Response> {
+  body: { agent?: string; event?: AgentEvent },
+): Promise<{ integration: Integration; app: AgentApp; event: AgentEvent } | Response> {
   if (!body.agent || !body.event?.integration)
     return json({ error: 'agent and event are required' }, 400);
 
   const integration = ctx.integrations[body.event.integration];
   if (!integration) return json({ error: `Unknown integration "${body.event.integration}"` }, 400);
-
-  const actor = body.event.actor?.id;
-  if (ctx.auth && actor) {
-    const linked = await ctx.auth.linkedUser(integration.id, actor);
-    if (linked && linked.id !== ctx.session?.user.id)
-      return json({ error: "The event's actor is linked to another member" }, 403);
-  }
 
   const apps = (await ctx.store.list('app')).map(entry => entry.value);
   const app = apps.find(
@@ -533,13 +578,25 @@ export async function adminEvent(
       404,
     );
 
-  const now = ctx.now ?? Date.now;
   const event: AgentEvent = {
     ...body.event,
     appId: app.id,
     installationId: installation.id.slice(app.id.length + 1),
-    deliveryId: `admin-${now()}-${randomUUID()}`,
+    deliveryId: `admin-${(ctx.now ?? Date.now)()}-${randomUUID()}`,
   };
+
+  return { integration, app, event };
+}
+
+async function adminEvent(
+  body: { agent?: string; event?: AgentEvent },
+  ctx: ServerContext,
+): Promise<Response> {
+  const target = await eventTarget(ctx, body);
+  if (target instanceof Response) return target;
+  const { integration, app, event } = target;
+
+  const now = ctx.now ?? Date.now;
   const dispatched = await dispatchEvent(
     ctx,
     integration,
@@ -585,7 +642,7 @@ export async function adminCreate(
     if (body.event) return adminEvent(body, ctx);
 
     const status =
-      (body.source !== 'cli' ? await startLocalTask(ctx, body) : undefined) ??
+      (body.source !== 'cli' && !ctx.taskPrincipal ? await startLocalTask(ctx, body) : undefined) ??
       (await createTask(ctx, body.source === 'cli' ? 'cli' : 'dashboard', body));
 
     return json(redactTask(status), 201);
@@ -629,6 +686,8 @@ export async function listTasks(
     ...(agent ? { agent } : {}),
     ...(source ? { source: source as TaskSource } : {}),
     ...(q ? { q } : {}),
+    viewer: await viewer(ctx),
+    ...(ctx.taskPrincipal ? { parent: ctx.taskPrincipal.task } : {}),
     archived: since === undefined ? url.searchParams.get('archived') === '1' : undefined,
     ...(since !== undefined
       ? {
@@ -659,7 +718,16 @@ export async function listTasks(
             })),
             ...localTasks(ctx.local.cwd, false),
           ];
-    const rows = localRows(ctx.local.cwd, cli, await ctx.queue.list(ctx.organizationId))
+    const queued = await ctx.queue.list(ctx.organizationId, {
+      ...(ctx.taskPrincipal ? { parent: ctx.taskPrincipal.task } : {}),
+    });
+    const children = new Set(queued.map(row => row.task.id));
+    const merged = localRows(
+      ctx.local.cwd,
+      ctx.taskPrincipal ? cli.filter(row => children.has(row.task.id)) : cli,
+      queued,
+    );
+    const rows = merged
       .filter(row => matchesTask(row, { ...filter, ...states }))
       .sort(since === undefined ? listOrder : deltaOrder);
     const limit = pageLimit(url, paged(url) ? undefined : 20);
@@ -672,6 +740,15 @@ export async function listTasks(
       limit,
       since === undefined ? listCursor : deltaCursor,
     );
+    const pending =
+      url.searchParams.get('approvals') === '1' && !before && summary
+        ? merged
+            .filter(row =>
+              matchesTask(row, { viewer: filter.viewer, archived: false, status: 'waiting' }),
+            )
+            .sort(listOrder)
+            .slice(0, APPROVAL_QUEUE_ROWS)
+        : [];
 
     return json({
       ...result,
@@ -687,6 +764,7 @@ export async function listTasks(
             },
           }
         : {}),
+      ...(pending.length ? { pendingApprovals: shape(pending) } : {}),
     });
   }
   if (!paged(url)) {
@@ -711,7 +789,9 @@ export async function listTasks(
           summary,
         })
       : undefined;
-  const [rows, counts] = await Promise.all([
+  // The first page, when asked, also carries the viewer's approval queue: open approvals on the tasks they see.
+  const approvals = url.searchParams.get('approvals') === '1' && !before && summary;
+  const [rows, counts, pending] = await Promise.all([
     together
       ? together.items
       : ctx.queue.list(ctx.organizationId, {
@@ -726,8 +806,56 @@ export async function listTasks(
       : url.searchParams.get('counts') === '1'
         ? ctx.queue.counts(ctx.organizationId, { ...filter, ...states })
         : undefined,
+    approvals
+      ? ctx.queue.list(ctx.organizationId, {
+          viewer: filter.viewer,
+          ...(filter.parent ? { parent: filter.parent } : {}),
+          archived: false,
+          status: 'waiting',
+          summary: true,
+          limit: APPROVAL_QUEUE_ROWS,
+        })
+      : undefined,
   ]);
   const result = page(rows, limit, since === undefined ? listCursor : deltaCursor);
 
-  return json({ ...result, items: shape(result.items), ...(counts ? { counts } : {}) });
+  return json({
+    ...result,
+    items: shape(result.items),
+    ...(counts ? { counts } : {}),
+    ...(pending?.length ? { pendingApprovals: shape(pending) } : {}),
+  });
+}
+
+/** `GET /admin/composer`: everything the New task composer offers, read in one handler. */
+export async function composerOptions(req: Request, ctx: ServerContext): Promise<Response> {
+  const { now, local } = await prepareAgent(ctx);
+  const [records, config, runners] = await Promise.all([
+    agentRecords(ctx, local, { limit: 200 }),
+    shownConfig(ctx),
+    ctx.store.list('runner'),
+  ]);
+
+  const preferred = defaultAgent();
+  const agents = records
+    .filter(record => !record.settings?.disabled)
+    .sort((a, b) => Number(b.id === preferred) - Number(a.id === preferred))
+    .map(({ id, name }) => ({ id, name, ...(id === preferred ? { default: true as const } : {}) }));
+  const effective = effectiveConfig(ctx, config);
+  const repos = Object.values(ctx.integrations).find(integration => integration.repos);
+
+  return json({
+    agents,
+    ...(effective.chain?.[0] ? { engine: effective.chain[0] } : {}),
+    engines: effective.engines ?? {},
+    models: modelList(config),
+    runners: runnerItems(ctx, runners, now).map(({ id, name, default: chosen }) => ({
+      id,
+      name,
+      default: chosen,
+    })),
+    flows: flowsIn(builtinFlowsDir(), 'builtin').map(flow => flow.name),
+    ...(ctx.local ? { folders: localFolders(ctx.local.cwd) } : {}),
+    ...(repos ? { connectLabel: repos.installLabel ?? `Connect ${repos.id}` } : {}),
+  } satisfies ComposerOptions);
 }

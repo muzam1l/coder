@@ -1,5 +1,5 @@
 /** Internal flow-runtime types. See docs/flows.md for the contract. */
-import type { McpServerSpec, TokenUsage } from '../core/types';
+import type { Access, McpServerSpec, TokenUsage } from '../core/types';
 
 /** Anything with zod's parse shape; the flow runtime never imports zod itself. */
 export interface FlowSchema<T> {
@@ -23,10 +23,9 @@ export interface GateResult {
 
 /** Options shared with `coder run`, plus `returns`. */
 export interface FlowTaskOptions<T = unknown> {
-  engine?: string;
   model?: string;
   effort?: string;
-  permissions?: string;
+  access?: Access;
   mcp?: string | McpServerSpec[];
   name?: string;
   appendSystem?: string;
@@ -39,7 +38,7 @@ export interface FlowTaskOptions<T = unknown> {
 export interface FlowSteerOptions {
   model?: string;
   effort?: string;
-  permissions?: string;
+  access?: Access;
 }
 
 export type FlowRunStatus = 'running' | 'completed' | 'failed' | 'stopped';

@@ -6,7 +6,7 @@ import { createHash } from 'node:crypto';
 import type { ConnectionInput, ConnectionRow } from '../client/types';
 import type { ServerConfig, ServerContext } from '../server/context';
 import type { Store } from '../server/store/types';
-import { loadConfig, type McpConfigEntry } from './config';
+import { ACCESS, loadConfig, type Access, type McpConfigEntry } from './config';
 import { CoderError } from './errors';
 import { mcpApprove, mcpApproved } from './mcp';
 import { connect, serverFor, type ServerOptions } from './remote';
@@ -24,7 +24,7 @@ export interface ConnectionAddOptions extends ConnectionOptions {
   /** A stdio MCP server's command line. */
   command?: string[];
   tools?: string[];
-  access?: 'read' | 'write';
+  access?: Access;
   /** Remote authentication is detected when omitted; commands default to none. */
   auth?: 'oauth' | 'key' | 'none';
   key?: string;
@@ -143,8 +143,8 @@ async function input(name: string, opts: ConnectionAddOptions): Promise<Connecti
   const access = opts.access && { access: opts.access };
   const owner = opts.me ? { owner: 'me' as const } : {};
   if (command && opts.url) throw invalid('Use either --url or a command, not both.');
-  if (opts.access && !['read', 'write'].includes(opts.access))
-    throw invalid('Invalid --access value.', 'Use read or write');
+  if (opts.access && !ACCESS.includes(opts.access))
+    throw invalid('Invalid --access value.', 'Use read-only or auto');
 
   if (command || opts.url) {
     const auth = opts.auth ?? (opts.key ? 'key' : opts.url ? undefined : 'none');

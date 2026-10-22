@@ -11,6 +11,15 @@ export const commandRunnerRemove = command({
   name: 'remove',
   description: 'remove a runner',
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/settings/runners',
+      label: 'Remove the runner',
+      action: 'delete',
+      args: ['id'],
+      button: 'Remove',
+    },
+  },
   args: { id: z.string().check(z.describe('the runner')), ...credentialServerOptions },
   globalFlags: { cwd: false },
   cli: { positional: ['id'] },

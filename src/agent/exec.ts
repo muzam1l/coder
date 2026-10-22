@@ -3,11 +3,11 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
 import type { ChildProcess } from 'node:child_process';
-import { defaultEmojiResolver, type Message, type Thread } from 'chat';
+import type { Message, Thread } from 'chat';
 
 import { resolveFlow } from '../flow/discover';
 import { runFlowByName } from '../flow/executor';
-import { loadConfig } from '../core/config';
+import { loadConfig, type Access } from '../core/config';
 import {
   CoderError,
   dispatchTask,
@@ -18,7 +18,7 @@ import {
   type DispatchOptions,
   type TaskResult,
 } from '../core/dispatch';
-import { EMPTY_MESSAGE, EMPTY_MESSAGE_NOTICE, SKIPPED } from '../core/defaults';
+import { EMPTY_MESSAGE, EMPTY_MESSAGE_NOTICE, SKIPPED } from '../core/task/view';
 import {
   watchTask,
   appendTaskLog,
@@ -40,9 +40,16 @@ import {
 } from './definition';
 import { loadAgents } from './load';
 import { INTEGRATIONS } from '../integrations';
-import { nativeToolEnvironment, tokenEnvName, type ReplyEndpoint } from './mcp';
-import type { Agent, AgentEvent, AgentTask, Preset, TaskContext, TaskSource } from './types';
-import { eventPrompt, historyPrompt, replyRequired, requestPrompt } from './context/turn';
+import { nativeToolEnvironment, taskPlatforms, tokenEnvName, type ReplyEndpoint } from './mcp';
+import { replyRequired } from './event-json';
+import {
+  type Agent,
+  type AgentEvent,
+  type AgentTask,
+  type TaskContext,
+  type TaskSource,
+} from './types';
+import { decisionsPrompt, eventPrompt, historyPrompt, requestPrompt } from './context/turn';
 import type { AgentPromptParts, DeveloperParts } from '../core/task/context/system';
 import { connectionEnvironment, localConnections, narrowConnections } from '../core/connections';
 import { readJsonFile, writeJsonFileAtomic } from '../utils/fsx';
@@ -81,9 +88,13 @@ function normalizedReply(text: string): string {
     .trim();
 }
 
+/** An engine refusing the model it was given, as Claude Code and Codex word it. */
+const MODEL_UNAVAILABLE =
+  /issue with the selected model|model_not_found|\bmodel\b.{0,80}\b(?:does not exist|is not supported|not found)/i;
+
 /** The turn's reply, including skipped answers, missing answers and failures. */
 export function threadReply(
-  task: Pick<AgentTask, 'event' | 'context' | 'failureReply' | 'taskUrl'>,
+  task: Pick<AgentTask, 'event' | 'context' | 'failureReply' | 'taskUrl' | 'settingsUrl'>,
   result: { finalMessage?: string | null; error?: { message?: string } | null } | null | undefined,
   cancelled: boolean,
   turn?: Pick<TurnResultEntry, 'prompt' | 'steers' | 'lastReply'>,
@@ -117,6 +128,13 @@ export function threadReply(
     const link = task.taskUrl ? ` [See the task](${task.taskUrl})` : '';
 
     return { text: `${EMPTY_MESSAGE_NOTICE}${link}`, problem: false };
+  }
+
+  if (MODEL_UNAVAILABLE.test(error)) {
+    const fix = task.settingsUrl
+      ? `[Open the agent's settings](${task.settingsUrl}) to pick another one.`
+      : "An admin can pick another one in the agent's settings.";
+    return { text: `This agent's model is not available in this workspace. ${fix}`, problem: true };
   }
 
   return { text: task.failureReply ?? error, problem: true };
@@ -257,6 +275,7 @@ async function eventThread(
 
 export async function reactToMessage(thread: Thread, emoji: string, message?: string) {
   if (!message) throw new Error('This turn has no message to react to; give a message id');
+  const { defaultEmojiResolver } = await import('chat');
   const normalized = defaultEmojiResolver.fromSlack(defaultEmojiResolver.fromGChat(emoji).name);
   await thread.adapter.addReaction(thread.id, message, normalized);
 }
@@ -318,7 +337,7 @@ export async function execAgent(options: {
   onEngine?: (engine: string) => Promise<boolean | void>;
   onStart?: import('../flow/runtime').FlowHooks['onStart'];
   /** Secrets passed only to task-core MCP children, never inherited by the engine. */
-  toolEnvironment?: { tokens: Record<string, string>; native?: string[] };
+  toolEnvironment?: { tokens: Record<string, string> };
   /** Where the conversation tools post, when the caller posts replies for the task. */
   replyEndpoint?: ReplyEndpoint;
   connections?: Record<string, McpServerSpec>;
@@ -359,7 +378,6 @@ export async function execAgent(options: {
     task,
     options.toolEnvironment?.tokens ?? localTokens(task, process.env),
     options.replyEndpoint,
-    options.toolEnvironment?.native,
   );
 
   if (flow === 'default') {
@@ -453,7 +471,7 @@ export async function execAgent(options: {
                 engine: resolved.engine,
                 model: resolved.model ?? undefined,
                 effort: resolved.effort ?? undefined,
-                permissions: task.permissions ?? resolved.permissions,
+                access: agentAccess(agent, task.access),
                 agentPrompt: defaults.agentPrompt,
                 prompt: defaults.prompt,
                 outputSchema: task.context?.outputSchema,
@@ -576,11 +594,7 @@ export async function execAgent(options: {
       cwd,
       ...(options.taskId ? { runId: options.taskId } : {}),
       args,
-      ceiling: {
-        agent: agent.id,
-        permissions:
-          task.permissions ?? resolveTaskOptions(effectiveSettings(agent), config).permissions,
-      },
+      access: agentAccess(agent, task.access),
       ...(options.postToken ? { integrationToken: options.postToken } : {}),
       connections: {
         mcp: { ...connected.mcp, ...native.mcp },
@@ -648,7 +662,7 @@ export async function builtinTaskArgs(
   return {
     ...(await builtinArgs(task.event, agent, task.context, task.author, post)),
     ...effectiveSettings(agent),
-    ...(task.permissions ? { permissions: task.permissions } : {}),
+    ...(task.access ? { access: task.access } : {}),
   };
 }
 
@@ -689,17 +703,16 @@ export function builtinArgs(
   };
 }
 
-/** A repo agent's access mode, which its local Default connections follow; Read-only when it is gone. */
-/** A local agent's access and developer instructions as they are now; read access once it is gone. */
+/** A local agent's access and developer instructions as they are now; read-only once it is gone. */
 export async function localAgentPrompt(
   cwd: string,
   id: string,
-): Promise<{ access: Preset; developer?: DeveloperParts }> {
+): Promise<{ access: Access; developer?: DeveloperParts }> {
   const agent = (await loadAgents(cwd, INTEGRATIONS).catch(() => [])).find(a => a.id === id);
 
   return agent
     ? { access: agentAccess(agent), developer: agentDeveloperInstructions(agent) }
-    : { access: 'read' };
+    : { access: 'read-only' };
 }
 
 /** Task options from a local agent definition: `coder task run --agent <id>`. */
@@ -709,11 +722,12 @@ export async function agentTaskOptions(
   mcpFlag?: string,
   connections?: Record<string, McpServerSpec>,
   narrowed?: string[],
+  asked?: Access,
 ): Promise<{
   engine?: string;
   model?: string;
   effort?: string;
-  permissions?: string;
+  access: Access;
   developer: DeveloperParts;
   mcp: McpServerSpec[];
   mcpBindings?: Task['mcpBindings'];
@@ -730,13 +744,14 @@ export async function agentTaskOptions(
       hint: `Agents here: ${agents.map(a => a.id).join(', ')}`,
     });
   const { definition, usage } = agent;
+  const access = agentAccess(agent, asked);
   const connected =
     connections === undefined
       ? await localConnections(
           narrowConnections(usage?.connections, narrowed),
           undefined,
           undefined,
-          agentAccess(agent),
+          access,
         )
       : undefined;
   const own = definition.mcp ?? {};
@@ -746,7 +761,7 @@ export async function agentTaskOptions(
     engine: usage?.engine ?? definition.engine,
     model: usage?.model ?? definition.model,
     effort: usage?.effort ?? definition.effort,
-    permissions: usage?.permissions ?? definition.permissions,
+    access,
     developer: agentDeveloperInstructions(agent),
     ...mcp,
     mcpWarnings: mcp.warnings,
@@ -756,8 +771,6 @@ export async function agentTaskOptions(
 }
 
 const MAX_SYSTEM_CHARS = 48_000;
-/** Where the built-in review flow leaves its findings, on a platform that hosts code. */
-const REVIEW_FINDINGS = 'Review findings are inline review comments marked coder-review:fp.';
 
 /** The developer's part of the system prompt: what whoever built the agent wrote, plus the installation's repository instructions. */
 export function agentDeveloperInstructions(agent: Agent, context?: TaskContext): DeveloperParts {
@@ -768,7 +781,7 @@ export function agentDeveloperInstructions(agent: Agent, context?: TaskContext):
   };
 }
 
-export function agentInstructions(agent: Agent): string {
+function agentInstructions(agent: Agent): string {
   if (!agent.dir) return filesInstructions(agent.files ?? {});
   let files: string[];
   try {
@@ -807,17 +820,18 @@ function filesInstructions(files: Record<string, string>): string {
 }
 
 /** A platform event's own task is a conversation; dashboard and CLI tasks are reports. */
-export const isConversation = (task: Pick<AgentTask, 'event' | 'source'>) =>
+const isConversation = (task: Pick<AgentTask, 'event' | 'source'>) =>
   Boolean(task.event && task.source === task.event.integration);
 
 export function defaultTask(
   agent: Agent,
-  task: Pick<AgentTask, 'event' | 'prompt' | 'context' | 'source' | 'tools'>,
+  task: Pick<AgentTask, 'event' | 'prompt' | 'context' | 'source' | 'tools' | 'access'>,
 ): { agentPrompt: AgentPromptParts; prompt: string } {
   const { event, context } = task;
   const conversation = isConversation(task);
   const user = task.prompt === undefined ? context?.user : undefined;
   const integration = event && INTEGRATIONS[event.integration];
+  const platforms = taskPlatforms(task);
   const turn =
     task.prompt === undefined
       ? event
@@ -832,16 +846,14 @@ export function defaultTask(
         ? {
             platform: {
               name: event!.integration,
-              prompt:
-                [integration?.prompt, integration?.repos && REVIEW_FINDINGS]
-                  .filter(Boolean)
-                  .join('\n') || undefined,
+              prompt: integration?.prompt,
             },
             events: definitionEvents(agent.definition.integrations[event!.integration]),
           }
         : {}),
-      access: agentAccess(agent),
+      access: agentAccess(agent, task.access),
+      ...(platforms.length ? { platforms } : {}),
     },
-    prompt: historyPrompt(context?.messages ?? [], turn),
+    prompt: historyPrompt(context?.messages ?? [], decisionsPrompt(context, turn)),
   };
 }

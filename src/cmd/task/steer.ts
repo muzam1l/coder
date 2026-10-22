@@ -1,8 +1,9 @@
 /** `coder task steer`: send a follow-up to a task, live or by resuming it. */
 import process from 'node:process';
 
-import { CoderError } from '../../core/dispatch';
+import { CoderError } from '../../core/errors';
 import type { SteerResult } from '../../core/task';
+import type { Access } from '../../core/types';
 import { outStyle } from '../../tui/output';
 import { flag, serverOptions, str, strList } from '../../utils/args';
 import { command } from '../../cli';
@@ -47,7 +48,7 @@ export const commandSteer = command({
   name: 'steer',
   description: "continue a task's thread",
   usage:
-    "Continue a task's thread with new instructions. They are injected into a live Codex or\nClaude turn at its next tool boundary and queued across a startup or completion race.\nA stopped, finished, or archived task resumes on the same task id. It reuses the\ntask's engine, model, and permissions unless overridden.",
+    "Continue a task's thread with new instructions. They are injected into a live Codex or\nClaude turn at its next tool boundary and queued across a startup or completion race.\nA stopped, finished, or archived task resumes on the same task id. It reuses the\ntask's engine, model, and access unless overridden.",
   access: 'write',
   args: {
     'task-id': str('the task to continue'),
@@ -55,7 +56,7 @@ export const commandSteer = command({
     wait: flag('run in the foreground and block until the answer is ready'),
     model: str("override the task's model for this follow-up", '<alias|slug>'),
     effort: str("override the task's reasoning effort", '<low|medium|high>'),
-    permissions: str('read-only · workspace-write · auto', '<mode>'),
+    access: str("lower the task's access for this follow-up", '<read-only|auto>'),
     ...serverOptions,
   },
   cli: {
@@ -69,7 +70,11 @@ export const commandSteer = command({
       'Usage: coder task steer <task-id> "<follow-up>" [--wait]',
       'Help: coder task steer --help',
     ]);
-    return tasks.steer(id, text, { ...options, organization: options.workspace });
+    return tasks.steer(id, text, {
+      ...options,
+      access: options.access as Access | undefined,
+      organization: options.workspace,
+    });
   },
   json: (outcome, { options }) =>
     !options.wait || outcome.steered === 'queued'

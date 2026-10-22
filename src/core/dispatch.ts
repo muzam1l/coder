@@ -33,16 +33,16 @@ import {
 } from './state';
 import { createJsonlTail, readJsonFile } from '../utils/fsx';
 import { getCodexAvailability } from './engines/codex';
-import { isUnsupportedModelError } from './engines/codex/errors';
+import { isUnsupportedModelError } from './engines/codex/app-server';
 import { claudeVersionEnvironment, getClaudeAvailability } from './engines/claude';
 import { ensureCodexInstalled, modelVersionWarning } from './hosts';
 import {
+  ACCESS_MODES,
   CLAUDE_EFFORTS,
   CLAUDE_MODELS,
   CLAUDE_SANDBOX_UNAVAILABLE_PATTERN,
   CODEX_EFFORTS,
   CODEX_MODELS,
-  PERMISSION_MODES,
   assertModelEnabled,
   isAliasModel,
   isEndpointModel,
@@ -109,7 +109,7 @@ export function resolveTaskOptions(
 ): ResolvedTaskOptions {
   // A bare model implies its engine: sonnet/opus/fable -> claude,
   // luna/sol/astra -> codex, a configured custom-model name -> custom.
-  // Explicit --engine always wins; unknown/raw slugs keep the chain default.
+  // Internal engine overrides keep fallback dispatch pinned.
   let engine = options.engine;
   const explicitEngine = Boolean(engine);
   let modelInput = options.model as string | undefined;
@@ -122,18 +122,18 @@ export function resolveTaskOptions(
     const entry = name ? config.models?.[name] : undefined;
     return entry && isEndpointModel(entry) ? entry : undefined;
   };
-  const expandAlias = (name: string) => {
+  const parseModel = (name: string) => {
     try {
       return parseEngineSpec(name, config);
     } catch (error) {
       throw new CoderError(
         'invalid-option',
-        error instanceof Error ? error.message : String(error),
+        `Invalid model "${name}". Use a model name or engine:model. ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   };
-  if (aliasEntry(modelInput)) {
-    const parsed = expandAlias(modelInput!);
+  if (modelInput?.includes(':') || aliasEntry(modelInput)) {
+    const parsed = parseModel(modelInput!);
     if (parsed) {
       if (!explicitEngine) {
         engine = parsed.engine;
@@ -161,14 +161,14 @@ export function resolveTaskOptions(
         : '';
     throw new CoderError(
       'invalid-option',
-      `Invalid --engine "${engine}". Use codex, claude, or custom.${hint}`,
+      `Invalid engine "${engine}". Use --model <model> or --model <engine:model>.${hint}`,
     );
   }
   const engineDefaults = config.engines[engine as Engine] ?? {};
   let model = modelInput ?? engineDefaults.model ?? null;
   let effort = effortInput ?? engineDefaults.effort ?? null;
   if (aliasEntry(model)) {
-    const parsed = expandAlias(model!);
+    const parsed = parseModel(model!);
     if (parsed) {
       if (!explicitEngine) {
         engine = parsed.engine;
@@ -177,7 +177,7 @@ export function resolveTaskOptions(
       effort = effortInput ?? parsed.effort ?? effort;
     }
   }
-  const permissions = options.permissions ?? engineDefaults.permissions ?? 'auto';
+  const access = options.access ?? 'auto';
 
   // A disabled built-in alias must never reach an engine.
   try {
@@ -203,17 +203,17 @@ export function resolveTaskOptions(
           ? `No custom model named "${model}". Configured: ${names.join(', ') || 'none'}.`
           : 'No custom model to run: pass --model <name> or set engines.custom.model.',
         {
-          hint: 'Add one: coder model add <name> --base-url <url> --model <id>',
+          hint: 'Use --model <name> or --model custom:<name>. Add one: coder model add <name> --base-url <url> --model <id>',
         },
       );
     }
   }
   const claude = engine === 'claude';
 
-  if (!(permissions in PERMISSION_MODES)) {
+  if (!(access in ACCESS_MODES)) {
     throw new CoderError(
       'invalid-option',
-      `Invalid --permissions "${permissions}". Use one of: ${Object.keys(PERMISSION_MODES).join(', ')}`,
+      `Invalid --access "${access}". Use one of: ${Object.keys(ACCESS_MODES).join(', ')}`,
     );
   }
   if (!claude && effort && !CODEX_EFFORTS.has(effort)) {
@@ -229,7 +229,7 @@ export function resolveTaskOptions(
     );
   }
 
-  return { engine, model, effort, permissions };
+  return { engine, model, effort, access };
 }
 
 // ---------------------------------------------------------------------------
@@ -491,8 +491,8 @@ export function ignoredAddDirs(runner: RunnerKind): string | undefined {
     : `--add-dir ignored: this task runs on a ${runner} machine`;
 }
 
-function isSandboxFailure(permissions: string, detail: string): boolean {
-  return permissions === 'read-only' && CLAUDE_SANDBOX_UNAVAILABLE_PATTERN.test(detail ?? '');
+function isSandboxFailure(access: string, detail: string): boolean {
+  return access === 'read-only' && CLAUDE_SANDBOX_UNAVAILABLE_PATTERN.test(detail ?? '');
 }
 
 // ---------------------------------------------------------------------------
@@ -510,7 +510,7 @@ export interface DispatchOptions {
   engine?: string;
   model?: string;
   effort?: string;
-  permissions?: string;
+  access?: string;
   name?: string | null;
   appendSystem?: string | null;
   /** The agent's part of the engine's system prompt. */
@@ -551,24 +551,7 @@ export interface DispatchOptions {
   };
 }
 
-const PERMISSION_ORDER = ['read-only', 'workspace-write', 'auto'];
-
-/** Permissions for a task an agent's flow starts: the agent's unless the task asks for less. */
-export function capPermissions(
-  name: string | null | undefined,
-  asked: string | null | undefined,
-  ceiling: { agent: string; permissions: string },
-): string {
-  if (!asked) return ceiling.permissions;
-  if (PERMISSION_ORDER.indexOf(asked) > PERMISSION_ORDER.indexOf(ceiling.permissions))
-    throw new CoderError(
-      'invalid-option',
-      `task "${name ?? 'task'}" asks for ${asked} but agent "${ceiling.agent}" is ${ceiling.permissions}: lower the task's permissions or raise the agent's`,
-    );
-  return asked;
-}
-
-export interface DispatchResult {
+interface DispatchResult {
   taskId: string;
   task: Task;
   /** The engine the task actually started on (may differ after a fallback). */
@@ -691,7 +674,7 @@ async function attemptOnce(
       conversation: opts.conversation,
       local: process.env.CODER_MCP_MODE !== 'cloud',
       scratch,
-      writes: resolved.permissions !== 'read-only',
+      writes: resolved.access !== 'read-only',
       ...(opts.structured || opts.outputSchema ? { structured: true } : {}),
     },
     engine: resolved.engine,
@@ -699,7 +682,7 @@ async function attemptOnce(
     ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
     model: resolved.model,
     effort: resolved.effort,
-    permissions: resolved.permissions,
+    access: resolved.access,
     resumeThreadId: resume?.threadId ?? null,
     ...(resume
       ? {
@@ -795,7 +778,7 @@ async function attemptOnce(
       .map(entry => entry.message ?? '')
       .join('\n');
     const detail = resultError || logTail;
-    if (isSandboxFailure(resolved.permissions, detail)) {
+    if (isSandboxFailure(resolved.access, detail)) {
       throw new CoderError('read-only-unavailable', detail);
     }
     if (isStartupError(detail) && !turnHasSideEffects(result, toolUsed)) {
@@ -815,7 +798,7 @@ async function attemptOnce(
 export function buildFallbackPayload(
   engine: Engine,
   detail: string,
-  permissions: string,
+  access: string,
   appendSystem: string | null | undefined,
   task: string,
 ): FallbackPayload {
@@ -824,10 +807,10 @@ export function buildFallbackPayload(
     fallback: {
       action: 'run-native-subagent',
       reason: 'no-engine-available',
-      permissions,
+      access,
       instructions:
-        'Mention the engine failure to the user, including any limit reset time. If your harness has a native subagent facility, spawn one subagent with fallback.task verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If fallback.permissions is "read-only", append: "Investigate and report without modifying anything." If it is "workspace-write", append: "Never touch anything outside the workspace." Relay its output when it completes. If your harness has no native subagent facility, report the failure and stop; do not implement the task yourself.',
-      note: 'Every coder engine failed to start. Spawn your own native subagent and forward the task verbatim; tell it to never run git write operations (commit, checkout, stash, reset, push, ...) and to honor the permissions.',
+        'Mention the engine failure to the user, including any limit reset time. If your harness has a native subagent facility, spawn one subagent with fallback.task verbatim, prefixed with: "NEVER run git write operations (commit, checkout, stash, reset, push, etc.); leave changes uncommitted." If fallback.access is "read-only", append: "Investigate and report without modifying anything." Relay its output when it completes. If your harness has no native subagent facility, report the failure and stop; do not implement the task yourself.',
+      note: 'Every coder engine failed to start. Spawn your own native subagent and forward the task verbatim; tell it to never run git write operations (commit, checkout, stash, reset, push, ...) and to honor the access.',
       ...(appendSystem ? { appendSystem } : {}),
       task,
     },
@@ -880,7 +863,7 @@ export async function dispatchTask(
     engine: opts.engine,
     model: opts.model,
     effort: opts.effort,
-    permissions: opts.permissions,
+    access: opts.access,
   };
   let taskExtras = {
     name: opts.name,
@@ -905,14 +888,14 @@ export async function dispatchTask(
         const payload = buildFallbackPayload(
           error.engine,
           error.detail,
-          resolved.permissions,
+          resolved.access,
           opts.appendSystem,
           opts.prompt,
         );
         throw new CoderError('chain-exhausted', payload.error, { payload });
       }
       opts.onFallback?.({ engine: error.engine, detail: error.detail, next });
-      resolveInput = { engine: next, permissions: opts.permissions };
+      resolveInput = { engine: next, access: opts.access };
       taskExtras = {
         name: undefined,
       };
@@ -1055,13 +1038,13 @@ export async function waitTask(
 export { isStartupError, isSandboxFailure };
 
 /** A pending approval as a wait surfaces it. */
-export interface PendingApproval {
+interface PendingApproval {
   id: string;
   reason: string;
   actions: string[];
 }
 
-export interface WaitOutcome {
+interface WaitOutcome {
   task: Task;
   reason: 'terminal' | 'approval';
   approval?: PendingApproval;

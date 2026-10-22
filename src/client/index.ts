@@ -1,4 +1,5 @@
 import { CoderError } from '../core/errors';
+import type { Access } from '../core/types';
 import type {
   RunnerSpec,
   RunnerPairing,
@@ -45,6 +46,7 @@ import type {
   TaskInput,
   TaskLog,
 } from './types';
+import { serverEvents, queryPath, validateUrl } from './http';
 
 export class ClientError extends CoderError {
   constructor(
@@ -58,56 +60,13 @@ export class ClientError extends CoderError {
   }
 }
 
-export type ClientAuth = { token: string } | { cookie: true };
-export interface ClientOptions {
+type ClientAuth = { token: string } | { cookie: true };
+interface ClientOptions {
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   organization?: string;
   onError?(error: ClientError): void;
   renewal?: { expiresAt(): number; renew(): Promise<string> };
 }
-
-export function isLoopbackServer(server: string): boolean {
-  try {
-    const host = new URL(server).hostname.toLowerCase();
-    return host === 'localhost' || host === '[::1]' || /^127(?:\.\d{1,3}){3}$/.test(host);
-  } catch {
-    return false;
-  }
-}
-
-export function validateUrl(raw: string): string {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new CoderError(
-      'invalid-option',
-      'Give the server as a URL, e.g. https://agents.example.com.',
-    );
-  }
-  if (url.protocol !== 'https:' && !(url.protocol === 'http:' && isLoopbackServer(url.origin)))
-    throw new CoderError(
-      'invalid-option',
-      'Coder servers require HTTPS unless they are loopback.',
-      { hint: 'Use https://, or http://localhost for a local server.' },
-    );
-  if (url.username || url.password || url.search || url.hash)
-    throw new CoderError(
-      'invalid-option',
-      'The server must be an origin without credentials, query, or fragment.',
-    );
-  return url.toString().replace(/\/+$/, '');
-}
-
-const queryPath = (path: string, options: object) => {
-  const query = new URLSearchParams();
-  if ('cursor' in options && typeof options.cursor === 'string')
-    query.set('cursor', options.cursor);
-  for (const [key, value] of Object.entries(options))
-    if (key !== 'cursor' && value !== undefined && value !== false && value !== '')
-      query.set(key, value === true ? '1' : Array.isArray(value) ? value.join(',') : String(value));
-  return `${path}?${query}`;
-};
 
 const DONE = new Set<TaskRow['status']>(['completed', 'failed', 'cancelled']);
 
@@ -167,6 +126,17 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         );
       if (this.cookie && text) plain = text;
     }
+    // 202 Accepted: the change waits for a person to approve it.
+    if (response.status === 202 && (body as { pending?: boolean }).pending) {
+      const { approval, reason, changes } = body as unknown as {
+        approval: string;
+        reason: string;
+        changes: string[];
+      };
+      throw new CoderError('approval-pending', reason, {
+        approval: { id: approval, reason, actions: changes },
+      });
+    }
     if (!response.ok) {
       const error = new ClientError(
         response.status,
@@ -212,12 +182,6 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   me(): Promise<Me> {
     return this.request('/me');
   }
-  info(): Promise<{ wular: string | null }> {
-    return this.request('/api/auth/capabilities');
-  }
-  linkAccount(token: string): Promise<{ platform: string; platformUserId: string }> {
-    return this.post('/connect', { token });
-  }
   signOut(): Promise<{ url?: string }> {
     return this.post('/api/auth/sign-out', {});
   }
@@ -233,21 +197,13 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
               : Q extends { fields: 'id,name' }
                 ? Pick<AgentRow, 'id' | 'name'>
                 : AgentCardRow
-          > & {
-            connectable?: Array<{ id: string; integration: string; agent: string }>;
-          }
+          >
         : Q extends { fields: 'id' }
           ? Array<Pick<AgentRow, 'id'>>
           : Q extends { fields: 'id,name' }
             ? Array<Pick<AgentRow, 'id' | 'name'>>
             : D['agent'][]
-    > =>
-      this.request(
-        queryPath('/admin/agents', {
-          ...options,
-          ...(options?.connect ? { connect: 1 } : {}),
-        }),
-      ),
+    > => this.request(queryPath('/admin/agents', options ?? {})),
     get: <Q extends { versions?: boolean; content?: boolean; handles?: boolean } = {}>(
       slug: string,
       options?: Q,
@@ -289,7 +245,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         unchanged: result.unchanged,
         ...(result.apps?.length ? { apps: result.apps } : {}),
       })),
-    settings: (slug: string, settings: AgentSettings): Promise<D['record']> =>
+    settings: (slug: string, settings: Omit<AgentSettings, 'engine'>): Promise<D['record']> =>
       this.request(`/admin/agents/${encodeURIComponent(slug)}/settings`, {
         method: 'PATCH',
         body: JSON.stringify(settings),
@@ -334,6 +290,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
           ...(options?.archived ? { archived: 1 } : {}),
           ...(options?.summary ? { summary: 1 } : {}),
           ...(options?.counts ? { counts: 1 } : {}),
+          ...(options?.approvals ? { approvals: 1 } : {}),
         }),
       ),
     get: (id: string): Promise<D['task']> => this.request(`/admin/tasks/${encodeURIComponent(id)}`),
@@ -364,7 +321,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       options: {
         model?: string;
         effort?: string;
-        permissions?: string;
+        access?: Access;
         outputSchema?: object;
       } = {},
     ) => this.post(`/admin/tasks/${encodeURIComponent(id)}/steer`, { text, ...options }),
@@ -381,6 +338,21 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         decision,
         ...options,
       }),
+    /** Approve, deny or ask an admin about a change the task asked for; `scope` where the approver picks another. */
+    request: (
+      id: string,
+      approvalId: string,
+      decision: 'accept' | 'decline' | 'ask',
+      options: { reason?: string; scope?: string } = {},
+    ) =>
+      this.post(
+        `/admin/tasks/${encodeURIComponent(id)}/requests/${encodeURIComponent(approvalId)}`,
+        { decision, ...options },
+      ),
+    /** Changes waiting for an admin's approval. */
+    pendingApprovals: (): Promise<
+      Array<{ task: string; approval: string; reason: string; by: string; at: number }>
+    > => this.request('/admin/approvals/pending'),
     archive: (id: string): Promise<{ ok: true }> =>
       this.post(`/admin/tasks/${encodeURIComponent(id)}/archive`),
     delete: (id: string): Promise<{ ok: true }> =>
@@ -536,6 +508,12 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     ): Promise<{ url: string }> =>
       this.post(`/admin/operator/apps/${encodeURIComponent(integration)}`, body),
     audit: (): Promise<AuditRow[]> => this.request('/admin/operator/audit'),
+    /** What to change on the platform for the built-in app on `integration`. */
+    drift: (integration: string): Promise<AppCheck> =>
+      this.request(`/admin/operator/apps/${encodeURIComponent(integration)}/drift`),
+    /** Pushes the built-in app on `integration`, or records its values were entered by hand. */
+    update: (integration: string): Promise<{ updated: true }> =>
+      this.post(`/admin/operator/apps/${encodeURIComponent(integration)}/update`, {}),
   };
   readonly installations = {
     list: (
@@ -549,6 +527,9 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
           ...(options.active ? { active: 1 } : {}),
         }),
       ),
+    /** Uninstalls the app on its platform, then ends the installation here. */
+    uninstall: (id: string): Promise<{ ok: true }> =>
+      this.request(`/admin/installations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   };
   readonly connections = {
     list: (authorization?: string, wait?: string): Promise<ConnectionRow[]> =>
@@ -593,6 +574,14 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     remove: (name: string): Promise<Config> =>
       this.request(`/admin/models/${encodeURIComponent(name)}`, {
         method: 'DELETE',
+      }),
+    update: (
+      name: string,
+      body: { baseUrl?: string; model?: string; envKey?: string; contextWindow?: number },
+    ): Promise<Config> =>
+      this.request(`/admin/models/${encodeURIComponent(name)}`, {
+        method: 'PATCH',
+        body: JSON.stringify(body),
       }),
     alias: (name: string, spec: string): Promise<Config> =>
       this.post(`/admin/models/${encodeURIComponent(name)}/alias`, { spec }),
@@ -641,30 +630,5 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   }
   usageRows(installation?: string): Promise<Array<StoredRow<D['usageRow']>>> {
     return this.request(queryPath('/admin/usage', { installation }));
-  }
-}
-
-/** Server-Sent Events from a response body, one `{ event, data }` per message. */
-export async function* serverEvents(
-  body: ReadableStream<Uint8Array>,
-): AsyncGenerator<{ event: string; data: string; id?: string }> {
-  const decoder = new TextDecoder();
-  let buffer = '';
-  for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
-    buffer += decoder.decode(chunk, { stream: true });
-    let end: number;
-    while ((end = buffer.indexOf('\n\n')) >= 0) {
-      const block = buffer.slice(0, end);
-      buffer = buffer.slice(end + 2);
-      let event = 'message';
-      let id: string | undefined;
-      const data: string[] = [];
-      for (const line of block.split('\n')) {
-        if (line.startsWith('event: ')) event = line.slice(7);
-        else if (line.startsWith('data: ')) data.push(line.slice(6));
-        else if (line.startsWith('id: ')) id = line.slice(4);
-      }
-      if (data.length || id) yield { event, data: data.join('\n'), ...(id ? { id } : {}) };
-    }
   }
 }

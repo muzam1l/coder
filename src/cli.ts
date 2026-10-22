@@ -10,7 +10,6 @@ import { pathToFileURL } from 'node:url';
 import {
   defineCommand,
   defineNamespace,
-  jsx,
   type Access,
   type Args,
   type Command,
@@ -20,17 +19,10 @@ import {
 } from 'contextjsx';
 import { parse, ParseError, resolve, walk } from 'contextjsx/emit';
 
-import {
-  DEFAULT_SERVER,
-  isKnownServer,
-  rememberServer,
-  validateServer,
-} from './client/auth/session';
 import { TOP_HELP } from './cmd/help';
-import { actionLines } from './core/approvals';
-import { CoderError, type FallbackPayload } from './core/dispatch';
+import { CoderError, type FallbackPayload } from './core/errors';
 import { CLI_PATH, readVersion } from './core/runtime';
-import { newerVersion } from './core/update-check';
+import type { ApprovalPolicy } from './core/tools';
 import {
   flagRow,
   keyRows,
@@ -44,7 +36,7 @@ import { canPrompt, pick, PromptCancelled } from './tui/prompt';
 import { flag, serverSuffix, str } from './utils/args';
 
 export const MODEL_HINT =
-  'Use luna or sonnet for mechanical work; sol or opus is the default.\nUse astra or fable for the hardest work; they cost the most.';
+  'Recommended, unless the user prefers otherwise or a model is unavailable:\n- sol or opus by default\n- luna or sonnet for mechanical work\n- opus for public APIs, SDKs and UI design\n- astra or fable for the hardest work; they cost the most';
 
 const GLOBALS = {
   json: flag('JSON output'),
@@ -144,21 +136,28 @@ function printNext(steps: CommandNext[], display: HintDisplay = {}): void {
 }
 
 /** A contextjsx command that also runs as the CLI on argv. */
-export type CoderCommand = Command & ((argv: string[]) => Promise<void>);
+export type CoderCommand = Command & { approvalPolicy?: ApprovalPolicy } & ((
+    argv: string[],
+  ) => Promise<void>);
 
 /** A contextjsx group that also routes argv to its commands. */
 export type CoderGroup = Namespace & ((argv: string[]) => Promise<void>);
 
-const loginHint = (server: string) =>
-  server === DEFAULT_SERVER
+async function loginHint(option: string | true | undefined): Promise<string> {
+  const { DEFAULT_SERVER, validateServer } = await import('./client/auth/session');
+  const server = validateServer(option);
+
+  return server === DEFAULT_SERVER
     ? 'Sign in: coder auth login'
     : `Sign in: coder auth login --server ${server}`;
+}
 
 /** A Coder server used for the first time is confirmed once, then remembered. */
 export async function confirmServer(
   option: string | true | undefined,
   yes = false,
 ): Promise<string> {
+  const { isKnownServer, rememberServer, validateServer } = await import('./client/auth/session');
   const server = validateServer(option);
   if (isKnownServer(server)) return server;
   if (!yes) {
@@ -197,8 +196,8 @@ function printFallback(payload: FallbackPayload): void {
 function readOnlyUnavailable(detail: string, json = false): never {
   const hint =
     'read-only unavailable on this host: the OS sandbox failed to start ' +
-    '(Linux/WSL2 needs bubblewrap + socat). Re-dispatch with --permissions auto ' +
-    '(or workspace-write) if writes are acceptable, or install the sandbox deps.';
+    '(Linux/WSL2 needs bubblewrap + socat). Re-dispatch with --access auto ' +
+    'if writes are acceptable, or install the sandbox deps.';
   if (json) {
     printJson({ error: hint, code: 'read-only-unavailable', detail });
   } else {
@@ -241,15 +240,16 @@ function toolError(output: unknown, steps: CommandNext[]): Error {
 // Surface a pending approval hit during a --wait, then exit so a background
 // host caller is re-invoked to answer it (`coder task approve`) and re-wait, instead
 // of blocking silently until the worker's configured auto-decline timeout.
-function surfaceApproval(
+async function surfaceApproval(
   cwd: string,
   taskId: string,
   approval: NonNullable<CoderError['approval']>,
   flags: Flags,
-): never {
+): Promise<never> {
   if (flags.json) {
     printJson({ taskId, status: 'awaiting-approval', approval });
   } else {
+    const { actionLines } = await import('./core/approvals');
     const hints = approvalNext(cwd, taskId, approval, flags).map(step => step.cli!.text!);
     process.stdout.write(`Approval needed for task ${taskId}: ${approval.reason}\n`);
     process.stdout.write(`${actionLines(approval.actions)}\n`);
@@ -259,7 +259,7 @@ function surfaceApproval(
 }
 
 /** How the CLI shows a typed failure: its exit code, output and next steps. */
-function report(error: CoderError, cwd: string, options: Flags): never {
+async function report(error: CoderError, cwd: string, options: Flags): Promise<never> {
   switch (error.code) {
     case 'chain-exhausted':
       printFallback(error.payload!);
@@ -267,7 +267,7 @@ function report(error: CoderError, cwd: string, options: Flags): never {
     case 'read-only-unavailable':
       readOnlyUnavailable(error.message, options.json);
     case 'approval-pending':
-      surfaceApproval(cwd, error.taskId!, error.approval!, options);
+      return surfaceApproval(cwd, error.taskId!, error.approval!, options);
     case 'startup-failed':
       if (options.json) {
         printJson({ taskId: error.taskId, status: 'failed', detail: error.message });
@@ -279,15 +279,13 @@ function report(error: CoderError, cwd: string, options: Flags): never {
     case 'login-failed':
       fail(error.message, {
         hint: [
-          loginHint(validateServer(options.server)),
+          await loginHint(options.server),
           'Or, for a memory server, set the same ADMIN_TOKEN it was started with',
         ],
       });
     case 'server':
       fail(error.message, {
-        hint:
-          error.hint ??
-          (error.status === 401 ? loginHint(validateServer(options.server)) : undefined),
+        hint: error.hint ?? (error.status === 401 ? await loginHint(options.server) : undefined),
       });
     default:
       fail(error.message, error.hint ? { hint: error.hint } : {});
@@ -305,6 +303,8 @@ export function command<S extends Shape, R>(spec: {
   cli?: Command<S & Globals>['cli'];
   globalFlags?: { json?: false; cwd?: false };
   mcp?: false;
+  /** Whether a task may call this: allow (default), ask a person, deny, or hand off to a page. */
+  approvalPolicy?: ApprovalPolicy;
   run(input: CommandInput<S>): Promise<R> | R;
   /** Human output. */
   print?(result: R, input: CommandInput<S>): unknown;
@@ -406,7 +406,7 @@ export function command<S extends Shape, R>(spec: {
     try {
       result = await call(given);
     } catch (error) {
-      if (error instanceof CoderError) report(error, given.cwd, given.options as Flags);
+      if (error instanceof CoderError) await report(error, given.cwd, given.options as Flags);
       throw error;
     }
 
@@ -424,7 +424,11 @@ export function command<S extends Shape, R>(spec: {
   };
   Object.defineProperty(invoke, 'name', { value: spec.name, writable: true, enumerable: true });
 
-  return Object.assign(invoke, definition) as CoderCommand;
+  return Object.assign(
+    invoke,
+    definition,
+    spec.approvalPolicy ? { approvalPolicy: spec.approvalPolicy } : {},
+  ) as CoderCommand;
 }
 
 /** A command group: `coder <group> <sub>` routes to its commands; the work is in them. */
@@ -512,6 +516,7 @@ export async function dispatch(argv: string[]): Promise<void> {
   // Passive, non-blocking update notice. Skip internal and MCP commands so the
   // detached refresher never re-triggers itself and stdio servers stay quiet.
   if (!INTERNAL[id] && first !== 'mcp') {
+    const { newerVersion } = await import('./core/update-check');
     const latest = newerVersion(readVersion(), CLI_PATH);
     if (latest)
       process.stderr.write(

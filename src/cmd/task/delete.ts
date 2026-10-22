@@ -12,6 +12,15 @@ export const commandDelete = command({
   usage:
     "Delete a task's session from disk. This is permanent. Pass --all-archived to\ndelete every archived task at once. A running task must be stopped first.",
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/tasks/:task-id',
+      label: 'Delete the task',
+      action: 'delete',
+      args: ['task-id'],
+      button: 'Delete',
+    },
+  },
   args: {
     'task-id': str('the task to delete'),
     'all-archived': flag('delete every archived task'),

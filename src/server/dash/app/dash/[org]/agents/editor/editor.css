@@ -274,3 +274,15 @@
 .access-note.warn-hint {
   color: var(--warn);
 }
+
+/* a stored definition's stale keys, one per line with its fix */
+.stale {
+  display: grid;
+  gap: 6px;
+}
+.stale > span {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}

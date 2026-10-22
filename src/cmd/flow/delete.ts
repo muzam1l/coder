@@ -12,6 +12,7 @@ export const commandDelete = command({
   usage:
     "Delete a flow run's record from disk (its journal, events, and logs). This is\npermanent; the run's tasks are ordinary tasks and are not touched. Pass\n--all-archived to delete every archived run at once. A running run must be\nstopped first.",
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     'run-id': str('the run to delete'),
     'all-archived': flag('delete every archived run'),

@@ -1,5 +1,6 @@
 import { type Params } from '../routes/match';
 import { builtinDefinitions, defaultAgent } from '../../agent/load';
+import { staleKeys } from '../../agent/definition';
 import { type AgentApp } from '../../agent/types';
 import {
   agentOrderKey,
@@ -14,16 +15,15 @@ import {
   agentWithVersion,
   getVersion,
   ensureBuiltinAgents,
-  versionKey,
   agentProblems,
 } from './records';
 import { syncLocalAgents } from '../store/local';
 import { agentApps } from './connections';
-import { failedDeliveries } from '../tasks/failures';
+import { failedDeliveries } from '../tasks/events';
 import { decodeCursor, json, notFound, page, pageLimit, paged } from '../routes/http';
-import { resolveEngine } from '../settings/credentials';
+import { agentEngines } from '../settings/credentials';
 
-export async function sourceUrl(
+async function sourceUrl(
   ctx: ServerContext,
   record: AgentRecord,
   version?: AgentVersionSummary,
@@ -41,7 +41,7 @@ export async function sourceUrl(
   return integration?.repos?.url(record.repo, record.path, app?.branch ?? version?.commit);
 }
 
-export async function loadAgent(ctx: ServerContext, slug: string, now: number) {
+async function loadAgent(ctx: ServerContext, slug: string, now: number) {
   if (builtinDefinitions()[slug]) await ensureBuiltinAgents(ctx, now);
   return agentWithVersion(ctx.store, slug);
 }
@@ -153,7 +153,7 @@ export async function listVersions(
   url: URL,
 ): Promise<Response> {
   const slug = params.slug!;
-  const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
+  const { local, loadCurrent } = await prepareAgent(ctx, slug);
   const limit = pageLimit(url, 10, 50);
   const below = decodeCursor<number>(url);
   const [record, rows] = await Promise.all([
@@ -177,7 +177,7 @@ export async function readVersion(
   const versionNumber = params.version ? Number(params.version) : undefined;
   if (params.version && !/^\d+$/.test(url.pathname.split('/').at(-1)!)) return notFound();
 
-  const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
+  const { local } = await prepareAgent(ctx, slug);
   const version = local
     ? local.find(({ version }) => version?.version === versionNumber)?.version
     : await getVersion(ctx.store, slug, versionNumber);
@@ -194,11 +194,11 @@ export async function readAgent(
   url: URL,
 ): Promise<Response> {
   const slug = params.slug!;
-  const { now, local, loadCurrent } = await prepareAgent(ctx, slug);
+  const { local, loadCurrent } = await prepareAgent(ctx, slug);
   const withVersions = url.searchParams.get('versions') !== '0';
   const withContent = url.searchParams.get('content') !== '0';
   const withHandles = url.searchParams.get('handles') === '1';
-  const requester = ctx.session?.user.id;
+  const requestedBy = ctx.session?.user.id;
   const [{ record, version: current }, rows, apps, deliveries] = await Promise.all([
     !withContent && !local
       ? ctx.store
@@ -215,16 +215,16 @@ export async function readAgent(
   ]);
   if (!record) return json({ error: `No agent named "${slug}"` }, 404);
 
-  const resolved = withHandles
-    ? await resolveEngine(
+  const { resolved, unrunnable } = withHandles
+    ? await agentEngines(
         ctx,
         {
           engine: record.settings?.engine ?? current?.definition.engine,
           model: record.settings?.model ?? current?.definition.model,
         },
-        requester,
+        requestedBy,
       )
-    : undefined;
+    : {};
 
   // The names its apps answer to, once each, where the agent wakes on a mention.
   const wired = current?.definition.integrations ?? {};
@@ -265,6 +265,7 @@ export async function readAgent(
     problems: agentProblems(record, current, ctx.integrations),
     ...(current
       ? {
+          stale: staleKeys(current.definition),
           definition: current.definition,
           ...(withContent && 'systemPrompt' in current
             ? {
@@ -294,6 +295,7 @@ export async function readAgent(
         }
       : {}),
     ...(resolved ? { ...(!resolved.usable ? { needsModel: true } : {}) } : {}),
+    ...(unrunnable?.length ? { unrunnable } : {}),
   });
 }
 
@@ -315,15 +317,10 @@ export async function agentsPage(
   const q = url.searchParams.get('q')?.trim().toLowerCase();
   const source = AGENT_TYPES[url.searchParams.get('type') ?? ''];
   const platform = url.searchParams.get('platform');
-  const connect = url.searchParams.get('connect') === '1';
-  const server = ctx.serverOrganizationId;
   const apps = ctx.store.list('app');
-  const [appRows, installations, shared, candidates] = await Promise.all([
+  const [appRows, installations, candidates] = await Promise.all([
     apps,
     ctx.store.list('installation'),
-    connect && server !== undefined && server !== ctx.organizationId && ctx.scope
-      ? ctx.scope(server).store.list('app')
-      : [],
     all
       ? all
           .filter(
@@ -369,22 +366,6 @@ export async function agentsPage(
 
   return {
     ...result,
-    ...(connect
-      ? {
-          connectable: [...appRows, ...shared]
-            .filter(
-              ({ value }) =>
-                value.builtin &&
-                ctx.integrations[value.integration]?.app.shareable &&
-                !live.has(value.id),
-            )
-            .map(({ value }) => ({
-              id: value.id,
-              integration: value.integration,
-              agent: value.agent,
-            })),
-        }
-      : {}),
     items: await Promise.all(
       result.items.map(async ({ record, version, ids }) => {
         const source = await sourceUrl(ctx, record, version, apps);

@@ -11,6 +11,7 @@ export const commandRunnerRename = command({
   name: 'rename',
   description: 'rename a runner',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     id: z.string().check(z.describe('the runner')),
     name: z.string().check(z.describe('its new name')),

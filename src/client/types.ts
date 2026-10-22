@@ -1,6 +1,6 @@
 import type { SerializedMessage, SerializedThread } from 'chat';
-import type { TaskLogEntry } from '../core/task/log-view';
-import type { Approval } from '../core/types';
+import type { TaskLogEntry } from '../core/task/view';
+import type { Access, Approval } from '../core/types';
 import type {
   AppDrift,
   CreateStep,
@@ -19,6 +19,10 @@ export interface TaskRow {
     flow?: string;
     prompt?: string;
     cwd?: string;
+    access?: 'auto' | 'read-only';
+    requestedBy?: string;
+    /** The Coder account behind the event's actor, when they connected it. */
+    context?: { user?: { name: string } };
     event?: {
       integration: string;
       type: string;
@@ -50,6 +54,8 @@ export interface TaskRow {
   lastActivityAt?: number;
   /** How long its latest turn ran. */
   lastTurnMs?: number;
+  /** The model it runs with: its own pick, else its engine's default. */
+  model?: string;
   /** A task the CLI runs on this machine, listed beside the server's. */
   local?: boolean;
   /** The first lines of its log, when read one task at a time. */
@@ -73,8 +79,7 @@ export interface AgentDefinition {
   engine?: string;
   model?: string;
   effort?: string;
-  permissions?: string;
-  access?: string;
+  access?: Access;
   integrations?: Record<string, { events?: string[] | Record<string, unknown> }>;
 }
 
@@ -83,10 +88,9 @@ export interface AgentSettings {
   engine?: string;
   model?: string;
   effort?: string;
-  permissions?: string;
   /** A registered runner id; unset follows the requester's default. */
   runner?: string;
-  access?: string;
+  access?: Access;
   integrations?: Record<string, { allowedEvents?: string[] }>;
   /** Connections its tasks may use, by id; absent allows every granted one. */
   connections?: string[];
@@ -121,8 +125,12 @@ export interface AgentRow {
   deliveries?: { failed: number; recent: FailedDeliveryRow[] };
   /** Nothing can run its engine for the caller: no credential of theirs or the workspace's, no sign-in on this machine. */
   needsModel?: true;
+  /** Engines, and custom models as `custom:<name>`, that no workspace credential runs, so its settings can't pick them. */
+  unrunnable?: string[];
   /** Why its definition is invalid; it answers no events until fixed. */
   problems?: string[];
+  /** Keys its definition has that Coder renamed, with their new name, or no longer reads. */
+  stale?: { renamed?: Record<string, string>; unknown?: string[] };
 }
 
 /** A platform event Coder failed to handle. */
@@ -209,9 +217,7 @@ export interface SetupOutcome {
     | 'installation-taken'
     | 'installation-bound'
     | 'account-taken'
-    | 'not-member'
     | 'other-workspace'
-    | 'disconnected'
     | 'failed'
     | IntegrationErrorCode;
   /** Integration id. */
@@ -300,6 +306,8 @@ export interface TasksPage {
   items: TaskRow[];
   next?: string;
   counts?: TaskCounts;
+  /** On the first page, when asked: the viewer's approval queue, tasks with an open approval they see. */
+  pendingApprovals?: TaskRow[];
 }
 
 export type Reach = 'installed' | 'created' | 'none';
@@ -373,6 +381,8 @@ export interface Me {
   };
   /** May enter operator mode. */
   operator?: boolean;
+  /** One of the viewer's connections needs reconnecting. */
+  reconnect?: boolean;
 }
 
 /** One platform in the operator area, with the built-in agent's shared app when this server has it. */
@@ -381,7 +391,10 @@ export interface OperatorAppRow {
   name: string;
   brand: IntegrationInfo['brand'];
   organizationApps: boolean;
-  app?: { id: string; name: string; createdAt: number };
+  /** How the built-in app comes up to date: Coder pushes it, or shows what to change on the platform. */
+  appUpdate?: 'push' | 'drift' | 'confirm';
+  /** `changed`: the app differs from what the built-in agent needs now. */
+  app?: { id: string; name: string; createdAt: number; changed?: true };
 }
 
 export interface OperatorApps {
@@ -412,7 +425,6 @@ export interface AgentQuery extends PageQuery {
   q?: string;
   platform?: string;
   type?: string;
-  connect?: boolean;
 }
 export interface CredentialQuery extends PageQuery {
   fields?: 'id';
@@ -425,6 +437,8 @@ export interface TaskQuery extends PageQuery {
   archived?: boolean;
   summary?: boolean;
   counts?: boolean;
+  /** On an admin's first page, also the changes waiting for an admin's approval. */
+  approvals?: boolean;
   agent?: string;
   source?: string;
   q?: string;
@@ -432,7 +446,6 @@ export interface TaskQuery extends PageQuery {
 export type EngineEntry = {
   model?: string;
   effort?: string;
-  permissions?: string;
 };
 export type ModelEntry = {
   provider?: string;
@@ -530,7 +543,6 @@ export interface ProbeResult {
   contextWindows?: Record<string, number>;
   detail: string;
 }
-export type McpRows = Record<string, McpEntry>;
 
 /** One connection as the dashboard lists it; secrets never leave the server. */
 export interface ConnectionRow {
@@ -541,8 +553,8 @@ export interface ConnectionRow {
   /** Set on a member's own connection; `mine` when that member is the viewer. */
   owner?: string;
   mine?: true;
-  /** Absent follows the mode of the agent whose task uses it. */
-  access?: 'read' | 'write';
+  /** `read-only` exposes only its read-only tools; absent or `auto` follows the task. */
+  access?: Access;
   auth: 'none' | 'key' | 'oauth';
   /** The remote server, or the stdio command, it is bound to. */
   url?: string;
@@ -564,7 +576,7 @@ export interface ConnectionInput {
   provider?: string;
   /** `me` makes it the viewer's own instead of the workspace's. */
   owner?: 'me';
-  access?: 'read' | 'write';
+  access?: Access;
   endpoint?: McpEntry;
   auth?: 'none' | 'key' | 'oauth';
   /** For `env`, a new credential holding `key`; without `key` or `credential`, a visible credential with `keyIn.env`. */
@@ -632,7 +644,7 @@ export interface LocalFolders {
 export interface ComposerOptions {
   agents: Array<{ id: string; name: string; default?: true }>;
   engine?: string;
-  engines: Record<string, { model?: string; effort?: string; permissions?: string } | undefined>;
+  engines: Record<string, { model?: string; effort?: string } | undefined>;
   models: ModelsShape;
   runners: Array<Pick<RunnerRow, 'id' | 'name' | 'default'>>;
   flows: string[];
@@ -651,10 +663,9 @@ export type TaskInput = {
   agent?: string;
   flow?: string;
   args?: Record<string, unknown>;
-  engine?: string;
   model?: string;
   effort?: string;
-  permissions?: string;
+  access?: Access;
   runner?: string;
   mcp?: string[];
   /** Narrows the connections the task is granted. */

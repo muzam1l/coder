@@ -1,6 +1,6 @@
 # MCP
 
-Give tasks tools of your own: an MCP server is a [connection](agents/index.md#connections), or an entry under `mcp` in a config file you edit, attached to a task by name. Nothing from a config file attaches unless asked, so the default run stays lean. `--mcp all` also loads your engine's own MCP servers and connectors. To use Coder itself as an MCP server in your host, see [In your local harness](../README.md#in-your-local-harness).
+Give tasks tools of your own: an MCP server is a [connection](agents/index.md#connections), added under **# Settings → (Connections)** or with `coder connection add`, or an entry under `mcp` in a config file you edit, attached to a task by name. Nothing from a config file attaches unless asked, so the default run stays lean. `--mcp all` also loads your engine's own MCP servers and connectors. To use Coder itself as an MCP server in your host, see [In your local harness](../README.md#in-your-local-harness).
 
 ```sh
 coder connection add docs --access write -- npx -y docs-mcp           # stdio server: the command after --

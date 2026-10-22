@@ -1,28 +1,32 @@
 import path from 'node:path';
 import * as z from 'zod/mini';
+import { execFile } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
-import { type RunnerKind, type RunnerRow, type RunnerSpec } from '../../client/types';
+import {
+  type RunnerKind,
+  type RunnerRow,
+  type RunnerSpec,
+  type RunnerTest,
+} from '../../client/types';
+import type { AgentTask } from '../../agent/types';
 import { scoped, type ServerContext } from '../context';
 import { type Params } from '../routes/match';
 import { randomBytes } from 'node:crypto';
 import { type RunnerRecord, type Store } from '../store/types';
 import { decryptSecret, encryptSecret } from '../store/secrets';
-import {
-  deletedKey,
-  deletedRunnerTasks,
-  serverRunnerId,
-  testRunner,
-  validateRunnerConfig,
-  visibleRunner,
-} from '../runners';
+import { RunnerCheckError } from '../runners';
+import { recordRunner, serverRunnerId, taskRunner, visibleRunner } from '../runners/select';
 import { ACTIVE_STATES } from '../tasks/queue';
 import { workspaceAdmin } from '../routes/guards';
 import { json } from '../routes/http';
 import { safeEqual, sha256 } from '../../utils/crypto';
-import { HttpRunner } from '../runners/http';
-import { RUNNER_IMAGE } from '../runners';
+import { checkHttp, HttpRunner, validateHttpConfig } from '../runners/kinds/http';
+import { RUNNER_IMAGE } from '../runners/package';
+import { checkDocker, validateDockerConfig } from '../runners/kinds/docker';
+import { checkGithubActions, validateGithubActionsConfig } from '../runners/kinds/github-actions';
+import { checkVercelSandbox } from '../runners/kinds/vercel-sandbox';
 
-export function dockerAvailable(): boolean {
+function dockerAvailable(): boolean {
   return (process.env.PATH ?? '').split(path.delimiter).some(dir => {
     try {
       const file = path.join(dir, 'docker');
@@ -34,7 +38,7 @@ export function dockerAvailable(): boolean {
   });
 }
 
-export function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
+function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
   const local = Boolean(ctx.local);
   const docker = local && dockerAvailable();
   return [
@@ -184,7 +188,7 @@ const updateSchema = z.strictObject({
   config: z.optional(config),
 });
 
-export function runnerRow(
+function runnerRow(
   id: string,
   value: RunnerRecord,
   now: number,
@@ -209,7 +213,7 @@ const shown =
     visibleRunner(value, user) &&
     (ctx.local || (value.kind !== 'local' && value.kind !== 'local-docker'));
 
-export function runnerContext(ctx: ServerContext) {
+function runnerContext(ctx: ServerContext) {
   const user = ctx.session?.user.id;
   const now = (ctx.now ?? Date.now)();
 
@@ -268,8 +272,7 @@ export async function createRunner(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const { user, now, canCreate, rows, row } = runnerContext(ctx);
+  const { user, now, canCreate, row } = runnerContext(ctx);
   {
     const parsed = addSchema.safeParse(await req.json().catch(() => undefined));
     if (!parsed.success) return json({ error: 'Invalid runner' }, 400);
@@ -310,7 +313,7 @@ export async function checkRunner(
   url: URL,
 ): Promise<Response> {
   const id = params.id!;
-  const { user, now, canCreate, rows, row } = runnerContext(ctx);
+  const { user } = runnerContext(ctx);
   if (id === serverRunnerId(ctx)) {
     return json(await testRunner(ctx));
   }
@@ -347,6 +350,23 @@ export async function checkRunner(
   return json(result);
 }
 
+/** Clears every other default in the scope `id` becomes the default of: its own scope and owner, or the workspace's for the built-in runner. */
+export async function clearDefaults(
+  store: Store,
+  id: string,
+  existing: RunnerRecord | undefined,
+  now: number,
+) {
+  for (const other of await store.list('runner'))
+    if (
+      other.id !== id &&
+      other.value.default &&
+      other.value.scope === (existing?.scope ?? 'workspace') &&
+      other.value.owner === existing?.owner
+    )
+      await store.put('runner', other.id, { ...other.value, default: false, updatedAt: now });
+}
+
 export async function updateRunner(
   req: Request,
   ctx: ServerContext,
@@ -354,17 +374,15 @@ export async function updateRunner(
   url: URL,
 ): Promise<Response> {
   const id = params.id!;
-  const { user, now, canCreate, rows, row } = runnerContext(ctx);
+  const { user, now, rows, row } = runnerContext(ctx);
   if (id === serverRunnerId(ctx)) {
     if (workspaceAdmin(ctx)) {
       const parsed = updateSchema.safeParse(await req.json().catch(() => undefined));
       if (!parsed.success || !parsed.data.default || parsed.data.name || parsed.data.config)
         return json({ error: 'Only the default can change for the built-in runner.' }, 400);
-      await ctx.store.withAppLock(`runners:${ctx.organizationId}`, async store => {
-        for (const { id, value } of await store.list('runner'))
-          if (value.scope === 'workspace' && value.default)
-            await store.put('runner', id, { ...value, default: false, updatedAt: now });
-      });
+      await ctx.store.withAppLock(`runners:${ctx.organizationId}`, store =>
+        clearDefaults(store, id, undefined, now),
+      );
 
       const personal = (await rows()).some(
         ({ value }) => value.scope === 'personal' && value.default,
@@ -423,16 +441,7 @@ export async function updateRunner(
         }
         fields = splitConfig(existing.kind, merged, ctx);
       }
-      if (parsed.data.default) {
-        for (const other of await store.list('runner'))
-          if (
-            other.id !== id &&
-            other.value.scope === existing.scope &&
-            other.value.owner === existing.owner &&
-            other.value.default
-          )
-            await store.put('runner', other.id, { ...other.value, default: false, updatedAt: now });
-      }
+      if (parsed.data.default) await clearDefaults(store, id, existing, now);
 
       const record = {
         ...existing,
@@ -455,7 +464,7 @@ export async function deleteRunner(
   url: URL,
 ): Promise<Response> {
   const id = params.id!;
-  const { user, now, canCreate, rows, row } = runnerContext(ctx);
+  const { user } = runnerContext(ctx);
   if (id === serverRunnerId(ctx)) {
     return json({ error: 'The server default cannot be renamed or removed.' }, 403);
   }
@@ -476,9 +485,10 @@ export async function deleteRunner(
     const denied = access(existing);
     if (denied || !existing) return denied!;
     {
-      const count = (await store.list('task')).filter(
-        ({ value }) => value.task.runnerId === id && ACTIVE_STATES.includes(value.status),
-      ).length;
+      const { active: count } = await (store.queue?.() ?? ctx.queue).counts(ctx.organizationId, {
+        statuses: ACTIVE_STATES,
+        runnerId: id,
+      });
       if (count)
         return json(
           {
@@ -498,7 +508,7 @@ export async function deleteRunner(
   });
 }
 
-export function splitConfig(kind: RunnerKind, config: Record<string, string>, ctx: ServerContext) {
+function splitConfig(kind: RunnerKind, config: Record<string, string>, ctx: ServerContext) {
   const secrets = new Set(
     runnerCatalog(ctx)
       .find(s => s.kind === kind)!
@@ -531,8 +541,7 @@ export async function pairRunner(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const id = params.id!;
-  const { user, now, canCreate, rows, row } = runnerContext(ctx);
+  const { user, now, canCreate } = runnerContext(ctx);
   const parsed = pairSchema.safeParse(await req.json().catch(() => undefined));
   if (!parsed.success) return json({ error: 'Invalid pairing' }, 400);
   if (!canCreate(parsed.data.scope))
@@ -651,4 +660,112 @@ export async function registerRunner(
   if (registered.ok) ctx.taskWatcher?.runnersChanged(ctx.organizationId);
 
   return registered;
+}
+
+export const deletedKey = (runnerId: string) => `runner-deleted:${runnerId}`;
+
+/** A deleted task's work folder goes now where the server runs it; a registered runner hears of it at its next registration. */
+export async function removeTaskWork(
+  ctx: ServerContext,
+  task: Pick<AgentTask, 'id' | 'runner' | 'runnerId'>,
+  handle?: string,
+): Promise<void> {
+  if (task.runner !== 'http' || !task.runnerId) {
+    await (await taskRunner(ctx, task))?.remove?.(task.id, handle);
+    return;
+  }
+  const runnerId = task.runnerId;
+  await ctx.store.withAppLock(`runners:${ctx.organizationId}`, async store => {
+    const pending = await store.get<{ deletedTasks: string[] }>('snapshot', deletedKey(runnerId));
+    await store.put('snapshot', deletedKey(runnerId), {
+      deletedTasks: [...(pending?.deletedTasks ?? []), task.id],
+    });
+  });
+}
+
+/** The tasks deleted since a runner's last registration, less those it reports removed; call under the runners lock. */
+export async function deletedRunnerTasks(
+  store: Store,
+  runnerId: string,
+  removed: string[] = [],
+): Promise<string[]> {
+  const pending = await store.get<{ deletedTasks: string[] }>('snapshot', deletedKey(runnerId));
+  const left = (pending?.deletedTasks ?? []).filter(id => !removed.includes(id));
+  if (!pending || left.length === pending.deletedTasks.length) return left;
+  if (left.length) await store.put('snapshot', deletedKey(runnerId), { deletedTasks: left });
+  else await store.delete('snapshot', deletedKey(runnerId));
+
+  return left;
+}
+
+export function validateRunnerConfig(spec: RunnerSpec, config: Record<string, string>): void {
+  if (Object.keys(config).some(key => !spec.fields.some(field => field.key === key)))
+    throw new Error('Unknown runner field');
+  for (const field of spec.fields)
+    if (!field.optional && !config[field.key]?.trim())
+      throw new Error(`${field.label} is required`);
+  if (spec.kind === 'http') validateHttpConfig(config);
+  if (spec.kind === 'github-actions') validateGithubActionsConfig(config);
+  if (spec.kind === 'local-docker') validateDockerConfig(config);
+}
+
+export async function testRunner(ctx: ServerContext, record?: RunnerRecord): Promise<RunnerTest> {
+  const start = Date.now();
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout>;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new RunnerCheckError('Runner check timed out'));
+    }, ctx.runnerTimeoutMs ?? 5000);
+  });
+  try {
+    const detail = await Promise.race([
+      timeout,
+      (async () => {
+        const kind = record?.kind ?? ctx.config.runner;
+        const config = record
+          ? {
+              ...record.config,
+              ...decryptSecret<Record<string, string>>(ctx.config, record.secret),
+            }
+          : (ctx.config.runnerConfig ?? {});
+        if (kind === 'local') {
+          if (!ctx.local) throw new RunnerCheckError('Local runners require a local server');
+          return 'This machine is available';
+        }
+        if (kind === 'http')
+          return checkHttp(
+            record ? recordRunner(ctx, record) : ctx.runners.http,
+            controller.signal,
+          );
+        if (kind === 'local-docker') {
+          if (!ctx.local) throw new RunnerCheckError('Docker runners require a local server');
+          return checkDocker(ctx.runnerExec ?? execFile, controller.signal);
+        }
+        const request = async (url: string) => {
+          const response = await (ctx.fetch ?? fetch)(url, {
+            signal: controller.signal,
+            redirect: 'manual',
+            headers: {
+              authorization: `Bearer ${config.token}`,
+              accept: 'application/json',
+              'user-agent': 'coder',
+            },
+          });
+          if (!response.ok)
+            throw new RunnerCheckError(`Runner check failed with HTTP ${response.status}`);
+          return response;
+        };
+        if (kind === 'github-actions') return checkGithubActions(config, request);
+        return checkVercelSandbox(config, request);
+      })(),
+    ]);
+    return { ok: true, detail, ms: Date.now() - start };
+  } catch (error) {
+    const detail = error instanceof RunnerCheckError ? error.message : 'Runner check failed';
+    return { ok: false, detail, ms: Date.now() - start };
+  } finally {
+    clearTimeout(timer!);
+  }
 }

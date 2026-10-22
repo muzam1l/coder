@@ -5,7 +5,7 @@ import path from 'node:path';
 import { markdown, skills } from 'contextjsx/emit';
 
 import { cli } from '../src/cmd';
-import { SKILLS } from '../src/context/skills';
+import { SKILLS } from '../src/context';
 
 /** Every emitted file, by path relative to the package root. */
 export function emitted(): Record<string, string> {

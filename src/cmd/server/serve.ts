@@ -4,7 +4,7 @@ import process from 'node:process';
 import * as z from 'zod/mini';
 
 import type { RunnerKind } from '../../agent/types';
-import { CoderError } from '../../core/dispatch';
+import { CoderError } from '../../core/errors';
 import { coderHome } from '../../core/state';
 import type { ServeDetails } from '../../server/serve';
 import { outStyle } from '../../tui/output';
@@ -52,6 +52,7 @@ export const commandServerServe = command({
   usage:
     "Run the Coder server on Bun: the address platforms deliver events to, the dashboard, and the worker that runs tasks. With DATABASE_URL it is a full server with sign-in and workspaces. Without one it is the dashboard for this machine's CLI: its config, agents, tasks and engine logins, on loopback only. --memory makes a throwaway test server that keeps everything in memory. Configured through the environment; every variable is in coder docs self-host.",
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     port: arg(
       z.optional(z.coerce.number().check(z.int(), z.positive())),

@@ -14,8 +14,8 @@ import { forInstallation, type ServerContext } from '../context';
 import type { Target } from '../chat';
 import { decryptSecret } from '../store/secrets';
 import type { TaskStatus } from '../store/types';
-import { ACCESS_UNCHECKED, writeCheck } from './events';
-import { conversationKey } from './thread';
+import { ACCESS_UNCHECKED, linkedMember, writeCheck } from './events';
+import { conversationKey } from './conversation';
 
 /** How long a shown approval's post stays known, so a late answer still updates it. */
 const SHOWN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -39,16 +39,16 @@ export interface ApprovalNotice {
 }
 
 /** A decision as the post shows it; `by` is who answered, absent when it came from Coder with no name; `closed` when the task was stopped. */
-export interface ApprovalOutcome {
+interface ApprovalOutcome {
   decision: 'accept' | 'decline' | 'closed';
   reason?: string;
   by?: string;
 }
 
-/** An answer written in the conversation; without `id` it answers the conversation's only open approval. */
-export interface ApprovalAnswer {
+/** An answer written in the conversation; without `id` it answers the conversation's only open approval; `ask` puts a change request on the admins' list. */
+interface ApprovalAnswer {
   id?: string;
-  decision: 'accept' | 'decline';
+  decision: 'accept' | 'decline' | 'ask';
   reason?: string;
 }
 
@@ -72,10 +72,11 @@ export interface ApprovalPost {
   retryAt?: number;
 }
 
-const COMMAND = /^\s*\/(approve|deny)\s+(apr-[\w-]+)(?:\s+([\s\S]*?))?\s*$/i;
+const COMMAND = /^\s*\/(approve|deny|ask-admin)\s+(apr-[\w-]+)(?:\s+([\s\S]*?))?\s*$/i;
 const BARE = /^\s*(approve|deny)\s*$/i;
+const DECISIONS = { approve: 'accept', deny: 'decline', 'ask-admin': 'ask' } as const;
 
-/** An answer command: `/approve <id>`, `/deny <id> [reason]`, or a lone `Approve` or `Deny` for the only open approval. */
+/** An answer command: `/approve <id>`, `/deny <id> [reason]`, `/ask-admin <id>`, or a lone `Approve` or `Deny` for the only open approval. */
 export function readApprovalCommand(text: string): ApprovalAnswer | undefined {
   const command = COMMAND.exec(text);
   const word = (command?.[1] ?? BARE.exec(text)?.[1])?.toLowerCase();
@@ -84,7 +85,7 @@ export function readApprovalCommand(text: string): ApprovalAnswer | undefined {
 
   return {
     ...(command ? { id: command[2]! } : {}),
-    decision: word === 'approve' ? 'accept' : 'decline',
+    decision: DECISIONS[word as keyof typeof DECISIONS],
     ...(reason && word === 'deny' ? { reason } : {}),
   };
 }
@@ -123,7 +124,7 @@ export function approvalActionsSection(approval: ApprovalNotice) {
 }
 
 /** The approval's header and reason, its actions unless the draft carries them, then how to answer or, once answered, the decision. */
-export function approvalMarkdown(
+function approvalMarkdown(
   approval: ApprovalNotice,
   next: {
     outcome?: ApprovalOutcome;
@@ -166,7 +167,7 @@ function draftOf(
   integration: Integration,
   notice: ApprovalNotice,
   outcome?: ApprovalOutcome,
-  again?: { note?: string },
+  again?: { note?: string; buttons?: Button[] },
 ): MessageDraft {
   const buttons: Button[] | undefined =
     integration.messages && !outcome
@@ -188,7 +189,7 @@ function draftOf(
   if (again)
     return {
       markdown: [again.note, WAITING].filter(Boolean).join('\n\n'),
-      ...(buttons ? { buttons } : {}),
+      ...(buttons ? { buttons: [...buttons, ...(again.buttons ?? [])] } : {}),
     };
 
   return {
@@ -221,7 +222,9 @@ function draftOf(
   };
 }
 
-const postKey = (task: string, approval: string) => `approval:${task}:${approval}`;
+/** Posts live in the `delivery` kind under this prefix. */
+export const APPROVAL_PREFIX = 'approval:';
+const postKey = (task: string, approval: string) => `${APPROVAL_PREFIX}${task}:${approval}`;
 
 /** The integration and conversation that show a task's approvals; none for a task outside a conversation. */
 function conversationOf(ctx: ServerContext, task: AgentTask) {
@@ -245,7 +248,7 @@ async function placeOf(
   const target = {
     id: event.installationId,
     ...(event.repo ? { repo: event.repo } : {}),
-    ...(event.within ? { within: event.within } : {}),
+    ...(event.account ? { account: event.account } : {}),
   };
 
   return {
@@ -341,17 +344,28 @@ export async function syncApprovals(
   approvals: Approval[],
 ): Promise<void> {
   const found = conversationOf(ctx, task);
-  if (!found) return;
+  if (!found || !approvals.length) return;
+  // One read of the task's posts; only an approval never posted, or with a decision its post does not show, is touched.
+  const posts = new Map(
+    (await ctx.store.list<ApprovalPost>('delivery', { prefix: postKey(task.id, '') })).map(row => [
+      row.id,
+      row.value,
+    ]),
+  );
   let place: MessagePlace | undefined;
   const at = async () => (place ??= await placeOf(ctx, found.integration, found.event));
   for (let approval of approvals) {
     const key = postKey(task.id, approval.id);
-    await ctx.store.create(
-      'delivery',
-      key,
-      { at: (ctx.now ?? Date.now)(), notice: noticeOf(task, approval) },
-      { ttlMs: SHOWN_TTL_MS },
-    );
+    const posted = posts.get(key);
+    if (posted?.shownAt && (!approval.response || posted.shown === approval.response.answeredAt))
+      continue;
+    if (!posted)
+      await ctx.store.create(
+        'delivery',
+        key,
+        { at: (ctx.now ?? Date.now)(), notice: noticeOf(task, approval) },
+        { ttlMs: SHOWN_TTL_MS },
+      );
     // Another sync that found this post busy asked for one more look, at the record as it is then.
     for (let look = 0; look < 3; look++) {
       const row = await lease(ctx, key);
@@ -478,6 +492,48 @@ export async function answerInConversation(
     return;
   }
 
+  const { changeOf, decideChange } = await import('./changes');
+  const requested = status.task.context?.approvals?.find(entry => entry.id === open[0]);
+  const change = changeOf(requested);
+  if (change) {
+    const linked = ctx.auth ? await linkedMember(ctx, integration, event) : undefined;
+    // The role Wular gave at the member's last sign-in, kept with their link.
+    const member = linked && { ...linked, role: linked.roles?.[ctx.organizationId] };
+    const decided = await decideChange(ctx, status, open[0]!, { ...answer }, member);
+    // Said in the thread, where every platform shows it; where a pick used the controls up, the approval is asked again under it.
+    const found = conversationOf(ctx, status.task);
+    const say = async (text: string, buttons: Button[] = []) => {
+      if (!found) return reply(text);
+      const place = await placeOf(ctx, integration, found.event);
+      if (integration.messages?.clickConsumes)
+        return askAgain(
+          ctx,
+          integration,
+          place,
+          postKey(status.task.id, open[0]!),
+          noticeOf(status.task, requested!),
+          text,
+          buttons,
+        );
+
+      return post(integration, place, { markdown: text, ...(buttons.length ? { buttons } : {}) });
+    };
+    if (decided.ok) {
+      if (answer.decision === 'ask') await say('Asked the workspace admins to approve it.');
+      return;
+    }
+    const error = ((await decided.json()) as { error?: string }).error ?? NO_WRITE_ACCESS;
+    if (decided.status !== 403 || !member || change.scope !== 'workspace')
+      return void (await say(error));
+    if (!integration.messages)
+      return void (await say(`${error} Reply \`/ask-admin ${open[0]}\` to ask one.`));
+    await say(error, [{ label: 'Ask an admin', value: `/ask-admin ${open[0]}` }]);
+    return;
+  }
+  if (answer.decision === 'ask') {
+    await reply('Only a change the task asked for goes to an admin.');
+    return;
+  }
   const { decideApproval } = await import('./admin');
   const response = await decideApproval(
     ctx,
@@ -532,8 +588,13 @@ async function askAgain(
   key: string,
   notice: ApprovalNotice,
   note?: string,
+  buttons?: Button[],
 ) {
-  const message = await post(integration, place, draftOf(integration, notice, undefined, { note }));
+  const message = await post(
+    integration,
+    place,
+    draftOf(integration, notice, undefined, { note, buttons }),
+  );
 
   return release(ctx, key, { ...(message ? { message } : {}), shownAt: (ctx.now ?? Date.now)() });
 }
@@ -606,7 +667,7 @@ export async function clickedApproval(
   }
   const place = await placeOf(tenant, integration, event);
   const token = () =>
-    place.ctx.token(event.installationId, { tools: integration.tools.presets.read });
+    place.ctx.token(event.installationId, { tools: integration.tools.presets['read-only'] });
 
   await answerInConversation(
     tenant,

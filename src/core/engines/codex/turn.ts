@@ -2,13 +2,21 @@
 import fs from 'node:fs';
 
 import { shortPath } from '../../../utils/fsx';
-import type { ProgressUpdate, TokenUsage } from '../../types';
+import { processTiming } from '../../../utils/process';
+import { MACHINE_SANDBOX_ENV, resolveCustomModel } from '../../config';
+import type { McpServerSpec, ProgressUpdate, TokenUsage, TurnResult } from '../../types';
+import { HISTORY_LOST } from '../../types';
 import type { CodexAppServerClient } from './app-server';
+import { startCodexControlServer } from './control';
+import { isCodexSessionArchived, unarchiveCodexSession } from './sessions';
+import type { RunTurnOptions } from '.';
 
 // Only log a token snapshot once the count has moved this far.
-export const USAGE_LOG_STEP = 1000;
+const USAGE_LOG_STEP = 1000;
 
-export const TASK_THREAD_PREFIX = 'Coder Task';
+const TASK_THREAD_PREFIX = 'Coder Task';
+
+const SERVICE_NAME = 'coder_runtime';
 
 /** The connected app-server client (spawned or broker transport). */
 export type AppServerClient = Awaited<ReturnType<typeof CodexAppServerClient.connect>>;
@@ -902,4 +910,263 @@ export async function captureTurn(
     client.setNotificationHandler(previousHandler ?? null);
     client.setServerRequestHandler(null);
   }
+}
+
+/** turn/start sandboxPolicy carrying extra writable roots or read-only network, or null to keep the thread's sandbox. */
+export function codexSandboxPolicy(
+  sandbox: string | undefined,
+  networkAccess: boolean | undefined,
+  writableRoots: string[] = [],
+): Record<string, unknown> | null {
+  if (sandbox === 'read-only') return networkAccess ? { type: 'readOnly', networkAccess } : null;
+  if (sandbox !== 'workspace-write' || !writableRoots.length) return null;
+  // Temp roots stay read-only: the task's scratch is one of the writable roots.
+  return {
+    type: 'workspaceWrite',
+    writableRoots,
+    networkAccess: networkAccess ?? false,
+    excludeTmpdirEnvVar: true,
+    excludeSlashTmp: true,
+  };
+}
+
+/** Thread-scoped MCP servers. */
+export function buildCodexMcpOverrides(
+  servers: McpServerSpec[] = [],
+  nativeServers: string[] = [],
+  nativeMcp = false,
+): { mcp_servers?: Record<string, unknown> } {
+  const configured: Record<string, unknown> = Object.fromEntries(
+    (nativeMcp ? [] : nativeServers).map(name => [name, { enabled: false }]),
+  );
+  const names = new Set([...nativeServers, ...servers.map(server => server.name)]);
+  for (const server of servers) {
+    let name = server.name;
+    if (nativeServers.includes(name)) {
+      for (let suffix = 1; names.has(name); suffix++) name = `${server.name}_coder_${suffix}`;
+      names.add(name);
+    }
+    configured[name] = {
+      ...(server.url
+        ? { url: server.url, ...(server.headers ? { http_headers: server.headers } : {}) }
+        : {
+            command: server.command,
+            args: server.args ?? [],
+            ...(server.env ? { env: server.env } : {}),
+          }),
+      default_tools_approval_mode: 'approve',
+    };
+  }
+  return Object.keys(configured).length ? { mcp_servers: configured } : {};
+}
+
+function cleanCodexStderr(stderr: string) {
+  return stderr
+    .split(/\r?\n/)
+    .map(line => line.trimEnd())
+    .filter(
+      line =>
+        line && !line.startsWith('WARNING: proceeding, even though we could not update PATH:'),
+    )
+    .join('\n');
+}
+
+function missingBridge(): never {
+  throw new Error('The Codex app-server has no custom-model bridge; restart the Coder broker.');
+}
+
+/** One turn on a new or resumed thread of `client`. */
+export async function threadTurn(
+  client: AppServerClient,
+  cwd: string,
+  prompt: string,
+  options: RunTurnOptions,
+): Promise<TurnResult> {
+  const mode =
+    process.env[MACHINE_SANDBOX_ENV] === '1' && (options.sandbox ?? 'read-only') !== 'read-only'
+      ? 'danger-full-access'
+      : options.sandbox;
+  const sandbox = { sandbox: mode ?? 'read-only' };
+  // A policy that asks answers through the handler, never a reviewer the user's config names.
+  const reviewer =
+    options.approvalsReviewer ?? ((options.approvalPolicy ?? 'never') === 'never' ? null : 'user');
+  const configOverrides =
+    options.configOverrides && Object.keys(options.configOverrides).length
+      ? options.configOverrides
+      : null;
+  const sandboxPolicy = codexSandboxPolicy(mode, options.networkAccess, options.writableRoots);
+
+  let controlServer: Awaited<ReturnType<typeof startCodexControlServer>> | null = null;
+  let threadId: string;
+  processTiming('codex.config.start');
+  const effective = await client.request('config/read', { cwd, includeLayers: false });
+  processTiming('codex.config.done');
+  const custom = options.customModel
+    ? resolveCustomModel(
+        options.customModel.alias,
+        options.customModel.entry,
+        client.bridgeUrl ?? missingBridge(),
+      )
+    : null;
+  const model = options.customModel?.entry.model ?? options.model ?? null;
+  const threadConfig = {
+    ...(!custom ? { model_reasoning_summary: 'auto' } : {}),
+    ...custom?.configOverrides,
+    ...configOverrides,
+    ...buildCodexMcpOverrides(
+      options.mcpServers,
+      Object.keys(effective.config?.mcp_servers ?? {}),
+      options.nativeMcp,
+    ),
+    ...(!options.nativeMcp ? { 'features.apps': false, 'features.plugins': false } : {}),
+    // Snapshots save the shell's environment, task tokens included, to disk.
+    'features.shell_snapshot': false,
+  };
+
+  const developer = options.developerInstructions
+    ? { developerInstructions: options.developerInstructions }
+    : {};
+  let resumed: { thread: { id: string } } | undefined;
+  if (options.resumeThreadId) {
+    emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, 'starting', {
+      kind: 'status',
+    });
+    // Sessions may have been auto-archived since the task stopped; resume
+    // rejects archived sessions.
+    if (isCodexSessionArchived(options.resumeThreadId)) {
+      await unarchiveCodexSession(options.resumeThreadId);
+    }
+    resumed = await client
+      .request('thread/resume', {
+        threadId: options.resumeThreadId,
+        cwd,
+        model,
+        modelProvider: custom?.modelProvider ?? null,
+        config: threadConfig,
+        approvalPolicy: options.approvalPolicy ?? 'never',
+        ...sandbox,
+        // Only sent when set: older codex builds reject unknown enum-bearing fields.
+        ...(reviewer ? { approvalsReviewer: reviewer } : {}),
+        ...developer,
+      })
+      .catch(error => {
+        emitProgress(options.onProgress, HISTORY_LOST, 'starting', {
+          kind: 'warning',
+          detail: String(error?.message ?? error),
+        });
+        return undefined;
+      });
+  }
+  if (resumed) {
+    threadId = resumed.thread.id;
+  } else {
+    emitProgress(options.onProgress, 'Starting Codex task thread.', 'starting', {
+      kind: 'status',
+    });
+    processTiming('codex.thread.start');
+    const response = await client.request('thread/start', {
+      cwd,
+      model,
+      modelProvider: custom?.modelProvider ?? null,
+      config: threadConfig,
+      approvalPolicy: options.approvalPolicy ?? 'never',
+      ...sandbox,
+      ...(reviewer ? { approvalsReviewer: reviewer } : {}),
+      ...developer,
+      serviceName: SERVICE_NAME,
+      // Persist by default so status/steer/stop can target the thread later.
+      ephemeral: options.ephemeral ?? false,
+    });
+    threadId = response.thread.id;
+    // Ephemeral threads reject metadata updates; they are never listed anyway.
+    if (!(options.ephemeral ?? false)) {
+      try {
+        await client.request('thread/name/set', { threadId, name: buildTaskThreadName(prompt) });
+      } catch (err) {
+        const msg = String((err as Error)?.message ?? err ?? '');
+        if (!msg.includes('unknown variant') && !msg.includes('unknown method')) {
+          throw err;
+        }
+      }
+    }
+  }
+
+  processTiming('codex.thread.ready');
+  emitProgress(options.onProgress, `Thread ready (${threadId}).`, 'starting', {
+    kind: 'status',
+    threadId,
+  });
+
+  let turnState: TurnCaptureState;
+  let activeTurnId: string | null = null;
+  const interrupt = () => {
+    if (activeTurnId)
+      void client.request('turn/interrupt', { threadId, turnId: activeTurnId }).catch(() => {});
+  };
+  options.signal?.addEventListener('abort', interrupt, { once: true });
+  try {
+    turnState = await captureTurn(
+      client,
+      threadId,
+      () =>
+        client.request('turn/start', {
+          threadId,
+          input: [
+            {
+              type: 'text',
+              text: prompt,
+              text_elements: [],
+            },
+          ],
+          model,
+          effort: options.effort ?? null,
+          outputSchema: options.outputSchema ?? null,
+          // A turn's policy persists on the thread, so every turn sets its own.
+          approvalPolicy: options.approvalPolicy ?? 'never',
+          ...(reviewer ? { approvalsReviewer: reviewer } : {}),
+          ...(sandboxPolicy ? { sandboxPolicy } : {}),
+        }),
+      {
+        cwd,
+        onProgress: options.onProgress,
+        onHeartbeat: options.onHeartbeat,
+        onApprovalRequest: options.onApprovalRequest,
+        onTurnStarted: async turnId => {
+          activeTurnId = turnId;
+          if (options.signal?.aborted) interrupt();
+          if (options.onControlReady) {
+            controlServer = await startCodexControlServer(client, { threadId, turnId });
+            options.onControlReady(controlServer.endpoint, threadId, turnId);
+          }
+        },
+      },
+    );
+    processTiming('codex.result');
+    options.onResult?.({
+      status: turnState.finalTurn?.status === 'completed' ? 0 : 1,
+      threadId,
+      turnId: turnState.turnId,
+      finalMessage: turnState.lastAgentMessage,
+      error: turnState.error ?? (turnState.finalTurn?.error as TurnCaptureState['error']) ?? null,
+    });
+  } finally {
+    options.signal?.removeEventListener('abort', interrupt);
+    await (controlServer as Awaited<ReturnType<typeof startCodexControlServer>> | null)?.close();
+  }
+
+  return {
+    status: turnState.finalTurn?.status === 'completed' ? 0 : 1,
+    threadId,
+    turnId: turnState.turnId,
+    finalMessage: turnState.lastAgentMessage,
+    reasoningSummary: turnState.reasoningSummary,
+    turn: turnState.finalTurn,
+    error: turnState.error ?? (turnState.finalTurn?.error as TurnCaptureState['error']) ?? null,
+    stderr: cleanCodexStderr(client.stderr),
+    fileChanges: turnState.fileChanges,
+    tokens: collectTokenUsage(turnState),
+    contextTokens: turnState.contextTokens,
+    model: options.customModel?.alias ?? options.model ?? null,
+    commandExecutions: turnState.commandExecutions,
+  };
 }

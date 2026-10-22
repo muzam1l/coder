@@ -4,7 +4,7 @@ import { type Params } from '../routes/match';
 import { type ServerConfig, type ServerContext } from '../context';
 import { workspaceAdmin } from '../routes/guards';
 import { decodeCursor, json, page, pageLimit, paged } from '../routes/http';
-import { engineSignIn, engineSignOut, engineStatus } from '../tasks/local';
+import { engineSignIn, engineSignOut, engineStatus, machineSignedIn } from '../tasks/local';
 import { type Installation } from '../../agent/types';
 import { type EngineCredential, type Store } from '../store/types';
 import {
@@ -16,12 +16,11 @@ import {
   secretKeyVersion,
   type EncryptedCredential,
 } from '../store/secrets';
-import { dashPath, organizationSlug } from '../auth/account';
+import { dashPath, organizationSlug } from '../auth/members';
 import { resolveTaskOptions } from '../../core/dispatch';
 import { isEndpointModel, type CoderConfig } from '../../core/config';
 import { effectiveConfig, shownConfig } from './config';
-import { machineSignedIn } from '../tasks/local';
-import { DEFAULT_ENGINE } from '../../core/defaults';
+import { DEFAULT_ENGINE } from '../../core/types';
 import { type LoginEngine } from './logins';
 
 /** Engine credentials for a workspace or a member, one per variable or subscription in each scope; every row change goes through `store.withCredential`. */
@@ -44,7 +43,7 @@ export interface CredentialSummary {
   scope: 'personal' | 'workspace';
   subscription: boolean;
   createdAt: number;
-  /** The secret with all but its ends hidden. */
+  /** The first five characters of the secret, followed by four bullets. */
   masked: string;
   account?: CredentialAccount;
 }
@@ -79,7 +78,7 @@ function credentialName(env: Record<string, string>): string {
   return engine ?? name;
 }
 
-export class CredentialCheckError extends Error {
+class CredentialCheckError extends Error {
   constructor(
     readonly status: number,
     statusText: string,
@@ -154,13 +153,13 @@ function credentialNames(
   return [(entry && isEndpointModel(entry) && entry.envKey) || ENGINE_KEYS.codex];
 }
 
-/** The requester's own, then the workspace's, by name order; tasks without a requester use the workspace's only. */
+/** The own ones of the member who asked, then the workspace's, by name order; tasks no member asked for use the workspace's only. */
 function pickCredential(
   rows: CredentialRow[],
   names: string[],
-  requester?: string,
+  requestedBy?: string,
 ): CredentialRow | undefined {
-  for (const owner of requester ? [requester, undefined] : [undefined])
+  for (const owner of requestedBy ? [requestedBy, undefined] : [undefined])
     for (const name of names) {
       const row = rows.find(row => row.id === credentialId(owner, name));
       if (row) return row;
@@ -170,18 +169,18 @@ function pickCredential(
 export async function resolveCredential(
   ctx: ServerContext,
   engine: string,
-  requester?: string,
+  requestedBy?: string,
   settings: { model?: string } = {},
 ): Promise<CredentialRow | undefined> {
   const [shown, rows] = await Promise.all([
     shownConfig(ctx),
-    ctx.store.listCredentials({ owner: requester }),
+    ctx.store.listCredentials({ owner: requestedBy }),
   ]);
 
   return pickCredential(
     rows,
     credentialNames(engine, effectiveConfig(ctx, shown), settings),
-    requester,
+    requestedBy,
   );
 }
 
@@ -189,7 +188,7 @@ export async function resolveCredential(
 export async function resolveEngine(
   ctx: ServerContext,
   settings: { engine?: string; model?: string },
-  requester?: string,
+  requestedBy?: string,
 ): Promise<{
   engine: string;
   credential?: string;
@@ -199,16 +198,26 @@ export async function resolveEngine(
 }> {
   const [shown, rows] = await Promise.all([
     shownConfig(ctx),
-    ctx.store.listCredentials({ owner: requester }),
+    ctx.store.listCredentials({ owner: requestedBy }),
   ]);
-  const config = effectiveConfig(ctx, shown);
+
+  return chooseEngine(ctx, effectiveConfig(ctx, shown), rows, settings, requestedBy);
+}
+
+async function chooseEngine(
+  ctx: ServerContext,
+  config: CoderConfig,
+  rows: CredentialRow[],
+  settings: { engine?: string; model?: string },
+  requestedBy?: string,
+) {
   const pinned =
     settings.engine ?? (settings.model ? resolveTaskOptions(settings, config).engine : undefined);
   const chain = pinned ? [pinned] : config.chain;
   const credentials = Object.fromEntries(
     chain.flatMap(engine => {
       const names = credentialNames(engine, config, engine === pinned ? settings : {});
-      const row = pickCredential(rows, names, requester);
+      const row = pickCredential(rows, names, requestedBy);
       return row ? [[engine, row.id]] : [];
     }),
   );
@@ -236,6 +245,53 @@ export async function resolveEngine(
     chain,
     credentials,
   };
+}
+
+const ENGINE_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', custom: 'Custom' };
+
+/** Why pinned settings can't run in a shared thread, where only workspace credentials and a local server's own logins count; `link` makes the fix a link. */
+export async function modelProblem(
+  ctx: ServerContext,
+  settings: { engine?: string; model?: string },
+  link = false,
+): Promise<string | undefined> {
+  if (!settings.engine && !settings.model) return undefined;
+  const { usable, chain } = await resolveEngine(ctx, settings);
+  if (usable) return undefined;
+  const engine = chain[0]!;
+  const name = ENGINE_NAMES[engine] ?? engine;
+  const add = `Add one in Settings → ${engine === 'custom' ? 'Models' : 'Credentials'}`;
+
+  return `No workspace credential runs ${settings.model ? `${settings.model} (${name})` : name}. ${link ? `[${add}](${await credentialFix(ctx, engine)})` : add}, or pick another model.`;
+}
+
+/** What runs an agent's settings for `requestedBy`, and the engines, and custom models as `custom:<name>`, that no workspace credential runs; one read of config and credentials. */
+export async function agentEngines(
+  ctx: ServerContext,
+  settings: { engine?: string; model?: string },
+  requestedBy?: string,
+) {
+  const [shown, rows] = await Promise.all([
+    shownConfig(ctx),
+    ctx.store.listCredentials({ owner: requestedBy }),
+  ]);
+  const config = effectiveConfig(ctx, shown);
+  const choices: Array<{ engine: string; model?: string }> = [
+    { engine: 'claude' },
+    { engine: 'codex' },
+    ...Object.entries(config.models ?? {}).flatMap(([model, entry]) =>
+      isEndpointModel(entry) ? [{ engine: 'custom', model }] : [],
+    ),
+  ];
+  const [resolved, ...checked] = await Promise.all([
+    chooseEngine(ctx, config, rows, settings, requestedBy),
+    ...choices.map(choice => chooseEngine(ctx, config, rows, choice)),
+  ]);
+  const unrunnable = choices.flatMap(({ engine, model }, index) =>
+    checked[index]!.usable ? [] : [model ? `${engine}:${model}` : engine],
+  );
+
+  return { resolved: resolved!, unrunnable };
 }
 
 /** Workspace credentials plus the caller's own; nobody sees another member's. */
@@ -316,7 +372,7 @@ export async function completeLogin(
 function mask(env: Record<string, string>): string {
   if (env.CODEX_AUTH_JSON) return 'auth.json';
   const value = Object.values(env)[0] ?? '';
-  return value.length > 16 ? `${value.slice(0, 7)}…${value.slice(-4)}` : '••••';
+  return value.length > 16 ? `${value.slice(0, 5)}••••` : '••••';
 }
 
 export function credentialSummary(
@@ -620,8 +676,6 @@ export async function deleteCredential(
     ? json({ ok: true })
     : json({ error: 'Unknown credential' }, 404);
 }
-
-const now = (ctx: ServerContext) => (ctx.now ?? Date.now)();
 
 export async function signInEngine(
   req: Request,

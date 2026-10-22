@@ -19,9 +19,9 @@ import { Button } from '@/comps/ui/button';
 import { Select, type Option } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
 import {
+  ACCESS,
   EFFORTS,
   ENGINE_NAMES,
-  PERMISSIONS,
   defaultLabel,
   modelHeadings,
   modelOptions,
@@ -29,11 +29,6 @@ import {
   splitModel,
 } from '@/app/dash/[org]/settings/model-options';
 import type { Defaults } from '@/app/dash/[org]/tasks/composer';
-
-const ACCESS: Option[] = [
-  ['read', 'Read-only'],
-  ['write', 'Read-write'],
-];
 
 function Choice({
   name,
@@ -102,6 +97,31 @@ export function AgentSettingsForm({
   const own = agent.definition;
   const engine = own?.engine;
   const deletable = agent.source !== 'builtin';
+  const modelChoices: Option[] = [
+    ...modelOptions(
+      models,
+      defaultLabel(
+        engine
+          ? [ENGINE_NAMES[engine] ?? engine, own?.model ?? defaults.engines[engine]?.model]
+              .filter(Boolean)
+              .join(' · ')
+          : 'first available engine',
+      ),
+    ),
+    ...(!settings.engine && settings.model
+      ? [[modelValue(undefined, settings.model), settings.model] as Option]
+      : []),
+  ];
+  const unrunnable = Object.fromEntries(
+    modelChoices.flatMap(([value]) => {
+      const runs = splitModel(value).engine;
+      const hint =
+        runs === 'custom' ? 'needs its API key' : `needs a ${ENGINE_NAMES[runs]} credential`;
+      return runs && (agent.unrunnable?.includes(runs) || agent.unrunnable?.includes(value))
+        ? [[value, hint]]
+        : [];
+    }),
+  );
 
   // Filters every panel's fields by label, current value and platform, and moves to a panel that has a match.
   useLayoutEffect(() => {
@@ -149,12 +169,16 @@ export function AgentSettingsForm({
     event.preventDefault();
     const values = new FormData(event.currentTarget as HTMLFormElement);
     const text = (key: string) => String(values.get(key) ?? '').trim();
-    const next: AgentSettings = {};
-    for (const key of ['effort', 'permissions', 'access', 'runner'] as const)
-      if (text(key)) next[key] = text(key);
+    const next: Omit<AgentSettings, 'engine'> = {};
+    for (const key of ['effort', 'runner'] as const) if (text(key)) next[key] = text(key);
+    if (text('access') !== (own?.access ?? 'auto'))
+      next.access = text('access') as AgentSettings['access'];
     const picked = splitModel(model);
-    if (picked.engine) next.engine = picked.engine;
-    if (picked.model) next.model = picked.model;
+    const selected =
+      picked.model || defaults.engines[picked.engine]?.model ||
+      (models[picked.engine]?.length === 1 ? models[picked.engine]?.[0] : undefined);
+    if (picked.engine && !selected) return setSaved('Choose a model.');
+    if (selected) next.model = picked.engine ? `${picked.engine}:${selected}` : selected;
     if (narrowed) next.connections = values.getAll('connection').map(String);
     for (const id of platforms) {
       const entry: NonNullable<AgentSettings['integrations']>[string] = {};
@@ -191,24 +215,8 @@ export function AgentSettingsForm({
               <Select
                 label="Model"
                 value={model}
-                options={[
-                  ...modelOptions(
-                    models,
-                    defaultLabel(
-                      engine
-                        ? [
-                            ENGINE_NAMES[engine] ?? engine,
-                            own?.model ?? defaults.engines[engine]?.model,
-                          ]
-                            .filter(Boolean)
-                            .join(' · ')
-                        : 'first available engine',
-                    ),
-                  ),
-                  ...(!settings.engine && settings.model
-                    ? [[modelValue(undefined, settings.model), settings.model] as Option]
-                    : []),
-                ]}
+                options={modelChoices}
+                unavailable={unrunnable}
                 headings={modelHeadings(models)}
                 onChange={setModel}
               />
@@ -222,22 +230,18 @@ export function AgentSettingsForm({
                 own?.effort ?? defaults.engines[(splitModel(model).engine ?? engine)!]?.effort,
               )}
             />
-            <Choice
-              name="permissions"
-              label="Permissions"
-              hint="what the runner may change in the checkout"
-              value={settings.permissions}
-              options={PERMISSIONS}
-              blank={defaultLabel(own?.permissions ?? 'auto')}
-            />
-            <Choice
-              name="access"
-              label="Access"
-              hint="what it may do on its platforms and connections"
-              value={settings.access}
-              options={own?.access === 'read' ? ACCESS.slice(0, 1) : ACCESS}
-              blank={defaultLabel(own?.access === 'read' ? 'Read-only' : 'Read-write')}
-            />
+            <Field label="Access" hint="what its tasks, platforms and connections may do" group>
+              <Select
+                name="access"
+                label="Access"
+                defaultValue={settings.access ?? own?.access ?? 'auto'}
+                options={
+                  own?.access === 'read-only'
+                    ? ACCESS.filter(([value]) => value === 'read-only')
+                    : ACCESS
+                }
+              />
+            </Field>
             {runners.length > 1 ? (
               <Field label="Runs on" group>
                 <Select

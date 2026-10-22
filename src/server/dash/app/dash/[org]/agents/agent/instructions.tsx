@@ -12,7 +12,8 @@ const SAFE_HREF = /^(?:https?:|mailto:)/i;
 const FENCE = /^\s*(```|~~~)/;
 const HEADING = /^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
 const ITEM = /^\s*(?:([-*+])|\d+[.)])\s+(.*)$/;
-const BLOCK = /^\s*(?:#{1,6}\s|```|~~~|[-*+]\s|\d+[.)]\s)/;
+const BLOCK = /^\s*(?:#{1,6}\s|```|~~~|[-*+]\s|\d+[.)]\s|\|)/;
+const TABLE_RULE = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
 
 function inline(text: string): ComponentChildren[] {
   const out: ComponentChildren[] = [];
@@ -36,6 +37,13 @@ function inline(text: string): ComponentChildren[] {
   return out;
 }
 
+const cells = (row: string) =>
+  row
+    .trim()
+    .replace(/^\||\|$/g, '')
+    .split('|')
+    .map(cell => inline(cell.trim()));
+
 /** Minimal markdown as Preact nodes, so raw HTML in the text stays text. */
 export function markdown(text: string) {
   const lines = text.split(/\r?\n/);
@@ -57,6 +65,31 @@ export function markdown(text: string) {
     } else if (heading) {
       blocks.push(h(`h${Math.min(heading[1]!.length + 2, 6)}`, null, inline(heading[2]!)));
       i++;
+    } else if (line.trim().startsWith('|') && TABLE_RULE.test(lines[i + 1] ?? '')) {
+      const rows: string[] = [];
+      for (i += 2; lines[i]?.trim().startsWith('|'); i++) rows.push(lines[i]!);
+      blocks.push(
+        <div class="table">
+          <table>
+            <thead>
+              <tr>
+                {cells(line).map(cell => (
+                  <th>{cell}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map(row => (
+                <tr>
+                  {cells(row).map(cell => (
+                    <td>{cell}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      );
     } else if (item) {
       const ordered = !item[1];
       const items: ComponentChildren[] = [];

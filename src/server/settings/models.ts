@@ -1,6 +1,5 @@
 import { sha256 } from '../../utils/crypto';
 import { type ProbeResult } from '../../client/types';
-import { MemoryCache } from '../context/cache';
 import { type Params } from '../routes/match';
 import { type ServerContext } from '../context';
 import {
@@ -15,6 +14,7 @@ import {
   removeModel,
   withDefaults,
   type CoderConfig,
+  type CustomModelConfig,
   type ModelEntry,
 } from '../../core/config';
 import { probeEndpoint } from '../../core/models';
@@ -36,6 +36,52 @@ export function modelList(config: Partial<CoderConfig>) {
     builtin: { codex: CODEX_MODELS, claude: CLAUDE_MODELS },
     models: config.models ?? {},
   };
+}
+
+/** One in-memory cache per server for answers fetched from outside: a TTL, a size cap and one request per key in flight. */
+export class MemoryCache<T> {
+  private readonly entries = new Map<string, { value: T; at: number }>();
+  private readonly pending = new Map<string, Promise<T | undefined>>();
+
+  constructor(
+    private readonly options: {
+      ttlMs: number;
+      max: number;
+      now?: () => number;
+      accept?: (value: T) => boolean;
+    },
+  ) {}
+
+  /** The fresh value, else one fetch shared by concurrent callers; a failed refresh falls back to the expired value. */
+  async get(key: string, fetch: () => Promise<T | undefined>): Promise<T | undefined> {
+    const now = this.options.now ?? Date.now;
+    const at = now();
+    const cached = this.entries.get(key);
+    if (cached && at - cached.at < this.options.ttlMs) return cached.value;
+
+    let refresh = this.pending.get(key);
+    if (!refresh) {
+      refresh = Promise.resolve()
+        .then(fetch)
+        .then(value => {
+          if (value === undefined) return cached?.value;
+          if (this.options.accept && !this.options.accept(value)) return cached?.value ?? value;
+          this.entries.set(key, { value, at: now() });
+          const oldest = this.entries.keys().next().value;
+          if (this.entries.size > this.options.max && oldest !== undefined)
+            this.entries.delete(oldest);
+          return value;
+        })
+        .catch(error => {
+          console.error(`coder server: model probe failed for ${key}`, error);
+          return cached?.value;
+        })
+        .finally(() => this.pending.delete(key));
+      this.pending.set(key, refresh);
+    }
+
+    return refresh;
+  }
 }
 
 export async function probe(req: Request, ctx: ServerContext): Promise<Response> {
@@ -121,42 +167,63 @@ export async function deleteModel(
   });
 }
 
+export async function updateModel(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+  url: URL,
+): Promise<Response> {
+  const fields = await body<Partial<CustomModelConfig>>(req);
+
+  return change(ctx, config => updateEntry(config, params.name!, fields));
+}
+
+/** Changes fields of a custom endpoint model. */
+export function updateEntry(
+  config: Partial<CoderConfig>,
+  name: string,
+  fields: Partial<CustomModelConfig>,
+) {
+  const existing = config.models?.[name];
+  if (!existing || !isEndpointModel(existing)) throw new ConfigError(`No custom model "${name}"`);
+  config.models = { ...config.models, [name]: { ...existing, ...fields } };
+}
+
 export async function aliasModel(
   req: Request,
   ctx: ServerContext,
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const name = params.name!;
-
   const { spec } = await body<{
     spec?: string;
   }>(req);
 
-  return change(ctx, config => {
-    if (!MODEL_NAME.test(name)) throw new ConfigError(`Invalid alias name "${name}"`);
+  return change(ctx, config => aliasEntry(config, params.name!, spec));
+}
 
-    const existing = config.models?.[name];
-    if (existing && isEndpointModel(existing))
-      throw new ConfigError(`"${name}" is a custom model name`);
+/** Names an engine spec, such as `fast` for `codex:luna`. */
+export function aliasEntry(config: Partial<CoderConfig>, name: string, spec: string | undefined) {
+  if (!MODEL_NAME.test(name)) throw new ConfigError(`Invalid alias name "${name}"`);
 
-    const parsed = parseEngineSpec(spec, withDefaults(config));
-    if (!parsed?.model || parsed.engine === 'custom')
-      throw new ConfigError(`"${spec}" does not name a codex or claude model`);
+  const existing = config.models?.[name];
+  if (existing && isEndpointModel(existing))
+    throw new ConfigError(`"${name}" is a custom model name`);
 
-    const builtins = parsed.engine === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
-    const effort = spec!
-      .split(':')
-      .some(part => CODEX_EFFORTS.has(part) || CLAUDE_EFFORTS.has(part));
-    config.models = {
-      ...config.models,
-      [name]: {
-        provider: parsed.engine,
-        model: builtins[parsed.model] ?? parsed.model,
-        ...(effort && parsed.effort ? { effort: parsed.effort } : {}),
-      },
-    };
-  });
+  const parsed = parseEngineSpec(spec, withDefaults(config));
+  if (!parsed?.model || parsed.engine === 'custom')
+    throw new ConfigError(`"${spec}" does not name a codex or claude model`);
+
+  const builtins = parsed.engine === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
+  const effort = spec!.split(':').some(part => CODEX_EFFORTS.has(part) || CLAUDE_EFFORTS.has(part));
+  config.models = {
+    ...config.models,
+    [name]: {
+      provider: parsed.engine,
+      model: builtins[parsed.model] ?? parsed.model,
+      ...(effort && parsed.effort ? { effort: parsed.effort } : {}),
+    },
+  };
 }
 
 export async function disableModel(
@@ -165,14 +232,7 @@ export async function disableModel(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const name = params.name!;
-
-  return change(ctx, config => {
-    const models = (config.models ??= {});
-    const entry = models[name];
-    if (entry && (isEndpointModel(entry) || isAliasModel(entry))) entry.disabled = true;
-    else models[name] = { disabled: true };
-  });
+  return change(ctx, config => toggleEntry(config, params.name!, true));
 }
 
 export async function enableModel(
@@ -181,12 +241,16 @@ export async function enableModel(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  const name = params.name!;
+  return change(ctx, config => toggleEntry(config, params.name!, false));
+}
 
-  return change(ctx, config => {
-    const models = (config.models ??= {});
-    const entry = models[name];
-    if (entry && (isEndpointModel(entry) || isAliasModel(entry))) delete entry.disabled;
-    else delete models[name];
-  });
+/** Turns any model name off or back on: a built-in, a custom model or an alias. */
+export function toggleEntry(config: Partial<CoderConfig>, name: string, disabled: boolean) {
+  const models = (config.models ??= {});
+  const entry = models[name];
+  if (entry && (isEndpointModel(entry) || isAliasModel(entry))) {
+    if (disabled) entry.disabled = true;
+    else delete entry.disabled;
+  } else if (disabled) models[name] = { disabled: true };
+  else delete models[name];
 }

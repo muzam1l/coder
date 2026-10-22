@@ -9,6 +9,17 @@
 .plat td:first-child b {
   margin-right: 8px;
 }
+/* a row with an app opens its page from anywhere but its own links and controls */
+.plat tbody tr {
+  position: relative;
+}
+.plat tbody tr:has(.cover):hover {
+  background: var(--wash);
+}
+.plat :is(td.acts, td a:not(.cover), td .more) {
+  position: relative;
+  z-index: 1;
+}
 .plat .where {
   min-width: 150px;
 }

@@ -4,12 +4,12 @@
 
 run, follow and steer coding tasks
 
-## `task run [prompt] [--output-schema <output-schema>] [--name <name>] [--agent <agent>] [--append-system <append-system>] [--wait] [--engine <engine>] [--model <model>] [--effort <effort>] [--permissions <permissions>] [--mcp <mcp>] [--connections <connections>] [--add-dir <add-dir>] [--server <server>] [--workspace <workspace>] [--yes] [--background] [--repo <repo>] [--runner <runner>] [--json] [--cwd <cwd>]`
+## `task run [prompt] [--output-schema <output-schema>] [--name <name>] [--agent <agent>] [--append-system <append-system>] [--wait] [--model <model>] [--effort <effort>] [--access <access>] [--mcp <mcp>] [--connections <connections>] [--add-dir <add-dir>] [--server <server>] [--workspace <workspace>] [--yes] [--repo <repo>] [--runner <runner>] [--json] [--cwd <cwd>]`
 
 run a task (background; --wait blocks)
 
 Dispatch a coding task to the configured engine. Backgrounds by default and
-prints a task id; --wait runs in the foreground and prints the answer.
+prints a task id locally or with --server; --wait follows it to the answer.
 Shortcut: `coder run "<text>"`.
 
 Writing a task: one task per focused goal, independent goals as parallel runs.
@@ -21,26 +21,27 @@ Waiting: run `coder task result <task-id> --wait` in its own background shell, o
 per task. Never wait on several tasks in one call, or their approvals and answers
 never reach you one by one.
 
-Use luna or sonnet for mechanical work; sol or opus is the default.
-Use astra or fable for the hardest work; they cost the most.
+Recommended, unless the user prefers otherwise or a model is unavailable:
+- sol or opus by default
+- luna or sonnet for mechanical work
+- opus for public APIs, SDKs and UI design
+- astra or fable for the hardest work; they cost the most
 
 - `<prompt>` the task text
 - `--output-schema <output-schema>` JSON Schema for the task answer
 - `--name <name>` label the task (shown in list/result)
 - `--agent <agent>` run as that agent: its system.md, engine settings, MCP servers and flows; flags override them
 - `--append-system <append-system>` standing instructions appended to Coder's system prompt (kept out of prompt previews)
-- `--wait` run in the foreground and block until the answer is ready
-- `--engine <engine>` engine to use; custom runs your configured custom models (default: first in the chain)
-- `--model <model>` luna/sol/astra (codex) · sonnet/opus/fable (claude) · a custom model (coder model list)
+- `--wait` follow the task until the answer is ready
+- `--model <model>` model alias, custom name or engine:model (codex:gpt-6.1-sol, claude:opus)
 - `--effort <effort>` reasoning effort
-- `--permissions <permissions>` read-only · workspace-write · auto (default: auto)
+- `--access <access>` read-only also restricts platforms and connections; auto lets the engine review what leaves the sandbox (default: auto)
 - `--mcp <mcp>` attach MCP servers from `mcp` in .coder/config.json by name (or all), or an inline JSON array [{"name","command","args","env","tools"}]; none by default, all adds your engine's own MCP servers
 - `--connections <connections>` use only these connections (coder connection list), within the agent's
-- `--add-dir <add-dir>` give the task another directory beyond --cwd (repeatable); read-only can only read it, other modes can also write
-- `--server <server>` run the task on your Coder server and follow it here (--background prints its id)
+- `--add-dir <add-dir>` give the task another directory beyond --cwd (repeatable); read-only can only read it, auto can also write
+- `--server <server>` run the task on your Coder server and print its id (--wait follows it)
 - `--workspace <workspace>` with --server: the workspace to run in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
-- `--background` with --server: print the task id instead of following it
 - `--repo <repo>` with --server: check out a repo from the workspace's installs
 - `--runner <runner>` with --server: where it runs (a runner kind or a registered runner)
 - `--json` JSON output
@@ -147,21 +148,21 @@ coder task watch  # follow the most recent task to completion
 coder task watch <task-id> --from 0 --json  # the log so far, and the command that continues it
 ```
 
-## `task steer [task-id] [text] [--wait] [--model <model>] [--effort <effort>] [--permissions <permissions>] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
+## `task steer [task-id] [text] [--wait] [--model <model>] [--effort <effort>] [--access <access>] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
 continue a task's thread
 
 Continue a task's thread with new instructions. They are injected into a live Codex or
 Claude turn at its next tool boundary and queued across a startup or completion race.
 A stopped, finished, or archived task resumes on the same task id. It reuses the
-task's engine, model, and permissions unless overridden.
+task's engine, model, and access unless overridden.
 
 - `<task-id>` the task to continue
 - `<text>` the follow-up instructions
 - `--wait` run in the foreground and block until the answer is ready
 - `--model <model>` override the task's model for this follow-up
 - `--effort <effort>` override the task's reasoning effort
-- `--permissions <permissions>` read-only · workspace-write · auto
+- `--access <access>` lower the task's access for this follow-up
 - `--server <server>` act on your Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking

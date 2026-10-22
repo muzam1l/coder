@@ -63,7 +63,7 @@ To make it the default, add this line to your project's `AGENTS.md` or `CLAUDE.m
 Always use Coder for implementation and exploration.
 ```
 
-Every task runs under the permissions you set and stays yours to watch, steer or stop. See them all in the browser:
+Every task runs under the access you set and stays yours to watch, steer or stop. See them all in the browser:
 
 ```bash
 coder dash

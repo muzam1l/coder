@@ -8,7 +8,7 @@ import { CoderError } from '../core/dispatch';
 import { CLI_PATH } from '../core/runtime';
 import { errStyle, formatHints } from '../tui/output';
 import { resolveFlow } from './discover';
-import { readJournal } from './journal';
+import { readJournal } from './runtime';
 import type { FlowHooks } from './runtime';
 import {
   markRunFailed,
@@ -37,7 +37,7 @@ import {
 } from '../core/state';
 import { moveDirectory } from '../utils/fsx';
 
-export interface StartOptions extends RunOptions {
+interface StartOptions extends RunOptions {
   /** Run in a detached orchestrator (CLI). */
   detached?: boolean;
   /** Follow the detached run until it ends. */
@@ -419,7 +419,7 @@ export function unarchiveRun(record: FlowRecord): FlowRecord {
 
 // Delete a run's dir (record, journal, events, logs) from either bin. The
 // run's tasks are ordinary tasks and are not touched.
-export function deleteRun(runId: string): boolean {
+function deleteRun(runId: string): boolean {
   const runDir = runDirFor(runId);
   if (!fs.existsSync(path.join(runDir, 'flow.json'))) return false;
   fs.rmSync(runDir, { recursive: true, force: true });
@@ -441,7 +441,7 @@ export function readRawRecord(runId: string): FlowRecord | null {
 // Self-heal a zombie run on read. This mirrors reconcileTask for tasks. Pidless
 // records are left alone: no pid means the run is still booting
 // (streamFlowCore's boot-pid bridge covers that window).
-export function reconcileRun(record: FlowRecord, startMs = processStartMs): FlowRecord {
+function reconcileRun(record: FlowRecord, startMs = processStartMs): FlowRecord {
   if (record.status !== 'running' || !record.pid) return record;
   if (orchestratorAlive(record, startMs)) return record;
   markRunFailed(record.runId, 'orchestrator died');
@@ -485,7 +485,7 @@ const byStart = (a: FlowRecord, b: FlowRecord) =>
   String(b.startedAt).localeCompare(String(a.startedAt));
 
 /** Live runs newest-first. */
-export function listRuns(): FlowRecord[] {
+function listRuns(): FlowRecord[] {
   return scanRuns(resolveFlowsDir()).sort(byStart);
 }
 
@@ -511,7 +511,7 @@ export function flowTaskIds(runId: string): string[] {
 }
 
 /** A run's task steps, from its journal and dispatch events. */
-export function flowSteps(runId: string, tail: number | 'all' = 'all'): FlowStep[] {
+function flowSteps(runId: string, tail: number | 'all' = 'all'): FlowStep[] {
   if (tail === 0) return [];
   const entries = readJournal(path.join(runDirFor(runId), 'journal.jsonl')).filter(
     e => e.kind === 'task',

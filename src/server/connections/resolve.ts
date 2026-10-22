@@ -1,13 +1,13 @@
-import type { AgentApp, AgentTask, Connection } from '../../agent/types';
+import type { AgentTask, Connection } from '../../agent/types';
 import { agentAccess } from '../../agent/definition';
+import { strictestAccess } from '../../core/config';
 import {
-  ConnectionRefused,
   connectionMcp,
-  connectionRevoked,
   connectionWarning,
-  connectionEnvName,
   connectionEnvConflicts,
+  credentialField,
 } from '../../core/connections';
+import { connectionEnvName } from '../../core/connection-env';
 import type { McpServerSpec } from '../../core/types';
 import { decryptCredential, encryptSecret, decryptSecret } from '../store/secrets';
 import {
@@ -15,12 +15,14 @@ import {
   nativeApp,
   nativeConnections,
   nativeCredential,
+  personalGrants,
   type ConnectionContext,
 } from './records';
 import { sharedApps } from '../agents/apps';
+import { connectionToolServer } from '../../agent/mcp';
 import { IntegrationError } from '../../integrations/types';
-import { OAuthRevoked } from './oauth';
-import { oauthAccessToken, type OAuthSecret } from './oauth';
+import { OAuthRevoked, oauthAccessToken, type OAuthSecret } from './oauth';
+import { refreshFailure, tokenFingerprint } from '../../core/oauth';
 import { createHash } from 'node:crypto';
 import type { Store, TaskStatus } from '../store/types';
 
@@ -36,6 +38,9 @@ function nativeSecretValues(stored: string): string[] {
   }
 }
 
+const hostOf = (connection: Connection) =>
+  connection.endpoint?.url ? URL.parse(connection.endpoint.url)?.host : undefined;
+
 /** An `env` connection's value, read from its credential; a member's connection reads only their own or the workspace's. */
 async function envKey(ctx: ConnectionContext, connection: Connection): Promise<string> {
   const stored = connection.credential
@@ -49,27 +54,40 @@ async function envKey(ctx: ConnectionContext, connection: Connection): Promise<s
   return key;
 }
 
+/** Who asked for the turn: its asker, else the task's requester. */
+export const taskAsker = (task: AgentTask) => task.context?.asker ?? task.requestedBy;
+
+/** A turn's connections: the task's grants and, on a conversation turn, the Just me ones of the member who asked it. */
+export async function turnConnections(ctx: ConnectionContext, task: AgentTask): Promise<string[]> {
+  const asker = taskAsker(task);
+  const own = task.event && asker ? await personalGrants(ctx, asker, task.usage?.connections) : [];
+
+  return [...new Set([...(task.connections ?? []), ...own])];
+}
+
+/** `actAs` refuses a Just me connection until its owner approved acting as them for the task, else answers nothing. */
 export async function resolveConnections(
   ctx: ConnectionContext,
   task: AgentTask,
   handles: Record<string, string> = {},
+  actAs?: (connection: Connection) => Promise<string | undefined>,
 ) {
   const mcp: Record<string, McpServerSpec> = {};
   const env: Record<string, string> = {};
   const tokens = { ...handles };
-  const tools = { ...task.tools };
-  const mode = agentAccess(task);
-  const nativeTokens: Record<string, string> = {};
+  const mode = agentAccess(task, task.access);
+  const accessOf = (connection: Connection) => strictestAccess(connection.access, mode);
   const warnings: string[] = [];
   const secrets: string[] = [];
-  const ids = [...new Set(task.connections ?? [])];
+  const asker = taskAsker(task);
+  const ids = await turnConnections(ctx, task);
   const stored = ids.length
-    ? await ctx.store.list('connection', { ids, visibleTo: task.requester, secrets: 'all' })
+    ? await ctx.store.list('connection', { ids, visibleTo: asker, secrets: 'all' })
     : [];
   const saved = new Set(stored.map(row => row.id));
   let nativeError: unknown;
   const native = ids.some(id => !saved.has(id))
-    ? await nativeConnections(ctx, task.requester).catch(error => {
+    ? await nativeConnections(ctx, asker).catch(error => {
         console.error('coder server: native connection lookup failed', error);
         nativeError = error;
         return [];
@@ -85,28 +103,22 @@ export async function resolveConnections(
       return { id, value: available.get(id) };
     }),
   );
-  let apps: Promise<AgentApp[]> | undefined;
-  const connections = rows.sort(
-    (a, b) =>
-      Number(b.status === 'fulfilled' && !!b.value.value?.owner) -
-      Number(a.status === 'fulfilled' && !!a.value.value?.owner),
-  );
   const conflicts = connectionEnvConflicts(
-    connections.flatMap(result =>
+    rows.flatMap(result =>
       result.status === 'fulfilled' && result.value.value ? [result.value.value] : [],
     ),
   );
-  for (const result of connections) {
+  for (const result of rows) {
     let connection: Connection | undefined;
     let id = '';
     try {
       if (result.status === 'rejected') throw result.reason;
       ({ id, value: connection } = result.value);
-      if (!connection || (connection.owner && connection.owner !== task.requester)) continue;
+      if (!connection || (connection.owner && connection.owner !== asker)) continue;
       if (
         connection.provider === 'env' &&
         (connection.auth !== 'key' ||
-          connection.access !== 'write' ||
+          connection.access !== 'auto' ||
           connection.endpoint ||
           !connection.credential ||
           !connection.keyIn ||
@@ -116,263 +128,307 @@ export async function resolveConnections(
           ('local' in ctx && ctx.local && process.env[connection.keyIn.env] !== undefined))
       )
         throw new Error('Invalid environment connection');
+      // A Just me key in the spawn environment waits for its owner's approval, from the turn that asks for it.
+      if (connection.owner && connection.provider === 'env') {
+        const refusal = actAs ? await actAs(connection) : 'Its owner has not approved it';
+        if (refusal) {
+          warnings.push(refusal);
+          continue;
+        }
+      }
+      if (
+        connection.auth === 'oauth' ||
+        (connection.owner && connection.provider === 'mcp' && connection.auth === 'key')
+      ) {
+        // OAuth tokens and Just me keys load on first use, through the task's server.
+        const access = accessOf(connection);
+        if (connection.provider === 'mcp')
+          mcp[id] = {
+            ...connectionMcp({ ...connection, access }, undefined),
+            connection: id,
+            credentialOnUse: credentialField(connection),
+            connectionCreatedAt: connection.createdAt,
+            description: connection.name,
+            access,
+            ...(connection.owner
+              ? { owner: connection.owner, account: connection.login ?? connection.account }
+              : {}),
+          };
+        else {
+          const integration = ctx.integrations[connection.provider];
+          if (!integration) throw new Error('Unknown integration');
+          mcp[id] = connectionToolServer(
+            connection,
+            [...integration.tools.presets[access]],
+            task.event,
+          );
+        }
+        continue;
+      }
       if (connection.broken) {
         warnings.push(`${connection.name} needs reconnecting.`);
         continue;
       }
       let token: string | undefined;
-      let credential: ((force?: boolean, refused?: string) => Promise<string>) | undefined;
-      if (
-        connection.provider !== 'mcp' &&
-        connection.provider !== 'env' &&
-        connection.auth === 'oauth'
-      ) {
-        if (nativeTokens[connection.provider]) continue;
-        const selected = connection;
-        const integration = ctx.integrations[selected.provider];
-        if (!integration?.auth.user) throw new Error('Missing user OAuth');
-        const selectedSecret =
-          !selected.owner && selected.secret
-            ? decryptSecret<{ app: string; token: string }>(ctx.config, selected.secret)
-            : undefined;
-        const account = selected.owner
-          ? (await ctx.auth?.linkedAccounts?.(selected.owner, ctx.store))?.find(
-              account =>
-                account.platform === selected.provider &&
-                account.token &&
-                account.organizations?.includes(ctx.organizationId) &&
-                (!selected.account || account.platformUserId === selected.account),
-            )
-          : undefined;
-        const app = await nativeApp(
-          ctx,
-          selected.provider,
-          (account?.token ? nativeCredential(ctx.config, account.token).app : undefined) ??
-            selected.oauthApp ??
-            selectedSecret?.app,
-          await (apps ??= Promise.all([sharedApps(ctx), ctx.store.list('app')]).then(
-            ([shared, own]) => [...shared, ...own.map(row => row.value)],
-          )),
-        );
-        if (!app) throw new Error('Missing integration credentials');
-        const accountId = selected.owner
-          ? (selected.account ?? account?.platformUserId)
-          : undefined;
-        if (selected.owner && !accountId) throw new Error('Missing linked account');
-        const lock = selected.owner
-          ? `native:${selected.owner}:${selected.provider}:${accountId}`
-          : `connection:${id}`;
-        token = await ctx.store.withAppLock(lock, async store => {
-          const current = await findConnection({ ...ctx, store }, id, task.requester);
-          if (
-            !current ||
-            current.owner !== selected.owner ||
-            current.provider !== selected.provider ||
-            current.broken
-          )
-            throw new Error('Connection changed during resolution');
-          connection = current;
-          const accounts = current.owner
-            ? await ctx.auth?.linkedAccounts?.(current.owner, store)
-            : [];
-          const account = accounts?.find(
-            account =>
-              account.platform === current.provider &&
-              account.token &&
-              account.organizations?.includes(ctx.organizationId) &&
-              account.platformUserId === accountId &&
-              (!current.account || account.platformUserId === current.account),
-          );
-          const secret = current.owner
-            ? undefined
-            : current.secret &&
-              decryptSecret<{ app: string; token: string }>(ctx.config, current.secret);
-          const decoded = account?.token ? nativeCredential(ctx.config, account.token) : undefined;
-          const stored = current.owner ? decoded?.token : secret && secret.token;
-          if (!stored) throw new Error('Missing native credential');
-          secrets.push(...nativeSecretValues(stored));
-          const boundApp = decoded?.app ?? current.oauthApp ?? (secret ? secret.app : undefined);
-          if (boundApp && boundApp !== app.id)
-            throw new Error('OAuth client changed during resolution');
-          let access;
-          try {
-            access = await integration.auth.user!.access(
-              stored,
-              decryptSecret(ctx.config, app.credentials),
-              {
-                fetch: ((input, init) =>
-                  (ctx.fetch ?? fetch)(input, {
-                    ...init,
-                    redirect: 'manual',
-                    signal: AbortSignal.timeout(5000),
-                  })) as typeof fetch,
-                now: (ctx.now ?? Date.now)(),
-              },
-            );
-          } catch (error) {
-            if (
-              error instanceof IntegrationError &&
-              ['invalid_grant', 'invalid_token', 'bad_refresh_token', 'expired_token'].includes(
-                error.error ?? '',
-              )
-            )
-              throw new OAuthRevoked('Native credential was revoked');
-            throw error;
-          }
-          if (access.refreshed) {
-            secrets.push(...nativeSecretValues(access.refreshed));
-            if (current.owner) {
-              if (
-                !account ||
-                !(await ctx.auth?.refreshLinkedToken?.(
-                  current.owner,
-                  account.platform,
-                  account.platformUserId,
-                  account.token!,
-                  encryptSecret(ctx.config, { app: app.id, token: access.refreshed }),
-                  store,
-                ))
-              )
-                throw new Error('Linked account changed during refresh');
-            } else {
-              current.secret = encryptSecret(ctx.config, { app: app.id, token: access.refreshed });
-              await store.put('connection', id, current);
-            }
-          } else if (current.owner) {
-            const linked = await ctx.auth?.linkedAccounts?.(current.owner, store);
-            if (
-              !linked?.some(
-                value =>
-                  value.platform === account?.platform &&
-                  value.platformUserId === account.platformUserId &&
-                  value.token === account.token,
-              )
-            )
-              throw new Error('Linked account changed during resolution');
-          }
-
-          return access.accessToken;
-        });
-      } else if (connection.provider === 'env') {
+      if (connection.provider === 'env') {
         token = await envKey(ctx, connection);
-      } else if (connection.auth !== 'none') {
+      } else if (connection.auth === 'key') {
         if (!connection.secret) throw new Error('Missing credential');
-        const secret = decryptSecret<{ key?: string } & OAuthSecret>(ctx.config, connection.secret);
-        secrets.push(
-          ...[secret.key, secret.accessToken, secret.refreshToken, secret.clientSecret].filter(
-            (value): value is string => !!value,
-          ),
-        );
-        if (connection.auth === 'key') {
-          if (!secret.key) throw new Error('Missing key');
-          token = secret.key;
-        } else {
-          const owner = connection.owner;
-          credential = async (force = false, refused?: string) => {
-            const active = await ctx.store.withAppLock(`connection:${id}`, async store => {
-              const current = await store.get('connection', id);
-              if (!current || current.owner !== owner || current.broken || current.auth !== 'oauth')
-                throw new Error('Connection changed during resolution');
-              if (!current.secret) throw new Error('Missing credential');
-              const secret = decryptSecret<OAuthSecret>(ctx.config, current.secret);
-              secrets.push(
-                ...[secret.accessToken, secret.refreshToken, secret.clientSecret].filter(
-                  (value): value is string => !!value,
-                ),
-              );
-              const signal = AbortSignal.timeout(5000);
-              const token = await oauthAccessToken({
-                secret,
-                now: (ctx.now ?? Date.now)(),
-                force: force && secret.accessToken === refused,
-                fetch: ((input, init) =>
-                  (ctx.fetch ?? fetch)(input, {
-                    ...init,
-                    redirect: 'manual',
-                    signal,
-                  })) as typeof fetch,
-                save: async value => {
-                  secrets.push(
-                    ...[value.accessToken, value.refreshToken, value.clientSecret].filter(
-                      (entry): entry is string => !!entry,
-                    ),
-                  );
-                  current.secret = encryptSecret(ctx.config, value);
-                  await store.put('connection', id, current);
-                },
-              });
-
-              return { connection: current, token };
-            });
-            connection = active.connection;
-
-            return active.token;
-          };
-          token = await credential();
-        }
+        token = decryptSecret<{ key?: string }>(ctx.config, connection.secret).key;
+        if (!token) throw new Error('Missing key');
       }
       if (token) secrets.push(token);
       if (connection.provider === 'env') {
         env[(connection.keyIn as { env: string }).env] = token!;
       } else if (connection.provider === 'mcp') {
-        const access = connection.access ?? mode;
-        let spec: McpServerSpec | undefined;
-        try {
-          spec = await connectionMcp({ ...connection, access }, token, ctx.fetch ?? fetch);
-        } catch (error) {
-          if (!(error instanceof ConnectionRefused) || !credential) throw error;
-          token = await credential(true, token);
-          secrets.push(token);
-          spec = await connectionMcp({ ...connection, access }, token, ctx.fetch ?? fetch);
-        }
-        if (spec) mcp[id] = { ...spec, description: connection.name, access };
-      } else if (!nativeTokens[connection.provider] && token) {
-        const integration = ctx.integrations[connection.provider];
-        if (!integration) throw new Error('Unknown integration');
-        nativeTokens[connection.provider] = token;
-        tokens[connection.provider] = token;
-        if (connection.access || !tools[connection.provider])
-          tools[connection.provider] = [...integration.tools.presets[connection.access ?? mode]];
+        const access = accessOf(connection);
+        mcp[id] = {
+          ...connectionMcp({ ...connection, access }, token),
+          connection: id,
+          description: connection.name,
+          access,
+        };
       }
     } catch (error) {
-      if (connection && connectionRevoked(error)) {
-        const failed = connection;
-        await ctx.store.withAppLock(`connection:${id}`, async store => {
-          const current = await store.get('connection', id);
-          if (current && current.secret === failed.secret)
-            await store.put('connection', id, {
-              ...current,
-              broken: { at: (ctx.now ?? Date.now)(), reason: 'Needs reconnecting' },
-            });
-        });
-      }
       warnings.push(connectionWarning(connection?.name ?? 'A connection', error));
     }
   }
 
-  return { mcp, env, tokens, nativeTokens, tools, warnings, secrets };
+  return { mcp, env, tokens, warnings, secrets };
 }
 
+/** Where an attempt keeps its resolved connections, by its grants and asker. */
+const resolvedId = (status: TaskStatus) =>
+  `connections:${status.task.id}:${status.generation ?? 0}:${status.attempts}:${createHash('sha256')
+    .update(JSON.stringify([status.task.connections, taskAsker(status.task)]))
+    .digest('hex')
+    .slice(0, 12)}`;
+
+/** Error codes with which a platform refuses a token's refresh. */
+const REFUSED = ['invalid_grant', 'invalid_token', 'bad_refresh_token', 'expired_token'];
+
+const broken = (ctx: ConnectionContext) => ({
+  at: (ctx.now ?? Date.now)(),
+  reason: 'Needs reconnecting',
+});
+
+const timed = (ctx: ConnectionContext) =>
+  ((input, init) =>
+    (ctx.fetch ?? fetch)(input, {
+      ...init,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(5000),
+    })) as typeof fetch;
+
+/** An OAuth MCP connection's token, refreshed when expired or when it is the `refused` one, and saved in the same locked step; only for the row and endpoint the task resolved. */
+function mcpToken(
+  ctx: ConnectionContext,
+  id: string,
+  owner: string | undefined,
+  refused: string | undefined,
+  secrets: string[],
+  resolved: { url?: unknown; connectionCreatedAt?: unknown },
+): Promise<string | undefined> {
+  return ctx.store.withAppLock(`connection:${id}`, async store => {
+    const current = await store.get('connection', id);
+    if (!current?.secret || current.auth !== 'oauth' || current.broken || current.owner !== owner)
+      return undefined;
+    if (
+      current.createdAt !== resolved.connectionCreatedAt ||
+      current.endpoint?.url !== resolved.url
+    )
+      throw new Error('The connection changed since the task resolved it');
+    const secret = decryptSecret<OAuthSecret>(ctx.config, current.secret);
+    secrets.push(
+      ...[secret.accessToken, secret.refreshToken].filter((value): value is string => !!value),
+    );
+    const force = !!secret.accessToken && tokenFingerprint(secret.accessToken) === refused;
+    // A token with no expiry stays until its server refuses it.
+    if (!force && secret.accessToken && secret.expiresAt === undefined) return secret.accessToken;
+    try {
+      return await oauthAccessToken({
+        secret,
+        now: (ctx.now ?? Date.now)(),
+        fetch: timed(ctx),
+        force,
+        save: async value => {
+          secrets.push(
+            ...[value.accessToken, value.refreshToken].filter((entry): entry is string => !!entry),
+          );
+          await store.put('connection', id, {
+            ...current,
+            secret: encryptSecret(ctx.config, value),
+          });
+        },
+      });
+    } catch (error) {
+      console.error(
+        'coder server: token refresh failed',
+        refreshFailure({ connection: id, host: hostOf(current) }, error),
+      );
+      if (!(error instanceof OAuthRevoked)) throw error;
+      await store.put('connection', id, { ...current, broken: broken(ctx) });
+      return undefined;
+    }
+  });
+}
+
+/** A Just me platform connection's token, from its member's link; a refresh and the save of its rotated token happen under the lock the token was read in. A token bound to no client refreshes with the event's app. */
+async function nativeToken(
+  ctx: ConnectionContext,
+  connection: Connection,
+  event: AgentTask['event'],
+  refused: string | undefined,
+  secrets: string[],
+): Promise<string | undefined> {
+  const integration = ctx.integrations[connection.provider];
+  if (!integration?.auth.user) throw new Error('Missing user OAuth');
+  const { owner, provider } = connection;
+  if (!owner) return undefined;
+  const linked = (
+    accounts: Awaited<
+      ReturnType<NonNullable<NonNullable<ConnectionContext['auth']>['linkedAccounts']>>
+    > = [],
+    account = connection.account,
+  ) =>
+    accounts.find(
+      value =>
+        value.platform === provider &&
+        value.token &&
+        value.organizations?.includes(ctx.organizationId) &&
+        (!account || value.platformUserId === account),
+    );
+  const accountId =
+    connection.account ??
+    linked(await ctx.auth?.linkedAccounts?.(owner, ctx.store))?.platformUserId;
+  if (!accountId) return undefined;
+  const eventApp =
+    event?.integration === provider ? await ctx.store.get('app', event.appId) : undefined;
+  const apps = await Promise.all([sharedApps(ctx), ctx.store.list('app')]).then(([shared, own]) => [
+    ...shared,
+    ...own.map(row => row.value),
+    ...(eventApp ? [eventApp] : []),
+  ]);
+
+  return ctx.store.withAppLock(`native:${owner}:${provider}:${accountId}`, async store => {
+    const current = await findConnection({ ...ctx, store }, connection.id, owner);
+    if (!current || current.owner !== owner || current.provider !== provider || current.broken)
+      return undefined;
+    const account = linked(await ctx.auth?.linkedAccounts?.(owner, store), accountId);
+    if (!account?.token || account.refusedAt) return undefined;
+    const stored = nativeCredential(ctx.config, account.token);
+    secrets.push(...nativeSecretValues(stored.token));
+    const app = await nativeApp(
+      ctx,
+      provider,
+      stored.app ?? current.oauthApp ?? eventApp?.id,
+      apps,
+    );
+    if (!app) throw new Error('Missing integration credentials');
+    const use = (force: boolean) =>
+      integration.auth.user!.access(stored.token, decryptSecret(ctx.config, app.credentials), {
+        fetch: timed(ctx),
+        now: (ctx.now ?? Date.now)(),
+        force,
+      });
+    let access;
+    try {
+      access = await use(false);
+      // Its server refused this very token, so it refreshes now.
+      if (!access.refreshed && tokenFingerprint(access.accessToken) === refused)
+        access = await use(true);
+    } catch (error) {
+      console.error(
+        'coder server: token refresh failed',
+        refreshFailure({ integration: provider, account: accountId }, error),
+      );
+      if (!(error instanceof IntegrationError && REFUSED.includes(error.error ?? ''))) throw error;
+      await ctx.auth?.refuseLinkedToken?.(
+        owner,
+        provider,
+        account.platformUserId,
+        account.token,
+        store,
+      );
+      return undefined;
+    }
+    if (access.refreshed) {
+      secrets.push(...nativeSecretValues(access.refreshed));
+      const sealed = encryptSecret(ctx.config, { app: app.id, token: access.refreshed });
+      if (
+        !(await ctx.auth?.refreshLinkedToken?.(
+          owner,
+          provider,
+          account.platformUserId,
+          account.token,
+          sealed,
+          store,
+        ))
+      ) {
+        const error = new Error('Linked account changed during refresh');
+        console.error(
+          'coder server: token refresh failed',
+          refreshFailure({ integration: provider, account: accountId }, error),
+        );
+        throw error;
+      }
+    }
+
+    return access.accessToken;
+  });
+}
+
+/** A Just me MCP key, only for the endpoint the task resolved; none once its server refused it. */
+function keyToken(
+  ctx: ConnectionContext,
+  connection: Connection,
+  refused: string | undefined,
+  resolved: { url?: unknown; connectionCreatedAt?: unknown },
+): string | undefined {
+  if (
+    connection.createdAt !== resolved.connectionCreatedAt ||
+    connection.endpoint?.url !== resolved.url
+  )
+    throw new Error('The connection changed since the task resolved it');
+  const key =
+    connection.secret && decryptSecret<{ key?: string }>(ctx.config, connection.secret).key;
+
+  return key && tokenFingerprint(key) !== refused ? key : undefined;
+}
+
+/** A task's OAuth connection token or Just me key on first use, refreshed then; `refused` names, by its fingerprint, a token its server refused, which refreshes only while it is still the current one. No token when it needs reconnecting: the refusal is marked on the connection or link. */
+export async function connectionToken(
+  ctx: ConnectionContext,
+  task: AgentTask,
+  id: string,
+  refused?: string,
+  resolved: { url?: unknown; connectionCreatedAt?: unknown } = {},
+): Promise<{ token?: string; name?: string }> {
+  const connection = await findConnection(ctx, id, taskAsker(task));
+  const key = connection?.auth === 'key' && connection.owner && connection.provider === 'mcp';
+  if (!connection || (connection.auth !== 'oauth' && !key) || connection.broken)
+    return { name: connection?.name };
+  const secrets: string[] = [];
+  const token = key
+    ? keyToken(ctx, connection, refused, resolved)
+    : connection.provider === 'mcp'
+      ? await mcpToken(ctx, id, connection.owner, refused, secrets, resolved)
+      : await nativeToken(ctx, connection, task.event, refused, secrets);
+  await taskConnectionSecrets(ctx, task.id, [...secrets, ...(token ? [token] : [])]);
+
+  return { name: connection.name, ...(token ? { token } : {}) };
+}
+
+/** The attempt's connections, resolved once and kept; `saved` when the kept resolution answered, whose secrets its first start stored. */
 export async function resolvedTaskConnections(
   ctx: ConnectionContext,
   status: TaskStatus,
   handles: Record<string, string>,
+  actAs?: (connection: Connection) => Promise<string | undefined>,
 ) {
-  if (!status.task.connections?.length)
-    return {
-      mcp: {},
-      env: {},
-      tokens: handles,
-      nativeTokens: {},
-      tools: status.task.tools,
-      warnings: [],
-      secrets: [],
-    };
-  const grants = createHash('sha256')
-    .update(JSON.stringify(status.task.connections))
-    .digest('hex')
-    .slice(0, 12);
-  const id = `connections:${status.task.id}:${status.generation ?? 0}:${status.attempts}:${grants}`;
+  if (!status.task.connections?.length && !(status.task.event && taskAsker(status.task)))
+    return { mcp: {}, env: {}, tokens: handles, warnings: [], secrets: [], saved: false };
+  const id = resolvedId(status);
 
   const known = await ctx.store.get('snapshot', id);
   if (known && 'resolvedConnections' in known) {
@@ -381,10 +437,14 @@ export async function resolvedTaskConnections(
       known.resolvedConnections,
     );
     if (!resolved.warnings.length)
-      return { ...resolved, tokens: { ...resolved.tokens, ...handles, ...resolved.nativeTokens } };
+      return {
+        ...resolved,
+        tokens: { ...resolved.tokens, ...handles },
+        saved: true,
+      };
   }
   const live = await ctx.store.get('task', status.task.id);
-  const resolved = await resolveConnections(ctx, status.task, handles);
+  const resolved = await resolveConnections(ctx, status.task, handles, actAs);
   if (!resolved.warnings.length && live)
     await ctx.store.withAppLock(`connections:${status.task.id}`, async store => {
       const current = await store.get('task', status.task.id);
@@ -409,7 +469,7 @@ export async function resolvedTaskConnections(
       );
     });
 
-  return resolved;
+  return { ...resolved, saved: false };
 }
 
 /** A task's redaction secrets, one sealed row each under `connection-secrets:<task>:`, kept for the task's timeout. */
@@ -447,10 +507,10 @@ export async function connectionSecretValues(
   const secrets: string[] = [];
   const ids = [...new Set(task.connections ?? [])];
   const stored = ids.length
-    ? await ctx.store.list('connection', { ids, visibleTo: task.requester, secrets: 'all' })
+    ? await ctx.store.list('connection', { ids, visibleTo: task.requestedBy, secrets: 'all' })
     : [];
   const native = ids.some(id => !stored.some(row => row.id === id))
-    ? await nativeConnections(ctx, task.requester)
+    ? await nativeConnections(ctx, task.requestedBy)
     : [];
   const available = new Map([
     ...native.map(value => [value.id, value] as const),

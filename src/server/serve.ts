@@ -4,7 +4,7 @@ import process from 'node:process';
 
 import type { RunnerKind } from '../agent/types';
 import { CoderError } from '../core/dispatch';
-import { migrateCache, type CacheMigration } from '../core/cache';
+import { migrateCache, type CacheMigration } from '../core/state';
 import type { ServerContext } from './context';
 import { createContext, type Contexts } from './context/create';
 import { kick } from './tasks/kick';
@@ -14,7 +14,6 @@ import { handleRequest } from './routes';
 import { LOOPBACK, serverMode, socketAllowed, type ServerMode } from './routes/guards';
 import { nodeListener } from './routes/http';
 import { RUNNER_KINDS } from './runners';
-import { describeDatabase } from './store/pg/client';
 
 const SWEEP_MS = 60 * 60 * 1000;
 
@@ -305,7 +304,7 @@ async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
     ...(signIn ? { signIn } : {}),
     ...(host.mintedToken ? { mintedToken: host.mintedToken } : {}),
     ...(host.config.store === 'postgres' && given.DATABASE_URL
-      ? { database: describeDatabase(given.DATABASE_URL) }
+      ? { database: (await import('./store/pg/client')).describeDatabase(given.DATABASE_URL) }
       : {}),
     ...(LOOPBACK.has(new URL(home).hostname)
       ? { dashboard: `${home}/dash${token ? `#token=${encodeURIComponent(token)}` : ''}` }

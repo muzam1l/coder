@@ -14,8 +14,8 @@ function printIntegration(detail: ReturnType<typeof agents.integrations.show>): 
     ...Object.entries(detail.events).map(([name, does]) => ({ kind: 'event', name, does })),
     ...Object.entries(detail.tools).map(([name]) => ({
       kind: 'tools',
-      name: name === 'read' ? 'Read-only' : 'Read-write',
-      does: name === 'read' ? 'Platform tools marked read-only' : 'All platform tools',
+      name: name === 'read-only' ? 'Read-only' : 'Auto',
+      does: name === 'read-only' ? 'Platform tools marked read-only' : 'All platform tools',
     })),
   ];
   process.stdout.write(
@@ -35,7 +35,7 @@ export const commandIntegrationsShow = command({
   name: 'show',
   description: 'events and tools of one integration',
   usage:
-    'Describe one integration: each event with what triggers it, and the tools each preset (read, write) allows.',
+    'Describe one integration: each event with what triggers it, and the tools each access (read-only, auto) allows.',
   access: 'read',
   args: { id: str('the integration') },
   globalFlags: { cwd: false },

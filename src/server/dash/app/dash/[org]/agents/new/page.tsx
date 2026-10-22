@@ -47,6 +47,7 @@ export default function NewAgentPage({ request }: { request?: Request }) {
                   connectLabel={reach[0]?.installLabel ?? 'Connect'}
                   tunnel={needsTunnel(who)}
                   port={url.port || '8787'}
+                  asked={Object.fromEntries(url.searchParams)}
                 />
               );
             },

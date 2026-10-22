@@ -1,11 +1,9 @@
 import { createHmac, randomBytes } from 'node:crypto';
 
-import { decodeJson, encodeJson } from '../../utils/base64url';
-import { safeEqual, sha256 } from '../../utils/crypto';
+import { decodeJson, encodeJson, safeEqual, sha256 } from '../../utils/crypto';
 import type { ServerContext } from '../context';
 
-export type NonceKind =
-  'create' | 'install' | 'link-start' | 'link' | 'link-oauth' | 'connection-oauth' | 'native-oauth';
+type NonceKind = 'create' | 'install' | 'connection-oauth' | 'native-oauth';
 
 interface NonceClaim {
   kind: NonceKind;

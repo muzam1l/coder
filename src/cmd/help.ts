@@ -1,10 +1,11 @@
 /** `coder --help`: the top-level sections, kept apart from the app so they load alone. */
+import { CODER_DESCRIPTION } from '../core/runtime';
 import type { TopHelpSpec } from '../tui/help';
 
 export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
   title: 'Coder',
   usageLine: 'coder <command>',
-  description: 'Delegate a coding task to the best available engine and steer it while it runs.',
+  description: CODER_DESCRIPTION,
   commands: [
     { usage: 'dash', blurb: 'your tasks, agents and settings in the browser' },
     { usage: 'run "<text>"', blurb: 'run a task (background; --wait blocks)' },
@@ -42,8 +43,8 @@ export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
       blurb: '"claude" for Claude Code, "agents" for any ~/.agents host (Codex, Pi, ...)',
     },
     {
-      usage: 'coder run --engine [codex|claude] "<task>"',
-      blurb: "run a task on that engine's default model",
+      usage: 'coder run --model <model|engine:model> "<task>"',
+      blurb: "run a task with that model",
     },
     {
       usage: 'coder task result <task-id> --wait',

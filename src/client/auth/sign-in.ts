@@ -1,10 +1,8 @@
 /** Wular tokens for a Coder server: loopback (RFC 8252) or device (RFC 8628) sign-in, and refresh. */
 import http from 'node:http';
 import process from 'node:process';
-
 import * as oidc from 'openid-client';
-
-import { CoderError } from '../../core/dispatch';
+import { CoderError } from '../../core/errors';
 import { openUrl } from '../../tui/prompt';
 import { serverFor } from '../../core/remote';
 import { savedSessions, writeSessions, type Session } from './session';
@@ -100,7 +98,7 @@ const failed = (error: unknown) =>
   );
 
 /** Authorization code with PKCE through a one-shot listener on 127.0.0.1. */
-export async function loopbackSignIn(server: string, open: (url: string) => void): Promise<Tokens> {
+async function loopbackSignIn(server: string, open: (url: string) => void): Promise<Tokens> {
   const { config, resource } = await discover(server);
   const verifier = oidc.randomPKCECodeVerifier();
   const state = oidc.randomState();
@@ -157,7 +155,7 @@ export async function loopbackSignIn(server: string, open: (url: string) => void
 }
 
 /** The device authorization grant, for machines without a browser. */
-export async function deviceSignIn(
+async function deviceSignIn(
   server: string,
   onCode: (code: string, url: string) => void,
 ): Promise<Tokens> {

@@ -5,6 +5,7 @@ import { commandAgentInit } from './init';
 import { commandAgentList } from './list';
 import { commandAgentPush } from './push';
 import { commandAgentRun } from './run';
+import { commandAgentSettings } from './settings';
 import { commandAgentShow } from './show';
 import { commandAgentUsage } from './usage';
 
@@ -16,6 +17,7 @@ export const commandAgent = group({
   commands: [
     commandAgentList,
     commandAgentShow,
+    commandAgentSettings,
     commandAgentInit,
     commandAgentPush,
     commandAgentRun,

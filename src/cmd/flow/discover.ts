@@ -13,6 +13,7 @@ export const commandDiscover = command({
   usage:
     'List every flow discoverable from the current directory: workspace flows in\n.coder/flows/ (walking up to the repo root) and global flows in ~/.coder/flows/.',
   access: 'read',
+  approvalPolicy: 'deny',
   run: async ({ cwd }) => {
     const { discoverFlows } = await import('../../flow/discover');
     return discoverFlows(cwd);

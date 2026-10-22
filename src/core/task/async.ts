@@ -18,7 +18,7 @@ export interface AsyncTool<I = any> {
   /** The flow's args for a call, run in the task's directory. */
   args(input: I, cwd: string): Record<string, unknown>;
   /** The message body for the flow's result. */
-  render(result: unknown, runId: string): string;
+  render(result: unknown, runId: string): Promise<string>;
 }
 
 /** One call: its tool, its run, the driver's pid once it drives, and whether the task got the result. */
@@ -142,7 +142,7 @@ export async function driveAsyncTool(
         done === 'timeout'
           ? `${name} timed out after ${timeout}s and was stopped`
           : `${name} was stopped`;
-    } else outcome = `${name} finished\n\n${tool.render(done.result, runId)}`;
+    } else outcome = `${name} finished\n\n${await tool.render(done.result, runId)}`;
   } catch (error) {
     outcome = `${name} ${runId} failed: ${error instanceof Error ? error.message : String(error)}`;
   } finally {

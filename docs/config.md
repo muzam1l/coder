@@ -5,9 +5,9 @@ The Coder configuration reference. Machine defaults live in `~/.coder/config.jso
 1. Built-in defaults
 2. `~/.coder/config.json`
 3. `<repo>/.coder/config.json`
-4. CLI flags on the dispatch itself (`--engine`, `--model`, `--effort`, `--permissions`)
+4. CLI flags on the dispatch itself (`--model`, `--effort`, `--access`)
 
-Read and write values from the CLI (`--workspace` targets the repo file instead of the user file):
+Read and write values in the dashboard under **# Settings → (Engines)** and **(Models)**, or from the CLI (`--workspace` targets the repo file instead of the user file):
 
 ```bash
 coder config list
@@ -22,8 +22,8 @@ coder config set engines.codex.model sol
 {
   "chain": ["codex", "claude", "custom"],
   "engines": {
-    "codex": { "model": "sol", "effort": "high", "permissions": "auto", "network": true },
-    "claude": { "model": "opus", "effort": "medium", "permissions": "auto" },
+    "codex": { "model": "sol", "effort": "high", "network": true },
+    "claude": { "model": "opus", "effort": "medium" },
     "custom": { "model": "qwen" }
   },
   "models": {
@@ -38,8 +38,7 @@ coder config set engines.codex.model sol
   "agents": {
     "review": false,
     "helper": {
-      "permissions": "read-only",
-      "access": "read"
+      "access": "read-only"
     }
   },
   "mcp": {
@@ -60,11 +59,10 @@ Per-engine defaults, used when a dispatch doesn't override them:
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `model`       | codex: `luna`, `sol` (default), `astra` · claude: `sonnet`, `opus` (default), `fable` · custom: any name from `models` · or any full model id |
 | `effort`      | `low`, `medium`, `high`                                                                                                                       |
-| `permissions` | `read-only`, `workspace-write`, `auto`                                                                                                        |
 
-Permission modes are one surface across all engines: read-only can't modify anything, workspace-write stays inside the repo, and auto lets the engine's own reviewer decide actions outside the sandbox (see [approvals](#approvals)); `engines.codex.network` overrides network access for every mode when set.
+A task's access is `auto` or `read-only` (`--access`, or **# Tasks → [New task]**), the same on every engine: `auto` lets the engine's own reviewer decide actions outside the sandbox (see [approvals](#approvals)), `read-only` changes nothing and uses only read-only tools. A read-only agent or parent task makes its tasks read-only; `engines.codex.network` overrides network access for every mode when set.
 
-A task reaches only its workspace unless you give it more. Pass `--add-dir <dir>` to `coder run` once for each sibling repo or shared folder the task needs. Relative paths resolve against the workspace and each one must already exist. Read-only tasks can read these directories but never write them, while workspace-write and auto tasks can write them just like the workspace. Claude receives them as `--add-dir` and `permissions.additionalDirectories`, so its OS sandbox follows the same rules. Codex already reads everywhere in read-only, and in the other modes it receives them as extra writable roots in the turn's sandbox policy. The directories are saved on the task, `coder result` lists them, and steering keeps them.
+A task reaches only its workspace unless you give it more. Pass `--add-dir <dir>` to `coder run` once for each sibling repo or shared folder the task needs. Relative paths resolve against the workspace and each one must already exist. Read-only tasks can read these directories but never write them, while auto tasks can write them just like the workspace. Claude receives them as `--add-dir` and `permissions.additionalDirectories`, so its OS sandbox follows the same rules. Codex already reads everywhere in read-only, and in auto it receives them as extra writable roots in the turn's sandbox policy. The directories are saved on the task, `coder result` lists them, and steering keeps them.
 
 ## `models`
 
@@ -82,7 +80,7 @@ Every shape also accepts `"disabled": true` to park the entry without deleting i
 
 | Key                   | Meaning                                                                                                           |
 | --------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `allowedNetworkHosts` | Hosts (and their subdomains) tasks reach without review. Default `[]`. Also in the dashboard, Settings → Engines. |
+| `allowedNetworkHosts` | Hosts (and their subdomains) tasks reach without review. Default `[]`. Also in the dashboard, **# Settings → (Engines)**. |
 
 How tasks ask for more: [Access and approvals](access.md).
 

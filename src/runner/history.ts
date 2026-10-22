@@ -7,8 +7,12 @@ import { gunzipSync, gzipSync } from 'node:zlib';
 import type { TaskHistory } from '../server/store/types';
 import { codexHome } from '../core/engines/codex/sessions';
 import type { DispatchOptions } from '../core/dispatch';
-import { claudeProjectsDir } from '../core/engines/claude/sessions';
-import { HISTORY_CONVERSATION, conversationIds, transcriptFiles } from '../core/engines/history';
+import {
+  claudeProjectsDir,
+  HISTORY_CONVERSATION,
+  conversationIds,
+  transcriptFiles,
+} from '../core/engines/history';
 import type { Task } from '../core/types';
 
 type Engine = TaskHistory['engine'];
@@ -41,7 +45,7 @@ function restoreTarget(engine: Engine, conversation: string, text: string): stri
 }
 
 /** Replace each secret, raw and JSON-escaped, with a marker. */
-export function redactHistory(text: string, secrets: string[]): string {
+function redactHistory(text: string, secrets: string[]): string {
   const values = secrets
     .flatMap(secret => [secret, ...(secret.startsWith('Bearer ') ? [secret.slice(7)] : [])])
     .filter(secret => secret.length >= 8)

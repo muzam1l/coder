@@ -13,6 +13,7 @@ export const commandRunnerServe = command({
   usage:
     "Run tasks on this machine with its own claude and codex logins. Expose the port with any tunnel (cloudflared, ngrok, Tailscale Funnel or a public VS Code port) and pass the tunnel's URL; each start registers the current URL, so a changing tunnel URL is fine. Choose a default with coder runner default. Tasks use their named runner, the agent setting, your default, the workspace default, then the server default.",
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     url: str('the HTTPS address the server reaches this runner at', '<public url>'),
     token: str('one-use pairing token, --url is the Coder server', '<token>'),

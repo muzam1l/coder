@@ -14,6 +14,14 @@ export const commandConnectionReconnect = command({
   usage:
     'Give a key connection its new key, read from stdin or a prompt, or sign in to an OAuth connection again in the browser. The credential an API key connection reads gets the new value, so every connection reading it rotates.',
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/settings/connections',
+      label: 'Reconnect the connection',
+      action: 'reconnect',
+      args: ['name'],
+    },
+  },
   args: { name: z.string().check(z.describe('the connection')), ...serverOptions },
   cli: {
     positional: ['name'],

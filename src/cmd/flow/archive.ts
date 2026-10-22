@@ -13,6 +13,7 @@ export const commandArchive = command({
   usage:
     'Archive a flow run so it drops out of the default list (see it again with\n`coder flow list --archived [--limit N]`). Pass --all-stopped to archive every\nfinished run. A running run must be stopped first.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     'run-id': str('the run to archive'),
     'all-stopped': flag('archive every stopped (finished) run'),

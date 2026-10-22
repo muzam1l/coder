@@ -9,16 +9,16 @@ endpoint (Ollama, vLLM, OpenRouter, ...) as the custom engine, alongside the
 built-in codex/claude models. Name your own shortcuts with `alias`
 (e.g. fast -> codex:luna); disable/enable turns any model off and on.
 
-## `model list [--json] [--cwd <cwd>]`
+## `model list [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
 list built-ins, custom models, and aliases
 
 List built-in aliases, configured custom models, and user aliases. Only custom
-models are probed.
+models on this machine are probed; --server lists the workspace's.
 
-Use luna or sonnet for mechanical work; sol or opus is the default.
-Use astra or fable for the hardest work; they cost the most.
-
+- `--server <server>` act on your Coder server
+- `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
+- `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
 - `--cwd <cwd>` workspace directory; default current
 
@@ -28,7 +28,7 @@ connect a model
 
 Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,
 vLLM, OpenRouter, ...). It currently runs on the codex engine pointed at your
-URL and is usable anywhere a model is: --model <name>, --engine custom, or as an
+URL and is usable anywhere a model is: --model <name> or --model custom:<name>, or as an
 agent default in config. Alias: `coder model setup`.
 
 - `<name>` the name to dispatch it by

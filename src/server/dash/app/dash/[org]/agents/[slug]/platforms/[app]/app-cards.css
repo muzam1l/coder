@@ -1,0 +1,30 @@
+/* the cards keep the page's own gaps */
+.app-cards {
+  display: contents;
+}
+.app-cards .acts .btn + .btn {
+  margin-left: 8px;
+}
+/* phones: a long action wraps under its card's name or row's title instead of squeezing it */
+@media (max-width: 760px) {
+  .app-cards .bar {
+    flex-wrap: wrap;
+  }
+  .app-cards .bar h2 {
+    flex-basis: auto;
+    white-space: nowrap;
+  }
+  .app-cards .settings td.acts {
+    grid-row: auto;
+    grid-column: 1 / -1;
+    justify-self: start;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  /* on their own line, the buttons no longer overhang one */
+  .app-cards .settings td.acts .btn,
+  .app-cards .acts .btn + .btn {
+    margin: 0;
+  }
+}

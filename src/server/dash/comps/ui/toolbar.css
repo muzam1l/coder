@@ -99,7 +99,13 @@ label.search input[type="search"] {
   }
   .filters .search {
     max-width: none;
+  }
+  /* Filter shares the search's row, or keeps right under it; applied filters take the row under it */
+  .filters:has(> .filter-chips:not(:empty)) .search {
     flex-basis: 100%;
+  }
+  .filters .filter-more {
+    margin-left: auto;
   }
   /* the filters share one row under the search, and only the search stays once the head sticks */
   .filters .select {

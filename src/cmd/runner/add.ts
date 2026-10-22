@@ -11,6 +11,14 @@ export const commandRunnerAdd = command({
   usage:
     'Connect a runner. Secret fields read environment variables with key=env:VARIABLE. Adding local prints a pairing command.',
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/settings/runners',
+      label: 'Add the runner',
+      action: 'add',
+      args: ['kind', 'name', 'scope'],
+    },
+  },
   args: {
     kind: z.string().check(z.describe('the runner kind, such as local or http')),
     name: str('runner display name'),

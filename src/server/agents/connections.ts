@@ -1,20 +1,20 @@
-import { savedAppTokens } from './tokens';
+import { savedAppTokens, appSpec } from './platform';
 import { definitionEvents } from '../../agent/definition';
 import { decryptSecret } from '../store/secrets';
 import { type Params } from '../routes/match';
-import { encodeJson } from '../../utils/base64url';
+import { encodeJson } from '../../utils/crypto';
 import { issueNonce } from '../auth/nonce';
 import { type ServerContext } from '../context';
 import { sharedApps } from './apps';
 import { nativeApp } from '../connections/records';
-import { agentWithVersion, getVersion } from './records';
+import { agentWithVersion, getVersion, seedBuiltinAgent } from './records';
 import { checkApp, inSync, syncApps, syncKey, syncManifest, type SyncMarker } from './repo';
 import { json, pageLimit } from '../routes/http';
 import { LOOPBACK } from '../routes/guards';
 import { updateMetadata } from '../store';
-import { dropTokens, installationToken, unsealed } from '../tasks/context';
+import { dropTokens, installationToken, uninstall, unsealed } from '../tasks/context';
+import { audit } from '../operator';
 import type { Installation, AgentApp } from '../../agent/types';
-import { appSpec } from './platform';
 import type { Integration } from '../../integrations/types';
 
 export async function adminInstallLink(
@@ -77,11 +77,25 @@ function appRow(ctx: ServerContext, app: AgentApp) {
   };
 }
 
-/** Apps changed since their last update, from their sync markers alone; no platform call. */
-async function changedApps(ctx: ServerContext, apps: AgentApp[]): Promise<Set<string>> {
+/** How an integration's apps come up to date: Coder pushes them, or shows what to change on the platform. */
+export const appUpdateOf = (integration: Integration) =>
+  integration.app.update
+    ? { appUpdate: 'push' as const }
+    : integration.app.drift
+      ? { appUpdate: 'drift' as const }
+      : integration.app.values
+        ? { appUpdate: 'confirm' as const }
+        : {};
+
+/** Apps changed since their last update, from their sync markers alone; no platform call; `shared` takes the server's own. */
+export async function changedApps(
+  ctx: ServerContext,
+  apps: AgentApp[],
+  shared = false,
+): Promise<Set<string>> {
   const publicUrl = ctx.config.publicUrl;
   const own = apps.filter(
-    app => !app.builtin && !app.shared && ctx.integrations[app.integration]?.app,
+    app => (shared || (!app.builtin && !app.shared)) && ctx.integrations[app.integration]?.app,
   );
   if (!publicUrl || !own.length) return new Set();
 
@@ -151,11 +165,57 @@ export async function removeApp(
   return json({ ok: true });
 }
 
+/** `DELETE /admin/installations/<id>`: uninstalls the app on its platform, then ends the installation as the platform's own uninstall does. */
+export async function uninstallApp(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+): Promise<Response> {
+  const installation = await ctx.store.get('installation', params.id!);
+  if (!installation || installation.deletedAt) return json({ error: 'Unknown installation' }, 404);
+
+  const app = await ctx.store.get('app', installation.app);
+  const integration = ctx.integrations[installation.integration];
+  if (!app || !integration?.app.uninstall)
+    return json(
+      { error: `Coder cannot uninstall ${integration?.name ?? installation.integration} apps.` },
+      400,
+    );
+
+  try {
+    await integration.app.uninstall(
+      unsealed(ctx, installation),
+      decryptSecret(ctx.config, app.credentials),
+      { fetch: ctx.fetch ?? fetch },
+    );
+  } catch (error) {
+    console.error(`coder server: uninstalling ${installation.id} failed`, error);
+    const url = integration.app.installationUrl?.(installation);
+
+    return json(
+      {
+        error: `${error instanceof Error ? error.message : String(error)}. Uninstall ${app.name} on ${integration.name} instead.`,
+        ...(url ? { hint: url } : {}),
+      },
+      502,
+    );
+  }
+  await uninstall(ctx.store, installation.id, (ctx.now ?? Date.now)());
+  await audit(
+    ctx,
+    'Uninstalled an app',
+    `${app.name} from ${installation.account.login} on ${integration.name}`,
+  );
+
+  return json({ ok: true });
+}
+
 /** A workspace app with its agent's current version, or why Coder cannot bring it up to date. */
-async function outdatedApp(ctx: ServerContext, id: string) {
+/** An app to bring up to date, with its agent's version; `shared` is the operator's, for the server's own apps. */
+async function outdatedApp(ctx: ServerContext, id: string, shared = false) {
   const app = await ctx.store.get('app', id);
   if (!app) return json({ error: 'Unknown app' }, 404);
-  if (app.builtin || app.shared)
+  if ((app.builtin || app.shared) && !shared)
     return json({ error: 'Only whoever runs this server can update its shared apps.' }, 403);
 
   if (!ctx.config.publicUrl) return json({ error: 'PUBLIC_URL is not set on this server' }, 400);
@@ -164,6 +224,14 @@ async function outdatedApp(ctx: ServerContext, id: string) {
     return json(
       { error: `Coder cannot update ${integration?.name ?? app.integration} apps.` },
       400,
+    );
+  // The server's organization runs no tasks, so its copy of the built-in agent is seeded here.
+  if (shared)
+    await seedBuiltinAgent(
+      ctx.store,
+      (ctx.now ?? Date.now)(),
+      app.agent,
+      await agentWithVersion(ctx.store, app.agent),
     );
   const version = await getVersion(ctx.store, app.agent);
   if (!version?.definition.integrations[app.integration])
@@ -177,8 +245,10 @@ export async function readDrift(
   req: Request,
   ctx: ServerContext,
   params: Params,
+  _url?: URL,
+  shared = false,
 ): Promise<Response> {
-  const found = await outdatedApp(ctx, params.id!);
+  const found = await outdatedApp(ctx, params.id!, shared);
   if (found instanceof Response) return found;
   if (found.integration.app.update)
     return json({ error: `Coder updates ${found.integration.name} apps itself.` }, 400);
@@ -199,8 +269,10 @@ export async function updateApp(
   req: Request,
   ctx: ServerContext,
   params: Params,
+  _url?: URL,
+  shared = false,
 ): Promise<Response> {
-  const found = await outdatedApp(ctx, params.id!);
+  const found = await outdatedApp(ctx, params.id!, shared);
   if (found instanceof Response) return found;
   const { app, version, integration } = found;
 
@@ -309,13 +381,7 @@ export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<
               }
             : {}),
           ...(unreachable ? { unreachable: true } : {}),
-          ...(integration.app.update
-            ? { appUpdate: 'push' }
-            : integration.app.drift
-              ? { appUpdate: 'drift' }
-              : integration.app.values
-                ? { appUpdate: 'confirm' }
-                : {}),
+          ...appUpdateOf(integration),
         };
       }),
     ),

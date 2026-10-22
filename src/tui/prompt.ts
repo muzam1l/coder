@@ -11,7 +11,7 @@ function screenRows(line: string): number {
   return Math.max(1, Math.ceil(visibleWidth(line) / cols));
 }
 
-export interface PickOption<T extends string = string> {
+interface PickOption<T extends string = string> {
   value: T;
   label?: string;
   hint?: string;
@@ -26,13 +26,13 @@ export interface PickOption<T extends string = string> {
   };
 }
 
-export interface PickResult<T extends string> {
+interface PickResult<T extends string> {
   values: T[];
   /** Text entered for options that declare `input`, by value; empty entries are omitted. */
   inputs: Partial<Record<T, string>>;
 }
 
-export interface PickOptions<T extends string> {
+interface PickOptions<T extends string> {
   title: string;
   /** One line under the title saying what the answer decides. */
   hint?: string;

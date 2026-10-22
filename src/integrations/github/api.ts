@@ -1,5 +1,5 @@
-/** GitHub REST: request headers for direct API calls, and repository reads through the Chat SDK adapter's Octokit. */
-import type { PlatformEvent, PullRequestSummary } from '../types';
+/** Direct REST calls send `githubHeaders`; repository reads go through the Chat SDK adapter's Octokit, loaded on first use. */
+import type { Access, LinkedMember, PlatformEvent, PullRequestSummary, ToolServer } from '../types';
 
 export const API = 'https://api.github.com';
 
@@ -231,7 +231,90 @@ export async function canWriteGithub(
   return ['admin', 'maintain', 'write'].includes(response?.data.permission ?? '');
 }
 
+/** The user ids of everyone with access to a repository: collaborators, and organization members through teams, base permissions or ownership (`GET /repos/{owner}/{repo}/collaborators`, Metadata read). Refused that list, it checks each of the `linked` members instead. */
+export async function githubMembers(
+  repo: string,
+  token: string,
+  request?: Fetcher,
+  linked?: () => Promise<LinkedMember[]>,
+): Promise<string[]> {
+  const client = await octokit(token, request);
+  const people = await client
+    .paginate(client.repos.listCollaborators, { ...split(repo), affiliation: 'all', per_page: 100 })
+    .catch(error => {
+      if ((error as { status?: number }).status !== 403 || !linked) throw error;
+    });
+  if (people) return people.map(person => String(person.id));
+
+  // The list needs write access; a user's permission is readable without it. A link made before logins were stored looks its login up.
+  const members: string[] = [];
+  for (const { id, login } of await linked!()) {
+    const username =
+      login ??
+      (
+        await client
+          .request('GET /user/{account_id}', { account_id: Number(id) })
+          .catch(missing([404]))
+      )?.data.login;
+    const permission =
+      username &&
+      (await client.repos
+        .getCollaboratorPermissionLevel({ ...split(repo), username })
+        .catch(missing([404])));
+    // A stored login may since belong to another account.
+    if (
+      permission &&
+      permission.data.permission !== 'none' &&
+      String(permission.data.user?.id) === id
+    )
+      members.push(id);
+  }
+
+  return members;
+}
+
+/** `owner/name` of every repository a team, named `org/slug`, can reach; it needs the Members organization permission. */
+export async function githubTeamRepositories(
+  team: string,
+  token: string,
+  request?: Fetcher,
+): Promise<string[]> {
+  const client = await octokit(token, request);
+  const [org = '', slug = ''] = team.split('/');
+  const repos = await client.paginate(client.teams.listReposInOrg, {
+    org,
+    team_slug: slug,
+    per_page: 100,
+  });
+
+  return repos.map(repo => repo.full_name);
+}
+
 export function githubRepositoryUrl(repo: string, path?: string, ref?: string): string {
   const base = `https://github.com/${repo}`;
   return path ? `${base}/tree/${ref ?? 'HEAD'}/${path}` : base;
+}
+
+export const GITHUB_PRESETS: Record<Access, string[]> = {
+  'read-only': ['read'],
+  auto: ['read', 'write'],
+};
+
+/** The latest release binary of github/github-mcp-server into /usr/local/bin. */
+export const GITHUB_MCP_SERVER_INSTALL =
+  'arch=$(uname -m); [ "$arch" = aarch64 ] && arch=arm64; curl -fsSL "https://github.com/github/github-mcp-server/releases/latest/download/github-mcp-server_Linux_$arch.tar.gz" | tar -xz -C /usr/local/bin github-mcp-server';
+
+/** GitHub's official MCP server (github/github-mcp-server) on the task's narrowed installation token. */
+export function githubToolServer(
+  tools: string[],
+  _event: PlatformEvent | undefined,
+  token: string,
+): ToolServer {
+  const readOnly = !tools.includes('write');
+  return {
+    name: 'github',
+    command: 'github-mcp-server',
+    args: ['stdio', '--toolsets=all', ...(readOnly ? ['--read-only'] : [])],
+    env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
+  };
 }

@@ -10,8 +10,6 @@ export const SETTINGS = [
   { tab: 'runners', label: 'Runners' },
 ] as const;
 
-export type SettingsTab = (typeof SETTINGS)[number]['tab'];
-
 /** Settings' head; members are managed in Wular. */
 export function SettingsHead({
   actions,

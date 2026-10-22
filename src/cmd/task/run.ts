@@ -1,7 +1,7 @@
 /** `coder task run` (also `coder run`): dispatch a task, in the background or waiting for its answer. */
 import process from 'node:process';
 
-import type { TokenUsage } from '../../core/types';
+import type { Access, TokenUsage } from '../../core/types';
 import { formatTokens, outStyle } from '../../tui/output';
 import { flag, optStr, serverSuffix, str, strList } from '../../utils/args';
 import { command, MODEL_HINT } from '../../cli';
@@ -72,7 +72,7 @@ function printFinished(done: {
 export const commandTask = command({
   name: 'run',
   description: 'run a task (background; --wait blocks)',
-  usage: `Dispatch a coding task to the configured engine. Backgrounds by default and\nprints a task id; --wait runs in the foreground and prints the answer.\nShortcut: \`coder run "<text>"\`.\n\nWriting a task: one task per focused goal, independent goals as parallel runs.\nThe worker starts with nothing but the text, so include the goal, file paths,\nconstraints and any context only you have. Delegate rather than doing the work\nyourself first, however small it looks.\n\nWaiting: run \`coder task result <task-id> --wait\` in its own background shell, one\nper task. Never wait on several tasks in one call, or their approvals and answers\nnever reach you one by one.\n\n${MODEL_HINT}`,
+  usage: `Dispatch a coding task to the configured engine. Backgrounds by default and\nprints a task id locally or with --server; --wait follows it to the answer.\nShortcut: \`coder run "<text>"\`.\n\nWriting a task: one task per focused goal, independent goals as parallel runs.\nThe worker starts with nothing but the text, so include the goal, file paths,\nconstraints and any context only you have. Delegate rather than doing the work\nyourself first, however small it looks.\n\nWaiting: run \`coder task result <task-id> --wait\` in its own background shell, one\nper task. Never wait on several tasks in one call, or their approvals and answers\nnever reach you one by one.\n\n${MODEL_HINT}`,
   access: 'write',
   args: {
     prompt: strList('the task text'),
@@ -86,17 +86,16 @@ export const commandTask = command({
       "standing instructions appended to Coder's system prompt (kept out of prompt previews)",
       '<text>',
     ),
-    wait: flag('run in the foreground and block until the answer is ready'),
-    engine: str(
-      'engine to use; custom runs your configured custom models (default: first in the chain)',
-      '<codex|claude|custom>',
-    ),
+    wait: flag('follow the task until the answer is ready'),
     model: str(
-      'luna/sol/astra (codex) · sonnet/opus/fable (claude) · a custom model (coder model list)',
-      '<alias|slug>',
+      'model alias, custom name or engine:model (codex:gpt-6.1-sol, claude:opus)',
+      '<model|engine:model>',
     ),
     effort: str('reasoning effort', '<low|medium|high>'),
-    permissions: str('read-only · workspace-write · auto (default: auto)', '<mode>'),
+    access: str(
+      'read-only also restricts platforms and connections; auto lets the engine review what leaves the sandbox (default: auto)',
+      '<read-only|auto>',
+    ),
     mcp: str(
       'attach MCP servers from `mcp` in .coder/config.json by name (or all), or an inline JSON array [{"name","command","args","env","tools"}]; none by default, all adds your engine\'s own MCP servers',
       '<names|all|json>',
@@ -106,16 +105,15 @@ export const commandTask = command({
       '<ids>',
     ),
     'add-dir': strList(
-      'give the task another directory beyond --cwd (repeatable); read-only can only read it, other modes can also write',
+      'give the task another directory beyond --cwd (repeatable); read-only can only read it, auto can also write',
       '<dir>',
     ),
     server: optStr(
-      'run the task on your Coder server and follow it here (--background prints its id)',
+      'run the task on your Coder server and print its id (--wait follows it)',
       '[url]',
     ),
     workspace: str('with --server: the workspace to run in (default: the saved one)', '<slug>'),
     yes: flag('with --server: connect to a server used for the first time without asking'),
-    background: flag('with --server: print the task id instead of following it'),
     repo: str("with --server: check out a repo from the workspace's installs", '<owner/name>'),
     runner: str('with --server: where it runs (a runner kind or a registered runner)'),
   },
@@ -154,10 +152,9 @@ export const commandTask = command({
       cwd: options.cwd,
       agent: options.agent,
       outputSchema: options['output-schema'] ? JSON.parse(options['output-schema']) : undefined,
-      engine: options.engine,
       model: options.model,
       effort: options.effort,
-      permissions: options.permissions,
+      access: options.access as Access | undefined,
       name: options.name,
       appendSystem: options['append-system'],
       mcp: options.mcp,
@@ -166,7 +163,7 @@ export const commandTask = command({
         .map(id => id.trim())
         .filter(Boolean),
       addDirs: options['add-dir'],
-      wait: waited(options),
+      wait: Boolean(options.wait),
       repo: options.repo,
       runner: options.runner,
       server: options.server,
@@ -198,7 +195,7 @@ export const commandTask = command({
         ),
       ];
     if (phase === 'waiting') return taskRunNext(taskId, args);
-    if (waited(args))
+    if (args.wait)
       return finishedNext(taskId, args).map(step => ({
         ...step,
         cli: { ...step.cli, stream: 'stderr' as const },
@@ -206,14 +203,9 @@ export const commandTask = command({
     return taskRunNext(taskId, args);
   },
   print(done, { options }) {
-    if (waited(options)) printFinished(done);
+    if (options.wait) printFinished(done);
     else printStarted(done.taskId, done.status);
   },
   exit: (done, { options }) =>
-    waited(options) ? (done.status === 'completed' ? 0 : 1) : undefined,
+    options.wait ? (done.status === 'completed' ? 0 : 1) : undefined,
 });
-
-/** A server task is followed until it ends unless --background; a local one only with --wait. */
-function waited(options: { server?: string | true; background?: boolean; wait?: boolean }) {
-  return options.server !== undefined ? !options.background : Boolean(options.wait);
-}

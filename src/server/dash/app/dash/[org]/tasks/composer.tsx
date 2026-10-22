@@ -9,7 +9,7 @@ import type { LocalFolder, LocalFolders } from '@coder/client/types';
 import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
 import { formatDate } from '@/utils/format';
-import { iAlert, iDown, iPlus, iRight, iSliders, iSteer, iX } from '@/comps/ui/icons';
+import { iAlert, iPlus, iRight, iSliders, iSteer, iX } from '@/comps/ui/icons';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Loading } from '@/comps/ui/card';
@@ -18,6 +18,7 @@ import { reasonText } from '@/utils/format';
 import { Icon } from '@/comps/ui/icon';
 import { Select, type Option } from '@/comps/ui/select';
 import {
+  MenuItem,
   MenuLabel,
   MenuLink,
   MenuNote,
@@ -28,10 +29,10 @@ import {
 } from '@/comps/ui/menu-items';
 import { connectRepositories } from '@/app/dash/[org]/agents/editor/connect-repositories';
 import {
+  ACCESS,
   EFFORTS,
   ENGINES,
   ENGINE_NAMES,
-  PERMISSIONS,
   defaultLabel,
   modelValue,
   splitModel,
@@ -51,14 +52,14 @@ export interface Choice {
   engine: string;
   model: string;
   effort: string;
-  permissions: string;
+  access: string;
   runner: string;
 }
 
 /** The workspace's defaults, per engine, for settings left unset. */
 export interface Defaults {
   engine: string;
-  engines: Record<string, { model?: string; effort?: string; permissions?: string } | undefined>;
+  engines: Record<string, { model?: string; effort?: string } | undefined>;
 }
 
 type Pull = { number: number; title: string; author?: string; createdAt?: string };
@@ -126,7 +127,10 @@ function modelSections(
     sections.push([
       ENGINE_NAMES[engine] ?? engine,
       [
-        [modelValue(engine, ''), defaultLabel(defaults.engines[engine]?.model)],
+        // Custom models have no engine default to fall back on.
+        ...(engine === 'custom'
+          ? []
+          : [[modelValue(engine, ''), defaultLabel(defaults.engines[engine]?.model)] as Option]),
         ...groups[engine]!.map((model): Option => [modelValue(engine, model), model]),
       ],
     ]);
@@ -138,6 +142,55 @@ const resolved = (options: Option[], value?: string): Option[] => {
   const label = options.find(([key]) => key === value)?.[1];
   return [['', defaultLabel(label?.toLowerCase())], ...options];
 };
+
+/** A setting as one row naming its pick; the chevron unfolds its options in place, as a model's efforts do. */
+function NestedPick({
+  label,
+  options,
+  value,
+  open,
+  onOpen,
+  onPick,
+}: {
+  label: string;
+  options: Option[];
+  value: string;
+  open: boolean;
+  onOpen: (open: boolean) => void;
+  onPick: (value: string) => void;
+}) {
+  return (
+    <>
+      <MenuRow>
+        <MenuItem
+          title={options.find(([key]) => key === value)?.[1] ?? options[0]?.[1]}
+          aria-label={label}
+          data-keep
+          onClick={() => onOpen(!open)}
+        />
+        <button
+          type="button"
+          class="pop-chev"
+          data-keep
+          aria-label={`${label} options`}
+          aria-expanded={open}
+          onClick={() => onOpen(!open)}
+        >
+          <Icon d={iRight} />
+        </button>
+      </MenuRow>
+      {open ? (
+        <div role="group" aria-label={label} class="pop-sub">
+          {options.map(([key, text]) => (
+            <MenuRadio key={key} on={key === value} onPick={() => onPick(key)}>
+              {text}
+            </MenuRadio>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+}
 
 /** Places an opening popover under its button, right-aligned to it. */
 function place(event: ToggleEvent) {
@@ -240,7 +293,7 @@ export function NeedsCredential({ reason, label }: { reason?: string; label?: st
 }
 
 /** The dashboard's one box: type and press Enter to start a task, or `/` for reviews and flows. */
-export function Composer({
+function Composer({
   initial,
   data,
   defaults,
@@ -408,12 +461,21 @@ export function Composer({
       return void setDismissed(false);
     const review = pr ?? (command === 'review' ? Number(name.replace('#', '')) : undefined);
     if (review && !choice.repo) return toastFailure('Pick a repository first.');
-    const { agent, engine, model, effort, permissions, runner } = choice;
+    const { agent, engine, model, effort, access, runner } = choice;
     const [repo, cwd] = lists.folders ? ['', choice.cwd] : [choice.repo, ''];
+    const selectedModel =
+      model || defaults.engines[engine]?.model ||
+      (lists.models[engine]?.length === 1 ? lists.models[engine]?.[0] : undefined);
+    if (engine && !selectedModel) return toastFailure('Choose a model.');
     const fields = Object.fromEntries(
-      Object.entries({ repo, cwd, engine, model, effort, permissions, runner }).filter(
-        ([, value]) => value,
-      ),
+      Object.entries({
+        repo,
+        cwd,
+        model: engine ? `${engine}:${selectedModel}` : model,
+        effort,
+        access: access === 'auto' ? '' : access,
+        runner,
+      }).filter(([, value]) => value),
     );
     setBusy(true);
     try {
@@ -544,13 +606,17 @@ export function Composer({
   const agents: Option[] = lists.agents.some(([id]) => id === choice.agent)
     ? lists.agents
     : [...lists.agents, [choice.agent, choice.agent]];
-  // Only the settings that differ from the workspace's defaults.
+  // What a task gets: the model, effort and access, the workspace's defaults dimmer.
+  const picks = (
+    [
+      [choice.model || own.model, Boolean(choice.model)],
+      [choice.effort || own.effort, Boolean(choice.effort)],
+      [choice.access, choice.access !== 'auto'],
+    ] as const
+  ).filter(([text]) => text);
+  // The agent and runner only when they differ from the workspace's defaults.
   const changed = [
     choice.agent !== lists.defaultAgent && choice.agent,
-    choice.engine !== defaults.engine && choice.engine,
-    ...(['model', 'effort', 'permissions'] as const).map(
-      key => choice[key] !== own[key] && choice[key],
-    ),
     choice.runner && (lists.runners.find(([id]) => id === choice.runner)?.[1] ?? choice.runner),
   ]
     .filter(Boolean)
@@ -668,9 +734,16 @@ export function Composer({
             class="quiet"
             popovertarget={`${id}-settings`}
             aria-label="Run options"
-            title="Model, effort, permissions and more"
+            title="Model, effort, access and more"
           >
             <Icon d={iSliders} />
+            <span class="run-picks">
+              {picks.map(([text, picked], index) => (
+                <span key={index} class={picked ? undefined : 'dim'}>
+                  {index ? ` · ${text}` : text}
+                </span>
+              ))}
+            </span>
             {changed ? <span>{changed}</span> : null}
           </button>
           <Button
@@ -769,13 +842,13 @@ export function Composer({
               Add models
             </MenuLink>
           </div>
-          <MenuLabel>Permissions</MenuLabel>
-          <div role="group" aria-label="Permissions">
-            {resolved(PERMISSIONS, own.permissions ?? 'auto').map(([value, label]) => (
+          <MenuLabel>Access</MenuLabel>
+          <div role="group" aria-label="Access">
+            {ACCESS.map(([value, label]) => (
               <MenuRadio
                 key={value}
-                on={choice.permissions === value}
-                onPick={() => apply({ permissions: value })}
+                on={choice.access === value}
+                onPick={() => apply({ access: value })}
               >
                 {label}
               </MenuRadio>
@@ -784,22 +857,26 @@ export function Composer({
           {agents.length > 1 ? (
             <>
               <MenuLabel>Agent</MenuLabel>
-              <Select
+              <NestedPick
                 label="Agent"
-                value={choice.agent}
                 options={agents}
-                onChange={value => apply({ agent: value })}
+                value={choice.agent}
+                open={expanded === 'agent'}
+                onOpen={open => setExpanded(open ? 'agent' : undefined)}
+                onPick={value => apply({ agent: value })}
               />
             </>
           ) : null}
           {lists.runners.length > 1 ? (
             <>
               <MenuLabel>Runs on</MenuLabel>
-              <Select
+              <NestedPick
                 label="Runs on"
                 options={lists.runners}
                 value={choice.runner}
-                onChange={value => apply({ runner: value })}
+                open={expanded === 'runner'}
+                onOpen={open => setExpanded(open ? 'runner' : undefined)}
+                onPick={value => apply({ runner: value })}
               />
             </>
           ) : null}
@@ -831,7 +908,7 @@ export function Composer({
 }
 
 /** The composer before it arrives: the same box and prompt, inert. */
-export function LoadingComposer() {
+function LoadingComposer() {
   return (
     <div class="composer" aria-hidden="true">
       <textarea rows={1} disabled tabIndex={-1} placeholder={PLACEHOLDER} />

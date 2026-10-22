@@ -2,6 +2,7 @@
 
 import './tasks-list.css';
 
+import { Fragment } from 'preact';
 import { dynamic } from '@wular/pnext/dynamic';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
@@ -21,12 +22,14 @@ import {
 import { Menu } from '@/comps/ui/menu';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { Link } from '@wular/pnext/link';
+import { PendingApprovals } from '@/app/dash/[org]/tasks/list/pending-approvals';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { usePaged } from '@/utils/paged';
 import { useZone } from '@/app/zone';
 import { pendingApproval } from '@/app/dash/[org]/tasks/[id]/task-actions';
 import type {
   IntegrationInfo,
+  Me,
   TaskCounts,
   TaskEvent,
   TaskRow,
@@ -35,7 +38,7 @@ import type {
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { Button } from '@/comps/ui/button';
 import { Card, Empty } from '@/comps/ui/card';
-import { Badge, Id } from '@/comps/ui/badge';
+import { Badge } from '@/comps/ui/badge';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 import { Status } from './status';
 import { Icon } from '@/comps/ui/icon';
@@ -133,35 +136,40 @@ function TaskRowView({
           {taskTitle(task)}
         </Link>
         <span class="sub">
-          {scoped ? null : (
-            <>
-              <Icon d={iAgent} />
-              {`${task.task.agent} · `}
-            </>
-          )}
-          <Id value={task.task.id} />
-          {kind ? ` · ${kind}` : null}
-          {task.task.cwd ? (
-            <>
-              {' · '}
+          {[
+            scoped ? null : (
+              <>
+                <Icon d={iAgent} />
+                {task.task.agent}
+              </>
+            ),
+            kind,
+            task.task.cwd ? (
               <span title={task.task.cwd}>
                 <Icon d={iFolder} />
                 {folderName(task.task.cwd)}
               </span>
-            </>
-          ) : null}
+            ) : null,
+          ]
+            .filter(Boolean)
+            .map((part, index) => (
+              <Fragment key={index}>
+                {index ? ' · ' : null}
+                {part}
+              </Fragment>
+            ))}
         </span>
       </td>
       <td>
         <Status status={task.status} approvals={task.approvals} />
       </td>
       <td class="model" title={taskModel(task)}>
-        {taskModel(task)}
+        {task.model ?? task.task.usage?.model ?? task.task.definition?.model}
       </td>
       <td class="when" title={formatDate(task.lastActivityAt, tz)}>
         {ago(task.lastActivityAt, now, tz)}
       </td>
-      <td class="num">{formatDuration(elapsed)}</td>
+      <td class="num">{task.startedAt === undefined ? null : formatDuration(elapsed)}</td>
       <td>
         <span class="source" title={sourceLabel(source)}>
           {brand ? <BrandIcon brand={brand} /> : <Icon d={sourceIcon(source)} />}
@@ -227,6 +235,8 @@ export function TasksList({
   agent,
   head,
   missing,
+  pendingApprovals,
+  me,
   tz: serverZone,
   now,
 }: {
@@ -241,6 +251,9 @@ export function TasksList({
   agent?: string;
   /** On the tasks page the toolbar is the page head. */
   head?: { title: string };
+  /** The viewer's approval queue. */
+  pendingApprovals?: TasksPage['pendingApprovals'];
+  me: Me;
   /** No credential can run a task yet. */
   missing?: boolean;
   tz: string;
@@ -413,7 +426,9 @@ export function TasksList({
     if (
       event.deleted ||
       event.status !== row.status ||
-      Boolean(event.archivedAt) !== Boolean(row.archivedAt)
+      Boolean(event.archivedAt) !== Boolean(row.archivedAt) ||
+      Boolean(pendingApproval(row)) !==
+        Boolean(pendingApproval({ approval: event.approval, approvals: event.approvals }))
     )
       refresh();
     if (event.deleted || (event.archivedAt && values.status !== 'archived'))
@@ -484,6 +499,12 @@ export function TasksList({
         <Filter name="tasks" facets={facets} values={values} onChange={set} />
       </Toolbar>
       {missing ? <NeedsCredential /> : null}
+      {pendingApprovals?.length ? (
+        <PendingApprovals
+          rows={pendingApprovals.map(row => fresh.rows[row.task.id] ?? row)}
+          me={me}
+        />
+      ) : null}
       <Card
         title="Tasks"
         count={counts ? formatCount(counts.all) : undefined}

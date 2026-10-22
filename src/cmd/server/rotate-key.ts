@@ -8,6 +8,7 @@ export const commandServerRotateKey = command({
   description: 're-seal secrets with SERVER_ENCRYPTION_KEY',
   usage: 'Re-seal stored app, installation, engine, and linked user secrets with the current key.',
   access: 'write',
+  approvalPolicy: 'deny',
   globalFlags: { cwd: false },
   cli: {
     env: [

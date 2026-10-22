@@ -11,8 +11,7 @@ import { decryptSecret, encryptSecret } from '../store/secrets';
 import type { Store } from '../store/types';
 import { json, notFound, redirect } from '../routes/http';
 import { workspaceAdmin } from '../routes/guards';
-import { dashPath, sessionSlug } from '../auth/account';
-import { memberOf } from '../auth/connect';
+import { dashPath, memberOf, sessionSlug } from '../auth/members';
 
 export const MCP_CLIENT_PATH = '/connections/oauth/client.json';
 const CALLBACK_PATH = '/connections/oauth/callback';

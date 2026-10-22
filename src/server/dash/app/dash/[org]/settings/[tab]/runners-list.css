@@ -7,6 +7,12 @@
 .row-title:has(> b.runner-name) {
   align-items: center;
 }
+/* a phone keeps a runner's badges on one line */
+.runner-badges {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .runner-name > .ic {
   color: var(--muted);
 }

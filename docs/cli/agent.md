@@ -35,7 +35,31 @@ Describe one agent as it will run here, or its active version on a server: its s
 coder agent show coder  # what the built-in agent listens to and may do
 ```
 
-## `agent init [id] [--integrations <integrations>] [--events <events>] [--access <access>] [--name <name>] [--description <description>] [--permissions <permissions>] [--match <match>] [--yes] [--json] [--cwd <cwd>]`
+## `agent settings [id] [--model <model>] [--effort <effort>] [--access <access>] [--connections <connections>] [--events <events>] [--instructions <instructions>] [--match <match>] [--server <server>] [--yes] [--json]`
+
+change an agent's settings on your Coder server
+
+Set the model, effort, access, connections or events of an agent in the
+saved workspace, or publish its next version with new instructions or matches.
+Settings you leave out stay as they are.
+
+- `<id>` the agent
+- `--model <model>` model alias, custom name or engine:model
+- `--effort <effort>` low, medium or high
+- `--access <access>` read-only or auto, at most its definition
+- `--connections <connections>` the connections its tasks may use, by id
+- `--events <events>` the events it answers on a platform
+- `--instructions <instructions>` its system prompt, published as its next version
+- `--match <match>` start tasks only for event text matching a regex, as event=regex pairs
+- `--server <server>` act on your Coder server, in the saved workspace
+- `--yes` connect to a server used for the first time without asking
+- `--json` JSON output
+
+```sh
+coder agent settings helper --model sonnet  # a cheaper model for a simple agent
+```
+
+## `agent init [id] [--integrations <integrations>] [--events <events>] [--access <access>] [--name <name>] [--description <description>] [--match <match>] [--yes] [--json] [--cwd <cwd>]`
 
 scaffold an agent folder in .coder/agents
 
@@ -44,10 +68,9 @@ Create .coder/agents/<id>/ with an agent.json built from the integration catalog
 - `<id>` the agent id: its folder under .coder/agents
 - `--integrations <integrations>` platforms the agent listens to (see coder agent integrations list)
 - `--events <events>` events that start tasks, applied to each integration that has them (default: mention)
-- `--access <access>` read or write, on its platforms and connections (default: write)
+- `--access <access>` read-only or auto, for its tasks, platforms and connections (default: auto)
 - `--name <name>` display name used in replies (default: the id)
 - `--description <description>` one line for agent list
-- `--permissions <permissions>` engine permission mode (default: auto)
 - `--match <match>` start tasks only for event text matching a regex, as event=regex pairs
 - `--yes` skip the questions and take the defaults
 - `--json` JSON output
@@ -55,7 +78,7 @@ Create .coder/agents/<id>/ with an agent.json built from the integration catalog
 
 ```sh
 coder agent init  # answer the questions, id included
-coder agent init triage --integrations github --events issue,mention --access read  # no questions
+coder agent init triage --integrations github --events issue,mention --access read-only  # no questions
 ```
 
 ## `agent push [id] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
@@ -127,7 +150,7 @@ One row per integration: its id, the events an agent can wire, and every tool it
 
 events and tools of one integration
 
-Describe one integration: each event with what triggers it, and the tools each preset (read, write) allows.
+Describe one integration: each event with what triggers it, and the tools each access (read-only, auto) allows.
 
 - `<id>` the integration
 - `--json` JSON output

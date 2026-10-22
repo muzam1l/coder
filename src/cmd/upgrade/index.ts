@@ -12,6 +12,7 @@ export const commandUpgrade = command({
   usage:
     'Update the coder CLI through whichever package manager installed it, then refresh\nthe host plugins to match.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     'cli-only': flag('update just the CLI'),
     'plugins-only': flag('refresh just the host plugins'),

@@ -3,7 +3,7 @@ import process from 'node:process';
 
 import * as z from 'zod/mini';
 
-import { CoderError } from '../core/dispatch';
+import { CoderError } from '../core/errors';
 import { arg, flag, str, strList } from '../utils/args';
 import { command } from '../cli';
 
@@ -13,6 +13,7 @@ export const commandReview = command({
   usage:
     'Review changed code with a read-only agent. Every reported finding is checked\nagainst the repository. Runs the built-in `review` flow. A local review covers\neverything since the merge-base with the origin default branch, including\nuncommitted and untracked files. Changed submodules are reviewed file by file.\nPR reviews can post deduplicated inline comments.\n\nRelated: `coder flow watch`, `coder docs review`.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: {
     base: str('local comparison base (default: merge-base with origin default)', '<ref>'),
     head: str('review commits through this ref only (default: the working tree)', '<ref>'),
@@ -25,8 +26,10 @@ export const commandReview = command({
     exclude: strList('leave this path out, relative to cwd (repeatable)', '<p>'),
     post: flag('post deduplicated inline comments and sticky PR summary'),
     md: flag('markdown output (the default)'),
-    engine: str('codex, claude, or custom', '<name>'),
-    model: str('model for the review task', '<alias|slug>'),
+    model: str(
+      'model alias, custom name or engine:model for the review task',
+      '<model|engine:model>',
+    ),
     effort: arg(
       z.optional(
         z.enum(['low', 'medium', 'high'], {

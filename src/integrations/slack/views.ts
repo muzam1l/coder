@@ -1,9 +1,8 @@
-/** Block Kit for Slack: the app's Home tab, direct messages laid out as pages, link cards, and messages with buttons. */
+/** Block Kit for Slack: the app's Home tab, direct messages laid out as pages, and messages with buttons. */
 import * as z from 'zod/mini';
 
 import type {
   AdapterContext,
-  Card,
   Click,
   LinkButton,
   MessageDraft,
@@ -11,7 +10,7 @@ import type {
   Page,
 } from '../types';
 import { slackApi } from './app';
-import { ASK_ACTION, ASK_VIEW, CLICK_ACTION, LINK_ACTION } from './index';
+import { ASK_ACTION, ASK_VIEW, CLICK_ACTION, LINK_ACTION } from './events';
 
 const mrkdwn = (text: string) => ({ type: 'mrkdwn', text });
 const plain = (text: string) => ({ type: 'plain_text', text });
@@ -24,8 +23,6 @@ const section = (text: string) => ({
 /** Slack's own escaping for text inside mrkdwn. */
 const escaped = (text: string) =>
   text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-
-const link = (url: string, text: string) => `<${url}|${escaped(text)}>`;
 
 /** A button that opens `url`; Slack still posts the click, which the host only answers. */
 const linkButton = ({ id, url, label, primary }: LinkButton) => ({
@@ -67,66 +64,13 @@ export async function directMessage(ctx: AdapterContext, user: string, page: Pag
   if (!ctx.installationId) return;
   await slackApi(
     'chat.postMessage',
-    { channel: user, text: page.title, blocks: pageBlocks(page) },
-    await ctx.token(ctx.installationId),
-    ctx.fetch,
-  );
-}
-
-/** A card's blocks: the linked title, its fields, and the footer. */
-function cardBlocks({ title, url, text, fields, footer }: Card): Record<string, unknown> {
-  return {
-    blocks: [
-      {
-        ...section([`*${link(url, title)}*`, text && escaped(text)].filter(Boolean).join('\n')),
-        ...(fields
-          ? {
-              fields: fields.map(field =>
-                mrkdwn(
-                  `*${escaped(field.label)}*\n${
-                    'at' in field
-                      ? `<!date^${Math.floor(field.at / 1000)}^{date_short_pretty} at {time}|${new Date(field.at).toISOString()}>`
-                      : escaped(field.text)
-                  }`,
-                ),
-              ),
-            }
-          : {}),
-      },
-      { type: 'context', elements: [mrkdwn(escaped(footer))] },
-    ],
-  };
-}
-
-/** `chat.unfurl` for the shared links the host has cards for. */
-export async function unfurl(
-  ctx: AdapterContext,
-  shared: {
-    channel: string;
-    message_ts: string;
-    unfurl_id?: string;
-    source?: string;
-    links: Array<{ url: string }>;
-  },
-): Promise<void> {
-  const { preview } = ctx;
-  if (!preview || !ctx.installationId) return;
-  const cards = await Promise.all(
-    shared.links.map(async ({ url }) => [url, await preview(url)] as const),
-  );
-  const unfurls = Object.fromEntries(
-    cards.flatMap(([url, card]) => (card ? [[url, cardBlocks(card)]] : [])),
-  );
-  if (!Object.keys(unfurls).length) return;
-
-  // A link in the composer has no message yet; Slack names it by its unfurl id.
-  const where =
-    shared.unfurl_id && shared.source
-      ? { unfurl_id: shared.unfurl_id, source: shared.source }
-      : { channel: shared.channel, ts: shared.message_ts };
-  await slackApi(
-    'chat.unfurl',
-    { ...where, unfurls },
+    {
+      channel: user,
+      text: page.title,
+      blocks: pageBlocks(page),
+      unfurl_links: false,
+      unfurl_media: false,
+    },
     await ctx.token(ctx.installationId),
     ctx.fetch,
   );
@@ -271,7 +215,13 @@ export async function postMessage(
 ): Promise<string> {
   const sent = await slackApi<{ ts: string }>(
     'chat.postMessage',
-    { ...conversation(thread.id), text: draft.markdown, blocks: messageBlocks(draft) },
+    {
+      ...conversation(thread.id),
+      text: draft.markdown,
+      blocks: messageBlocks(draft),
+      unfurl_links: false,
+      unfurl_media: false,
+    },
     await ctx.token(ctx.installationId!),
     ctx.fetch,
   );

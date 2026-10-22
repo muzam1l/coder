@@ -9,7 +9,7 @@ import { iX } from './icons';
 import { Icon } from './icon';
 
 /** A dialog's tone: a bar on top and the title's icon in its color. */
-export type Tone = 'neutral' | 'success' | 'warning' | 'error';
+type Tone = 'neutral' | 'success' | 'warning' | 'error';
 
 /** A modal with a title, a body and its actions after a cancel button; Escape, Cancel or a backdrop click closes it, never while busy. */
 export function Modal({

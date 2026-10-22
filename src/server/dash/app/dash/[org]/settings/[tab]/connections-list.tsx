@@ -3,10 +3,11 @@
 import './connections-list.css';
 
 import { useEffect, useRef, useState } from 'preact/hooks';
+import { useSearchParams } from '@wular/pnext/navigation/client';
 
 import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
-import { Card, Empty, FoldCard, Loading } from '@/comps/ui/card';
+import { Card, Empty, Loading } from '@/comps/ui/card';
 import { reasonText } from '@/utils/format';
 import { Field } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
@@ -17,8 +18,9 @@ import { Button, LinkButton } from '@/comps/ui/button';
 import { Segmented } from '@/comps/ui/segmented';
 import { Select } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
+import { Modal } from '@/comps/ui/modal';
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
-import { Row } from './list';
+import { Row, useAddDialog } from './list';
 import { useOrg } from '@/comps/nav/org';
 import type {
   ConnectionInput,
@@ -29,7 +31,7 @@ import type {
   RegistryInput,
 } from '@coder/client/types';
 import { Notice } from '@/comps/ui/notice';
-import { CONNECTION_SCOPES } from '@/app/dash/[org]/settings/model-options';
+import { ACCESS, CONNECTION_SCOPES } from '@/app/dash/[org]/settings/model-options';
 
 type Answer = ConnectionRow & { authorize?: string };
 
@@ -70,17 +72,15 @@ const KINDS: Array<[string, string]> = [
   ['mcp', 'MCP server'],
 ];
 const HELP: Record<string, string> = {
-  platform: 'Sign in with OAuth, and tasks use the account through Coder’s own tools.',
+  platform:
+    'Sign in with your own account, just for you. A task acts as you only after you approve it.',
   mcp: 'Search known servers, or paste a URL or command.',
 };
-const DEFAULT: [string, string] = ['default', 'Default'];
-const READ_ONLY: [string, string] = ['read', 'Read-only'];
-const READ_WRITE: [string, string] = ['write', 'Read-write'];
 
 const STATUS: Record<ConnectionRow['status'], { tone?: 'ok' | 'warn'; label: string }> = {
   ok: { tone: 'ok', label: 'connected' },
   authorize: { tone: 'warn', label: 'not signed in' },
-  reconnect: { tone: 'warn', label: 'reconnect needed' },
+  reconnect: { tone: 'warn', label: 'Needs reconnecting' },
 };
 
 /** What a connection reaches: the platform it signs in to, the variable its key is in, else its server's host or command. */
@@ -147,7 +147,7 @@ function Who({
   );
 }
 
-/** Default (the agent's mode), Read-only or Read-write, as a dropdown like the scope beside it. */
+/** Auto (follows the task) or Read-only, as a dropdown like the scope beside it. */
 function Access({
   value,
   onChange,
@@ -162,12 +162,21 @@ function Access({
     <Field label="Access" group>
       <Select
         label="Access"
-        options={write ? [DEFAULT, READ_WRITE] : [DEFAULT, READ_ONLY, READ_WRITE]}
+        options={write ? ACCESS.filter(([level]) => level === 'auto') : ACCESS}
         value={value}
         onChange={onChange}
       />
     </Field>
   );
+}
+
+/** A platform sign-in started here comes back here, with its outcome as a toast. */
+function returning(url: string) {
+  const target = new URL(url, location.origin);
+  if (target.origin === location.origin && target.pathname.startsWith('/connect/'))
+    target.searchParams.set('return', location.pathname);
+
+  return target.href;
 }
 
 type AddProps = {
@@ -177,10 +186,11 @@ type AddProps = {
   onAdded: (row: ConnectionRow) => void;
 };
 
-/** The add forms' shared send: a sign-in answer goes to the platform, anything else joins the list. */
-function useAdd({ local, admin, onAdded }: Omit<AddProps, 'operator'>) {
+/** The add forms' shared send: a sign-in answer goes to the platform, anything else joins the list; a `personal` form is always Just me. */
+function useAdd({ local, admin, onAdded }: Omit<AddProps, 'operator'>, personal = false) {
   const action = useAction({ leaves: true });
-  const [owner, setOwner] = useState(admin || local ? '' : 'me');
+  const mine = useSearchParams().has('me');
+  const [owner, setOwner] = useState((admin || local) && !personal ? (mine ? 'me' : '') : 'me');
   const add = (body: ConnectionInput, onFail?: (reason: unknown) => void) =>
     void action.run('add', async () => {
       const { authorize, ...row }: Answer = await client.connections
@@ -189,41 +199,53 @@ function useAdd({ local, admin, onAdded }: Omit<AddProps, 'operator'>) {
           onFail?.(reason);
           throw reason;
         });
-      if (authorize) return location.assign(authorize);
+      if (authorize) return location.assign(returning(authorize));
       onAdded(row);
     });
-  const who = <Who local={local} admin={admin} value={owner} onChange={setOwner} />;
-  return { busy: Boolean(action.pending), add, who };
+  // An account already connected in this scope signs in again on its own row.
+  const signIn = (id: string) =>
+    void action.run('add', async () =>
+      location.assign(returning((await client.connections.authorize(id)).url)),
+    );
+  const who = personal ? null : (
+    <Who local={local} admin={admin} value={owner} onChange={setOwner} />
+  );
+  return { busy: Boolean(action.pending), add, signIn, owner, who };
 }
 
 /** A platform account: sign in there, then tasks use Coder's own tools for it. */
-function AddPlatform({
+function useAddPlatform({
   catalog,
   rows,
   ...props
 }: AddProps & { catalog: IntegrationInfo[]; rows: ConnectionRow[] }) {
   const org = useOrg();
   const platforms = catalog.filter(info => info.personal);
-  const [id, setId] = useState(platforms[0]?.id ?? '');
-  const [access, setAccess] = useState('default');
-  const { busy, add, who } = useAdd(props);
+  const asked = useSearchParams().get('add');
+  const [id, setId] = useState(
+    platforms.find(entry => entry.id === asked)?.id ?? platforms[0]?.id ?? '',
+  );
+  const [access, setAccess] = useState('auto');
+  const { busy, add, signIn } = useAdd(props, true);
   const info = platforms.find(entry => entry.id === id);
   const mine = rows.find(row => row.provider === id && row.mine);
+  const submit = () => {
+    if (!info?.connectable) return;
+    if (mine) return signIn(mine.id);
+    add({
+      name: info.name,
+      provider: info.id,
+      ...(access === 'auto' ? {} : { access: access as ConnectionInput['access'] }),
+    });
+  };
+  const note = !info
+    ? 'No platform here offers sign-in yet.'
+    : mine && info.connectable
+      ? `Connected as ${mine.account ?? 'you'}.`
+      : null;
 
-  return (
-    <form
-      class="add-form"
-      method="post"
-      onSubmit={event => {
-        event.preventDefault();
-        if (info?.connectable)
-          add({
-            name: info.name,
-            provider: info.id,
-            ...(access === 'default' ? {} : { access: access as ConnectionInput['access'] }),
-          });
-      }}
-    >
+  const body = (
+    <div class="add-form">
       <div class="add-grid">
         <Field label="Platform" group>
           <Select
@@ -237,7 +259,6 @@ function AddPlatform({
           />
         </Field>
         <Access value={access} onChange={setAccess} />
-        {who}
       </div>
       {info && !info.connectable ? (
         <Notice tone="warning" slim>
@@ -253,40 +274,42 @@ function AddPlatform({
           ) : null}
         </Notice>
       ) : null}
-      <div class="add-foot">
-        <p class="muted grow">
-          {!info
-            ? 'No platform here offers sign-in yet.'
-            : mine && info.connectable
-              ? `Connected as ${mine.account ?? 'you'}.`
-              : null}
-        </p>
-        <Button type="submit" disabled={!info?.connectable} loading={busy}>
-          {info ? <BrandIcon brand={info.brand} /> : null}
-          Sign in to {info?.name ?? 'a platform'}
-        </Button>
-      </div>
-    </form>
+      {note ? <p class="muted">{note}</p> : null}
+    </div>
   );
+  const actions = (
+    <Button
+      type="submit"
+      variant={mine && info?.connectable ? 'secondary' : undefined}
+      disabled={!info?.connectable}
+      loading={busy}
+    >
+      {info ? <BrandIcon brand={info.brand} /> : null}
+      {mine && info?.connectable ? 'Sign in again' : `Sign in to ${info?.name ?? 'a platform'}`}
+    </Button>
+  );
+  return { busy, body, actions, submit };
 }
 
 /** An MCP server: one Coder knows, a URL or a command; how it signs in, its access and who it is for. */
-function AddMcp(props: AddProps) {
+function useAddMcp(props: AddProps) {
+  // A chat's link fills the form in.
+  const asked = useSearchParams();
   const [query, setQuery] = useState('');
   const [found, setFound] = useState<{ q: string; items?: Found[]; error?: string }>();
   const [picked, setPicked] = useState<Found>();
-  const [name, setName] = useState('');
-  const [target, setTarget] = useState('');
+  const [name, setName] = useState(asked.get('add') ?? '');
+  const [target, setTarget] = useState(asked.get('url') ?? '');
   // A remote server's sign-in is found on Add; a key is asked for only when it needs one.
   const [keyed, setKeyed] = useState(false);
-  const [access, setAccess] = useState('default');
+  const [access, setAccess] = useState(asked.get('access') ?? 'auto');
   const { busy, add, who } = useAdd(props);
   const timer = useRef<ReturnType<typeof setTimeout>>();
-  const form = useRef<HTMLFormElement>(null);
+  const fields = useRef<HTMLDivElement>(null);
   const url = !target.trim() || isUrl(target);
   const asksKey = !url || keyed || secretsOf(picked).length > 0;
   // A stdio server refuses Read-only without a tool list.
-  const level = url || access !== 'read' ? access : 'default';
+  const level = url ? access : 'auto';
   const secrets = secretsOf(picked);
   const secret = secrets.find(input => input.required) ?? secrets[0];
   const rest = secrets.filter(input => input !== secret);
@@ -327,7 +350,7 @@ function AddMcp(props: AddProps) {
     setTarget(targetOf(server));
     setKeyed(false);
     requestAnimationFrame(() =>
-      form.current
+      fields.current
         ?.querySelector<HTMLInputElement>(
           "input[name^='arg:'], input[name^='env:'], input[name^='header:'], input[name=key]",
         )
@@ -382,7 +405,7 @@ function AddMcp(props: AddProps) {
       {
         name: name.trim(),
         provider: 'mcp',
-        ...(level === 'default' ? {} : { access: level as ConnectionInput['access'] }),
+        ...(level === 'auto' ? {} : { access: level as ConnectionInput['access'] }),
         endpoint,
         ...(key
           ? { auth: 'key', key, keyIn: url ? { header: get('header') } : { env: get('env') } }
@@ -394,27 +417,23 @@ function AddMcp(props: AddProps) {
         if ((reason as { needs?: string }).needs !== 'key') return;
         setKeyed(true);
         requestAnimationFrame(() =>
-          form.current?.querySelector<HTMLInputElement>('input[name=key]')?.focus(),
+          fields.current?.querySelector<HTMLInputElement>('input[name=key]')?.focus(),
         );
       },
     );
   };
 
-  return (
-    <form
-      ref={form}
-      class="add-form"
-      method="post"
-      onSubmit={event => {
-        event.preventDefault();
-        submit(event.currentTarget);
-      }}
-    >
+  const body = (
+    <div ref={fields} class="add-form">
       <div
         class="registry"
         onKeyDown={event => {
           if (event.key === 'Enter') event.preventDefault();
-          if (event.key === 'Escape') setFound(undefined);
+          if (event.key === 'Escape' && found) {
+            // Closes the results, not the dialog.
+            event.preventDefault();
+            setFound(undefined);
+          }
         }}
         onFocusIn={() => {
           if (!found && !isUrl(query)) run(query);
@@ -514,7 +533,7 @@ function AddMcp(props: AddProps) {
             : `A connection holds one key, sent as ${secret!.name}. Add ${names(rest)} in the server's own config if you use them.`}
         </p>
       ) : null}
-      <div class="add-grid">
+      <div class="add-grid conn-access">
         <Access value={level} onChange={setAccess} write={!url} />
         {who}
       </div>
@@ -556,58 +575,67 @@ function AddMcp(props: AddProps) {
           )}
         </div>
       ) : null}
-      <div class="add-foot">
-        <Button type="submit" disabled={blocked} loading={busy}>
-          Add connection
-        </Button>
-      </div>
-    </form>
+    </div>
   );
+  const actions = (
+    <Button type="submit" disabled={blocked} loading={busy}>
+      Add connection
+    </Button>
+  );
+  return { busy, body, actions, submit };
 }
 
-/** Adds a connection: a platform account, an API key, or an MCP server; each kind its own short form. */
+/** Adds a connection in a dialog: a platform account or an MCP server; each kind its own short form. */
 function AddConnection({
   catalog,
   rows,
   local,
   admin,
   operator,
-  empty,
   onAdded,
+  onClose,
 }: {
   catalog: IntegrationInfo[];
   rows: ConnectionRow[];
-  /** No connection yet when the page loaded, so the form starts open. */
-  empty: boolean;
   local: boolean;
   admin: boolean;
   operator: boolean;
   onAdded: (row: ConnectionRow) => void;
+  onClose: () => void;
 }) {
-  const [kind, setKind] = useState(catalog.some(info => info.personal) ? 'platform' : 'mcp');
-  const [round, setRound] = useState(0);
-  const props: AddProps = {
-    local,
-    admin,
-    operator,
-    onAdded: row => {
-      onAdded(row);
-      setRound(round + 1);
-    },
-  };
+  const asked = useSearchParams();
+  const platform = catalog.some(info => info.personal && info.id === asked.get('add'));
+  const [kind, setKind] = useState(
+    asked.has('url') || (asked.has('add') && !platform)
+      ? 'mcp'
+      : catalog.some(info => info.personal)
+        ? 'platform'
+        : 'mcp',
+  );
+  const props: AddProps = { local, admin, operator, onAdded };
+  const platformForm = useAddPlatform({ ...props, catalog, rows });
+  const mcpForm = useAddMcp(props);
+  const form = kind === 'platform' ? platformForm : mcpForm;
 
   return (
-    <FoldCard opened={empty} title="Add a connection" note="A platform account, or any MCP server">
+    <Modal
+      class="add-modal"
+      title="Add a connection"
+      dismiss
+      busy={form.busy}
+      onSubmit={event => {
+        event.preventDefault();
+        form.submit(event.currentTarget as HTMLFormElement);
+      }}
+      onClose={onClose}
+      actions={form.actions}
+    >
       <div class="conn-add">
         <Segmented label="What to connect" options={KINDS} value={kind} onChange={setKind} />
         <p class="muted">{HELP[kind]}</p>
       </div>
-      {kind === 'platform' ? (
-        <AddPlatform key={round} {...props} catalog={catalog} rows={rows} />
-      ) : (
-        <AddMcp key={round} {...props} />
-      )}
-    </FoldCard>
+      {form.body}
+    </Modal>
   );
 }
 
@@ -673,7 +701,12 @@ export function ConnectionsList({
   operator: boolean;
 }) {
   const [rows, setRows] = useState(first.filter(row => row.provider !== 'env'));
-  const [keying, setKeying] = useState<ConnectionRow>();
+  // A chat's reconnect link opens the new key row of a key connection.
+  const reconnecting = useSearchParams().get('reconnect');
+  const [keying, setKeying] = useState(
+    rows.find(row => row.name === reconnecting && row.auth === 'key'),
+  );
+  const adding = useAddDialog(['url', 'access', 'tools', 'me']);
   const action = useAction({ leaves: true });
 
   const put = (row: ConnectionRow) =>
@@ -686,22 +719,13 @@ export function ConnectionsList({
   const reconnect = (row: ConnectionRow) => {
     if (row.auth === 'key') return setKeying(row);
     void action.run(row.id, async () =>
-      location.assign((await client.connections.authorize(row.id)).url),
+      location.assign(returning((await client.connections.authorize(row.id)).url)),
     );
   };
 
   return (
     <>
-      <AddConnection
-        catalog={catalog}
-        rows={rows}
-        local={local}
-        admin={admin}
-        operator={operator}
-        empty={!first.some(row => row.provider !== 'env')}
-        onAdded={put}
-      />
-      <Card title="Connections" count={rows.length}>
+      <Card title="Connections" count={rows.length} actions={adding.button}>
         {rows.length ? (
           <div class="table-scroll">
             <table class="rows settings conns">
@@ -713,13 +737,7 @@ export function ConnectionsList({
                     badges={
                       <span class="conn-badges">
                         <Badge>{row.owner ? (row.mine ? 'yours' : 'member') : 'workspace'}</Badge>
-                        <Badge>
-                          {row.access === 'read'
-                            ? 'Read-only'
-                            : row.access
-                              ? 'Read-write'
-                              : 'Default'}
-                        </Badge>
+                        <Badge>{row.access === 'read-only' ? 'Read-only' : 'Auto'}</Badge>
                         <Badge tone={STATUS[row.status].tone}>{STATUS[row.status].label}</Badge>
                       </span>
                     }
@@ -739,6 +757,7 @@ export function ConnectionsList({
                     remove={{
                       title: `Remove ${row.name}?`,
                       body: 'Tasks stop using it, and its key or sign-in is deleted.',
+                      link: row.name,
                       onRemove: () =>
                         client.connections
                           .remove(row.id)
@@ -754,7 +773,7 @@ export function ConnectionsList({
           </div>
         ) : (
           <Empty title="No connections yet">
-            Add one above so tasks can use another service, like an issue tracker or a database.
+            Add one so tasks can use another service, like an issue tracker or a database.
           </Empty>
         )}
         {keying ? (
@@ -768,6 +787,20 @@ export function ConnectionsList({
           />
         ) : null}
       </Card>
+      {adding.open ? (
+        <AddConnection
+          catalog={catalog}
+          rows={rows}
+          local={local}
+          admin={admin}
+          operator={operator}
+          onAdded={row => {
+            put(row);
+            adding.close();
+          }}
+          onClose={adding.close}
+        />
+      ) : null}
     </>
   );
 }

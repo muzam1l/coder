@@ -20,7 +20,7 @@ import {
   outStyle,
   paintStatus,
 } from '../../tui/output';
-import type { LogView } from '../../core/task/log-view';
+import type { LogView } from '../../core/task/view';
 import { termCols, visibleWidth, wrapAnsi } from '../../tui/live';
 import { flag, serverOptions, serverSuffix, str, tailOption } from '../../utils/args';
 import { command, nextSteps, type CommandNext } from '../../cli';
@@ -70,15 +70,15 @@ export function promptBlock(
   ];
 }
 
-// Header lines for the task's dispatch options, permissions and cwd, shown by
+// Header lines for the task's dispatch options, access and cwd, shown by
 // result/stream alongside engine/model so a glance answers "how was this
 // dispatched". Only options actually set are listed.
 function taskOptionLines(
-  task: { permissions?: string | null; cwd?: string; addDirs?: string[] },
+  task: { access?: string | null; cwd?: string; addDirs?: string[] },
   style: Style = outStyle,
 ): string[] {
   const opts: Array<[string, string]> = [];
-  if (task.permissions) opts.push(['perms', task.permissions]);
+  if (task.access) opts.push(['access', task.access]);
   if (task.cwd) opts.push(['cwd', task.cwd]);
   for (const dir of task.addDirs ?? []) opts.push(['add-dir', dir]);
   return opts.map(([k, v]) => `${style.dim(k.padEnd(8))} ${v}`);
@@ -273,7 +273,7 @@ function capBody(
   return rows.join('\n');
 }
 
-export interface LogRenderOptions {
+interface LogRenderOptions {
   /** Workspace root, stripped from paths in rendered text. */
   cwd?: string;
   /** Task dispatch time, for the elapsed gutter. Omit to render a blank gutter. */
@@ -306,12 +306,12 @@ export class LogRenderer {
   private readonly style: Style;
 
   static async create(opts: LogRenderOptions = {}): Promise<LogRenderer> {
-    return new LogRenderer(opts, await import('../../core/task/log-view'));
+    return new LogRenderer(opts, await import('../../core/task/view'));
   }
 
   private constructor(
     private readonly opts: LogRenderOptions,
-    private readonly presentation: typeof import('../../core/task/log-view'),
+    private readonly presentation: typeof import('../../core/task/view'),
   ) {
     this.view = new presentation.LogView(opts.cwd, { keepAnsi: true });
     this.style = opts.style ?? outStyle;

@@ -32,7 +32,7 @@ Run it:
 coder flow run audit-routes --wait
 ```
 
-`--wait` streams the run's progress right there; without it the run goes to the background and `coder flow stream` shows the same lines any time. If the run dies mid-wave, `coder flow resume` continues it without re-running finished steps.
+`--wait` streams the run's progress right there; without it the run goes to the background and `coder flow stream` shows the same lines any time. If the run dies mid-wave, `coder flow resume` continues it without re-running finished steps. In the dashboard, `/flow <name>` in **# Tasks → [New task]** runs one.
 
 ## Flows are plain modules
 
@@ -54,12 +54,12 @@ Dispatch one coder task and await its result.
 ```ts
 const r = await task('Explain the auth module', {
   model: 'sol',
-  permissions: 'read-only',
+  access: 'read-only',
 });
 r.output; // final message text
 ```
 
-Options are the same as the `coder run` flags (`engine`, `model`, `effort`, `permissions`, `name`, `appendSystem`, `cwd`, and `addDirs` for `--add-dir` - see `coder run --help`), plus one of its own:
+Options are the same as the `coder run` flags (`model`, `effort`, `access`, `name`, `appendSystem`, `cwd`, and `addDirs` for `--add-dir` - see `coder run --help`), plus one of its own:
 
 - `returns` - a zod schema for structured output instead of prose. The runtime passes the schema natively, validates the reply (one corrective retry on mismatch), and the parsed value lands on `r.data`:
 
@@ -77,7 +77,7 @@ Returns `{ taskId, status, output, data?, tokens, model }`. If the task fails, `
 
 ### `steer(taskId, text, opts?)`
 
-Give a task this run started one more turn on its own thread, under the same task id, and await it. It mirrors `coder task steer --wait`, with the same `model`, `effort` and `permissions` overrides:
+Give a task this run started one more turn on its own thread, under the same task id, and await it. It mirrors `coder task steer --wait`, with the same `model`, `effort` and `access` overrides:
 
 ```ts
 const draft = await task('Draft the schema for the new orders table.');

@@ -2,11 +2,23 @@ import { withFileLock } from '../utils/fsx';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { createHash, randomUUID } from 'node:crypto';
-import type { Connection, Preset } from '../agent/types';
+import { createHash } from 'node:crypto';
+import type { Connection } from '../agent/types';
+import { strictestAccess, type Access } from './config';
+import {
+  connectionEnvName,
+  injectedConnectionEnvironment,
+  transportedConnectionSecrets,
+} from './connection-env';
 import type { McpServerSpec } from './types';
 import { coderHome } from './state';
-import { oauthAccessToken, OAuthRevoked, type OAuthSecret } from './oauth';
+import {
+  oauthAccessToken,
+  OAuthRevoked,
+  refreshFailure,
+  tokenFingerprint,
+  type OAuthSecret,
+} from './oauth';
 
 export class ConnectionRefused extends Error {
   constructor(
@@ -15,33 +27,6 @@ export class ConnectionRefused extends Error {
   ) {
     super(message);
   }
-}
-
-export function connectionEnvName(name: string): boolean {
-  return (
-    /^[A-Z][A-Z0-9_]*$/.test(name) &&
-    !/^(CODER_|CODEX_|LD_|DYLD_|GIT_|APP_TOKEN(?:_|$))/.test(name) &&
-    ![
-      'PATH',
-      'HOME',
-      'SHELL',
-      'USER',
-      'PWD',
-      'TMPDIR',
-      'NODE_OPTIONS',
-      'NODE_PATH',
-      'BASH_ENV',
-      'ENV',
-      'OPENAI_API_KEY',
-      'ANTHROPIC_API_KEY',
-      'CLAUDE_CODE_OAUTH_TOKEN',
-      'CODEX_AUTH_JSON',
-      'CODEX_HOME',
-      'CLAUDE_CONFIG_DIR',
-      'OPENAI_BASE_URL',
-      'ANTHROPIC_BASE_URL',
-    ].includes(name)
-  );
 }
 
 /** The connection ids both lists allow; absent means every one. */
@@ -63,19 +48,6 @@ export function connectionEnvConflicts(connections: Connection[]): Set<string> {
   }
 
   return conflicts;
-}
-
-export function injectedConnectionEnvironment(
-  env: NodeJS.ProcessEnv = process.env,
-): Record<string, string> {
-  const values = JSON.parse(env.CODER_CONNECTION_ENV_VALUES ?? '{}') as Record<string, unknown>;
-
-  return Object.fromEntries(
-    Object.entries(values).filter(
-      (entry): entry is [string, string] =>
-        connectionEnvName(entry[0]) && typeof entry[1] === 'string',
-    ),
-  );
 }
 
 export function connectionEnvironmentKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
@@ -129,7 +101,7 @@ function checkResponse(response: Response): void {
   if (!response.ok) throw new Error('MCP did not answer');
 }
 
-export interface ConnectionSecrets {
+interface ConnectionSecrets {
   get(id: string): string | undefined;
   put(id: string, value: string): void;
   delete(id: string): void;
@@ -172,7 +144,7 @@ function write(file: string, value: unknown): void {
 }
 
 /** A stored engine credential: its sealed `env`, beside public fields such as `engine` and `owner`. */
-export type SealedCredential = { iv: string; tag: string; ciphertext: string };
+type SealedCredential = { iv: string; tag: string; ciphertext: string };
 type CredentialRecord = Record<string, unknown>;
 
 export class LocalConnections {
@@ -268,7 +240,7 @@ export class LocalConnections {
     if (
       connection.provider === 'env' &&
       (connection.auth !== 'key' ||
-        connection.access !== 'write' ||
+        connection.access !== 'auto' ||
         connection.endpoint ||
         connection.secret ||
         !connection.credential ||
@@ -337,14 +309,33 @@ export interface McpToolInfo {
   annotations?: { readOnlyHint?: boolean };
 }
 
+/** MCP `Implementation`: what a server says about itself. */
+export interface McpServerInfo {
+  name?: string;
+  title?: string;
+  version?: string;
+  description?: string;
+  websiteUrl?: string;
+}
+
 export interface McpClient {
-  initialize(): Promise<void>;
+  /** The server's own instructions and info, from `initialize` or, on 2026-07-28 servers, `server/discover`. */
+  initialize(): Promise<{ instructions?: string; serverInfo?: McpServerInfo }>;
   /** Every tool, page by page; initializes first when needed. */
   tools(): Promise<McpToolInfo[]>;
   /** One tool's result as the server sends it, unbounded by `startup`. */
   call(name: string, args: Record<string, unknown>): Promise<unknown>;
   close(): Promise<void>;
 }
+
+/** The stateless MCP revision, without `initialize`. */
+const MODERN_MCP = '2026-07-28';
+
+/** A header value as MCP 2026-07-28 carries it: plain when header-safe, else base64. */
+const mcpHeader = (value: string) =>
+  /^[\x21-\x7E]([\x20-\x7E]*[\x21-\x7E])?$/.test(value)
+    ? value
+    : `=?base64?${Buffer.from(value).toString('base64')}?=`;
 
 /** A client for one server spec, stdio or streamable HTTP. `startup` bounds connecting, initialize and the tool list only; the session then lives until `close`. */
 export async function mcpClient(
@@ -353,6 +344,7 @@ export async function mcpClient(
   startup?: AbortSignal,
 ): Promise<McpClient> {
   let version = '2025-11-25';
+  const clientInfo = { name: 'coder', version: '1' };
   const within = <T>(work: Promise<T>): Promise<T> =>
     startup
       ? Promise.race([
@@ -366,24 +358,49 @@ export async function mcpClient(
       : work;
   const base = await within(spec.command ? stdioRpc(spec) : httpRpc(spec, request, () => version));
   let next = 1;
-  const call = (method: string, params?: unknown, signal?: AbortSignal) =>
-    base.rpc(method, params, next++, signal);
-  let initialized: Promise<void> | undefined;
+  const call = (method: string, params?: object, signal?: AbortSignal) =>
+    base.rpc(
+      method,
+      version === MODERN_MCP
+        ? {
+            ...params,
+            _meta: {
+              'io.modelcontextprotocol/protocolVersion': version,
+              'io.modelcontextprotocol/clientInfo': clientInfo,
+              'io.modelcontextprotocol/clientCapabilities': {},
+            },
+          }
+        : params,
+      next++,
+      signal,
+    );
+  let initialized: Promise<{ instructions?: string; serverInfo?: McpServerInfo }> | undefined;
   const client: McpClient = {
     initialize: () =>
       (initialized ??= within(
         call(
           'initialize',
-          {
-            protocolVersion: version,
-            capabilities: {},
-            clientInfo: { name: 'coder', version: '1' },
-          },
+          { protocolVersion: version, capabilities: {}, clientInfo },
           startup,
-        ).then(async result => {
-          version = result?.protocolVersion ?? version;
-          await base.rpc('notifications/initialized');
-        }),
+        ).then(
+          async result => {
+            version = result?.protocolVersion ?? version;
+            await base.rpc('notifications/initialized');
+
+            return { instructions: result?.instructions, serverInfo: result?.serverInfo };
+          },
+          async error => {
+            if (error instanceof ConnectionRefused) throw error;
+            // A server of 2026-07-28 alone has no initialize; it describes itself through server/discover.
+            version = MODERN_MCP;
+            const result = await call('server/discover', {}, startup).catch(() => {
+              throw error;
+            });
+            if (!result?.supportedVersions?.includes(MODERN_MCP)) throw error;
+
+            return { instructions: result.instructions, serverInfo: result.serverInfo };
+          },
+        ),
       )),
     async tools() {
       await client.initialize();
@@ -421,7 +438,7 @@ async function stdioRpc(spec: McpServerSpec) {
   const { spawn } = await import('node:child_process');
   const readline = await import('node:readline');
   const child = spawn(spec.command!, spec.args ?? [], {
-    env: { ...process.env, ...spec.env },
+    env: { ...engineEnvironment(process.env), ...spec.env },
     stdio: ['pipe', 'pipe', 'inherit'],
   });
   const pending = new Map<
@@ -491,6 +508,14 @@ async function httpRpc(spec: McpServerSpec, request: typeof fetch, version: () =
         ...(signal ? { signal } : {}),
         headers: {
           ...headers(),
+          ...(version() === MODERN_MCP
+            ? {
+                'mcp-method': method,
+                ...(method === 'tools/call'
+                  ? { 'mcp-name': mcpHeader(String((params as { name?: unknown }).name)) }
+                  : {}),
+              }
+            : {}),
           'content-type': 'application/json',
           accept: 'application/json, text/event-stream',
         },
@@ -532,52 +557,51 @@ async function httpRpc(spec: McpServerSpec, request: typeof fetch, version: () =
   };
 }
 
-export async function connectionMcp(
-  connection: Connection,
-  token: string | undefined,
-  request: typeof fetch = fetch,
-): Promise<McpServerSpec | undefined> {
-  if (!connection.endpoint) throw new Error('Missing endpoint');
-  const spec: McpServerSpec = { ...connection.endpoint, name: connection.id };
-  if (token) {
-    if (spec.command) {
-      if (!connection.keyIn || !('env' in connection.keyIn)) throw new Error('Missing key env');
-      spec.env = { ...spec.env, [connection.keyIn.env]: token };
-      spec.credentialFields = { env: connection.keyIn.env };
-    } else {
-      const header =
-        connection.keyIn && 'header' in connection.keyIn
-          ? connection.keyIn.header
-          : 'Authorization';
-      spec.headers = {
-        ...spec.headers,
-        [header]: header.toLowerCase() === 'authorization' ? `Bearer ${token}` : token,
-      };
-      spec.credentialFields = { header };
-    }
+/** Where a connection's credential goes in its server spec. */
+export function credentialField(connection: Connection): { env?: string; header?: string } {
+  if (connection.endpoint?.command) {
+    if (!connection.keyIn || !('env' in connection.keyIn)) throw new Error('Missing key env');
+    return { env: connection.keyIn.env };
   }
+
+  return {
+    header:
+      connection.keyIn && 'header' in connection.keyIn ? connection.keyIn.header : 'Authorization',
+  };
+}
+
+/** A server spec with `token` in `field`. */
+export function withCredential(
+  spec: McpServerSpec,
+  field: { env?: string; header?: string },
+  token: string,
+): McpServerSpec {
+  if (field.env)
+    return { ...spec, env: { ...spec.env, [field.env]: token }, credentialFields: field };
+  const header = field.header!;
+
+  return {
+    ...spec,
+    headers: {
+      ...spec.headers,
+      [header]: header.toLowerCase() === 'authorization' ? `Bearer ${token}` : token,
+    },
+    credentialFields: field,
+  };
+}
+
+/** A connection's server spec, built without contacting it: a Read-only HTTP server is marked, and its tools are checked on first use. */
+export function connectionMcp(connection: Connection, token: string | undefined): McpServerSpec {
+  if (!connection.endpoint) throw new Error('Missing endpoint');
+  let spec: McpServerSpec = { ...connection.endpoint, name: connection.id };
+  if (token) spec = withCredential(spec, credentialField(connection), token);
   if (spec.command) {
-    if (connection.access === 'read' && !spec.tools?.length)
+    if (connection.access === 'read-only' && !spec.tools?.length)
       throw new Error('Read-only requires tools');
     return spec;
   }
-  const client = await mcpClient(spec, request, AbortSignal.timeout(5_000));
-  try {
-    await client.initialize();
-    if (connection.access === 'write') return spec;
-    spec.tools = (await client.tools())
-      .filter(
-        tool =>
-          connectionToolName(tool.name) &&
-          tool.annotations?.readOnlyHint === true &&
-          (!connection.endpoint?.tools?.length || connection.endpoint.tools.includes(tool.name)),
-      )
-      .map(tool => tool.name);
 
-    return spec.tools.length ? spec : undefined;
-  } finally {
-    await client.close();
-  }
+  return connection.access === 'read-only' ? { ...spec, readOnly: true } : spec;
 }
 
 /** Keep resolved credentials in the worker's environment, with only placeholders in task records. */
@@ -623,7 +647,7 @@ export async function localConnections(
   allowed?: string[],
   granted?: string[],
   local = new LocalConnections(),
-  mode: Preset = 'write',
+  access: Access = 'auto',
 ) {
   const ids =
     granted ??
@@ -639,12 +663,12 @@ export async function localConnections(
   );
   await Promise.all(
     ids.map(async id => {
-      let connection = local.get(id);
+      const connection = local.get(id);
       if (!connection || connection.owner || !['mcp', 'env'].includes(connection.provider)) return;
       if (
         connection.provider === 'env' &&
         (connection.auth !== 'key' ||
-          connection.access !== 'write' ||
+          connection.access !== 'auto' ||
           connection.endpoint ||
           !connection.credential ||
           !connection.keyIn ||
@@ -656,6 +680,18 @@ export async function localConnections(
         warnings.push(
           connectionWarning(connection.name, new Error('Invalid environment connection')),
         );
+        return;
+      }
+      const level = strictestAccess(connection.access, access);
+      if (connection.auth === 'oauth') {
+        // Its token loads on first use, through the tool search.
+        mcp[id] = {
+          ...connectionMcp({ ...connection, access: level }, undefined),
+          connection: id,
+          credentialOnUse: credentialField(connection),
+          description: connection.name,
+          access: level,
+        };
         return;
       }
       if (connection.broken) {
@@ -681,62 +717,14 @@ export async function localConnections(
         }
         return;
       }
-      const credential = async (force = false, refused?: string) =>
-        local.withLock(async () => {
-          const current = local.get(id);
-          if (!current || current.owner || current.broken || current.auth !== connection!.auth)
-            throw new Error('Connection changed during resolution');
-          connection = current;
-          if (!current.secret) throw new Error('Missing credential');
-          const secret: { key?: string } & Partial<OAuthSecret> = current.secret.startsWith(
-            'plain.',
-          )
-            ? (JSON.parse(Buffer.from(current.secret.slice(6), 'base64').toString('utf8')) as {
-                key?: string;
-              } & OAuthSecret)
-            : { key: current.secret };
-          if (current.auth === 'key') return secret.key;
-          return oauthAccessToken({
-            secret: secret as OAuthSecret,
-            fetch,
-            now: Date.now(),
-            force: force && secret.accessToken === refused,
-            save: async value =>
-              local.withLock(async () => {
-                const latest = local.get(id);
-                if (
-                  !latest ||
-                  latest.secret !== current.secret ||
-                  latest.auth !== current.auth ||
-                  latest.owner !== current.owner
-                )
-                  throw new Error('Connection changed during refresh');
-                current.secret = `plain.${Buffer.from(JSON.stringify(value)).toString('base64')}`;
-                local.put(current);
-              }),
-          });
-        }, id);
       try {
-        let token = connection.auth === 'none' ? undefined : await credential();
+        const token =
+          connection.auth === 'none' ? undefined : (await localCredential(local, id, 'key')).token;
         if (connection.auth !== 'none' && !token) throw new Error('Missing credential');
-        let spec: McpServerSpec | undefined;
-        try {
-          spec = await connectionMcp({ ...connection, access: connection.access ?? mode }, token);
-        } catch (error) {
-          if (!(error instanceof ConnectionRefused) || connection.auth !== 'oauth') throw error;
-          token = await credential(true, token);
-          spec = await connectionMcp({ ...connection, access: connection.access ?? mode }, token);
-        }
-        if (spec)
-          mcp[id] = { ...spec, description: connection.name, access: connection.access ?? mode };
+        const spec = connectionMcp({ ...connection, access: level }, token);
+        mcp[id] = { ...spec, description: connection.name, access: level };
       } catch (error) {
-        if (connectionRevoked(error))
-          await local.withLock(async () => {
-            const current = local.get(id);
-            if (current && current.secret === connection!.secret)
-              local.put({ ...current, broken: { at: Date.now(), reason: 'Needs reconnecting' } });
-          });
-        warnings.push(connectionWarning(connection!.name, error));
+        warnings.push(connectionWarning(connection.name, error));
       }
     }),
   );
@@ -744,27 +732,66 @@ export async function localConnections(
   return { ...connectionEnvironment(mcp, env), ids, warnings };
 }
 
-function transportedConnectionSecrets(): string[] {
-  return Object.entries(process.env)
-    .filter(([key, value]) => /^CODER_CONNECTION_[A-F0-9]{24}$/.test(key) && value)
-    .flatMap(([, value]) => [value!, ...(value!.startsWith('Bearer ') ? [value!.slice(7)] : [])]);
+/** A local connection's credential; an OAuth token that is still the `refused` one, by its fingerprint, refreshes before its expiry. */
+function localCredential(
+  local: LocalConnections,
+  id: string,
+  auth: Connection['auth'],
+  refused?: string,
+): Promise<{ token: string | undefined; current: Connection }> {
+  return local.withLock(async () => {
+    const current = local.get(id);
+    if (!current || current.owner || current.broken || current.auth !== auth)
+      throw new Error('Connection changed during resolution');
+    if (!current.secret) throw new Error('Missing credential');
+    const secret: { key?: string } & Partial<OAuthSecret> = current.secret.startsWith('plain.')
+      ? (JSON.parse(Buffer.from(current.secret.slice(6), 'base64').toString('utf8')) as {
+          key?: string;
+        } & OAuthSecret)
+      : { key: current.secret };
+    if (current.auth === 'key') return { token: secret.key, current };
+    const token = await oauthAccessToken({
+      secret: secret as OAuthSecret,
+      fetch,
+      now: Date.now(),
+      force: !!secret.accessToken && tokenFingerprint(secret.accessToken) === refused,
+      save: async value =>
+        local.withLock(async () => {
+          const latest = local.get(id);
+          if (
+            !latest ||
+            latest.secret !== current.secret ||
+            latest.auth !== current.auth ||
+            latest.owner !== current.owner
+          )
+            throw new Error('Connection changed during refresh');
+          current.secret = `plain.${Buffer.from(JSON.stringify(value)).toString('base64')}`;
+          local.put(current);
+        }),
+    });
+
+    return { token, current };
+  }, id);
 }
 
-export function redactConnectionSecrets(value: unknown, additional: string[] = []): string {
-  const named = Object.entries(injectedConnectionEnvironment())
-    .filter(([, secret]) => secret.length >= 8)
-    .map(([name, secret]) => [secret, `[${name}]`] as const);
-  const secrets = [...additional, ...transportedConnectionSecrets()]
-    .filter(Boolean)
-    .map(secret => [secret, '[REDACTED]'] as const);
-  const replacements = [...named, ...secrets].sort(([left], [right]) => right.length - left.length);
-
-  return JSON.stringify(value, (_key, entry) =>
-    typeof entry === 'string'
-      ? replacements.reduce(
-          (text, [secret, replacement]) => text.replaceAll(secret, replacement),
-          entry,
-        )
-      : entry,
-  );
+/** A local OAuth connection's token on first use, refreshed then; `refused` names by fingerprint a token its server refused. None when it needs reconnecting, which a refused refresh marks. */
+export async function localConnectionToken(
+  id: string,
+  refused?: string,
+  local = new LocalConnections(),
+): Promise<string | undefined> {
+  const connection = local.get(id);
+  if (connection?.auth !== 'oauth' || connection.broken || !connection.secret) return undefined;
+  try {
+    return (await localCredential(local, id, 'oauth', refused)).token;
+  } catch (error) {
+    console.error('coder: token refresh failed', refreshFailure({ connection: id }, error));
+    if (!connectionRevoked(error)) throw error;
+    await local.withLock(async () => {
+      const current = local.get(id);
+      if (current && current.secret === connection.secret)
+        local.put({ ...current, broken: { at: Date.now(), reason: 'Needs reconnecting' } });
+    });
+    return undefined;
+  }
 }

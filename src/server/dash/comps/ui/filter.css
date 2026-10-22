@@ -90,12 +90,6 @@
 }
 
 @media (max-width: 760px) {
-  /* the button sits at the left edge here, so its menu opens rightward */
-  @supports (anchor-scope: --menu) {
-    .filters .menu.filter-more > .pop {
-      inset: anchor(bottom) auto auto anchor(left);
-    }
-  }
   .head.tools .filter-chips {
     order: 0;
   }

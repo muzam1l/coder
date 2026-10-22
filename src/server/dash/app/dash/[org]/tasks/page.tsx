@@ -4,7 +4,7 @@ import { Page } from '@/comps/frame/page-head';
 import { TasksSection, loadTasks } from '@/app/dash/[org]/tasks/list/tasks-section';
 import { credentialMissing } from '@/app/dash/[org]/tasks/composer-data';
 
-/** Every task, with New task in the head. */
+/** Every task, with New task in the head, and for an admin the changes waiting for their approval. */
 export default function TasksPage({ request }: { request?: Request }) {
   if (!request) return null;
   const client = load(request);

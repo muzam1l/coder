@@ -1,14 +1,23 @@
 /** The task queue: claim, retry, finish, cancel. Logs and lookups go through the `Store` (`task`, `tasklog`). */
 import { deleteTaskConnections } from '../connections/resolve';
+import {
+  MEMBERS_CLAIM_MS,
+  canView,
+  createTaskToken,
+  spaceKey,
+  taskAudience,
+  type SpaceEvent,
+  type Viewer,
+} from './access';
 import { randomUUID } from 'node:crypto';
-import { createTaskToken } from './token';
 import type { AgentTask, TaskContext, TaskSource } from '../../agent/types';
+import type { LinkedMember } from '../../integrations/types';
 import type { TaskLogLine, TaskStatus, Store, UsageRecord } from '../store/types';
 import type { Loaded } from '../store/primed';
 import { scoped, type ServerContext } from '../context';
-import { taskRunner } from '../runners';
+import { taskRunner } from '../runners/select';
 import { pushLocalInbox } from './local';
-import { awaitsApproval, byId, byListKey, listRank, type ListKey } from '../../core/defaults';
+import { awaitsApproval, byId, byListKey, listRank, type ListKey } from '../../core/task/view';
 import { archiveDue } from '../../core/state';
 import { STOPPED_BY_USER, type Approval } from '../../core/types';
 import { ApprovalRefusedError, mergeApprovals, refusedAnswer } from '../../core/approvals';
@@ -20,12 +29,27 @@ export interface ClaimedTask {
   status: TaskStatus;
 }
 
+/** What `inspect` reads of a running task: its row without the task body, which a failure report loads by id. */
+export type RunningTask = Pick<
+  TaskStatus,
+  | 'status'
+  | 'attempts'
+  | 'generation'
+  | 'handle'
+  | 'tokenHash'
+  | 'lastSeenAt'
+  | 'logsComplete'
+  | 'startedAt'
+  | 'cancelRequestedAt'
+  | 'updatedAt'
+> & { task: Pick<AgentTask, 'id' | 'runner' | 'runnerId'> };
+
 export function taskTimes(status: TaskStatus, now = Date.now()) {
   const active = status.status === 'running' || status.status === 'waiting';
   const end = active ? now : (status.finishedAt ?? status.updatedAt);
 
   return {
-    lastActivityAt: status.updatedAt,
+    lastActivityAt: Math.max(status.updatedAt, status.lastSeenAt ?? 0),
     lastTurnMs: status.startedAt === undefined ? 0 : Math.max(0, end - status.startedAt),
   };
 }
@@ -68,6 +92,12 @@ export interface TaskFilter {
   q?: string;
   since?: number;
   sinceId?: string;
+  /** Only the children of this task. */
+  parent?: string;
+  /** Only tasks routed to this registered runner. */
+  runnerId?: string;
+  /** A member who is not an admin: their own tasks, public ones, and those of the private spaces they can see. */
+  viewer?: Viewer;
 }
 
 export interface TaskListOptions extends TaskFilter {
@@ -90,6 +120,28 @@ export interface TaskMetrics {
 
 export const ACTIVE_STATES: TaskStatus['status'][] = ['queued', 'running', 'waiting'];
 
+/** What a delete leaves for events streams: the task's audience and the member who asked, so only who saw it hears the delete. */
+export interface Tombstone {
+  at: number;
+  audience?: string;
+  requestedBy?: string;
+}
+
+/** What a log stream reads of its task each poll: its state, who sees it, and its new lines. */
+export interface LogTail {
+  status: Pick<TaskStatus, 'status' | 'approval'> & {
+    task: Pick<AgentTask, 'id' | 'audience' | 'requestedBy'>;
+  };
+  lines: TaskLogLine[];
+}
+
+/** Active unarchived tasks of one audience and one asking member, so every viewer's count comes from one read. */
+export interface AudienceCount {
+  audience?: string;
+  requestedBy?: string;
+  active: number;
+}
+
 /** Whether a task passes a filter; the memory queue's version of the SQL predicate. */
 export function matchesTask(status: TaskStatus, filter: TaskFilter): boolean {
   if (
@@ -106,8 +158,11 @@ export function matchesTask(status: TaskStatus, filter: TaskFilter): boolean {
   if (filter.agent && status.task.agent !== filter.agent) return false;
   if (filter.source && status.task.source !== filter.source) return false;
   if (filter.reviewKey && reviewKey(status.task) !== filter.reviewKey) return false;
+  if (filter.parent && status.task.parent !== filter.parent) return false;
+  if (filter.runnerId && status.task.runnerId !== filter.runnerId) return false;
   if (filter.archived !== undefined && filter.archived !== (status.archivedAt !== undefined))
     return false;
+  if (!canView(filter.viewer, status.task)) return false;
   const q = filter.q?.trim().toLowerCase();
   return (
     !q ||
@@ -144,7 +199,19 @@ export const afterCursor = (row: TaskStatus, before?: ListCursor) =>
 
 /** What a continued task takes for its next turn: the prompt and context, and the agent as it is now. */
 export type TaskRefresh = Pick<AgentTask, 'prompt' | 'context'> &
-  Partial<Pick<AgentTask, 'definition' | 'usage' | 'tools' | 'files' | 'permissions'>>;
+  Partial<
+    Pick<
+      AgentTask,
+      | 'definition'
+      | 'usage'
+      | 'tools'
+      | 'files'
+      | 'access'
+      | 'engineChain'
+      | 'engineCredentials'
+      | 'credential'
+    >
+  >;
 
 export interface TaskFence {
   generation?: number;
@@ -154,6 +221,8 @@ export interface TaskFence {
   lastSeenAt?: number | null;
   updatedAt?: number;
   statuses?: TaskStatus['status'][];
+  /** The approval with this id has no answer yet. */
+  unanswered?: string;
 }
 
 export interface InboxAck {
@@ -177,7 +246,7 @@ export type TaskPatch = Partial<
     | 'autoArchived'
     | 'approval'
   >
-> & { answer?: unknown; approvals?: Approval[] };
+> & { answer?: unknown; approvals?: Approval[]; resolvedModel?: string };
 
 export interface Completion {
   outcome: Outcome;
@@ -220,7 +289,7 @@ export function sessionKey(task: Pick<AgentTask, 'agent' | 'event'>): string {
   return JSON.stringify([event?.appId, event?.installationId, event?.chat?.thread.id, task.agent]);
 }
 
-export function sameSession(task: AgentTask, incoming: AgentTask): boolean {
+function sameSession(task: AgentTask, incoming: AgentTask): boolean {
   return (
     task.flow === 'default' &&
     Boolean(task.event?.chat) &&
@@ -355,22 +424,58 @@ export interface TaskQueue {
   cancelRequested(organizationId: string, id: string): Promise<boolean>;
   /** Newest first. */
   list(organizationId: string, opts?: TaskListOptions): Promise<TaskStatus[]>;
-  /** In one call, tasks of these organizations updated or deleted after `since`, and the named ones; a store queue returns every task. */
+  /** The audiences among `audiences` of private spaces whose stored member list holds a platform identity linked to `user`. */
+  memberSpaces(organizationId: string, user: string, audiences: string[]): Promise<string[]>;
+  /** The private spaces of `event`'s integration and account whose member list is stored and that still have tasks. */
+  listedSpaces(organizationId: string, event: SpaceEvent): Promise<SpaceEvent[]>;
+  /** The platform user ids linked to members of the organization. */
+  linkedMembers(organizationId: string, platform: string): Promise<LinkedMember[]>;
+  /** When a private space's member list was last fetched. */
+  spaceSynced(organizationId: string, event: SpaceEvent): Promise<number | undefined>;
+  /** Takes the one fetch claim on a space's member list; false while another server holds it, unless `force` takes it over. */
+  claimSpace(
+    organizationId: string,
+    event: SpaceEvent,
+    now: number,
+    force?: boolean,
+  ): Promise<boolean>;
+  /** Replaces a private space's member list with what its platform just listed, or releases the claim when the fetch failed. */
+  saveSpaceMembers(
+    organizationId: string,
+    event: SpaceEvent,
+    members: string[] | undefined,
+    now: number,
+  ): Promise<void>;
+  /** A member joined or left a listed space, or it turned public or private: its tasks take the new audience and its list goes. */
+  spaceChanged(
+    organizationId: string,
+    event: SpaceEvent,
+    change: { joined?: string; left?: string; private?: boolean },
+    now: number,
+  ): Promise<void>;
+  /** In one call, tasks of these organizations updated or deleted after `since`, and the `fresh` ones however old; asked `ids` carry their results. A store queue returns every task. */
   changes(
-    scopes: Array<{ organizationId: string; ids: string[] }>,
+    scopes: Array<{ organizationId: string; ids: string[]; fresh: string[] }>,
     since: number,
   ): Promise<{
     rows: ClaimedTask[];
-    deleted: Array<{ organizationId: string; id: string; at: number }>;
+    deleted: Array<{ organizationId: string; id: string } & Tombstone>;
   }>;
+  /** In one read, each named task's state and up to `limit` of its log lines after `after`; `undefined` for a task that is gone. */
+  logTails(
+    tails: Array<{ organizationId: string; id: string; after: number }>,
+    limit: number,
+  ): Promise<Array<LogTail | undefined>>;
   /** How many tasks match, and how many of those are active or waiting. */
   counts(organizationId: string, filter?: TaskFilter): Promise<TaskCounts>;
+  /** The workspace's active unarchived tasks by audience and the member who asked, for every open stream's count at once. */
+  activeCounts(organizationId: string): Promise<AudienceCount[]>;
   listWithCounts?(
     organizationId: string,
     opts: TaskListOptions,
   ): Promise<{ items: TaskStatus[]; counts: TaskCounts }>;
   runningCount(): Promise<number>;
-  running(): Promise<ClaimedTask[]>;
+  running(): Promise<Array<{ organizationId: string; status: RunningTask }>>;
   /** Appends an inbox entry; `approvals` are merged into the task in the same write. */
   appendInbox(
     organizationId: string,
@@ -459,7 +564,12 @@ const DONE = new Set<TaskStatus['status']>(['completed', 'failed', 'cancelled'])
 export class StoreQueue implements TaskQueue {
   private lock: Promise<unknown> = Promise.resolve();
   /** Deleted task ids and when, for events streams. */
-  private tombstones = new Map<string, number>();
+  private tombstones = new Map<string, Tombstone>();
+  /** Private spaces' member lists, by space key. */
+  private spaces = new Map<
+    string,
+    { syncedAt?: number; claimedAt?: number; members: Set<string> }
+  >();
 
   constructor(private readonly store: Store) {}
 
@@ -525,7 +635,7 @@ export class StoreQueue implements TaskQueue {
       });
     if (!existing)
       await this.store.put('task', task.id, {
-        task,
+        task: { ...task, ...taskAudience(task) },
         status: 'queued',
         attempts: 0,
         createdAt: now,
@@ -632,7 +742,7 @@ export class StoreQueue implements TaskQueue {
         generation: active.generation ?? 0,
         at: now,
         kind: 'steer',
-        value: { text: steer },
+        value: { text: steer, asker: task.context?.asker ?? null },
       };
       const id = `${active.task.id}:${String(seq).padStart(8, '0')}`;
       await this.store.put('delivery', delivery.key, {
@@ -711,7 +821,9 @@ export class StoreQueue implements TaskQueue {
       (fence.handle === undefined || (status.handle ?? null) === fence.handle) &&
       (fence.lastSeenAt === undefined || (status.lastSeenAt ?? null) === fence.lastSeenAt) &&
       (fence.updatedAt === undefined || status.updatedAt === fence.updatedAt) &&
-      (!fence.statuses || fence.statuses.includes(status.status))
+      (!fence.statuses || fence.statuses.includes(status.status)) &&
+      (fence.unanswered === undefined ||
+        !status.task.context?.approvals?.find(entry => entry.id === fence.unanswered)?.response)
     );
   }
 
@@ -733,7 +845,8 @@ export class StoreQueue implements TaskQueue {
       )
         return undefined;
       if (DONE.has(current.status)) return current;
-      const next = { ...current, lastSeenAt: now, updatedAt: now };
+      // Liveness only, so events streams see no change.
+      const next = { ...current, lastSeenAt: now };
       await this.store.put('task', id, next);
       return next;
     });
@@ -796,15 +909,19 @@ export class StoreQueue implements TaskQueue {
     return this.serial(async () => {
       const current = await this.read(id);
       if (!current || !this.allowed(current, fence)) return false;
-      const { answer, approvals, ...fields } = patch;
+      const { answer, approvals, resolvedModel, ...fields } = patch;
+      const task = resolvedModel
+        ? { ...current.task, usage: { ...current.task.usage, resolvedModel } }
+        : current.task;
       await this.store.put('task', id, {
         ...current,
+        task,
         ...(Object.hasOwn(patch, 'handle') && patch.handle !== current.handle
           ? { logsComplete: undefined }
           : {}),
         ...fields,
         ...(answer !== undefined ? { answer: [...(current.answer ?? []), answer] } : {}),
-        ...(approvals ? { task: withApprovals(current.task, approvals) } : {}),
+        ...(approvals ? { task: withApprovals(task, approvals) } : {}),
         updatedAt: now,
       });
       return true;
@@ -816,7 +933,7 @@ export class StoreQueue implements TaskQueue {
       const current = await this.read(id);
       if (!current || !this.allowed(current, fence)) return false;
       await this.store.delete('task', id);
-      this.tombstone(id);
+      this.tombstone(id, taskAudience(current.task).audience, current.task.requestedBy);
       await deleteTaskConnections(this.store, id);
 
       return true;
@@ -993,23 +1110,111 @@ export class StoreQueue implements TaskQueue {
   }
 
   /** A deleted task, for events streams. */
-  tombstone(id: string) {
-    this.tombstones.set(id, Date.now());
+  tombstone(id: string, audience?: string, requestedBy?: string) {
+    this.tombstones.set(id, {
+      at: Date.now(),
+      ...(audience === undefined ? {} : { audience }),
+      ...(requestedBy === undefined ? {} : { requestedBy }),
+    });
+  }
+
+  /** The memory store links no platform identities, so a member sees no private space. */
+  async memberSpaces(): Promise<string[]> {
+    return [];
+  }
+
+  /** The memory store links no platform identities, so no list needs fetching again. */
+  async listedSpaces(): Promise<SpaceEvent[]> {
+    return [];
+  }
+
+  async linkedMembers(): Promise<LinkedMember[]> {
+    return [];
+  }
+
+  async spaceSynced(_organizationId: string, event: SpaceEvent) {
+    return this.spaces.get(spaceKey(event))?.syncedAt;
+  }
+
+  async claimSpace(_organizationId: string, event: SpaceEvent, now: number, force = false) {
+    const key = spaceKey(event);
+    const space = this.spaces.get(key) ?? { members: new Set<string>() };
+    if (!force && space.claimedAt !== undefined && now - space.claimedAt < MEMBERS_CLAIM_MS)
+      return false;
+    this.spaces.set(key, { ...space, claimedAt: now });
+
+    return true;
+  }
+
+  async saveSpaceMembers(
+    _organizationId: string,
+    event: SpaceEvent,
+    members: string[] | undefined,
+    now: number,
+  ) {
+    const key = spaceKey(event);
+    const space = this.spaces.get(key) ?? { members: new Set<string>() };
+    if (space.claimedAt !== now) return;
+    this.spaces.set(
+      key,
+      members ? { syncedAt: now, members: new Set(members) } : { ...space, claimedAt: undefined },
+    );
+  }
+
+  async spaceChanged(
+    _organizationId: string,
+    event: SpaceEvent,
+    change: { joined?: string; left?: string; private?: boolean },
+    now: number,
+  ) {
+    const key = spaceKey(event);
+    const space = this.spaces.get(key);
+    if (space && (change.joined || change.left))
+      this.spaces.set(key, { ...space, claimedAt: undefined });
+    const members = space?.members;
+    if (change.joined) members?.add(change.joined);
+    if (change.left) members?.delete(change.left);
+    if (change.private === undefined) return;
+    const audience = change.private ? `space:${key}` : '';
+    for (const { value } of await this.store.list('task')) {
+      const task = value.task;
+      if (task.space !== key || task.audience?.startsWith('dm:')) continue;
+      const event = task.event?.space
+        ? { ...task.event, space: { ...task.event.space, private: change.private } }
+        : task.event;
+      await this.store.put('task', task.id, {
+        ...value,
+        task: { ...task, audience, ...(event ? { event } : {}) },
+        updatedAt: now,
+      });
+    }
+    this.spaces.delete(key);
   }
 
   async changes(scopes: Array<{ organizationId: string }>, since: number) {
     const organizationId = scopes[0]?.organizationId;
     if (!organizationId) return { rows: [], deleted: [] };
 
-    for (const [id, at] of this.tombstones)
+    for (const [id, { at }] of this.tombstones)
       if (at < Date.now() - TOMBSTONE_MS) this.tombstones.delete(id);
 
     return {
       rows: (await this.store.list('task')).map(row => ({ organizationId, status: row.value })),
       deleted: [...this.tombstones]
-        .filter(([, at]) => at > since)
-        .map(([id, at]) => ({ organizationId, id, at })),
+        .filter(([, { at }]) => at > since)
+        .map(([id, tombstone]) => ({ organizationId, id, ...tombstone })),
     };
+  }
+
+  async logTails(tails: Array<{ id: string; after: number }>, limit: number) {
+    const { readLog } = await import('./logs');
+
+    return Promise.all(
+      tails.map(async ({ id, after }) => {
+        const status = await this.store.get('task', id);
+        return status && { status, lines: await readLog(this.store, id, after, limit) };
+      }),
+    );
   }
 
   async counts(_organizationId: string, filter: TaskFilter = {}): Promise<TaskCounts> {
@@ -1028,6 +1233,23 @@ export class StoreQueue implements TaskQueue {
     return (await this.store.list('task')).filter(row =>
       ['running', 'waiting'].includes(row.value.status),
     ).length;
+  }
+
+  async activeCounts(): Promise<AudienceCount[]> {
+    const groups = new Map<string, AudienceCount>();
+    for (const { value } of await this.store.list('task')) {
+      if (value.archivedAt !== undefined || !ACTIVE_STATES.includes(value.status)) continue;
+      const { audience } = value.task;
+      const key = `${audience ?? null}\n${value.task.requestedBy ?? ''}`;
+      const group = groups.get(key) ?? {
+        ...(audience === undefined ? {} : { audience }),
+        ...(value.task.requestedBy ? { requestedBy: value.task.requestedBy } : {}),
+        active: 0,
+      };
+      groups.set(key, { ...group, active: group.active + 1 });
+    }
+
+    return [...groups.values()];
   }
 
   async running(): Promise<ClaimedTask[]> {
@@ -1064,7 +1286,6 @@ export class StoreQueue implements TaskQueue {
         logCursor: progress.cursor,
         logSeq: progress.seq,
         logBytes: progress.bytes,
-        updatedAt: now,
       });
       return true;
     });

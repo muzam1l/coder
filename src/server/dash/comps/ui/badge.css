@@ -25,6 +25,11 @@
   background: var(--warnbg);
   color: var(--warn);
 }
+.badge.bad {
+  border-color: transparent;
+  background: var(--badbg);
+  color: var(--bad);
+}
 .badge.solid {
   border-color: var(--fg);
   background: var(--fg);

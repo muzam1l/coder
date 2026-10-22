@@ -12,6 +12,15 @@ export const commandConnectionRemove = command({
   description: 'remove a connection',
   usage: 'Remove a connection. The credential an API key connection reads stays.',
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/settings/connections',
+      label: 'Remove the connection',
+      action: 'delete',
+      args: ['name'],
+      button: 'Remove',
+    },
+  },
   args: { name: z.string().check(z.describe('the connection')), ...serverOptions },
   cli: { positional: ['name'] },
   run: async ({ options, args: [name], cwd }) => {

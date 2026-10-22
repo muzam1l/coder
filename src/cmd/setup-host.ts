@@ -13,6 +13,7 @@ export const commandSetupHost = command({
   usage:
     'Set up coder in your host: check engines and auth, seed the config, and\ninstall the host plugin/skill for the named host(s). Claude Code gets its\nmarketplace plugin; "agents" installs a skill into ~/.agents/skills for\nevery host that reads the Agent Skills standard dir (Codex, Pi, OpenCode,\n...). Codex and Cursor also get the MCP server; the Claude plugin includes it.\nWith no host, checks, seeds and registers available Codex and Cursor hosts.\n\nTo add the MCP server by hand: claude mcp add coder -- coder mcp, codex mcp\nadd coder -- coder mcp, or for Cursor "coder": { "command": "coder", "args":\n["mcp"] } under mcpServers in ~/.cursor/mcp.json. Restart running sessions after.',
   access: 'write',
+  approvalPolicy: 'deny',
   args: { hosts: strList('claude, agents, codex, cursor (one or more)') },
   cli: {
     positional: ['hosts'],
@@ -69,8 +70,7 @@ function printSetupHost(
 ): void {
   const head = outStyle.bold;
   const gray = outStyle.dim;
-  const { codex, claude, codexUpdate, config, configFile, claudePlugin, agentsSkill, ready } =
-    report;
+  const { codex, codexUpdate, config, claudePlugin, agentsSkill } = report;
   const lines: string[] = [];
 
   process.stdout.write(`${head('Available Engines')}\n`);
@@ -94,7 +94,7 @@ function printSetupHost(
 
   const engineSummary = (engine: Engine) => {
     const entry = config.engines?.[engine] ?? {};
-    return [entry.model, entry.effort, entry.permissions].filter(Boolean).join('/');
+    return [entry.model, entry.effort].filter(Boolean).join('/');
   };
   lines.push(
     head('Config'),

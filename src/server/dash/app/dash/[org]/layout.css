@@ -70,7 +70,8 @@
   background: var(--wash2);
   border-left-color: var(--deep);
 }
-.side nav .n {
+.side nav .n,
+.side nav .dot {
   margin-left: auto;
   background: var(--accbg);
   color: var(--acc);
@@ -229,6 +230,11 @@ button.side-toggle {
 }
 .side-min .side nav .n {
   display: none;
+}
+.side-min .side nav .dot {
+  position: absolute;
+  top: 8px;
+  right: 8px;
 }
 /* collapsed icons and the sidebar toggle name themselves on hover and keyboard focus */
 .side-min .side [data-tip],

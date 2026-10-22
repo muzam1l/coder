@@ -20,9 +20,10 @@ import {
 } from '../chat';
 import { dropTokens, uninstall } from './context';
 import { appendLog } from './logs';
-import { recordFailure } from './failures';
+import { recordFailure } from './events';
 import { clickedApproval } from './approvals';
 import { reviewKey } from './queue';
+import { membersChanged, spaceChanged } from './access';
 import { updateMetadata } from '../store';
 import { decryptSecret } from '../store/secrets';
 import { InstallationBoundError } from '../store/types';
@@ -184,6 +185,7 @@ async function ownEvent(
           console.error(`coder server: a click failed for ${app.id}`, error),
         ),
       );
+    else console.error(`coder server: ${app.id} sent a click for no installation; dropped`);
     return new Response(null, { status: 200 });
   }
   if ('unhandled' in own) {
@@ -200,7 +202,7 @@ async function ownEvent(
           return recordFailure(ctx, app, error, target.id);
         });
       (ctx.waitUntil ?? (() => {}))(work);
-    }
+    } else console.error(`coder server: ${app.id} sent work for no installation; dropped`);
     return json({ ok: true });
   }
   if ('installation' in own) {
@@ -234,6 +236,19 @@ async function ownEvent(
     // Its repositories or permissions may have changed.
     await dropTokens(tenant.store, existing.id);
 
+    return json({ ok: true });
+  }
+  if ('space' in own) {
+    const tenant = await forInstallation(ctx, `${app.id}:${own.space.installation}`);
+    if (tenant) await spaceChanged(tenant, integration, app.id, credentials, own.space);
+    return json({ ok: true });
+  }
+  if ('members' in own) {
+    const tenant = await forInstallation(ctx, `${app.id}:${own.members.installation}`);
+    if (tenant)
+      (ctx.waitUntil ?? (() => {}))(
+        membersChanged(tenant, integration, app.id, credentials, own.members),
+      );
     return json({ ok: true });
   }
   if ('covers' in own) {

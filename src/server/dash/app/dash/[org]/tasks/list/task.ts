@@ -1,6 +1,6 @@
 import type { TaskRow } from '@coder/client/types';
-import { byListKey, listRank } from '@coder/core/defaults';
-import { eventJsons, replyRequired as turnReplyRequired } from '@coder/agent/context/turn';
+import { byListKey, listRank, promptTitle } from '@coder/core/task/view';
+import { replyRequired as turnReplyRequired } from '@coder/agent/event-json';
 
 /** A task page's tabs, the loading frame's too. */
 export const TASK_TABS = ['Conversation', 'Activity'];
@@ -84,25 +84,6 @@ export function readDelta(
   };
 }
 
-export type EventMessage = { author: string; text: string; reaction?: boolean };
-
-/** A platform turn's messages from its `<event>` prompt; undefined for any other prompt. */
-export function eventMessages(prompt?: string): EventMessage[] | undefined {
-  return eventJsons(prompt)?.flatMap(json => {
-    if (json.reactions)
-      return json.reactions.map(({ emoji, by }) => ({
-        author: by.join(', '),
-        text: `reacted ${emoji}`,
-        reaction: true,
-      }));
-
-    return (json.messages ?? (json.message ? [json.message] : [])).map(({ text, author }) => ({
-      author: author.handle ?? author.name ?? author.id,
-      text: text || (json.event ?? ''),
-    }));
-  });
-}
-
 /** Whether a turn had to be answered: any of its events asks for a reply, else the task's event decides. */
 export const replyRequired = (task: TaskRow, prompt: string) =>
   turnReplyRequired(prompt, task.task.event?.mustReply !== false)!;
@@ -110,14 +91,7 @@ export const replyRequired = (task: TaskRow, prompt: string) =>
 /** A platform task is titled by its first message; dashboard and CLI tasks by their prompt. */
 export function taskTitle(task: TaskRow) {
   // The first turn's prompt: a follow-up or a decision never retitles the task.
-  const prompt = (task.turns?.[0]?.prompt ?? task.task.prompt)?.trim();
-  const first =
-    !prompt || eventMessages(prompt)
-      ? task.task.event?.text?.trim() ||
-        eventMessages(prompt ?? '')
-          ?.find(message => !message.reaction)
-          ?.text.trim()
-      : prompt;
+  const first = promptTitle(task.turns?.[0]?.prompt ?? task.task.prompt, task.task.event?.text);
 
   return (
     task.task.name?.trim() || first || `${task.task.event?.type ?? 'task'} on ${task.task.agent}`
@@ -128,7 +102,7 @@ export function taskTitle(task: TaskRow) {
 export function taskModel(task: TaskRow) {
   const { engine, model, effort } = { ...task.task.definition, ...task.task.usage };
 
-  return [engine, model, effort].filter(Boolean).join('/');
+  return [engine, task.model ?? model, effort].filter(Boolean).join('/');
 }
 
 /** A folder path's last segment. */

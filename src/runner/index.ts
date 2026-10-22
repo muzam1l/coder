@@ -1,16 +1,25 @@
+import process from 'node:process';
+
 import { connect, type ServerOptions } from '../core/remote';
 import { serveRunner } from './serve';
 import { CoderError } from '../core/errors';
 import type { RunnerInput, RunnerUpdate } from '../client/types';
 
+/** A runner's `agent run --task`: sign an engine in, prepare the repo, or run the task, as the env says. */
+export async function runAssignedTask(id: string, cwd: string): Promise<unknown> {
+  if (process.env.CODER_LOGIN) return (await import('./login')).runLogin(id, cwd);
+  const { prepareRepo, runTask } = await import('./task');
+  return process.env.CODER_PREPARE ? prepareRepo(id, cwd) : runTask(id, cwd);
+}
+
 export const listRunners = (options: ServerOptions = {}) => connect(options).runners.list();
-export const addRunner = (input: RunnerInput, options: ServerOptions = {}) =>
+const addRunner = (input: RunnerInput, options: ServerOptions = {}) =>
   connect(options).runners.add(input);
-export const pairRunner = (
+const pairRunner = (
   input: { name?: string; scope: RunnerInput['scope'] },
   options: ServerOptions = {},
 ) => connect(options).runners.pair(input);
-export const updateRunner = (id: string, input: RunnerUpdate, options: ServerOptions = {}) =>
+const updateRunner = (id: string, input: RunnerUpdate, options: ServerOptions = {}) =>
   connect(options).runners.update(id, input);
 export const testRunner = (id: string, options: ServerOptions = {}) =>
   connect(options).runners.test(id);

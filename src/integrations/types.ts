@@ -8,9 +8,9 @@ import type {
   Thread,
 } from 'chat';
 
-/** Access modes: read-only tools, or tools that also write. */
-export type Preset = 'read' | 'write';
-export const PRESETS: Preset[] = ['read', 'write'];
+/** Access: read-only tools, or every tool with the engine's reviewer deciding what leaves the sandbox. */
+export const ACCESS = ['read-only', 'auto'] as const;
+export type Access = (typeof ACCESS)[number];
 
 /** A platform event, typed by its integration. */
 export interface PlatformEvent {
@@ -24,18 +24,35 @@ export interface PlatformEvent {
   actor: { id: string; login?: string; role?: string; agent?: boolean };
   /** Human text attached to the event: mention body, comment, PR title + body. */
   text: string;
+  /** The text @-mentions the app, on an event with no chat message to say so (an opened GitHub issue). */
+  mentioned?: true;
   /** What the platform tells an agent about where the event happened, such as a Linear issue; bounded. */
   promptContext?: string;
-  /** The covered account it happened in, for an installation that covers several. */
-  within?: string;
+  /** The platform account it happened in (Slack team, GitHub org), for an installation that covers several. */
+  account?: string;
   /** The Chat SDK thread and message it happened in, without raw platform payloads; replies go to this thread. */
   chat?: { thread: SerializedThread; message?: SerializedMessage };
+  /** Where it happened and who may see that place; unknown privacy counts as private. */
+  space?: Space;
   repo?: {
     owner: string;
     name: string;
     cloneUrl: string;
     defaultBranch: string;
   };
+}
+
+/** A place events come from: a channel (DMs too), a repository or a team; `private` is unknown until the platform told it. */
+export interface Space {
+  kind: 'channel' | 'repository' | 'team';
+  id: string;
+  private?: boolean;
+}
+
+/** A workspace member's linked platform identity: the platform user id and the login stored at link time. */
+export interface LinkedMember {
+  id: string;
+  login?: string;
 }
 
 /** One platform app; id `<integration>:<platform app id>`. */
@@ -80,16 +97,24 @@ export interface ToolServer {
   credentialFields?: { env?: string; header?: string };
   /** Only tools the server marks read-only may be called. */
   readOnly?: boolean;
+  /** What the server's own tools do, for a server that sends no instructions. */
+  instructions?: string;
 }
 
 /** Access modes select the platform server's tools. */
 export interface IntegrationTools {
-  presets: Record<Preset, string[]>;
+  presets: Record<Access, string[]>;
   /** Shell command a Linux runner runs as root to install `server`'s binary. */
   install?: string;
   /** Hosts `install` downloads from, redirects included. */
   installHosts?: string[];
-  server(tools: string[], event: PlatformEvent | undefined, token: string): ToolServer;
+  /** `owner` is set when `token` is a member's own, from a Just me connection. */
+  server(
+    tools: string[],
+    event: PlatformEvent | undefined,
+    token: string,
+    owner?: string,
+  ): ToolServer;
 }
 
 /** What an app is made from: its name, what it listens to and what its tools may do. */
@@ -98,10 +123,8 @@ export interface AppSpec {
   description?: string;
   /** Catalog events it listens to. */
   events: string[];
-  /** Defaults to `write`. */
-  access?: Preset;
-  /** Slash commands it registers, where the platform has them. */
-  commands?: Array<{ command: string; description: string; usage?: string }>;
+  /** Defaults to `auto`. */
+  access?: Access;
 }
 
 /** One input of a create form. */
@@ -257,6 +280,14 @@ export interface IntegrationApp {
   settingsUrl?(app: PlatformApp, credentials: unknown): string | undefined;
   /** An installed account's page on the platform. */
   accountUrl?(account: { login: string; type?: string }): string | undefined;
+  /** Removes the app from one installation on the platform; the installation's token is plaintext. */
+  uninstall?(
+    installation: PlatformInstallation,
+    credentials: unknown,
+    input: { fetch: typeof fetch },
+  ): Promise<void>;
+  /** Where a person uninstalls the app from an installation by hand. */
+  installationUrl?(installation: PlatformInstallation): string;
   /** Where the browser goes to install an existing app; `state` comes back to installCallback. With `installation`, a fresh authorization that verifies it. */
   installUrl(
     app: PlatformApp,
@@ -306,19 +337,19 @@ export interface PlatformUser {
 export interface IntegrationUserAuth {
   authorizeUrl(
     credentials: unknown,
-    input: { publicUrl: string; state: string; access?: 'read' | 'write' },
+    input: { publicUrl: string; state: string; access?: Access },
   ): string;
   /** Exchange the callback's code for the user and their token. */
   exchange(
     req: Request,
     credentials: unknown,
-    input: { publicUrl: string; fetch: typeof fetch; access?: 'read' | 'write' },
+    input: { publicUrl: string; fetch: typeof fetch; access?: Access },
   ): Promise<PlatformUser>;
-  /** A usable access token from the stored token JSON, and the JSON to store when it was refreshed. */
+  /** A usable access token from the stored token JSON, and the JSON to store when it was refreshed; `force` refreshes one the platform refused before its expiry. */
   access(
     token: string,
     credentials: unknown,
-    input: { fetch: typeof fetch; now: number },
+    input: { fetch: typeof fetch; now: number; force?: boolean },
   ): Promise<{ accessToken: string; refreshed?: string }>;
 }
 
@@ -351,8 +382,6 @@ export interface AdapterContext {
   knows?(channel: string, message: string): Promise<boolean>;
   /** The app's own page on the platform, such as Slack's Home tab; none leaves it unpublished. */
   home?(): Promise<Page | undefined>;
-  /** A card for a shared link the host recognizes; none leaves the link as it is. */
-  preview?(url: string): Promise<Card | undefined>;
 }
 
 /** A button that opens a page; `id` tells the buttons of one page apart. */
@@ -369,15 +398,6 @@ export interface Page {
   text?: string;
   sections: Array<{ title: string; text: string }>;
   links: LinkButton[];
-}
-
-/** A shared link's card: a linked title, its text, labelled fields and a footer. Text is plain; `at` is epoch ms. */
-export interface Card {
-  title: string;
-  url: string;
-  text?: string;
-  fields?: Array<{ label: string; text: string } | { label: string; at: number }>;
-  footer: string;
 }
 
 /** Chat SDK handlers that raise catalog events. */
@@ -422,6 +442,24 @@ export interface ConversationFacts {
   since?: SinceMessage[];
 }
 
+/** A platform's report that a member joined or left a space, or that it turned private (`space.private: true`) or public. */
+export interface SpaceChange {
+  installation: string;
+  account?: string;
+  space: Space;
+  joined?: string;
+  left?: string;
+}
+
+/** A platform's report that a team's or the account's members changed: the stored member lists of `spaces`, else of the spaces `team` reaches, else of every space of the installation are fetched again. */
+export interface MembersChange {
+  installation: string;
+  account?: string;
+  spaces?: string[];
+  /** The team as the platform names it, for `IntegrationAuth.teamSpaces`. */
+  team?: string;
+}
+
 /** A signed webhook the adapter does not cover, verified by the integration itself. */
 export type OwnEvent =
   | { invalid: true }
@@ -435,6 +473,8 @@ export type OwnEvent =
       };
     }
   | { covers: { installation: string; add?: string[]; remove?: string[] } }
+  | { space: SpaceChange }
+  | { members: MembersChange }
   | { push: Push }
   /** Platform calls made after the webhook is answered, with the installation's adapter context. */
   | { work(ctx: AdapterContext): Promise<void> }
@@ -523,10 +563,12 @@ export interface WebhookTarget {
   /** Platform app id (GitHub `X-GitHub-Hook-Installation-Target-ID`, Slack `api_app_id`). */
   app: string;
   installation?: string;
-  /** The covered account it happened in, for an installation that covers several. */
-  within?: string;
+  /** The platform account it happened in, for an installation that covers several. */
+  account?: string;
   /** The repository it happened in, as a task checks it out. */
   repo?: NonNullable<PlatformEvent['repo']>;
+  /** Where it happened, when the webhook tells. */
+  space?: Space;
   /** The app's own platform user, so mentions of it are recognized. */
   self?: string;
   /** The message's position in its conversation when the webhook states it (GitHub's comment count), 0 = first. */
@@ -534,7 +576,7 @@ export interface WebhookTarget {
 }
 
 /** What the host lends a token mint. */
-export interface TokenInput {
+interface TokenInput {
   /** Stores a refreshed installation token, or resolves to the one another refresh stored first. */
   save?(token: string): Promise<string | void>;
   /** Reuses a token minted for `key` (the app's credentials and the exact scope) while it has time left, else runs `mint`, whose expiry is in epoch ms. */
@@ -555,6 +597,21 @@ export interface IntegrationAuth {
   user?: IntegrationUserAuth;
   /** Whether the event's actor may write where the event happened, checked with the platform. */
   canWrite?(event: PlatformEvent, token: string, fetch?: typeof globalThis.fetch): Promise<boolean>;
+  /** The platform user ids of a private space's members, listed on the installation's token while an event of it is handled; absent where the app's permissions cannot list them. `linked` gives the workspace's linked ids with the logins known for them, for a platform that checks them one by one when the list is refused. */
+  members?(
+    space: Space,
+    token: string,
+    fetch?: typeof globalThis.fetch,
+    linked?: () => Promise<LinkedMember[]>,
+  ): Promise<string[]>;
+  /** The ids of the spaces a team reaches, listed on the installation's token. */
+  teamSpaces?(team: string, token: string, fetch?: typeof globalThis.fetch): Promise<string[]>;
+  /** The event's space with its privacy, asked of the platform on the installation's token when the event arrived without it. */
+  space?(
+    event: PlatformEvent,
+    token: string,
+    fetch?: typeof globalThis.fetch,
+  ): Promise<Space | undefined>;
 }
 
 /** Repository reads, for an integration that hosts code. */
@@ -623,6 +680,8 @@ export interface Integration {
   readonly featured?: true;
   /** How a model works with this platform and its tools, for a prompt about its events. */
   readonly prompt?: string;
+  /** What an installation on `account` reaches, for the prompt's server list. */
+  readonly reach?: (account: string) => string;
   /** The most characters one posted reply may hold; a longer reply goes out as several, split between paragraphs. */
   readonly replyLimit?: number;
   readonly events: Record<string, EventSpec>;
@@ -662,7 +721,10 @@ export interface Integration {
     thread: Thread,
     message: Message,
     app: PlatformApp,
-  ): Pick<PlatformEvent, 'type' | 'actor' | 'promptContext'> | undefined;
+  ):
+    | (Pick<PlatformEvent, 'type' | 'actor' | 'promptContext'> &
+        Partial<Pick<PlatformEvent, 'text'>>)
+    | undefined;
 }
 
 /** What a minted token may reach: the permissions its tools need, across its whole installation. */

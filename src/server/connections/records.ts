@@ -3,15 +3,16 @@ import { isDeepStrictEqual } from 'node:util';
 import * as z from 'zod/mini';
 import type { AgentApp, Connection } from '../../agent/types';
 import type { ConnectionRow } from '../../client/types';
-import { mcpEntrySchema } from '../../core/config';
+import { ACCESS, mcpEntrySchema } from '../../core/config';
 import { mcpSecretValue } from '../../core/mcp';
 import {
-  connectionEnvName,
   connectionToolName,
   connectionUrlAllowed,
   connectionMcp,
   ConnectionRefused,
+  mcpClient,
 } from '../../core/connections';
+import { connectionEnvName } from '../../core/connection-env';
 import type { ServerContext } from '../context';
 import type { Params } from '../routes/match';
 import { json } from '../routes/http';
@@ -48,7 +49,7 @@ const inputSchema = z.strictObject({
   id: z.optional(slug),
   provider: z.optional(slug),
   owner: z.optional(z.literal('me')),
-  access: z.optional(z.enum(['read', 'write'])),
+  access: z.optional(z.enum(ACCESS)),
   endpoint: z.optional(mcpEntrySchema),
   auth: z.optional(z.enum(['none', 'key', 'oauth'])),
   key: z.optional(z.string().check(z.minLength(1))),
@@ -57,7 +58,7 @@ const inputSchema = z.strictObject({
 });
 const patchSchema = z.strictObject({
   name: z.optional(z.string().check(z.minLength(1))),
-  access: z.optional(z.nullable(z.enum(['read', 'write']))),
+  access: z.optional(z.enum(ACCESS)),
   key: z.optional(z.string().check(z.minLength(1))),
 });
 
@@ -67,13 +68,16 @@ function endpointAllowed(ctx: ServerContext, connection: Connection): boolean {
     return (
       !endpoint &&
       connection.auth === 'key' &&
-      connection.access === 'write' &&
+      connection.access === 'auto' &&
       !!connection.keyIn &&
       'env' in connection.keyIn &&
       connectionEnvName(connection.keyIn.env)
     );
   if (connection.provider !== 'mcp') return !endpoint;
-  if (!endpoint || (endpoint.command && connection.access === 'read' && !endpoint.tools?.length))
+  if (
+    !endpoint ||
+    (endpoint.command && connection.access === 'read-only' && !endpoint.tools?.length)
+  )
     return false;
   if (endpoint.tools?.some(tool => !connectionToolName(tool))) return false;
   if (endpoint.url) {
@@ -120,7 +124,7 @@ export function connectionRow(
     ...(connection.provider === 'env' && connection.keyIn && 'env' in connection.keyIn
       ? { env: connection.keyIn.env }
       : {}),
-    ...(connection.account ? { account: connection.account } : {}),
+    ...(connection.account ? { account: connection.login ?? connection.account } : {}),
     status: connection.broken
       ? 'reconnect'
       : connection.auth === 'oauth' && !authorized
@@ -135,6 +139,10 @@ export function nativeCredential(config: ConnectionContext['config'], sealed: st
 
   return typeof value === 'string' ? { token: value, app: undefined } : value;
 }
+
+/** The connection id of a member's link to a platform account. */
+export const nativeConnectionId = (owner: string, platform: string, platformUserId: string) =>
+  `${owner}:${platform}-${createHash('sha256').update(platformUserId).digest('hex').slice(0, 12)}`;
 
 export async function nativeConnections(
   ctx: ConnectionContext,
@@ -151,19 +159,23 @@ export async function nativeConnections(
         ctx.integrations[account.platform]?.auth.user,
     )
     .map(account => ({
-      id: `${owner}:${account.platform}-${createHash('sha256').update(account.platformUserId).digest('hex').slice(0, 12)}`,
+      id: nativeConnectionId(owner, account.platform, account.platformUserId),
       name: ctx.integrations[account.platform]!.name ?? account.platform,
       provider: account.platform,
       owner,
       auth: 'oauth',
       secret: account.token,
       account: account.platformUserId,
+      ...(account.login ? { login: account.login } : {}),
       oauthApp: nativeCredential(ctx.config, account.token!).app,
+      ...(account.refusedAt
+        ? { broken: { at: account.refusedAt, reason: 'Needs reconnecting' } }
+        : {}),
       createdAt: 0,
     }));
 }
 
-export async function visibleConnections(
+async function visibleConnections(
   ctx: ConnectionContext,
   owner?: string,
   secrets?: 'oauth' | 'all',
@@ -184,6 +196,8 @@ export async function visibleConnections(
         ...record,
         secret: linked?.secret,
         account: linked?.account ?? record.account,
+        ...(linked?.login ? { login: linked.login } : {}),
+        ...(linked?.broken && !record.broken ? { broken: linked.broken } : {}),
       };
     });
 
@@ -211,40 +225,6 @@ export async function findConnection(
   if (stored) return !stored.owner || stored.owner === owner ? stored : undefined;
 
   return (await nativeConnections(ctx, owner)).find(connection => connection.id === id);
-}
-
-export async function completeNativeConnection(
-  ctx: ConnectionContext,
-  owner: string,
-  provider: string,
-  account: string,
-): Promise<void> {
-  for (const { id, value } of await ctx.store.list('connection')) {
-    if (
-      value.owner !== owner ||
-      value.provider !== provider ||
-      value.auth !== 'oauth' ||
-      (value.account && value.account !== account)
-    )
-      continue;
-    await ctx.store.withAppLock(`connection:${id}`, async store => {
-      const current = await store.get('connection', id);
-      if (
-        !current ||
-        current.owner !== owner ||
-        current.provider !== provider ||
-        (current.account && current.account !== account)
-      )
-        return;
-      await store.put('connection', id, {
-        ...current,
-        account,
-        broken: undefined,
-        secret: undefined,
-        updatedAt: (ctx.now ?? Date.now)(),
-      });
-    });
-  }
 }
 
 export async function connectionAllowed(
@@ -443,6 +423,11 @@ export async function addConnection(
   const owner = input.owner === 'me' ? ctx.session!.user.id : undefined;
   if (provider !== 'mcp' && provider !== 'env' && !ctx.integrations[provider]?.auth.user)
     throw refuse(400, 'This integration does not support user OAuth');
+  if (provider !== 'mcp' && provider !== 'env' && !owner)
+    throw refuse(
+      400,
+      `The app is the workspace's identity on ${ctx.integrations[provider]!.name ?? provider}, and members connect their own account as Just me.`,
+    );
   if (provider === 'env' && input.auth && input.auth !== 'key')
     throw refuse(400, 'Environment connections require a key');
   if (provider !== 'env' && input.credential)
@@ -460,7 +445,7 @@ export async function addConnection(
     name: input.name,
     provider,
     ...(owner ? { owner } : {}),
-    ...(input.access || provider === 'env' ? { access: input.access ?? 'write' } : {}),
+    ...(input.access || provider === 'env' ? { access: input.access ?? 'auto' } : {}),
     auth,
     ...(input.endpoint ? { endpoint: input.endpoint } : {}),
     ...(input.keyIn ? { keyIn: input.keyIn } : {}),
@@ -478,7 +463,12 @@ export async function addConnection(
       discovered = await oauthResource(ctx, input.endpoint.url, true);
       if (!discovered) {
         try {
-          await connectionMcp({ ...connection, access: 'write' }, undefined, ctx.fetch);
+          const client = await mcpClient(
+            connectionMcp({ ...connection, access: 'auto' }, undefined),
+            ctx.fetch,
+            AbortSignal.timeout(5_000),
+          );
+          await client.initialize().finally(() => client.close());
         } catch (error) {
           if (!(error instanceof ConnectionRefused) || !error.authenticate) throw error;
           discovered = await oauthResource(ctx, input.endpoint.url, true, error.authenticate);
@@ -549,9 +539,8 @@ export async function changeConnection(
     if (!current) throw refuse(404, 'Unknown connection');
     const { key, access, ...settings } = parsed.data;
     if (key && current.auth !== 'key') throw refuse(400, 'This connection does not use a key');
-    const { access: _, ...kept } = current;
     const next = {
-      ...(access === null ? kept : current),
+      ...current,
       ...settings,
       ...(access ? { access } : {}),
       ...(key && current.provider !== 'env' ? { secret: encryptSecret(ctx.config, { key }) } : {}),
@@ -654,4 +643,30 @@ export async function authorizeConnection(
   params: Params,
 ): Promise<Response> {
   return respond(async () => ({ url: await connectionAuthorization(ctx, params.id!) }));
+}
+
+export async function connectionGrants(
+  ctx: ConnectionContext,
+  requestedBy?: string,
+  allowed?: string[],
+): Promise<string[]> {
+  const rows = await visibleConnections(ctx, requestedBy);
+
+  return rows
+    .filter(connection => allowed === undefined || allowed.includes(connection.id))
+    .map(connection => connection.id);
+}
+
+/** A member's own connections the agent allows, offered on the turns they ask for. */
+export async function personalGrants(
+  ctx: ConnectionContext,
+  owner: string,
+  allowed?: string[],
+): Promise<string[]> {
+  return (await visibleConnections(ctx, owner))
+    .filter(
+      connection =>
+        connection.owner === owner && (allowed === undefined || allowed.includes(connection.id)),
+    )
+    .map(connection => connection.id);
 }

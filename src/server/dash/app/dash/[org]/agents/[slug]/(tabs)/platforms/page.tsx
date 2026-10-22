@@ -1,7 +1,8 @@
 import './page.css';
 import { dynamic } from '@wular/pnext/dynamic';
+import { Link } from '@wular/pnext/link';
 
-import { encodeDefinition, load, orgOf, unwrap } from '@/api/load';
+import { createUrl, load, orgOf, unwrap } from '@/api/load';
 import type {
   AppRow,
   AgentRow,
@@ -19,7 +20,7 @@ import { InfoTip, MoreList } from '@/comps/ui/menu';
 import { Settle } from '@/comps/frame/stream';
 import { loadAgent } from '@/api/load';
 import { needsTunnel } from '@/api/types';
-import { editableAgent, eventNames } from '@/api/types';
+import { editableAgent, eventNames, isAdmin } from '@/api/types';
 import { TunnelGuide } from '@/app/dash/[org]/settings/tunnel-guide';
 import { Platform } from '@/app/dash/[org]/agents/agent/agent-pills';
 import {
@@ -58,6 +59,7 @@ function Platforms({
   installations,
   catalog,
   operator = false,
+  admin = false,
   failed,
   issues,
 }: {
@@ -68,13 +70,16 @@ function Platforms({
   catalog: IntegrationInfo[];
   /** The viewer runs this server and can set up its shared apps. */
   operator?: boolean;
+  /** The viewer owns or administers this workspace and can uninstall apps. */
+  admin?: boolean;
   /** The last setup, when it failed unexpectedly. */
   failed?: SetupOutcome;
   /** Where to report an unexpected failure. */
   issues?: string;
 }) {
   const declared = agent.definition?.integrations ?? {};
-  const readOnly = agent.definition?.access === 'read' || agent.settings?.access === 'read';
+  const readOnly =
+    agent.definition?.access === 'read-only' || agent.settings?.access === 'read-only';
   const ids = Object.keys(declared).sort();
   if (!ids.length)
     return (
@@ -103,25 +108,6 @@ function Platforms({
   const order = [...ids].sort((a, b) => position(a) - position(b));
 
   const builtin = agent.source === 'builtin';
-  const def = agent.definition ? encodeDefinition(agent.definition) : '';
-  const createUrl = (integration: string) => {
-    const params = new URLSearchParams({ agent: agent.id, def });
-    if (agent.source === 'repo' && agent.repo) {
-      params.set('repo', agent.repo);
-      params.set('branch', apps.find(app => app.branch)?.branch ?? 'main');
-    }
-    return `/create/${encodeURIComponent(integration)}?${params}`;
-  };
-  // One Install with a menu makes every Install a split button, so they line up.
-  const split = order.some(id => {
-    const own = apps.filter(app => app.integration === id);
-    const installed = installations.some(
-      entry => !entry.uninstalled && own.some(app => app.id === entry.app),
-    );
-    const shared = builtin && catalog.find(entry => entry.id === id)?.builtinApp !== 'own';
-
-    return own.length > 0 && !installed && (own.length > 1 || !shared);
-  });
 
   return (
     <Card title="Handles" count={order.filter(id => catalog.some(entry => entry.id === id)).length}>
@@ -159,11 +145,9 @@ function Platforms({
                   )}
                   <span class="sub">
                     {[
-                      entry.uninstalled && 'uninstalled',
                       entry.account.type?.toLowerCase(),
                       entry.covers &&
                         `${entry.covers.length} ${info?.covered ?? 'account'}${entry.covers.length === 1 ? '' : 's'}`,
-                      [entry.settings?.engine, entry.settings?.effort].filter(Boolean).join(', '),
                     ]
                       .filter(Boolean)
                       .join(' · ') || 'account'}
@@ -178,18 +162,18 @@ function Platforms({
                   <td>
                     <Chips values={events} />
                   </td>
-                  <td class="muted">{readOnly ? 'Read-only' : 'Read-write'}</td>
+                  <td class="muted">{readOnly ? 'Read-only' : 'Auto'}</td>
                   <td>
                     {own.length
-                      ? own.map(app => (
+                      ? own.map((app, index) => (
                           <span key={app.id} class="inst">
-                            {app.settingsUrl ? (
-                              <a href={app.settingsUrl} target="_blank" rel="noreferrer">
-                                <b>{app.name}</b>
-                              </a>
-                            ) : (
+                            <Link
+                              class={index ? undefined : 'cover'}
+                              href="/dash/[org]/agents/[slug]/platforms/[app]"
+                              params={{ org, slug: agent.id, app: app.id }}
+                            >
                               <b>{app.name}</b>
-                            )}
+                            </Link>
                             {events.includes('mention') ? (
                               <span class="sub">mention @{app.name}</span>
                             ) : null}
@@ -198,12 +182,12 @@ function Platforms({
                       : null}
                   </td>
                   <td class="where">
-                    {installs.length ? (
+                    {live.length ? (
                       <>
-                        {place(installs[0]!)}
-                        {installs.length > 1 ? (
-                          <MoreList label={`+${installs.length - 1} more`}>
-                            {installs.slice(1).map(place)}
+                        {place(live[0]!)}
+                        {live.length > 1 ? (
+                          <MoreList label={`+${live.length - 1} more`}>
+                            {live.slice(1).map(place)}
                           </MoreList>
                         ) : null}
                       </>
@@ -254,22 +238,24 @@ function Platforms({
                         <PlatformActions
                           integration={id}
                           name={info?.name ?? id}
-                          apps={own.map(app => ({
-                            id: app.id,
-                            name: app.name,
-                            settingsUrl: app.settingsUrl,
-                            changed: app.changed,
-                          }))}
+                          apps={own.map(app => ({ id: app.id, name: app.name }))}
                           installed={live.length > 0}
+                          installs={
+                            admin
+                              ? live.map(entry => ({
+                                  id: entry.id,
+                                  app: own.find(app => app.id === entry.app)!.name,
+                                  account: entry.account.login,
+                                }))
+                              : []
+                          }
                           reinstall={gone?.app}
-                          createUrl={createUrl(id)}
+                          createUrl={createUrl(agent, apps, id)}
                           create={info?.create}
                           unreachable={catalog.some(entry => entry.unreachable)}
                           publicApps={info?.publicApps}
                           organizationApps={info?.organizationApps}
                           shared={builtin && info.builtinApp !== 'own'}
-                          appUpdate={info.appUpdate}
-                          split={split}
                           failed={
                             failed?.platform === id
                               ? {
@@ -420,6 +406,7 @@ export default async function AgentPlatformsPage({
                     installations={all}
                     catalog={integrations}
                     operator={who?.operator === true}
+                    admin={who ? isAdmin(who) : false}
                     failed={inRow ? failed : undefined}
                     issues={who?.server?.issuesUrl}
                   />

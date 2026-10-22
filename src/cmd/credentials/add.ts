@@ -1,7 +1,7 @@
 /** `coder credentials add --env <NAME>`. */
 import process from 'node:process';
 
-import { CoderError } from '../../core/dispatch';
+import { CoderError } from '../../core/errors';
 import { outStyle } from '../../tui/output';
 import { credentialServerOptions, flag, str } from '../../utils/args';
 import { command } from '../../cli';
@@ -12,6 +12,14 @@ export const commandCredentialsAdd = command({
   usage:
     'Store the key of one environment variable, encrypted on the server, as your own or with --workspace for every member. A key saved for that variable in the same scope is replaced. Where the server has subscription sign-in on, CLAUDE_CODE_OAUTH_TOKEN takes your own claude setup-token output.',
   access: 'write',
+  approvalPolicy: {
+    handoff: {
+      page: '/settings/credentials',
+      label: 'Add the credential',
+      action: 'add',
+      args: ['env'],
+    },
+  },
   args: {
     env: str('the variable tasks read the key as (reads that variable by default)', '<NAME>'),
     value: str(

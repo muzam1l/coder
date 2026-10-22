@@ -1,15 +1,14 @@
-import { connectionGrants } from '../connections/grants';
+import { connectionGrants } from '../connections/records';
 import { narrowConnections } from '../../core/connections';
 import { checkFolder } from '../settings/folders';
 import { repositorySnapshot } from '../agents/connections';
 import { getApps } from '../store';
-import { dashPath, sessionSlug } from '../auth/account';
+import { dashPath, sessionSlug } from '../auth/members';
 /** Tasks started from the dashboard, the CLI, or a schedule: a prompt or a flow, optionally on a workspace repo. */
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
-import { effectiveSettings } from '../../agent/definition';
-import { declaredTools, matchAgent } from '../../agent/match';
+import { agentAccess, declaredTools, effectiveSettings, matchAgent } from '../../agent/definition';
 import { defaultAgent } from '../../agent/load';
 import type { Integration } from '../../integrations/types';
 import type {
@@ -20,20 +19,28 @@ import type {
   AgentUsage,
   Installation,
   TaskSource,
+  TaskUsage,
 } from '../../agent/types';
 import type { TaskTurn } from '../../client/types';
 import type { AgentRecord, TaskStatus } from '../store/types';
-import { PERMISSION_MODES, type Permission } from '../../core/config';
+import { ACCESS, strictestAccess, type Access } from '../../core/config';
 import { agentWithVersion, ensureBuiltinAgents, toAgent } from '../agents/records';
 import type { ServerContext } from '../context';
+import type { TaskPrincipal } from './access';
 import { syncLocalAgents } from '../store/local';
 import { runLocalTask } from './local';
 import { credentialFix, resolveEngine } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { dispatchTokens, installationToken } from './context';
-import { chooseRunner } from '../runners';
-import { CoderError, ignoredAddDirs, resolveAddDirs } from '../../core/dispatch';
+import { chooseRunner } from '../runners/select';
+import {
+  CoderError,
+  ignoredAddDirs,
+  resolveAddDirs,
+  resolveTaskOptions,
+} from '../../core/dispatch';
 import { taskWarnings } from './logs';
+import { effectiveConfig, shownConfig } from '../settings/config';
 
 export interface NewTask {
   cwd?: string;
@@ -46,10 +53,9 @@ export interface NewTask {
   agent?: string;
   flow?: string;
   args?: Record<string, unknown>;
-  engine?: string;
   model?: string;
   effort?: string;
-  permissions?: string;
+  access?: Access;
   runner?: string;
   mcp?: string[];
   /** Narrows the connections the task is granted. */
@@ -91,12 +97,37 @@ export function taskCwd(ctx: ServerContext, input: { cwd?: string }): string | u
   return checked.folder.path;
 }
 
+/** A child keeps its agent, and at most its parent's access and connections. */
+function childTask(parent: TaskPrincipal, input: NewTask): NewTask {
+  if (input.agent && input.agent !== parent.agent)
+    throw new TaskInputError('A task starts children of its own agent only.', 403);
+  const beyond = (['cwd', 'flow', 'args', 'mcp', 'addDirs'] as const).filter(
+    key => input[key] !== undefined,
+  );
+  if (beyond.length)
+    throw new TaskInputError(
+      `A child task takes no ${beyond.join(', ')}; give it the text to work on.`,
+      403,
+    );
+
+  return {
+    ...input,
+    agent: parent.agent,
+    access: strictestAccess(input.access, parent.access),
+    connections: narrowConnections(parent.connections, input.connections),
+  };
+}
+
 export const MAX_PROMPT_CHARS = 64 * 1024;
 const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
-const ENGINES = new Set(['claude', 'codex', 'custom']);
 const EFFORTS = new Set(['low', 'medium', 'high']);
 
 export function check(input: NewTask): void {
+  for (const key of ['engine', 'permissions', 'background'])
+    if (key in input)
+      throw new TaskInputError(
+        `Unknown task option "${key}". Use model as a name or engine:model, and access read-only or auto.`,
+      );
   const flow = input.flow ?? 'default';
   if (!SLUG.test(flow)) throw new TaskInputError(`Invalid flow "${flow}"`);
   if (input.prompt !== undefined && typeof input.prompt !== 'string')
@@ -108,12 +139,10 @@ export function check(input: NewTask): void {
     throw new TaskInputError('repo must be owner/name');
   if (input.pr !== undefined && (!Number.isInteger(input.pr) || input.pr < 1 || !input.repo))
     throw new TaskInputError('pr needs a repo and a pull request number');
-  if (input.engine !== undefined && !ENGINES.has(input.engine))
-    throw new TaskInputError(`Unknown engine "${input.engine}"`);
   if (input.effort !== undefined && !EFFORTS.has(input.effort))
     throw new TaskInputError(`Unknown effort "${input.effort}"`);
-  if (input.permissions !== undefined && !(input.permissions in PERMISSION_MODES))
-    throw new TaskInputError(`Unknown permissions "${input.permissions}"`);
+  if (input.access !== undefined && !ACCESS.includes(input.access))
+    throw new TaskInputError(`Unknown access "${input.access}". Use read-only or auto.`);
   if (
     input.mcp !== undefined &&
     (!Array.isArray(input.mcp) || !input.mcp.every(name => SLUG.test(name)))
@@ -149,7 +178,7 @@ export function check(input: NewTask): void {
     throw new TaskInputError('addDirs must list absolute paths');
 }
 
-/** The first install of the workspace that reaches `repo`, with a token for it. */
+/** The first install of the workspace that reaches `repo`, with a token for it; a task reaches only its own agent's installs. */
 export async function repoAccess(
   ctx: ServerContext,
   repo: string,
@@ -170,11 +199,12 @@ export async function repoAccess(
     ).map(({ id, value }) => [id, value]),
   );
 
+  const agent = ctx.taskPrincipal?.agent;
   for (const { value: installation } of installations) {
     const integration = ctx.integrations[installation.integration];
     if (installation.deletedAt || !integration?.repos) continue;
     const app = apps.get(installation.app);
-    if (!app) continue;
+    if (!app || (agent && app.agent !== agent)) continue;
     try {
       const token = await installationToken(
         ctx,
@@ -192,6 +222,7 @@ export async function repoAccess(
       console.error(`coder server: repository token for ${installation.id} failed`, error);
     }
   }
+  if (agent) throw new TaskInputError(`No install of agent "${agent}" reaches ${repo}`, 403);
   throw new TaskInputError(`No install in this workspace reaches ${repo}`, 404);
 }
 
@@ -200,7 +231,7 @@ async function repoEvent(
   ctx: ServerContext,
   id: string,
   input: NewTask,
-  requester: string | undefined,
+  requestedBy: string | undefined,
 ): Promise<{ event: AgentEvent; author: string }> {
   const repo = input.repo!;
   const { integration, installation, app, token } = await repoAccess(ctx, repo);
@@ -211,12 +242,34 @@ async function repoEvent(
     appId: app.id,
     installationId: installation.id.slice(app.id.length + 1),
     deliveryId: id,
-    actor: { id: requester ?? '' },
+    actor: { id: requestedBy ?? '' },
     text: input.prompt ?? '',
     ...(input.pr ? { chat: { thread: integration.repos!.pullRequestThread(repo, input.pr) } } : {}),
     repo: found,
   };
   return { event, author: integration.author?.(app.name) ?? app.name };
+}
+
+/** The engine, model and effort asked for, resolved together; undefined when nothing was asked. */
+async function taskPick(
+  ctx: ServerContext,
+  model: string | undefined,
+  effort: string | undefined,
+): Promise<TaskUsage['pick']> {
+  if (!model) return effort ? { effort: effort as AgentUsage['effort'] } : undefined;
+  try {
+    const selected = resolveTaskOptions(
+      { model, effort },
+      { ...effectiveConfig(ctx, await shownConfig(ctx)), engines: {} },
+    );
+    return {
+      engine: selected.engine,
+      model: selected.model ?? undefined,
+      ...(selected.effort ? { effort: selected.effort } : {}),
+    };
+  } catch (error) {
+    throw new TaskInputError((error as Error).message);
+  }
 }
 
 /** Queue a task, whose next kick starts it on its runner; a local server runs it at once. */
@@ -225,17 +278,19 @@ export async function createTask(
   source: TaskSource,
   input: NewTask,
 ): Promise<TaskStatus> {
+  const parent = ctx.taskPrincipal;
+  if (parent) input = childTask(parent, input);
   check(input);
   const cwd = taskCwd(ctx, input);
   const now = (ctx.now ?? Date.now)();
-  const requester = ctx.session?.user.id;
+  const requestedBy = ctx.session?.user.id;
   const slug = input.agent || defaultAgent();
   if (!slug) throw new TaskInputError('Name an agent: this server has no default agent.');
   if (slug === defaultAgent()) await ensureBuiltinAgents(ctx, now);
   if (ctx.local) await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
   const { record, version } = await agentWithVersion(ctx.store, slug);
   const chosen = await chooseRunner(ctx, {
-    requester,
+    requestedBy,
     runner: input.runner,
     agent: version?.definition.runner,
   }).catch((error: Error) => {
@@ -243,19 +298,14 @@ export async function createTask(
   });
   if (!record || !version) throw new TaskInputError(`No agent "${slug}"`, 404);
   assertEnabled(ctx, slug, record);
-  const usage: AgentUsage = {
-    ...(input.engine ? { engine: input.engine } : {}),
-    ...(input.model ? { model: input.model } : {}),
-    ...(input.effort ? { effort: input.effort as AgentUsage['effort'] } : {}),
-    ...(input.permissions ? { permissions: input.permissions as Permission } : {}),
-  };
-  const agent = toAgent(record, version, usage, ctx.integrations);
+  const pick = await taskPick(ctx, input.model, input.effort);
+  const agent = toAgent(record, version, pick, ctx.integrations);
   const settings = effectiveSettings(agent);
 
   const { engine, credential, usable, chain, credentials } = await resolveEngine(
     ctx,
     settings,
-    requester,
+    requestedBy,
   );
   if (!usable && chosen.runner !== 'http')
     throw new TaskInputError(
@@ -265,7 +315,7 @@ export async function createTask(
     );
 
   const id = `${now.toString(36)}-${randomBytes(4).toString('hex')}`;
-  const repo = input.repo ? await repoEvent(ctx, id, input, requester) : undefined;
+  const repo = input.repo ? await repoEvent(ctx, id, input, requestedBy) : undefined;
   const ignored = input.addDirs?.length ? ignoredAddDirs(chosen.runner) : undefined;
   // A local server shares the caller's machine, so missing directories fail here rather than on the runner.
   if (ctx.local && input.addDirs?.length && !ignored)
@@ -282,7 +332,7 @@ export async function createTask(
     agent: agent.id,
     flow: input.flow ?? 'default',
     ...chosen,
-    permissions: settings.permissions,
+    access: agentAccess(agent, input.access),
     ...(repo ? { event: repo.event, author: repo.author } : {}),
     ...(cwd && !repo ? { cwd } : {}),
     ...(input.prompt ? { prompt: input.prompt } : {}),
@@ -294,13 +344,20 @@ export async function createTask(
     engineChain: chain,
     engineCredentials: credentials,
     ...(credential ? { credential } : {}),
-    ...(requester ? { requester } : {}),
+    ...(requestedBy ? { requestedBy } : {}),
+    ...(parent
+      ? {
+          parent: parent.task,
+          audience: parent.audience,
+          ...(parent.space ? { space: parent.space } : {}),
+        }
+      : {}),
     ...(agent.files ? { files: agent.files } : {}),
-    usage: { ...agent.usage, engine },
-    tools: {},
+    usage: { ...agent.usage, engine, ...(pick ? { pick } : {}) },
+    tools: parent ? declaredTools(agent, input.access) : {},
     connections: await connectionGrants(
       ctx,
-      requester,
+      requestedBy,
       narrowConnections(agent.usage?.connections, input.connections),
     ),
     ...(ctx.session || input.outputSchema
@@ -338,11 +395,26 @@ export function taskTurns(status: TaskStatus): TaskTurn[] {
   ];
 }
 
-/** The agent as it is now, for a task's next turn: definition, usage, files and tools by the current access mode; the engine stays with the conversation. A disabled agent fails the turn; one the store no longer holds keeps the task's snapshot. */
+/** The agent as it is now, for a task's next turn: definition, usage, files and tools by the current access mode, and the engine of the task's pick else the agent's settings. A disabled agent fails the turn; one the store no longer holds keeps the task's snapshot. */
 export async function refreshedTask(
   ctx: ServerContext,
   task: AgentTask,
-): Promise<Partial<Pick<AgentTask, 'definition' | 'usage' | 'tools' | 'files' | 'permissions'>>> {
+): Promise<
+  Partial<
+    Pick<
+      AgentTask,
+      | 'definition'
+      | 'usage'
+      | 'tools'
+      | 'files'
+      | 'access'
+      | 'engineChain'
+      | 'engineCredentials'
+      | 'credential'
+    >
+  >
+> {
+  const pick = task.usage?.pick;
   const event = task.event;
   let agent: Agent | undefined;
   if (event) {
@@ -365,31 +437,34 @@ export async function refreshedTask(
     const { record, version } = await agentWithVersion(ctx.store, task.agent);
     assertEnabled(ctx, task.agent, record);
     if (!record || !version) return {};
-    agent = toAgent(record, version, task.usage, ctx.integrations);
+    agent = toAgent(record, version, pick, ctx.integrations);
   }
-  const match = event && matchAgent(event, agent);
-  const { engine, model, effort } = task.usage ?? {};
+  const match = event && matchAgent(event, agent, task.access);
+  const usage = { ...agent.usage, ...pick };
+  const { engine, credential, chain, credentials } = await resolveEngine(
+    ctx,
+    effectiveSettings({ ...agent, usage }),
+    task.requestedBy,
+  );
 
   return {
     definition: agent.definition,
-    usage: {
-      ...agent.usage,
-      ...(engine ? { engine } : {}),
-      ...(model ? { model } : {}),
-      ...(effort ? { effort } : {}),
-    },
-    tools: match?.tools ?? declaredTools(agent),
+    usage: { ...usage, engine, ...(pick ? { pick } : {}) },
+    engineChain: chain,
+    engineCredentials: credentials,
+    credential,
+    tools: match?.tools ?? declaredTools(agent, task.access),
     ...(agent.files ? { files: agent.files } : {}),
-    permissions: match?.permissions ?? effectiveSettings(agent).permissions,
+    access: agentAccess(agent, task.access),
   };
 }
 
 /** Ask a finished task something new: the same task runs again with the earlier turns as its thread. */
-/** What a resumed turn may change: model and effort, and permissions only downward. */
-export interface TurnOverrides {
+/** What a resumed turn may change: model and effort, and access only downward. */
+interface TurnOverrides {
   model?: string;
   effort?: string;
-  permissions?: string;
+  access?: Access;
 }
 
 export async function continueTask(
@@ -406,20 +481,13 @@ export async function continueTask(
     throw new TaskInputError('outputSchema must be an object');
   if (!text.trim()) throw new TaskInputError('text is required');
   if (text.length > MAX_PROMPT_CHARS) throw new TaskInputError('text is longer than 64 KB');
-  const { model, effort, permissions } = overrides;
+  const { model, effort, access } = overrides;
   if (model !== undefined && (typeof model !== 'string' || !model.trim()))
     throw new TaskInputError('model must be text');
   if (effort !== undefined && !EFFORTS.has(effort))
     throw new TaskInputError(`Unknown effort "${effort}"`);
-  if (permissions !== undefined && !(permissions in PERMISSION_MODES))
-    throw new TaskInputError(`Unknown permissions "${permissions}"`);
-  const rank = (mode?: string) => Object.keys(PERMISSION_MODES).indexOf(mode ?? 'auto');
-  if (permissions !== undefined && rank(permissions) > rank(status.task.permissions))
-    throw new TaskInputError(
-      `permissions can only be lowered on a resumed task (it runs ${status.task.permissions ?? 'auto'})`,
-    );
-  if (ctx.session && status.task.requester && status.task.requester !== ctx.session.user.id)
-    throw new TaskInputError('Only the member who asked can continue this task', 403);
+  if (access !== undefined && !ACCESS.includes(access))
+    throw new TaskInputError(`Unknown access "${access}". Use read-only or auto.`);
   const now = (ctx.now ?? Date.now)();
   const earlier = status.task.context?.messages ?? [];
   const at = String(status.finishedAt ?? now);
@@ -435,22 +503,21 @@ export async function continueTask(
   const context = status.task.context ?? {};
   const turns = taskTurns(status);
   turns.at(-1)!.finishedAt ??= now;
-  const current = await refreshedTask(ctx, status.task);
+  const pick = model
+    ? await taskPick(ctx, model, effort)
+    : effort
+      ? { ...status.task.usage?.pick, effort: effort as AgentUsage['effort'] }
+      : status.task.usage?.pick;
+  const current = await refreshedTask(ctx, {
+    ...status.task,
+    usage: { ...status.task.usage, pick },
+  });
   const next: TaskStatus = {
     task: {
       ...status.task,
       ...current,
       prompt: text,
-      ...(model || effort
-        ? {
-            usage: {
-              ...(current.usage ?? status.task.usage),
-              ...(model ? { model } : {}),
-              ...(effort ? { effort: effort as AgentUsage['effort'] } : {}),
-            },
-          }
-        : {}),
-      ...(permissions ? { permissions: permissions as Permission } : {}),
+      access: strictestAccess(access, current.access ?? status.task.access),
       context: {
         ...context,
         ...(outputSchema ? { outputSchema } : {}),

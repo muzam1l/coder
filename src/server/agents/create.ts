@@ -4,16 +4,12 @@ import { decryptSecret, encryptSecret } from '../store/secrets';
 import { type AgentApp, type AgentDefinition } from '../../agent/types';
 import { IntegrationError } from '../../integrations/types';
 import { inspectNonce, issueNonce } from '../auth/nonce';
-import { encodeJson } from '../../utils/base64url';
-import { sha256 } from '../../utils/crypto';
+import { encodeJson, sha256 } from '../../utils/crypto';
 import { decodeParam, json, redirect } from '../routes/http';
 import { notBuilt, serveDash } from '../dash/serve';
-import { appTokens, savedAppTokens } from './tokens';
-import { sharedApps } from './apps';
-import { syncKey } from './repo';
-import { dashPath, sessionSlug } from '../auth/account';
-import { audit } from '../operator';
 import {
+  appTokens,
+  savedAppTokens,
   type AppsContext,
   OPERATOR,
   outcome,
@@ -26,6 +22,10 @@ import {
   appSpec,
   type CreateState,
 } from './platform';
+import { sharedApps } from './apps';
+import { syncKey } from './repo';
+import { dashPath, sessionSlug } from '../auth/members';
+import { audit } from '../operator';
 
 const FINISHED_TTL_MS = 10 * 60 * 1000;
 

@@ -27,3 +27,18 @@
   padding: 0;
   background: none;
 }
+.md .table {
+  overflow-x: auto;
+}
+.md table {
+  border-collapse: collapse;
+}
+.md :where(th, td) {
+  padding: 4px 12px 4px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}
+.md th {
+  font-weight: 700;
+}

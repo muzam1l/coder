@@ -27,8 +27,8 @@ import {
   stoppedMessage,
   withDecisions,
 } from '../../core/approvals';
-import { loadConfig } from '../../core/config';
-import { logEntry } from '../../core/task/log-view';
+import { loadConfig, type Access } from '../../core/config';
+import { logEntry, SKIPPED } from '../../core/task/view';
 import {
   CoderError,
   dispatchTask,
@@ -67,14 +67,13 @@ import {
   type Task,
   type Availability,
 } from '../../core/types';
-import { SKIPPED } from '../../core/defaults';
 import { readFlowRecord } from '../../flow/runs';
 import { stopRun, stopFlowTasks } from '../../flow/executor';
 import { applyTaskMessage } from '../../runner/task';
 import { readJsonFile, writeJsonFileAtomic } from '../../utils/fsx';
 import type { ServerContext } from '../context';
-import { eventTokens } from './context';
-import { connectionGrants } from '../connections/grants';
+import { eventTokens, taskDashboard } from './context';
+import { connectionGrants } from '../connections/records';
 import { resolveConnections, taskConnectionSecrets } from '../connections/resolve';
 import { connectionEnvironment, narrowConnections } from '../../core/connections';
 import { nativeToolEnvironment, type ReplyEndpoint } from '../../agent/mcp';
@@ -98,7 +97,7 @@ import {
   type InboxAck,
 } from './queue';
 import { kick, scheduleKick } from './kick';
-import { chooseRunner } from '../runners';
+import { chooseRunner } from '../runners/select';
 import { syncLocalAgents } from '../store/local';
 import { agentWithVersion } from '../agents/records';
 import { getClaudeAvailability } from '../../core/engines/claude';
@@ -167,7 +166,7 @@ function row(cwd: string, task: Task, detail = false): TaskStatus {
           : {}),
       runner: 'local',
       ...(task.cwd ? { cwd: task.cwd } : {}),
-      ...(task.permissions ? { permissions: task.permissions } : {}),
+      ...(task.access ? { access: task.access } : {}),
       // The row keeps the first turn's prompt, which titles the task.
       ...(task.prompt ? { prompt: task.prompt } : {}),
       definition: { integrations: {} },
@@ -309,7 +308,7 @@ export async function startLocalTask(
   const { record, version } = await agentWithVersion(ctx.store, slug);
   assertEnabled(ctx, slug, record);
   const route = await chooseRunner(ctx, {
-    requester: ctx.session?.user.id,
+    requestedBy: ctx.session?.user.id,
     runner: input.runner,
     agent: version?.definition.runner,
   }).catch((error: Error) => {
@@ -326,6 +325,7 @@ export async function startLocalTask(
       runner: 'local',
       cwd,
       ...(input.name ? { name: input.name } : {}),
+      ...(input.access ? { access: input.access } : {}),
       prompt: input.prompt,
       definition: version?.definition ?? { integrations: {} },
       ...(record?.settings ? { usage: record.settings } : {}),
@@ -352,21 +352,23 @@ export async function startLocalTask(
       saved?.task ??
         ({
           connections: granted,
+          access: input.access,
           tools: {},
           definition: version?.definition ?? { integrations: {} },
           ...(record?.settings ? { usage: record.settings } : {}),
         } as AgentTask),
     );
     const connected = connectionEnvironment(resolved.mcp, resolved.env);
-    const native = nativeToolEnvironment(
-      { tools: resolved.tools },
-      resolved.tokens,
-      undefined,
-      Object.keys(resolved.nativeTokens),
-    );
     const agent =
       slug !== preferred
-        ? await agentTaskOptions(cwd, slug, input.mcp?.join(','), connected.mcp)
+        ? await agentTaskOptions(
+            cwd,
+            slug,
+            input.mcp?.join(','),
+            connected.mcp,
+            undefined,
+            input.access,
+          )
         : undefined;
     const selectedMcp =
       agent ?? selectMcpServers(input.mcp?.join(','), loadConfig(cwd).mcp, {}, connected.mcp);
@@ -380,25 +382,28 @@ export async function startLocalTask(
         name: input.name,
         appendSystem: input.appendSystem,
         addDirs: input.addDirs,
-        engine: input.engine ?? agent?.engine,
-        model: input.model ?? (input.engine ? undefined : agent?.model),
-        effort: input.effort ?? (input.engine ? undefined : agent?.effort),
-        permissions: input.permissions ?? agent?.permissions,
+        engine: input.model ? undefined : agent?.engine,
+        model: input.model ?? agent?.model,
+        effort: input.effort ?? agent?.effort,
+        access: agent?.access ?? input.access,
         ...(agent
           ? {
               agentPrompt: {
                 developer: agent.developer,
-                access: agentAccess({
-                  definition: version?.definition ?? { integrations: {} },
-                  ...(record?.settings ? { usage: record.settings } : {}),
-                }),
+                access: agentAccess(
+                  {
+                    definition: version?.definition ?? { integrations: {} },
+                    ...(record?.settings ? { usage: record.settings } : {}),
+                  },
+                  saved?.task.access,
+                ),
               },
             }
           : {}),
-        mcp: [...Object.values(native.mcp), ...selectedMcp.mcp],
+        mcp: selectedMcp.mcp,
         mcpBindings: selectedMcp.mcpBindings,
         mcpWarnings: [...(selectedMcp.warnings ?? []), ...resolved.warnings],
-        connectionEnv: { ...connected.env, ...native.env },
+        connectionEnv: connected.env,
         connections: granted,
         nativeMcp: selectedMcp.nativeMcp,
         ...(agent ? { agentId: input.agent } : {}),
@@ -429,8 +434,8 @@ export interface LocalStart {
   cwd: string;
   input?: NewTask;
   resume?: boolean;
-  /** Model, effort or permissions the resumed turn runs with instead of the task's. */
-  overrides?: { model?: string; effort?: string; permissions?: string };
+  /** Model, effort or a lower access the resumed turn runs with instead of the task's. */
+  overrides?: { model?: string; effort?: string; access?: Access };
   startedId?: string;
 }
 
@@ -470,7 +475,9 @@ export async function startQueuedLocalTask(
     const turns = start.resume ? readTurnResults(start.cwd, status.task.id).length : 0;
     const existing =
       status.task.flow === 'default' ? loadTask(start.cwd, status.task.id) : undefined;
-    const reply = token ? replyEndpoint(ctx, status.task.id, token) : undefined;
+    const reply = token
+      ? replyEndpoint(ctx, status.task.id, token, await taskDashboard(ctx))
+      : undefined;
     if (existing && !start.resume) startedId = existing.id;
     else if (start.resume) {
       const task = loadTask(start.cwd, status.task.id);
@@ -532,7 +539,7 @@ export async function startQueuedLocalTask(
         { attempts: status.attempts, tokenHash: status.tokenHash },
       )
     ) {
-      const { reportTaskFailure } = await import('./failures');
+      const { reportTaskFailure } = await import('./events');
       await reportTaskFailure(ctx, status.task, error);
     }
   }
@@ -857,8 +864,17 @@ export async function stopLocalTasks(ctx: ServerContext): Promise<void> {
 
 /** A resumed turn's connections and tool tokens, resolved afresh the way its first turn's were. */
 /** The conversation tools post to this server's own task callback path on the attempt's token. */
-function replyEndpoint(ctx: ServerContext, taskId: string, token: string): ReplyEndpoint {
-  return { url: `http://127.0.0.1:${ctx.local!.port}/tasks/${encodeURIComponent(taskId)}`, token };
+function replyEndpoint(
+  ctx: ServerContext,
+  taskId: string,
+  token: string,
+  dashboard?: string,
+): ReplyEndpoint {
+  return {
+    url: `http://127.0.0.1:${ctx.local!.port}/tasks/${encodeURIComponent(taskId)}`,
+    token,
+    ...(dashboard ? { dashboard } : {}),
+  };
 }
 
 async function turnConnections(
@@ -867,19 +883,14 @@ async function turnConnections(
   granted: string[],
   reply?: ReplyEndpoint,
 ) {
-  const handles = task.event ? await eventTokens(ctx, task) : {};
+  const handles = await eventTokens(ctx, task);
   const resolved = await resolveConnections(ctx, { ...task, connections: granted }, handles);
   await taskConnectionSecrets(ctx, task.id, [
     ...resolved.secrets,
     ...Object.values(resolved.tokens),
   ]);
   const connected = connectionEnvironment(resolved.mcp, resolved.env);
-  const native = nativeToolEnvironment(
-    { ...task, tools: resolved.tools },
-    resolved.tokens,
-    reply,
-    Object.keys(resolved.nativeTokens),
-  );
+  const native = nativeToolEnvironment(task, resolved.tokens, reply);
 
   return {
     mcp: connected.mcp,
@@ -918,14 +929,13 @@ export async function runLocalTask(
     return enqueueLocalTask(ctx, { ...task, id: taskId ?? generateTaskId(), cwd }, { cwd });
   }
 
-  const handles = task.event ? await eventTokens(ctx, task) : {};
+  const handles = await eventTokens(ctx, task);
   const resolved = await resolveConnections(ctx, task, handles);
   await taskWarnings(ctx, taskId ?? task.id, resolved.warnings);
   await taskConnectionSecrets(ctx, taskId ?? task.id, [
     ...resolved.secrets,
     ...Object.values(resolved.tokens),
   ]);
-  task = { ...task, tools: resolved.tools };
   const tokens = resolved.tokens;
   const token = task.event && handles[task.event.integration];
   const cwd = taskCwd(ctx, task) ?? ctx.local!.cwd;
@@ -979,7 +989,7 @@ export async function runLocalTask(
     if (existing.status === 'queued' && !existing.pid)
       worker = spawnWorker(cwd, existing.id, {
         ...connectionEnvironment(resolved.mcp, resolved.env).env,
-        ...nativeToolEnvironment(task, tokens, reply, Object.keys(resolved.nativeTokens)).env,
+        ...nativeToolEnvironment(task, tokens, reply).env,
       });
     watchCompletion(ctx, existing.id, completion, worker);
     return row(cwd, existing);
@@ -996,7 +1006,7 @@ export async function runLocalTask(
     flow: task.flow,
     task,
     taskId,
-    toolEnvironment: { tokens, native: Object.keys(resolved.nativeTokens) },
+    toolEnvironment: { tokens },
     ...(reply ? { replyEndpoint: reply } : {}),
     connections: resolved.mcp,
     connectionEnv: resolved.env,
@@ -1258,7 +1268,7 @@ export async function localTaskAction(
     // A live task takes the follow-up now; a finished one resumes on the same id with these.
     const outputSchema = active ? undefined : body.outputSchema;
     const overrides = Object.fromEntries(
-      (['model', 'effort', 'permissions'] as const).flatMap(key =>
+      (['model', 'effort', 'access'] as const).flatMap(key =>
         typeof body[key] === 'string' && body[key] ? [[key, body[key] as string]] : [],
       ),
     );

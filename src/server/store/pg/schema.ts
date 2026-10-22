@@ -8,21 +8,28 @@ import {
   integer,
   jsonb,
   pgSchema,
+  primaryKey,
   text,
   timestamp,
   unique,
   uniqueIndex,
+  type AnyPgColumn,
 } from 'drizzle-orm/pg-core';
 
 import type {
   AgentDefinition,
   AgentEvent,
+  AgentTask,
   AgentUsage,
-  InstallationSettings,
+  Connection,
   TaskContext,
   TaskSource,
+  TaskUsage,
 } from '../../../agent/types';
 import type { Approval } from '../../../core/types';
+import type { Space } from '../../../integrations/types';
+import type { StoredConfig } from '../../settings/config';
+import type { ApprovalPost } from '../../tasks/approvals';
 import type { AgentRecord, TaskHistory, TaskLogLine, TaskOutcome, TaskState } from '../types';
 
 /** Everything Coder owns lives in its own Postgres schema, so a database can be shared. */
@@ -40,6 +47,13 @@ const owned = {
   organizationId: text().notNull(),
 };
 
+/** Every credential-like sealed value, one row each: `plain.<base64>` or `<iv>.<tag>.<ciphertext>`. Owners point at it and delete it with themselves; shared apps point at one row. */
+export const secret = pgTable('secret', {
+  id: bigserial({ mode: 'number' }).primaryKey(),
+  value: text().notNull(),
+});
+const secretId = () => bigint({ mode: 'number' }).references(() => secret.id);
+
 /** A platform user (Slack member, GitHub login) who connected their Wular account. */
 export const platformLink = pgTable(
   'platform_link',
@@ -47,14 +61,20 @@ export const platformLink = pgTable(
     id: bigserial({ mode: 'number' }).primaryKey(),
     platform: text().notNull(),
     platformUserId: text().notNull(),
+    /** The platform's own handle for the user (GitHub login), when the link learned it. */
+    login: text(),
     /** Wular user id, with the name and email Wular gave at link time. */
     userId: text().notNull(),
     name: text().notNull(),
     email: text().notNull(),
     /** Workspaces the user belonged to when last linked. */
     organizations: jsonb().$type<string[]>(),
-    /** The platform's user token from the link's OAuth, encrypted. */
-    token: text(),
+    /** The user's role in each of those workspaces, refreshed at sign-in. */
+    roles: jsonb().$type<Record<string, string>>(),
+    /** The platform's user token from the link's OAuth, sealed. */
+    tokenSecretId: secretId(),
+    /** When the platform refused the token's refresh; a new token clears it. */
+    refusedAt: at(),
     createdAt: at().notNull().defaultNow(),
   },
   t => [
@@ -62,6 +82,14 @@ export const platformLink = pgTable(
     index().on(t.userId),
   ],
 );
+
+/** A workspace's own row: its Wular slug and name for links made without a session, and its task configuration. */
+export const workspace = pgTable('workspace', {
+  organizationId: text().primaryKey(),
+  slug: text(),
+  name: text(),
+  config: jsonb().$type<StoredConfig>(),
+});
 
 /** An agent owned by an organization; its current version is the one events run. */
 export const agent = pgTable(
@@ -76,7 +104,7 @@ export const agent = pgTable(
     repo: text(),
     path: text(),
     currentVersion: integer().notNull(),
-    settings: jsonb().$type<AgentUsage>(),
+    engineSettings: jsonb().$type<AgentUsage>(),
     ...timestamps,
   },
   t => [uniqueIndex('agent_organizationId_slug_unique').on(t.organizationId, t.slug)],
@@ -101,22 +129,7 @@ export const agentVersion = pgTable(
   t => [uniqueIndex('agent_version_agentId_version_unique').on(t.agentId, t.version)],
 );
 
-/** Encrypted values shared by apps, installations, and engine credentials. */
-export const secret = pgTable(
-  'secret',
-  {
-    ...owned,
-    kind: text().$type<'app' | 'installation' | 'engine' | 'runner'>().notNull(),
-    iv: text().notNull(),
-    tag: text().notNull(),
-    ciphertext: text().notNull(),
-    keyVersion: integer().notNull(),
-    ...timestamps,
-  },
-  t => [index().on(t.organizationId, t.kind)],
-);
-
-/** The agent's identity on one platform; credentials encrypted. Organization `""` is a server-level app shared by every workspace. */
+/** The agent's identity on one platform; credentials sealed. Organization `""` is a server-level app shared by every workspace. */
 export const integrationApp = pgTable(
   'integration_app',
   {
@@ -124,23 +137,19 @@ export const integrationApp = pgTable(
     /** `<integration>:<platform app id>`, the id the rest of the server uses. */
     key: text().notNull(),
     integration: text().notNull(),
-    platformAppId: text().notNull(),
     agent: text().notNull(),
     name: text().notNull(),
     agentsRepo: text(),
     branch: text(),
-    /** Any account may install it, not only the one that owns it. */
-    credentialsSecretId: bigint({ mode: 'number' })
-      .notNull()
-      .references(() => secret.id),
+    /** Its sealed credentials, the shared app's row when it runs on them. */
+    credentialsSecretId: secretId().notNull(),
+    /** The server-level app whose credentials this app uses. Any account may install it, not only the one that owns it. */
+    sharedAppId: bigint({ mode: 'number' }).references((): AnyPgColumn => integrationApp.id),
     ...timestamps,
   },
   t => [
     uniqueIndex('integration_app_organizationId_key_unique').on(t.organizationId, t.key),
-    uniqueIndex('integration_app_integration_platformAppId_unique').on(
-      t.integration,
-      t.platformAppId,
-    ),
+    uniqueIndex('integration_app_key_unique').on(t.key),
   ],
 );
 
@@ -155,13 +164,13 @@ export const integrationAppInstallation = pgTable(
     appId: bigint({ mode: 'number' }).references(() => integrationApp.id, { onDelete: 'set null' }),
     platformInstallId: text().notNull(),
     account: jsonb().$type<{ login: string; type?: string }>().notNull(),
-    tokenSecretId: bigint({ mode: 'number' }).references(() => secret.id),
+    /** The platform's one-time secret (Slack bot token), sealed. */
+    tokenSecretId: secretId(),
     installer: text(),
     /** The app's own platform user in this installation, as the platform named it at install. */
     self: text(),
     covers: jsonb().$type<string[]>(),
     repos: jsonb().$type<string[]>(),
-    settings: jsonb().$type<InstallationSettings>(),
     ...timestamps,
     deletedAt: at(),
     uninstalled: boolean(),
@@ -174,13 +183,11 @@ export const engineCredential = pgTable(
   'engine_credential',
   {
     ...owned,
-    secretId: bigint({ mode: 'number' })
-      .notNull()
-      .references(() => secret.id)
-      .unique(),
     /** Wular user id of a personal credential; null for a workspace one. */
     owner: text(),
     label: text().notNull(),
+    /** The sealed credential environment. */
+    secretId: secretId().notNull(),
     /** What the engine's CLI reported at sign-in. */
     account: jsonb().$type<{ email?: string; plan?: string }>(),
     ...timestamps,
@@ -195,7 +202,7 @@ export const engineCredential = pgTable(
   ],
 );
 
-/** A scoped runner with its secret fields sealed separately. */
+/** A runner; the workspace's when `owner` is null, else that member's own. */
 export const runner = pgTable(
   'runner',
   {
@@ -204,20 +211,34 @@ export const runner = pgTable(
     owner: text(),
     name: text().notNull(),
     kind: text().$type<import('../../../client/types').RunnerKind>().notNull(),
-    scope: text().$type<'personal' | 'workspace'>().notNull(),
     config: jsonb().$type<Record<string, string>>().notNull(),
+    /** Its secret fields, sealed. */
+    secretId: secretId().notNull(),
     createdBy: text(),
     isDefault: boolean().notNull().default(false),
     lastSeen: timestamp({ withTimezone: true }),
-    secretId: bigint({ mode: 'number' })
-      .notNull()
-      .references(() => secret.id),
     ...timestamps,
   },
   t => [uniqueIndex('runner_organizationId_publicId_unique').on(t.organizationId, t.publicId)],
 );
 
-/** One run of an agent for one request: queue row while waiting, record afterwards. */
+/** A member's connection to an MCP server or a platform API, its sealed secret in its own row; the workspace's when `owner` is null. */
+export const connection = pgTable(
+  'connection',
+  {
+    ...owned,
+    key: text().notNull(),
+    owner: text(),
+    record: jsonb().$type<Omit<Connection, 'secret'>>().notNull(),
+    secretId: secretId(),
+  },
+  t => [
+    uniqueIndex('connection_organizationId_key_unique').on(t.organizationId, t.key),
+    index().on(t.organizationId, t.owner),
+  ],
+);
+
+/** One run of an agent for one request: queue row while waiting, record afterwards, with what it cost once finished. */
 export const task = pgTable(
   'task',
   {
@@ -228,32 +249,54 @@ export const task = pgTable(
     agent: text().notNull(),
     flow: text().notNull(),
     reviewKey: text(),
-    runner: text().notNull(),
-    permissions: text().$type<AgentDefinition['permissions']>(),
-    appId: bigint({ mode: 'number' }).references(() => integrationApp.id, { onDelete: 'set null' }),
+    runnerKind: text().notNull(),
+    access: text().$type<AgentTask['access']>(),
     installationId: bigint({ mode: 'number' }).references(() => integrationAppInstallation.id),
     event: jsonb().$type<AgentEvent>(),
+    /** Who sees it: `''` every member, `dm:<user>` the member who asked, `space:<key>` the private space's members; null is unknown and shows to the member who asked and admins only. Set by every insert; a child copies its parent's. */
+    audience: text(),
+    /** The space it came from, own or inherited, so a privacy change finds its tasks. */
+    space: text(),
+    parent: text(),
+    connections: jsonb().$type<string[]>(),
+    engineChain: jsonb().$type<string[]>(),
+    engineCredentials: jsonb().$type<Record<string, string>>(),
+    name: text(),
+    cwd: text(),
     prompt: text(),
     args: jsonb().$type<Record<string, unknown>>(),
     mcp: jsonb().$type<string[]>(),
+    appendSystem: text(),
+    addDirs: jsonb().$type<string[]>(),
     author: text(),
     definition: jsonb().$type<AgentDefinition>().notNull(),
     credential: text(),
-    requester: text(),
+    requestedBy: text(),
     runnerId: text(),
-    usage: jsonb().$type<AgentUsage>(),
+    engineSettings: jsonb().$type<TaskUsage>(),
     tools: jsonb().$type<Record<string, string[]>>().notNull(),
     context: jsonb().$type<TaskContext>(),
     files: jsonb().$type<Record<string, string>>(),
+    failureReply: text(),
+    taskUrl: text(),
+    settingsUrl: text(),
     result: jsonb().$type<TaskOutcome>(),
     error: text(),
     tokens: jsonb(),
+    /** What the finished task cost: the engine and model that ran, runner time and tokens summed over its turns. */
+    engine: text(),
+    model: text(),
+    runnerMs: integer(),
+    tokenCount: bigint({ mode: 'number' }),
+    usageTokens: jsonb(),
     handle: text(),
     tokenHash: text(),
     lastSeenAt: at(),
     logCursor: integer(),
     logSeq: integer(),
     logBytes: integer(),
+    /** The runner reported its last line of this attempt; cleared with the handle. */
+    logsComplete: boolean(),
     archivedAt: at(),
     approval: jsonb().$type<Approval>(),
     answer: jsonb(),
@@ -265,7 +308,6 @@ export const task = pgTable(
       .notNull()
       .default(sql`'-1'`),
     generation: integer().notNull().default(0),
-    lockedAt: at(),
     startedAt: at(),
     finishedAt: at(),
     cancelRequestedAt: at(),
@@ -275,10 +317,20 @@ export const task = pgTable(
     uniqueIndex('task_organizationId_publicId_unique').on(t.organizationId, t.publicId),
     index().on(t.publicId),
     index().on(t.organizationId, t.createdAt.desc(), t.publicId.desc()),
+    index('task_organizationId_unarchived_index')
+      .on(t.organizationId, t.createdAt.desc(), t.publicId.desc())
+      .where(sql`${t.archivedAt} is null`),
     index().on(t.organizationId, t.updatedAt),
+    index().on(t.organizationId, t.finishedAt),
+    index().on(t.organizationId, t.audience),
+    index().on(t.organizationId, t.requestedBy),
+    index().on(t.organizationId, t.parent),
     index()
       .on(t.organizationId)
       .where(sql`${t.status} = 'queued'`),
+    index('task_organizationId_active_index')
+      .on(t.organizationId)
+      .where(sql`${t.status} in ('queued', 'running', 'waiting')`),
     index().on(t.status, t.createdAt),
     index()
       .on(t.organizationId, t.reviewKey)
@@ -290,7 +342,7 @@ export const task = pgTable(
 export const taskInbox = pgTable(
   'task_inbox',
   {
-    ...owned,
+    id: bigserial({ mode: 'number' }).primaryKey(),
     taskId: bigint({ mode: 'number' })
       .notNull()
       .references(() => task.id, { onDelete: 'cascade' }),
@@ -306,27 +358,26 @@ export const taskInbox = pgTable(
   ],
 );
 
-/** A task's output, one row per line, streamed while it runs. */
+/** A task's output, one row per flush the runner sent: lines `seqFrom` through `seqTo`. */
 export const taskLog = pgTable(
   'task_log',
   {
-    ...owned,
+    id: bigserial({ mode: 'number' }).primaryKey(),
     taskId: bigint({ mode: 'number' })
       .notNull()
       .references(() => task.id, { onDelete: 'cascade' }),
-    seq: integer().notNull(),
-    at: at().notNull(),
-    level: text().$type<TaskLogLine['level']>().notNull(),
-    line: text().notNull(),
+    seqFrom: integer().notNull(),
+    seqTo: integer().notNull(),
+    lines: jsonb().$type<TaskLogLine[]>().notNull(),
   },
-  t => [uniqueIndex('task_log_taskId_seq_unique').on(t.taskId, t.seq)],
+  t => [uniqueIndex('task_log_taskId_seqFrom_unique').on(t.taskId, t.seqFrom)],
 );
 
 /** A task's engine conversations, one row each, gzipped and encrypted. */
 export const taskHistory = pgTable(
   'task_history',
   {
-    ...owned,
+    id: bigserial({ mode: 'number' }).primaryKey(),
     taskId: bigint({ mode: 'number' })
       .notNull()
       .references(() => task.id, { onDelete: 'cascade' }),
@@ -339,38 +390,103 @@ export const taskHistory = pgTable(
   t => [uniqueIndex('task_history_taskId_conversation_unique').on(t.taskId, t.conversation)],
 );
 
+/** A task's sealed connection secrets while it runs: `connection-secrets:<task>:<hash>` rows and the `connections:<task>:<generation>:<attempt>:<id>` resolution, gone with the task. */
+export const taskSecret = pgTable(
+  'task_secret',
+  {
+    id: bigserial({ mode: 'number' }).primaryKey(),
+    taskId: bigint({ mode: 'number' })
+      .notNull()
+      .references(() => task.id, { onDelete: 'cascade' }),
+    key: text().notNull(),
+    secretId: secretId().notNull(),
+    expiresAt: at(),
+  },
+  t => [
+    uniqueIndex('task_secret_taskId_key_unique').on(t.taskId, t.key),
+    index()
+      .on(t.expiresAt)
+      .where(sql`${t.expiresAt} is not null`),
+  ],
+);
+
 /** A deleted task's id for a while, so every server's events streams drop it from their lists. */
 export const taskTombstone = pgTable(
   'task_tombstone',
   {
     organizationId: text().notNull(),
     publicId: text().notNull(),
+    /** The task's audience and the member who asked, so only who saw it hears the delete. */
+    audience: text(),
+    requestedBy: text(),
     deletedAt: at().notNull(),
   },
-  t => [index().on(t.organizationId, t.deletedAt)],
+  t => [
+    primaryKey({ name: 'task_tombstone_pk', columns: [t.organizationId, t.publicId] }),
+    index().on(t.organizationId, t.deletedAt),
+  ],
 );
 
-/** What a finished task cost. */
-export const usage = pgTable(
-  'usage',
+/** An approval's post in its conversation, under `approval:<task>:<approval>`; `retryAt` and `shownAt` are the record's own, lifted so the sweep finds due posts by index. */
+export const approvalPost = pgTable(
+  'approval_post',
   {
     ...owned,
-    taskId: bigint({ mode: 'number' })
-      .notNull()
-      .references(() => task.id, { onDelete: 'cascade' })
-      .unique(),
-    installationId: bigint({ mode: 'number' }).references(() => integrationAppInstallation.id),
-    agent: text().notNull(),
-    target: text().notNull(),
-    engine: text(),
-    model: text(),
-    credential: text().notNull(),
-    runnerMs: integer().notNull(),
-    tokens: jsonb(),
+    key: text().notNull(),
+    value: jsonb().$type<ApprovalPost>().notNull(),
     at: at().notNull(),
-    ...timestamps,
+    shownAt: at(),
+    retryAt: at(),
+    expiresAt: at(),
   },
-  t => [index().on(t.organizationId, t.at)],
+  t => [
+    uniqueIndex('approval_post_organizationId_key_unique').on(t.organizationId, t.key),
+    index()
+      .on(t.retryAt)
+      .where(sql`${t.retryAt} is not null`),
+    index('approval_post_unshown_index')
+      .on(t.at)
+      .where(sql`${t.shownAt} is null`),
+  ],
+);
+
+/** A private space with tasks: its member list as last fetched, kept current by membership events; a row with no `syncedAt` is a fetch claim or a failed fetch. */
+export const privateSpace = pgTable(
+  'private_space',
+  {
+    ...owned,
+    integration: text().notNull(),
+    /** The app key and platform installation id whose token lists the members. */
+    app: text().notNull(),
+    installation: text().notNull(),
+    /** The platform account, else the installation, as a task's `account ?? installationId`. */
+    account: text().notNull(),
+    kind: text().$type<Space['kind']>().notNull(),
+    space: text().notNull(),
+    syncedAt: at(),
+    /** A fetch in progress holds the row until it lands, fails or expires. */
+    claimedAt: at(),
+  },
+  t => [
+    uniqueIndex('private_space_organizationId_integration_account_space_unique').on(
+      t.organizationId,
+      t.integration,
+      t.account,
+      t.space,
+    ),
+  ],
+);
+
+/** One platform user in a private space's member list. */
+export const spaceMember = pgTable(
+  'space_member',
+  {
+    spaceId: bigint({ mode: 'number' })
+      .notNull()
+      .references(() => privateSpace.id, { onDelete: 'cascade' }),
+    member: text().notNull(),
+  },
+  t => [uniqueIndex('space_member_spaceId_member_unique').on(t.spaceId, t.member)],
 );
 
 /** TTL values: Chat SDK keys and organization-scoped server state. */
@@ -400,7 +516,7 @@ export const chatItem = pgTable(
     expiresAt: at(),
   },
   t => [
-    uniqueIndex('chat_item_key_seq_pk').on(t.key, t.seq),
+    primaryKey({ name: 'chat_item_key_seq_pk', columns: [t.key, t.seq] }),
     index()
       .on(t.expiresAt)
       .where(sql`${t.expiresAt} is not null`),
@@ -409,20 +525,25 @@ export const chatItem = pgTable(
 
 /** Every table, for drizzle's relational schema option. */
 export const tables = {
+  secret,
   platformLink,
+  workspace,
   agent,
   agentVersion,
-  secret,
   integrationApp,
   integrationAppInstallation,
   engineCredential,
   runner,
+  connection,
   task,
   taskInbox,
   taskLog,
   taskHistory,
+  taskSecret,
   taskTombstone,
-  usage,
+  approvalPost,
+  privateSpace,
+  spaceMember,
   chatState,
   chatItem,
 };

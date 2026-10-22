@@ -11,7 +11,7 @@ import type { Task } from '../../core/types';
 import { history } from '../../core/engines/history';
 import { appendTaskDirLog } from '../../core/state';
 import { arg, str } from '../../utils/args';
-import { eventJsons } from './turn';
+import { eventJsons } from '../event-json';
 
 /** Posts a reply or reaction to the task's conversation (`CODER_REPLY_URL`); a retry after a network failure reuses the call id, so it posts once. */
 async function postToConversation(
@@ -106,7 +106,7 @@ export const conversationCommands = [
   defineCommand({
     name: 'history',
     description:
-      "Search or read this task's full earlier conversation, including anything compacted out of your context, with your tool calls and results, oldest first. With query, the messages containing that exact text; without, the messages from `from` on.",
+      "Search or read your own earlier turns in this task, including anything compacted out of your context, oldest first. With query, the messages containing that exact text; without, the messages from `from` on. The platform's tools read the thread itself.",
     args: {
       query: str(
         'Exact text to find, case-insensitive, 1 to 500 characters: a word or phrase from the message, not a question.',
@@ -116,6 +116,10 @@ export const conversationCommands = [
         'Message index to start at; default the oldest, or after the last match.',
       ),
       limit: arg(z.optional(z.number()), 'Messages to return, 1 to 20; default 10.'),
+      role: arg(
+        z.optional(z.enum(['all', 'conversation'])),
+        'conversation: only platform messages and your replies; all (default): tool calls and results too.',
+      ),
     },
     access: 'read',
     run: async args => history((await historyTask()).task, args),
