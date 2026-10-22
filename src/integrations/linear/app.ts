@@ -21,6 +21,13 @@ const TOKEN = 'https://api.linear.app/oauth/token';
 const REVOKE = 'https://api.linear.app/oauth/revoke';
 const GRAPHQL = 'https://api.linear.app/graphql';
 const FIELDS = ['clientId', 'clientSecret', 'webhookSecret'] as const;
+/** The webhook's resource types, as the manifest names them and the application form labels them. */
+const RESOURCE_TYPES = {
+  AgentSessionEvent: 'Agent session events',
+  Issue: 'Issues',
+  Comment: 'Comments',
+  IssueSLA: 'Issue SLA',
+};
 
 const base = (publicUrl: string) => publicUrl.replace(/\/$/, '');
 
@@ -70,7 +77,7 @@ function exchange(req: Request, credentials: unknown, redirect: string, request:
   );
 }
 
-/** Linear's prefilled OAuth application form: name, callback URLs and the agent session webhook. */
+/** Linear's prefilled OAuth application form: name, callback URLs and the webhook. */
 function creationLink(publicUrl: string, key: string, name?: string, isPublic?: boolean): string {
   const params = new URLSearchParams(name ? { 'oauth.client_name': name } : {});
   // Public: installable by other Linear workspaces.
@@ -81,7 +88,7 @@ function creationLink(publicUrl: string, key: string, name?: string, isPublic?: 
   params.append('oauth.redirect_uris', `${base(publicUrl)}/connect/linear/callback`);
   params.set('webhook.enabled', 'true');
   params.set('webhook.url', `${base(publicUrl)}/hooks/linear?app=${key}`);
-  params.set('webhook.resourceTypes', 'AgentSessionEvent');
+  for (const type of Object.keys(RESOURCE_TYPES)) params.append('webhook.resourceTypes', type);
   return `https://linear.app/settings/api/applications/new?${params}`;
 }
 
@@ -143,7 +150,7 @@ export const linearApp: IntegrationApp = {
         text: 'Webhook URL',
         copy: `${base(publicUrl)}/hooks/linear?app=${app.id.slice(app.id.indexOf(':') + 1)}`,
       },
-      { text: 'Webhook resource types', copy: 'AgentSessionEvent' },
+      { text: 'Webhook events', copy: Object.values(RESOURCE_TYPES).join(', ') },
     ],
   }),
   async createCallback(req, { spec }) {

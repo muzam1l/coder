@@ -249,7 +249,8 @@ export async function describe(
   const thread = event.chat?.thread;
   if (!thread) return event;
   const direct = thread.isDM === true;
-  const mustReply = directAsk(integration, event) || integration.answersEveryPrompt === true;
+  const mustReply =
+    directAsk(integration, event) || integration.answersEveryPrompt?.(event) === true;
   const [unseen, facts] = await Promise.all([
     input.loaded
       ? (input.unseen ?? { messages: [], more: 0 })

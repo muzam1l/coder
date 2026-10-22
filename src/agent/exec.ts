@@ -100,7 +100,8 @@ export function threadReply(
   turn?: Pick<TurnResultEntry, 'prompt' | 'steers' | 'lastReply'>,
 ): { text: string; problem: boolean; skipped?: true; duplicate?: boolean } {
   const answer = result?.finalMessage?.trim();
-  const progress = task.event && INTEGRATIONS[task.event.integration]?.progressReplies;
+  const progress =
+    task.event && INTEGRATIONS[task.event.integration]?.progressReplies?.(task.event);
   const lastReply = turn?.lastReply?.trim();
   // Claude Code reports its own errors as the final message; a failed run gets the failure text instead.
   if (answer && answer.replace(/^`+|`+$/g, '').trim() !== EMPTY_MESSAGE && !result?.error)

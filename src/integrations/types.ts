@@ -664,10 +664,10 @@ export interface Integration {
   readonly installLabel?: string;
   /** How people reach an installed app listening to `events`, `{handle}` standing for its handle; `here` words it for the app's own page or DM. */
   readonly use?: string | ((events: string[], here?: boolean) => string | undefined);
-  /** Every prompt waits for its own answer, as a Linear agent session does, so notices repeat instead of going out once per thread. */
-  readonly answersEveryPrompt?: true;
-  /** Replies during a turn are progress; a final response must close it. */
-  readonly progressReplies?: true;
+  /** Every prompt in the event's conversation waits for its own answer, as a Linear agent session does, so notices repeat instead of going out once per thread. */
+  answersEveryPrompt?(event: PlatformEvent): boolean;
+  /** Replies during a turn in the event's conversation are progress; a final response must close it. */
+  progressReplies?(event: PlatformEvent): boolean;
   /** An outbound call proved the installation's token revoked. */
   isUninstalled?(error: unknown): boolean;
   /** What one account an installation covers is called, such as a Slack workspace of an org install. */
