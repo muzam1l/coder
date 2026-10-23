@@ -20,13 +20,16 @@ import {
   waitForAgentTask,
 } from '../agent/exec';
 import { INTEGRATIONS } from '../integrations';
-import { tokenEnvName } from '../agent/mcp';
-import type { AgentTask } from '../agent/types';
+import { nativeToolEnvironment, tokenEnvName, type ReplyEndpoint } from '../agent/mcp';
+import type { AgentTask, ModelAttempt } from '../agent/types';
+import { effectiveSettings } from '../agent/definition';
 import type { EngineCredential } from '../server/store/types';
 import {
   loadConfig,
   MACHINE_SANDBOX_ENV,
+  splitEngineSpec,
   WORKSPACE_CONFIG_ENV,
+  type Access,
   type CoderConfig,
 } from '../core/config';
 import {
@@ -53,11 +56,14 @@ import {
   type ConnectionResolver,
 } from '../core/task/actions';
 import { addTokens, SKIPPED } from '../core/task/view';
-import { readResultJson, resolveTaskOptions, waitTask } from '../core/dispatch';
-import { connectionVariables } from '../core/connections';
+import { readResultJson, resolveMcpServers, resolveTaskOptions, waitTask } from '../core/dispatch';
+import { connectionEnvironment, connectionVariables } from '../core/connections';
 import type { InboxEntry, InboxAck } from '../server/tasks/queue';
+import { nodeListener } from '../server/routes/http';
 import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mailbox';
-import type { Task, McpServerSpec } from '../core/types';
+import type { Task, McpServerSpec, ResolvedTaskOptions } from '../core/types';
+import type { FlowHooks } from '../flow/runtime';
+import { asyncTools } from '../core/task/context/tools';
 import {
   readJsonFile,
   writeJsonFileAtomic,
@@ -66,7 +72,7 @@ import {
   withFileLock,
 } from '../utils/fsx';
 import { CLAUDE_PROJECT, taskHistory } from './history';
-import { pendingCall } from '../core/task/async';
+import { claimCalls, driveAsyncTool, pendingCall } from '../core/task/async';
 
 const exec = promisify(execFile);
 type RemoteTask = {
@@ -268,9 +274,14 @@ async function changes(cwd: string): Promise<string> {
     : stdout;
 }
 
-/** Returns the task's own `CODEX_HOME` when the credential is a Codex sign-in. */
-async function applyEnvironment(remote: RemoteTask, root: string): Promise<string | undefined> {
-  delete process.env.CODER_SERVER;
+/** Returns the task's own `CODEX_HOME` when the credential is a Codex sign-in. The engine reaches the task's server through `socketPath`. */
+async function applyEnvironment(
+  remote: RemoteTask,
+  root: string,
+  socketPath: string,
+): Promise<string | undefined> {
+  process.env.CODER_SERVER = `unix:${socketPath}`;
+  if (remote.dashboard) process.env.CODER_DASHBOARD = remote.dashboard;
   delete process.env.CODER_TASK_TOKEN;
   delete process.env.APP_TOKEN;
   for (const id of Object.keys(remote.tokens)) delete process.env[tokenEnvName(id)];
@@ -344,17 +355,77 @@ async function historySecrets(
 async function writeBack(
   auth: { server: string; token: string },
   id: string,
-  remote: RemoteTask,
+  credential: { id?: string; authJson?: string },
   home: string | undefined,
 ): Promise<void> {
   if (!home) return;
   const authJson = await fs.readFile(path.join(home, 'auth.json'), 'utf8').catch(() => '');
-  if (authJson && authJson !== remote.credential.env.CODEX_AUTH_JSON)
+  if (authJson && credential.id && authJson !== credential.authJson)
     await taskRequest(auth.server, auth.token, id, '/credential', {
       method: 'POST',
-      body: JSON.stringify({ authJson, credentialId: remote.task.credential }),
+      body: JSON.stringify({ authJson, credentialId: credential.id }),
     }).catch(() => {});
   await fs.rm(home, { recursive: true, force: true });
+}
+
+/** The credentials a flow step or review runs a model on, best first, as environments over the runner's: each sets its own variables and unsets the task's others; a Codex sign-in other than the turn's gets its own home, handed back by `release`. */
+function stepCredentials(
+  remote: RemoteTask,
+  root: string,
+  machineHomes: Record<string, string | undefined>,
+  current: () => string | undefined,
+) {
+  const homes = new Map<string, { home: string; authJson: string }>();
+  const credentials = async (option: ResolvedTaskOptions): Promise<NodeJS.ProcessEnv[]> => {
+    const rows = remote.engineCredentials ?? [];
+    const key =
+      option.engine === 'custom'
+        ? (loadConfig(root).models?.[option.model ?? ''] as { envKey?: string } | undefined)
+            ?.envKey ?? 'OPENAI_API_KEY'
+        : undefined;
+    const serving = rows.filter(row =>
+      key ? row.credential.env[key] !== undefined : row.credential.engine === option.engine,
+    );
+    // A machine run, its attempts without a credential, uses the machine's own sign-ins.
+    const machine = remote.task.runner === 'http' || remote.task.models?.some(attempt => !attempt.credential);
+    if (!serving.length) return machine ? [{}] : [];
+    const unset = Object.fromEntries(
+      rows.flatMap(row => Object.keys(row.credential.env)).map(name => [name, undefined]),
+    );
+
+    return Promise.all(
+      serving.map(async row => {
+        const { CODEX_AUTH_JSON: authJson, ...env } = row.credential.env;
+        const own = row.id === current();
+        let home = authJson && own ? process.env.CODEX_HOME : machineHomes.CODEX_HOME;
+        if (authJson && !own) {
+          if (!homes.has(row.id)) {
+            const created = await fs.mkdtemp(path.join(root, '.codex-'));
+            await fs.writeFile(path.join(created, 'auth.json'), authJson, { mode: 0o600 });
+            homes.set(row.id, { home: created, authJson });
+          }
+          home = homes.get(row.id)!.home;
+        }
+
+        return {
+          ...unset,
+          ...env,
+          CODEX_HOME: home,
+          CLAUDE_CONFIG_DIR: own ? process.env.CLAUDE_CONFIG_DIR : machineHomes.CLAUDE_CONFIG_DIR,
+        };
+      }),
+    );
+  };
+  const release = async (auth: { server: string; token: string }, id: string) => {
+    await Promise.all(
+      [...homes].map(([credential, { home, authJson }]) =>
+        writeBack(auth, id, { id: credential, authJson }, home),
+      ),
+    );
+    homes.clear();
+  };
+
+  return { credentials, release };
 }
 
 const INSTALLS: Array<[string, string, string[]]> = [
@@ -427,12 +498,53 @@ export function requestInboxControl(
   );
 }
 
+/** A live run's next turn: the connections the task's server resolves for it now, its grants and the asker's personal ones, as a fresh run gets them. */
+export function serverConnections(endpoint: ReplyEndpoint): ConnectionResolver {
+  return async () => {
+    const response = await fetch(endpoint.url, {
+      headers: { authorization: `Bearer ${endpoint.token}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`Coder server answered ${response.status}`);
+    const remote = (await response.json()) as RemoteTask;
+    const connected = connectionEnvironment(remote.connections ?? {}, remote.connectionEnv);
+    const native = nativeToolEnvironment(remote.task, remote.tokens, {
+      ...endpoint,
+      ...(remote.dashboard ? { dashboard: remote.dashboard } : {}),
+    });
+
+    return { mcp: connected.mcp, env: { ...connected.env, ...native.env }, warnings: [] };
+  };
+}
+
+/** A runner task's next turn asks its server through the conversation endpoint; without one it keeps what its task resolved. */
+export function liveConnections(task: Task): ConnectionResolver {
+  return async granted => {
+    const reply = resolveMcpServers(task.mcp, process.env).find(
+      server => server.name === 'conversation',
+    )?.env;
+
+    return (
+      reply?.CODER_REPLY_URL && reply.CODER_REPLY_TOKEN
+        ? serverConnections({ url: reply.CODER_REPLY_URL, token: reply.CODER_REPLY_TOKEN })
+        : heldConnections(task.mcp)
+    )(granted);
+  };
+}
+
+/** A steer's model and access, as its sender gave them. */
+function turnOverrides(value: Record<string, unknown> | undefined): { model?: string; access?: Access } {
+  return {
+    ...(typeof value?.model === 'string' && value.model ? { model: value.model } : {}),
+    ...(value?.access === 'read-only' || value?.access === 'auto' ? { access: value.access } : {}),
+  };
+}
+
 export async function applyTaskMessage(
   cwd: string,
   task: Task,
   entry: InboxEntry,
-  // A runner's turn resumes with the connections its task already resolved, not this machine's.
-  resolveConnections: ConnectionResolver = heldConnections(task.mcp),
+  resolveConnections: ConnectionResolver = liveConnections(task),
 ): Promise<unknown> {
   const command: MailboxKey = {
     task: task.name?.slice(6) ?? task.id,
@@ -475,10 +587,15 @@ export async function applyTaskMessage(
         });
       }
       if (!queued)
-        await steerTask(cwd, loadTask(cwd, task.id) ?? task, text, { command, resolveConnections });
+        await steerTask(cwd, loadTask(cwd, task.id) ?? task, text, {
+          command,
+          resolveConnections,
+          ...turnOverrides(value),
+        });
     } else if (entry.kind === 'ask') {
       const result = await askTask(cwd, task, String(value?.question ?? entry.value ?? ''), {
         command,
+        ...(typeof value?.model === 'string' && value.model ? { model: value.model } : {}),
       });
       return result.finalMessage ?? result.error?.message ?? '';
     } else if (entry.kind === 'approve') {
@@ -554,6 +671,7 @@ export async function runTask(id: string, root: string): Promise<unknown> {
     CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
   };
   let history: ReturnType<typeof taskHistory> | undefined;
+  let proxy: Awaited<ReturnType<typeof serveTaskServer>> | undefined;
   const timeout = new AbortController();
   const timer = setTimeout(
     () => timeout.abort(new Error('timeout')),
@@ -576,12 +694,20 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       ?.save(current ?? undefined)
       .catch(error => console.error('coder runner: history upload failed', error));
     if (claudeHome) await fs.rm(claudeHome, { recursive: true, force: true });
-    await writeBack(auth, id, remote, codexHome);
+    await writeBack(
+      auth,
+      id,
+      { id: credentialId, authJson: remote.credential.env.CODEX_AUTH_JSON },
+      codexHome,
+    );
   };
+  let credentialId = remote.task.models?.[0]?.credential;
+  const steps = stepCredentials(remote, root, machineHomes, () => credentialId);
   let reportingResult = false;
   const reportResult = async (body: unknown) => {
     reportingResult = true;
     await beforeResult();
+    await steps.release(auth, id);
     await landing(() =>
       taskRequest(auth.server, auth.token, id, '/result', {
         method: 'POST',
@@ -591,8 +717,9 @@ export async function runTask(id: string, root: string): Promise<unknown> {
   };
   try {
     const setup = (async () => {
+      proxy = await serveTaskServer(auth);
       [codexHome, claudeHome] = await Promise.all([
-        applyEnvironment(remote, root),
+        applyEnvironment(remote, root, proxy.socketPath),
         applyClaudeHome(remote, root),
       ]);
       history =
@@ -636,31 +763,27 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       beforeResult,
       reportResult,
       restored.value,
-      remote.engineCredentials
-        ? async engine => {
-            if (engine === remote.credential.engine) return true;
-            const selected = remote.engineCredentials!.find(
-              row => row.credential.engine === engine,
-            );
-            if (!selected) return false;
-            await beforeResult();
-            for (const [name, value] of Object.entries(machineHomes)) {
-              if (value === undefined) delete process.env[name];
-              else process.env[name] = value;
-            }
-            remote.credential = selected.credential;
-            remote.task = {
-              ...remote.task,
-              credential: selected.id,
-              usage: { ...remote.task.usage, engine, model: undefined, effort: undefined },
-            };
-            [codexHome, claudeHome] = await Promise.all([
-              applyEnvironment(remote, root),
-              applyClaudeHome(remote, root),
-            ]);
-            return true;
-          }
-        : undefined,
+      async attempt => {
+        if (attempt.credential === credentialId) return true;
+        const selected = remote.engineCredentials?.find(row => row.id === attempt.credential);
+        if (attempt.credential && !selected) return false;
+        await beforeResult();
+        for (const [name, value] of Object.entries(machineHomes)) {
+          if (value === undefined) delete process.env[name];
+          else process.env[name] = value;
+        }
+        remote.credential = selected?.credential ?? {
+          engine: splitEngineSpec(attempt.model).engine as EngineCredential['engine'],
+          env: {},
+        };
+        credentialId = attempt.credential;
+        [codexHome, claudeHome] = await Promise.all([
+          applyEnvironment(remote, root, proxy!.socketPath),
+          applyClaudeHome(remote, root),
+        ]);
+        return true;
+      },
+      steps.credentials,
     );
   } catch (error) {
     if (!reportingResult)
@@ -675,9 +798,12 @@ export async function runTask(id: string, root: string): Promise<unknown> {
   } finally {
     clearTimeout(timer);
     clearInterval(heartbeat);
+    await proxy?.close();
     delete process.env[WORKSPACE_CONFIG_ENV];
     delete process.env.CODER_MCP_MODE;
     delete process.env.CODER_MCP_CONNECTION_ENV;
+    delete process.env.CODER_SERVER;
+    delete process.env.CODER_DASHBOARD;
   }
 }
 
@@ -692,8 +818,9 @@ async function runCheckedOutTask(
   timeout: AbortSignal,
   beforeResult: () => Promise<void>,
   reportResult: (body: unknown) => Promise<void>,
-  resumed?: Awaited<ReturnType<ReturnType<typeof taskHistory>['restore']>>,
-  onEngine?: (engine: string) => Promise<boolean>,
+  resumed: Awaited<ReturnType<ReturnType<typeof taskHistory>['restore']>> | undefined,
+  onModel: (attempt: ModelAttempt) => Promise<boolean>,
+  onFlowModel: FlowHooks['onModel'],
 ): Promise<unknown> {
   const event = remote.task.event;
   const postToken = remote.task.flow === 'default' ? remote.postToken : eventToken;
@@ -837,17 +964,49 @@ async function runCheckedOutTask(
       body: JSON.stringify({ status: 'waiting', approval, approvals: approvals() }),
     });
   };
+  // A fallback shows on the task's page as it happens, and the model line follows what runs.
+  let reported = 0;
+  const reportAttempt = async (attempt: ModelAttempt) => {
+    const fallbacks = (taskId && loadTask(cwd, taskId)?.fallbacks) || [];
+    if (fallbacks.length <= reported) return;
+    reported = fallbacks.length;
+    await taskRequest(auth.server, auth.token, id, '/result', {
+      method: 'POST',
+      body: JSON.stringify({
+        status: 'running',
+        fallbacks,
+        model: attempt.model,
+        ...(attempt.credential ? { credential: attempt.credential } : {}),
+      }),
+    }).catch(error => console.error('coder runner: fallback report failed', error));
+  };
+  // The runner drives a task's review calls itself, so each model runs on its own credential.
+  const driving = new Set<Promise<void>>();
+  const driveCalls = (started: string) =>
+    claimCalls(resolveTaskDir(cwd, started))
+      .then(calls => {
+        for (const call of calls) {
+          const tool = asyncTools.find(candidate => candidate.name === call.tool);
+          if (!tool) continue;
+          const work = driveAsyncTool(tool, call.runId, cwd, started, call.timeout, {
+            integrationToken: tool.platform ? remote.tokens[tool.platform] : undefined,
+            onModel: onFlowModel,
+            stop: timeout,
+          })
+            .catch(error => console.error(`coder runner: ${call.tool} ${call.runId} failed`, error))
+            .finally(() => driving.delete(work));
+          driving.add(work);
+        }
+      })
+      .catch(error => console.error('coder runner: async calls could not be read', error));
   try {
+    const first = remote.task.models?.[0]?.model;
     const restored =
       resumed?.restored &&
       resumed.resume?.engine ===
-        resolveTaskOptions(
-          {
-            engine: remote.task.usage?.engine ?? remote.task.definition.engine,
-            model: remote.task.usage?.model ?? remote.task.definition.model,
-          },
-          loadConfig(cwd),
-        ).engine;
+        (first
+          ? splitEngineSpec(first).engine
+          : resolveTaskOptions(effectiveSettings(remote.task), loadConfig(cwd)).engine);
     let worker: ChildProcess | undefined;
     const running = execAgent({
       cwd,
@@ -897,9 +1056,11 @@ async function runCheckedOutTask(
             started,
             watchChanges(resolveTaskDir(cwd, started), file => {
               if (!file || file === 'log.jsonl') void forwardLogs().catch(() => {});
+              if (!file || file === 'async.json') void driveCalls(started);
             }),
           );
         void forwardLogs().catch(() => {});
+        void driveCalls(started);
         writeJsonFileAtomic(path.join(root, '.runner-task.json'), {
           generation: remote.generation,
           id: started,
@@ -920,7 +1081,11 @@ async function runCheckedOutTask(
           }, 4000);
       },
       onApproval,
-      onEngine,
+      async onModel(attempt) {
+        await reportAttempt(attempt);
+        return onModel(attempt);
+      },
+      onFlowModel,
     });
     const aborted = new Promise<never>((_, reject) => {
       const abort = () => reject(timeout.reason);
@@ -973,7 +1138,10 @@ async function runCheckedOutTask(
             for (const text of rest) enqueueSteer(cwd, taskId, text);
             if (first) {
               await steerTask(cwd, current, first, {
-                resolveConnections: heldConnections(current.mcp),
+                resolveConnections: serverConnections({
+                  url: `${auth.server}/tasks/${encodeURIComponent(id)}`,
+                  token: auth.token,
+                }),
                 onWorker: child => {
                   worker = child;
                 },
@@ -1198,6 +1366,65 @@ export async function receiveInbox(options: {
     close: async () => {
       await tail;
       await new Promise<void>(resolve => server.close(() => resolve()));
+    },
+  };
+}
+
+const UNFORWARDED = new Set([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'host',
+  'connection',
+  'keep-alive',
+  'upgrade',
+  'transfer-encoding',
+  'content-length',
+  'content-encoding',
+]);
+
+/** The task's server for its engine's shell, on a socket only this user opens: the runner adds the attempt token, so the token never enters the engine's env. */
+export async function serveTaskServer(auth: { server: string; token: string }) {
+  // `/tmp`, not the task's folder or TMPDIR, keeps the path under the unix socket limit (104 bytes on macOS).
+  const dir = await fs.realpath(await fs.mkdtemp('/tmp/coder-'));
+  const socketPath = path.join(dir, 'server.sock');
+  const server = http.createServer(
+    nodeListener(async request => {
+      const url = new URL(request.url);
+      // The shell gets the API routes the cloud MCP calls; the runner's own `/tasks/<id>` callbacks stay the runner's.
+      if (!url.pathname.startsWith('/admin/'))
+        return Response.json({ error: 'Not found' }, { status: 404 });
+      const target = new URL(`${auth.server}${url.pathname}${url.search}`);
+      const headers = new Headers(request.headers);
+      for (const name of UNFORWARDED) headers.delete(name);
+      headers.set('authorization', `Bearer ${auth.token}`);
+      const response = await fetch(target, {
+        method: request.method,
+        headers,
+        body: request.body,
+        duplex: 'half',
+        redirect: 'manual',
+        signal: request.signal,
+      } as RequestInit);
+      // fetch already decoded the body, so its length and encoding no longer hold.
+      const answer = new Headers(response.headers);
+      for (const name of UNFORWARDED) answer.delete(name);
+
+      return new Response(response.body, { status: response.status, headers: answer });
+    }),
+  );
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, resolve);
+  });
+  await fs.chmod(socketPath, 0o600);
+
+  return {
+    socketPath,
+    close: async () => {
+      server.closeAllConnections();
+      await new Promise<void>(resolve => server.close(() => resolve()));
+      await fs.rm(dir, { recursive: true, force: true });
     },
   };
 }

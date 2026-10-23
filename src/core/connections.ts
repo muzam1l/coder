@@ -590,10 +590,32 @@ export function withCredential(
   };
 }
 
+/** A connection server's one line: its name, what it connects and the account it acts as. */
+export function connectionDescription(
+  connection: Pick<Connection, 'name' | 'endpoint' | 'account' | 'login'>,
+): string {
+  const { url, command } = connection.endpoint ?? {};
+  const account = connection.login ?? connection.account;
+
+  return [
+    connection.name,
+    url && URL.canParse(url) ? new URL(url).host : command,
+    account && `as ${account}`,
+  ]
+    .filter(Boolean)
+    .join(', ');
+}
+
 /** A connection's server spec, built without contacting it: a Read-only HTTP server is marked, and its tools are checked on first use. */
+/** A connection's tool server name: its id, or `<name>-user` for a member's own, where a platform's name is its integration id. */
+export const connectionServerName = (connection: Pick<Connection, 'id' | 'provider' | 'owner'>) =>
+  !connection.owner
+    ? connection.id
+    : `${connection.provider === 'mcp' ? connection.id.slice(connection.owner.length + 1) : connection.provider}-user`;
+
 export function connectionMcp(connection: Connection, token: string | undefined): McpServerSpec {
   if (!connection.endpoint) throw new Error('Missing endpoint');
-  let spec: McpServerSpec = { ...connection.endpoint, name: connection.id };
+  let spec: McpServerSpec = { ...connection.endpoint, name: connectionServerName(connection) };
   if (token) spec = withCredential(spec, credentialField(connection), token);
   if (spec.command) {
     if (connection.access === 'read-only' && !spec.tools?.length)
@@ -689,7 +711,7 @@ export async function localConnections(
           ...connectionMcp({ ...connection, access: level }, undefined),
           connection: id,
           credentialOnUse: credentialField(connection),
-          description: connection.name,
+          description: connectionDescription(connection),
           access: level,
         };
         return;
@@ -722,7 +744,7 @@ export async function localConnections(
           connection.auth === 'none' ? undefined : (await localCredential(local, id, 'key')).token;
         if (connection.auth !== 'none' && !token) throw new Error('Missing credential');
         const spec = connectionMcp({ ...connection, access: level }, token);
-        mcp[id] = { ...spec, description: connection.name, access: level };
+        mcp[id] = { ...spec, description: connectionDescription(connection), access: level };
       } catch (error) {
         warnings.push(connectionWarning(connection.name, error));
       }

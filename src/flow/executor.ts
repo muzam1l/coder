@@ -454,6 +454,7 @@ export function drivePreparedRun(
   record: FlowRecord,
   cwd: string,
   hooks: FlowHooks,
+  integrationToken?: string,
 ): Promise<RunSummary> {
   return execute(
     '',
@@ -461,6 +462,7 @@ export function drivePreparedRun(
       cwd,
       concurrency: record.concurrencySet ? record.concurrency : undefined,
       maxTasks: record.maxTasks,
+      ...(integrationToken ? { integrationToken } : {}),
     },
     hooks,
     record.runId,

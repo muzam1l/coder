@@ -1,21 +1,20 @@
-/** `coder agent settings`: an agent's engine, model or effort on a server. */
+/** `coder agent settings`: an agent's model, access, connections or events on a server. */
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { credentialServerOptions, str } from '../../utils/args';
+import { credentialServerOptions, modelOption, str } from '../../utils/args';
 import { command } from '../../cli';
 import { list, parseMatches } from './init';
 
 export const commandAgentSettings = command({
   name: 'settings',
   description: "change an agent's settings on your Coder server",
-  usage: `Set the model, effort, access, connections or events of an agent in the\nsaved workspace, or publish its next version with new instructions or matches.\nSettings you leave out stay as they are.`,
+  usage: `Set the model, access, connections or events of an agent in the\nsaved workspace, or publish its next version with new instructions or matches.\nSettings you leave out stay as they are.`,
   access: 'write',
   approvalPolicy: 'ask',
   args: {
     id: str('the agent'),
-    model: str('model alias, custom name or engine:model', '<model|engine:model>'),
-    effort: str('low, medium or high', '<level>'),
+    model: modelOption(),
     access: str('read-only or auto, at most its definition', '<read-only|auto>'),
     connections: str('the connections its tasks may use, by id', '<a,b>'),
     events: str('the events it answers on a platform', '<platform=a,b>'),

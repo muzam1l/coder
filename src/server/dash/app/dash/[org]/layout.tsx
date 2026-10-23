@@ -13,8 +13,12 @@ import {
   iMonitor,
   iMoon,
   iOut,
+  iPlug,
+  iPlus,
   iSliders,
+  iSpark,
   iSun,
+  iTerminal,
   iUpdown,
   iUser,
   iUsers,
@@ -233,6 +237,47 @@ function ServerMenu({ me, host }: { me?: Me; host: string }) {
   );
 }
 
+/** Every create action in one place; each opens its page's own form. */
+function CreateMenu({ org }: { org: string }) {
+  const settings = (tab: string) => ({
+    href: '/dash/[org]/settings/[tab]' as const,
+    params: { org, tab },
+  });
+
+  return (
+    <Menu
+      class="create"
+      label="Create"
+      button={{ wide: true }}
+      summary={
+        <>
+          <Icon d={iPlus} />
+          Create
+        </>
+      }
+    >
+      <MenuLink href="/dash/[org]/tasks" params={{ org }} search={{ new: '' }} icon={iActivity}>
+        New task
+      </MenuLink>
+      <MenuLink href="/dash/[org]/agents/new" params={{ org }} icon={iAgent}>
+        New agent
+      </MenuLink>
+      <MenuLink {...settings('connections')} search={{ add: '' }} icon={iPlug}>
+        Add connection
+      </MenuLink>
+      <MenuLink {...settings('models')} search={{ add: '' }} icon={iSpark}>
+        Add model
+      </MenuLink>
+      <MenuLink {...settings('credentials')} icon={iKey}>
+        Add credential
+      </MenuLink>
+      <MenuLink {...settings('runners')} icon={iTerminal}>
+        Add runner
+      </MenuLink>
+    </Menu>
+  );
+}
+
 // Without a saved choice, mid-width screens start with the sidebar collapsed, before first paint.
 const SIDE_AUTO = `(() => {
   const app = document.currentScript.parentElement;
@@ -349,26 +394,29 @@ export default function DashLayout({
         </div>
       </header>
       <aside class="side">
-        <nav aria-label="Dashboard">
-          {navFor(request.headers.get('x-coder-mode') === 'local', org).map(
-            ({ within, label, icon, ...to }) => (
-              <CurrentLink key={within} {...linkOf(to)} within={within} data-tip={label}>
-                <Icon d={icon} />
-                {label}
-                {label === 'Tasks' ? <ActiveCount /> : null}
-                {label === 'Settings' ? (
-                  <WithMe me={me}>
-                    {who =>
-                      who?.reconnect ? (
-                        <i class="dot" title="A connection needs reconnecting" />
-                      ) : null
-                    }
-                  </WithMe>
-                ) : null}
-              </CurrentLink>
-            ),
-          )}
-        </nav>
+        <div class="side-main">
+          <CreateMenu org={org} />
+          <nav aria-label="Dashboard">
+            {navFor(request.headers.get('x-coder-mode') === 'local', org).map(
+              ({ within, label, icon, ...to }) => (
+                <CurrentLink key={within} {...linkOf(to)} within={within} data-tip={label}>
+                  <Icon d={icon} />
+                  {label}
+                  {label === 'Tasks' ? <ActiveCount /> : null}
+                  {label === 'Settings' ? (
+                    <WithMe me={me}>
+                      {who =>
+                        who?.reconnect ? (
+                          <i class="dot" title="A connection needs reconnecting" />
+                        ) : null
+                      }
+                    </WithMe>
+                  ) : null}
+                </CurrentLink>
+              ),
+            )}
+          </nav>
+        </div>
         <div class="side-foot">
           <SideToggle collapsed={side === 'min'} />
           <WithMe me={me}>{who => <ServerMenu me={who} host={host} />}</WithMe>

@@ -305,10 +305,15 @@ export const GITHUB_MCP_SERVER_INSTALL =
   'arch=$(uname -m); [ "$arch" = aarch64 ] && arch=arm64; curl -fsSL "https://github.com/github/github-mcp-server/releases/latest/download/github-mcp-server_Linux_$arch.tar.gz" | tar -xz -C /usr/local/bin github-mcp-server';
 
 /** GitHub's official MCP server (github/github-mcp-server) on the task's narrowed installation token. */
+/** What a user's own GitHub connection reaches. */
+export const GITHUB_USER_DESCRIPTION =
+  "On the user's token; acts as the user, in repositories both the user and this agent's GitHub App can access.";
+
 export function githubToolServer(
   tools: string[],
   _event: PlatformEvent | undefined,
   token: string,
+  owner?: string,
 ): ToolServer {
   const readOnly = !tools.includes('write');
   return {
@@ -316,5 +321,12 @@ export function githubToolServer(
     command: 'github-mcp-server',
     args: ['stdio', '--toolsets=all', ...(readOnly ? ['--read-only'] : [])],
     env: { GITHUB_PERSONAL_ACCESS_TOKEN: token },
+    description: owner
+      ? GITHUB_USER_DESCRIPTION
+      : 'On the installation token; the repositories the app is installed on.',
+    instructions: [
+      'issue_read reads an issue with its comments.',
+      'pull_request_read reads a pull request: get, get_diff, get_files, get_comments, get_reviews, get_review_comments.',
+    ].join(' '),
   };
 }

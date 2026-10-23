@@ -380,7 +380,7 @@ export function RunnersList({ first, me }: { first: Runners; me: Me }) {
     });
 
   return (
-    <Card title="Runners" count={items.length}>
+    <Card look="filled" title="Runners" count={items.length}>
       <div class="table-scroll">
         <table class="rows settings">
           <tbody>

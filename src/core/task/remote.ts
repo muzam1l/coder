@@ -10,6 +10,8 @@ import {
 } from '../types';
 import { logEntry } from './view';
 import { APPROVERS } from '../approvals';
+import { effectiveSettings } from '../../agent/definition';
+import { splitEngineSpec } from '../config';
 import type { TaskInspection } from '.';
 
 export const iso = (ms: number | undefined) =>
@@ -68,6 +70,7 @@ export function remoteResult(status: TaskStatus): TurnResult | null {
 
 export function remoteTask(status: TaskStatus): Task {
   const { task } = status;
+  const settings = effectiveSettings(task);
 
   return {
     id: task.id,
@@ -75,16 +78,19 @@ export function remoteTask(status: TaskStatus): Task {
     updatedAt: iso(status.updatedAt),
     status: status.status === 'waiting' ? 'running' : status.status,
     name: task.name ?? null,
-    engine: (task.usage?.engine ?? task.definition?.engine) as Engine | undefined,
+    // An engine its settings name, else the one its first model attempt runs on.
+    engine: (settings.engine ??
+      (task.models?.[0] ? splitEngineSpec(task.models[0].model).engine : undefined)) as
+      | Engine
+      | undefined,
     prompt: task.prompt ?? task.event?.text,
     model:
       task.usage?.resolvedModel ??
       remoteResult(status)?.model ??
-      task.usage?.model ??
-      task.definition?.model ??
+      settings.model ??
       status.model ??
       null,
-    effort: task.usage?.effort ?? null,
+    effort: settings.effort ?? null,
     ...(task.access ? { access: task.access } : {}),
     ...(task.cwd ? { cwd: task.cwd } : {}),
     ...(task.appendSystem ? { appendSystem: task.appendSystem } : {}),

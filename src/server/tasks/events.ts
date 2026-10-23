@@ -12,7 +12,7 @@ import { AgentLoadError } from '../../agent/load';
 import { dispatchStore } from '../store/primed';
 import { runLocalTask } from './local';
 import { syncLocalAgents } from '../store/local';
-import { credentialFix, resolveEngine } from '../settings/credentials';
+import { credentialFix, modelAttempts, resolveModels } from '../settings/credentials';
 import { dispatchTokens } from './context';
 import { chooseRunner } from '../runners/select';
 import {
@@ -31,7 +31,6 @@ import {
 } from './conversation';
 import { eventPrompt } from '../../agent/context/turn';
 import { generateTaskId } from '../../core/state';
-import { generateRunId } from '../../flow/runs';
 import type { PendingDelivery } from './queue';
 import { answerInConversation, openApprovals, readApprovalCommand } from './approvals';
 import { dashPath, organizationSlug } from '../auth/members';
@@ -137,8 +136,7 @@ async function reservedConversation(
   const reserved = receipts.find(({ value }) => {
     const task = value.pending?.task;
     return (
-      task?.flow === 'default' &&
-      task.agent === agent &&
+      task?.agent === agent &&
       task.event?.appId === event.appId &&
       task.event.installationId === event.installationId &&
       task.event.chat?.thread.id === thread &&
@@ -284,7 +282,7 @@ async function handoff(
   claim?: string,
 ): Promise<{ work?: Promise<void> }> {
   const owner = claim ?? randomUUID();
-  const taskId = task && (task.flow === 'default' ? generateTaskId() : generateRunId());
+  const taskId = task && generateTaskId();
   // A local task runs under its own id, so its link names that one.
   const taskUrl =
     taskId && task?.taskUrl
@@ -438,7 +436,7 @@ async function claimed(
     const receipt = await ctx.store.get<{ pending?: PendingHandoff }>('delivery', delivery);
     if (receipt?.pending?.task) {
       const saved = receipt.pending.task;
-      if (saved.agent !== agent.id || saved.flow !== match.flow) {
+      if (saved.agent !== agent.id) {
         dropped(event, `its interrupted handoff belongs to agent ${saved.agent}`);
         return {};
       }
@@ -447,7 +445,7 @@ async function claimed(
   }
 
   // A conversation has one task: the first message starts it, every later one steers it.
-  const talk = Boolean(event.chat) && match.flow === 'default';
+  const talk = Boolean(event.chat);
   const state = talk ? await conversationState(ctx, event) : undefined;
   const known = state?.record;
   const described = talk
@@ -471,23 +469,23 @@ async function claimed(
       ]);
     });
 
-  // A 1:1 conversation runs on the own engine credentials of the member who asked; a shared one, where anyone may steer, on the workspace's. Each turn adds its asker's own connections.
-  const requestedBy = !talk || described.chat?.thread.isDM === true ? member?.id : undefined;
-  const settings = effectiveSettings(agent);
-  const [route, resolved, context, grants, space] = await Promise.all([
+  // The linked member whose message started the conversation is its starter: their turns run on their own credentials and runner first, anyone else's on the workspace's. Each turn adds its asker's own connections.
+  const requestedBy = member?.id;
+  const [route, { models, first }, context, grants, space] = await Promise.all([
     chooseRunner(ctx, { requestedBy, agent: agent.definition.runner }),
-    resolveEngine(ctx, settings, requestedBy),
+    resolveModels(ctx, effectiveSettings(agent), requestedBy),
     buildContext(ctx, integration, event, member ?? null),
     connectionGrants(ctx, undefined, agent.usage?.connections),
     eventSpace(ctx, integration, event, token),
   ]);
-  const { engine, credential, usable, chain, credentials: engineCredentials } = resolved;
-  if (!usable && route.runner !== 'http') {
+  const attempts = modelAttempts(models, route.runner === 'http');
+  const engine = first.engine;
+  if (!attempts.length) {
     const spoken = described.mustReply ?? directAsk(integration, event);
     if (!spoken) {
       dropped(
         event,
-        `no usable ${chain.join(' or ')} model${requestedBy ? '' : ' among the workspace credentials'}`,
+        `no usable ${models.map(run => run.model).join(' or ')} model${requestedBy ? '' : ' among the workspace credentials'}`,
         'error',
       );
       return {};
@@ -531,7 +529,7 @@ async function claimed(
     id,
     source: event.integration as TaskSource,
     agent: agent.id,
-    flow: match.flow,
+    flow: 'default',
     ...route,
     event: space ? { ...described, space } : described,
     failureReply: await failureText(ctx, engine, await slug()),
@@ -540,12 +538,10 @@ async function claimed(
     author: integration.author?.(app.name) ?? app.name,
     definition: agent.definition,
     access: agentAccess(agent),
-    engineChain: chain,
-    engineCredentials,
-    ...(credential ? { credential } : {}),
+    models: attempts,
     ...(requestedBy ? { requestedBy } : {}),
     ...(agent.files ? { files: agent.files } : {}),
-    usage: { ...agent.usage, engine },
+    ...(agent.usage ? { usage: agent.usage } : {}),
     tools: match.tools,
     connections: grants,
     ...(Object.keys(context).length ? { context } : {}),

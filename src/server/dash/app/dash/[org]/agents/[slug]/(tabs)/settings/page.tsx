@@ -28,7 +28,7 @@ export default async function AgentSettingsPage({
   // A failed list fails the form: Save replaces settings whole, so a missing list would wipe them.
   const connections = load(request)
     .connections.list()
-    .then(rows => rows.filter(row => !row.owner));
+    .then(rows => rows.filter(row => !row.owner && !row.agent));
   const runners = load(request)
     .runners.list()
     .then(rows => rows.items);
@@ -37,7 +37,7 @@ export default async function AgentSettingsPage({
     <Settle
       load={() =>
         Promise.all([agent, run, runners, catalog, connections]).then(
-          ([row, { models, defaults }, rows, integrations, workspace]) => (
+          ([row, { shape, defaults }, rows, integrations, workspace]) => (
             <>
               {row.needsModel ? (
                 <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
@@ -45,8 +45,8 @@ export default async function AgentSettingsPage({
               <AgentSettingsForm
                 agent={row}
                 catalog={integrations}
-                models={models}
-                defaults={defaults}
+                shape={shape}
+                chain={defaults.chain}
                 runners={runnerOptions(rows)}
                 connections={workspace}
               />

@@ -1,26 +1,32 @@
 'use client';
 
+import './models-list.css';
+
 import { client } from '@/utils/client';
-import type { ComponentChildren } from 'preact';
+import { Fragment } from 'preact';
 import { useRef, useState } from 'preact/hooks';
 import { useSearchParams } from '@wular/pnext/navigation/client';
 
-import { Loading } from '@/comps/ui/card';
+import { Card, Loading } from '@/comps/ui/card';
 import { Field } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
-import { Button } from '@/comps/ui/button';
-import { MenuItem } from '@/comps/ui/menu-items';
+import { Button, LinkButton } from '@/comps/ui/button';
+import { Icon } from '@/comps/ui/icon';
+import { Menu } from '@/comps/ui/menu';
+import { MenuHead, MenuItem, MenuLabel } from '@/comps/ui/menu-items';
 import { Select } from '@/comps/ui/select';
 import { Combo } from '@/comps/ui/combo';
 import { Modal } from '@/comps/ui/modal';
+import { Notice } from '@/comps/ui/notice';
+import { iAlert, iCheck, iDots, iFirst, iLeft, iOff, iPencil, iPlus, iRight, iTrash, iUndo } from '@/comps/ui/icons';
+import { useOrg } from '@/comps/nav/org';
 import {
   CUSTOM_PROVIDERS,
-  EFFORTS,
-  ENGINES,
-  ENGINE_NAMES,
   SCOPES,
-  defaultLabel,
+  modelChoices,
+  splitSpec,
 } from '@/app/dash/[org]/settings/model-options';
+import { ModelPick } from '@/app/dash/[org]/settings/model-pick';
 import { reasonText } from '@/utils/format';
 import { useAction } from '@/utils/action';
 import { toastError } from '@/comps/frame/task-toasts';
@@ -29,21 +35,10 @@ import type {
   Config,
   ConfigShape,
   CredentialRow,
-  ModelEntry,
   ModelsShape,
   ProbeResult,
 } from '@coder/client/types';
 
-const KINDS: Array<[string, string]> = [
-  ['endpoint', 'Endpoint'],
-  ['alias', 'Engine alias'],
-];
-const ALIAS_ENGINES: Array<[string, string]> = [
-  ['claude', 'Claude'],
-  ['codex', 'Codex'],
-];
-/** The built-in model each engine's id field shows as its example. */
-const EXAMPLES: Record<string, string> = { claude: 'sonnet', codex: 'sol' };
 const providers = CUSTOM_PROVIDERS;
 const OTHER = providers.at(-1)!;
 
@@ -56,68 +51,38 @@ const slug = (id: string) =>
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
 
-/** The first example name no model has, for a placeholder. */
-const unused = (names: string[], taken: Record<string, unknown>) =>
-  names.find(name => !(name in taken));
-
-/** A short name for a Claude or Codex model id, or an OpenAI-compatible endpoint, in a dialog. Enter adds. */
+/** An OpenAI-compatible model, such as Ollama or OpenRouter, in a dialog. Enter adds. */
 function AddModel({
-  builtin,
   credentials,
   admin,
-  taken,
-  efforts,
   onAdd,
   onClose,
 }: {
-  builtin: ModelsShape['builtin'];
   credentials: CredentialRow[] | null;
   admin: boolean;
-  /** Each engine's default effort, which an alias without one runs at. */
-  efforts: Record<string, string | undefined>;
-  /** Every model name in use. */
-  taken: Record<string, unknown>;
   onAdd: (act: () => Promise<Config>) => Promise<boolean>;
   onClose: () => void;
 }) {
-  const [kind, setKind] = useState('endpoint');
-  const kindField = (
-    <Field label="Kind" group>
-      <Select label="Kind" options={KINDS} value={kind} onChange={setKind} />
-    </Field>
-  );
-  const [engine, setEngine] = useState('claude');
-  const [effort, setEffort] = useState('');
   const [busy, setBusy] = useState(false);
   const replace = useReplace();
-  const known = builtin[engine] ?? {};
-  const example = known[EXAMPLES[engine]!] ?? Object.values(known)[0];
 
   const add = async (values: Record<string, string>) => {
     setBusy(true);
-    const added =
-      kind === 'alias'
-        ? await onAdd(() =>
-            client.models.alias(
-              values.name!,
-              [engine, values.model, effort].filter(Boolean).join(':'),
-            ),
-          )
-        : await onAdd(async () => {
-            const envKey = values.envKey || 'OPENAI_API_KEY';
-            if (values.key)
-              await client.credentials.add({
-                env: { [envKey]: values.key },
-                workspace: values.scope === 'workspace',
-              });
-            return client.models.add({
-              name: values.name!,
-              baseUrl: values.baseUrl!,
-              model: values.model!,
-              envKey,
-              ...(values.contextWindow ? { contextWindow: Number(values.contextWindow) } : {}),
-            });
-          });
+    const added = await onAdd(async () => {
+      const envKey = values.envKey || 'OPENAI_API_KEY';
+      if (values.key)
+        await client.credentials.add({
+          env: { [envKey]: values.key },
+          workspace: values.scope === 'workspace',
+        });
+      return client.models.add({
+        name: values.name!,
+        baseUrl: values.baseUrl!,
+        model: values.model!,
+        envKey,
+        ...(values.contextWindow ? { contextWindow: Number(values.contextWindow) } : {}),
+      });
+    });
     setBusy(false);
     if (added) onClose();
   };
@@ -135,15 +100,11 @@ function AddModel({
           const values = Object.fromEntries(
             [...new FormData(form)].map(([key, value]) => [key, String(value).trim()]),
           );
-          if (kind === 'endpoint' && !values.name) values.name = slug(values.model ?? '');
-          if (!values.name || !values.model || (kind === 'endpoint' && !values.baseUrl)) return;
+          if (!values.name) values.name = slug(values.model ?? '');
+          if (!values.name || !values.model || !values.baseUrl) return;
           const envKey = values.envKey || 'OPENAI_API_KEY';
           const scope = values.scope || 'personal';
-          if (
-            kind === 'endpoint' &&
-            values.key &&
-            credentials?.some(row => row.name === envKey && row.scope === scope)
-          )
+          if (values.key && credentials?.some(row => row.name === envKey && row.scope === scope))
             return replace.ask(replaceTitle(envKey, scope), () => void add(values));
           void add(values);
         }}
@@ -155,40 +116,7 @@ function AddModel({
         }
       >
         <div class="add-form">
-          {kind === 'alias' ? (
-            <div class="add-grid">
-              {kindField}
-              <Field label="Engine" group>
-                <Select
-                  label="Engine"
-                  options={ALIAS_ENGINES}
-                  value={engine}
-                  onChange={setEngine}
-                />
-              </Field>
-              <Field label="Model id">
-                <input name="model" placeholder={example ?? 'model id'} autocomplete="off" />
-              </Field>
-              <Field label="Short name" hint="used as --model">
-                <input
-                  name="name"
-                  placeholder={unused(['fast', 'deep', 'quick'], taken)}
-                  autocomplete="off"
-                  pattern="[a-z0-9][a-z0-9\-]*"
-                />
-              </Field>
-              <Field label="Effort" hint="optional" group>
-                <Select
-                  label="Effort"
-                  options={[['', defaultLabel(efforts[engine])], ...EFFORTS]}
-                  value={effort}
-                  onChange={setEffort}
-                />
-              </Field>
-            </div>
-          ) : (
-            <CustomFields kind={kindField} credentials={credentials} admin={admin} />
-          )}
+          <CustomFields credentials={credentials} admin={admin} />
         </div>
       </Modal>
       {replace.dialog}
@@ -198,11 +126,9 @@ function AddModel({
 
 /** A custom endpoint's fields: the model in one row, its key in the next; a provider fills its URL and key variable, and a probe lists its models. */
 function CustomFields({
-  kind,
   credentials,
   admin,
 }: {
-  kind: ComponentChildren;
   /** Null on the local server, where keys come from this machine's environment. */
   credentials: CredentialRow[] | null;
   admin: boolean;
@@ -232,7 +158,7 @@ function CustomFields({
   const saved = (name: string, where = scope) =>
     has(name, where) ? where : !admin && has(name, 'workspace') ? 'workspace' : undefined;
   const collapsed = saved(envKey, admin ? 'workspace' : 'personal');
-  const whose = (where?: string) => (where === 'workspace' ? "the workspace's" : 'your');
+  const whose = (where?: string) => (where === 'workspace' ? "the workspace's" : 'the personal');
 
   const [checking, setChecking] = useState(false);
   const timer = useRef<ReturnType<typeof setTimeout>>();
@@ -318,7 +244,6 @@ function CustomFields({
   return (
     <>
       <div class="add-grid">
-        {kind}
         <Field label="Provider" group>
           <Select
             label="Provider"
@@ -423,8 +348,138 @@ function CustomFields({
     </>
   );
 }
+/** An alias in a dialog: a short name for a model and effort; a built-in's name replaces it, or turns it off. */
+function AliasDialog({
+  shape,
+  editing,
+  onSave,
+  onClose,
+}: {
+  shape: ModelsShape;
+  /** The name being changed; none adds one. */
+  editing?: string;
+  onSave: (act: () => Promise<Config>) => Promise<boolean>;
+  onClose: () => void;
+}) {
+  const entry = editing ? shape.models[editing] : undefined;
+  const [name, setName] = useState(editing ?? '');
+  const [spec, setSpec] = useState(typeof entry === 'string' ? entry : entry === false ? '' : 'sol');
+  const [busy, setBusy] = useState(false);
+  const builtin = shape.builtin[name.trim()];
+  const shown = name.trim() || 'name';
 
-/** Each engine's models, what each points to, and its default; the default engine's default runs new tasks. */
+  return (
+    <Modal
+      title={editing ? `Edit ${editing}` : 'Add alias'}
+      dismiss
+      busy={busy}
+      onSubmit={async event => {
+        event.preventDefault();
+        const alias = name.trim();
+        if (!alias) return;
+        setBusy(true);
+        const saved = await onSave(() =>
+          spec ? client.models.alias(alias, spec) : client.models.disable(alias),
+        );
+        setBusy(false);
+        if (saved) onClose();
+      }}
+      onClose={onClose}
+      actions={
+        <Button type="submit" loading={busy}>
+          Save
+        </Button>
+      }
+    >
+      <Field label="Name" hint={builtin ? `replaces the built-in, ${builtin}` : 'used as --model'}>
+        <input
+          name="name"
+          value={name}
+          onInput={event => setName(event.currentTarget.value)}
+          placeholder="fast"
+          autocomplete="off"
+          spellcheck={false}
+          pattern="[a-z0-9][a-z0-9\-]*"
+          readOnly={Boolean(editing)}
+          required
+        />
+      </Field>
+      <Field label="Model" group>
+        <ModelPick shape={shape} value={spec} onChange={setSpec} empty={builtin ? { label: 'Off', sub: "can't be picked or fallen back to" } : undefined} />
+      </Field>
+      <p class="muted mono">
+        {spec ? `${shown} = ${spec}` : `${shown} can't be picked or fallen back to`}
+      </p>
+    </Modal>
+  );
+}
+
+/** One chain entry: its model and effort, each one click, and its ⋯ menu; it drags to a new place. */
+function ChainItem({
+  shape,
+  spec,
+  index,
+  count,
+  runsOn,
+  onChange,
+  onMove,
+  onRemove,
+  onDrop,
+  onAdd,
+}: {
+  shape: ModelsShape;
+  spec: string;
+  index: number;
+  count: number;
+  runsOn?: string;
+  onChange: (spec: string) => void;
+  onMove: (to: number) => void;
+  onRemove: () => void;
+  onDrop: (from: number) => void;
+  onAdd: () => void;
+}) {
+  const skipped = runsOn?.includes('no credential');
+  return (
+    <span
+      class="chain-item chain-chip"
+      draggable
+      onDragStart={event => event.dataTransfer?.setData('text/plain', String(index))}
+      onDragOver={event => event.preventDefault()}
+      onDrop={event => {
+        event.preventDefault();
+        onDrop(Number(event.dataTransfer?.getData('text/plain')));
+      }}
+    >
+      <ModelPick shape={shape} value={spec} onChange={onChange} onAdd={onAdd} compact />
+      <Menu button="icon" class="chain-more" label={`${spec} actions`} summary={<Icon d={iDots} />}>
+        <MenuHead
+          icon={<span class="chain-n">{index + 1}</span>}
+          title={index ? spec : `${spec}, the default`}
+          sub={runsOn ?? ''}
+        />
+        {index > 0 ? <MenuItem icon={iFirst} title="Make default" onClick={() => onMove(0)} /> : null}
+        {index > 0 ? <MenuItem icon={iLeft} title="Move earlier" onClick={() => onMove(index - 1)} /> : null}
+        {index < count - 1 ? (
+          <MenuItem icon={iRight} title="Move later" onClick={() => onMove(index + 1)} />
+        ) : null}
+        {count > 1 ? <MenuItem icon={iTrash} title="Remove from chain" danger onClick={onRemove} /> : null}
+      </Menu>
+      {skipped ? <i class="chain-dot" title={runsOn} /> : null}
+    </span>
+  );
+}
+
+/** What a name runs, as its row says it. */
+function target(shape: ModelsShape, name: string): string {
+  const entry = shape.models[name];
+  if (entry === false) return shape.builtin[name] ?? '';
+  if (typeof entry === 'object' && entry)
+    return `${entry.model} · ${URL.canParse(entry.baseUrl) ? new URL(entry.baseUrl).host : entry.baseUrl}`;
+
+  return String(entry ?? '');
+}
+
+/** The chain tasks try in order and the review model, each a model and effort; then the workspace's own names: aliases, custom models and built-ins turned off. */
 export function ModelsList({
   first,
   config,
@@ -437,135 +492,212 @@ export function ModelsList({
   admin: boolean;
 }) {
   const [models, setModels] = useState(first);
-  const adding = useAddDialog(['base-url', 'model', 'env-key', 'context-window']);
+  const adding = useAddDialog('Add model', ['base-url', 'model', 'env-key', 'context-window']);
+  const [aliasing, setAliasing] = useState<string | true>();
   const action = useAction();
   const settings = useConfig(config.config);
   const send = (act: () => Promise<Config>, toast?: string) =>
     action.run(
       'send',
       async () => {
-        const answer = await act();
-        setModels(now => ({ ...now, models: answer.models ?? {} }));
+        await act();
+        setModels(await client.models.list());
       },
       { toast },
     );
-  const defaultOf = (engine: string) =>
-    settings.value.engines?.[engine]?.model ?? config.effective.engines?.[engine]?.model;
-  const off = (name: string) => models.models[name]?.disabled === true;
-  const chain = settings.value.chain ?? config.effective.chain ?? ENGINES;
+  // A chain or review change reads the models again for where each runs.
+  const save = async (patch: Parameters<typeof settings.patch>[0]) => {
+    if (await settings.patch(patch)) setModels(await client.models.list());
+  };
+  const chain = settings.value.chain ?? config.effective.chain ?? [];
+  const review = settings.value.reviewModel ?? config.effective.reviewModel ?? '';
+  const move = (from: number, to: number) => {
+    if (from === to || Number.isNaN(from)) return;
+    const next = [...chain];
+    next.splice(to, 0, ...next.splice(from, 1));
+    void save({ chain: next });
+  };
+  const { options, headings } = modelChoices(models);
+  const unused = options.filter(
+    ([name]) => !chain.some(spec => splitSpec(spec, models).model === name),
+  );
+  const own = Object.keys(models.models);
+  // Built-ins the workspace left as they are, listed after its own names.
+  const builtins = Object.keys(models.builtin).filter(name => !(name in models.models));
+  const org = useOrg();
+  const skipped = chain.filter(spec => models.runsOn?.[spec]?.includes('no credential'));
 
-  const own = Object.entries(models.models).filter(([, entry]) => entry.provider || entry.baseUrl);
-  const shown: Array<{
-    name: string;
-    engine: string;
-    target: string;
-    entry?: ModelEntry;
-    removable: boolean;
-  }> = [
-    // An alias named like a built-in replaces it, so the built-in row steps aside.
-    ...Object.entries(models.builtin).flatMap(([engine, names]) =>
-      Object.entries(names)
-        .filter(([name]) => !own.some(([alias]) => alias === name))
-        .map(([name, id]) => ({
-          name,
-          engine,
-          target: id,
-          entry: models.models[name],
-          removable: false,
-        })),
-    ),
-    ...own.map(([name, entry]) => ({
-      name,
-      engine: entry.provider ?? 'custom',
-      target: entry.baseUrl
-        ? `${entry.model} · ${entry.baseUrl}`
-        : `${entry.model}${entry.effort ? ` · ${entry.effort}` : ''}`,
-      entry,
-      removable: true,
-    })),
-  ];
-  const groups = [...new Set([...chain, ...ENGINES])]
-    .map(engine => [engine, shown.filter(model => model.engine === engine)] as const)
-    .filter(([, list]) => list.length);
   return (
     <>
-      {groups.map(([engine, list], index) => (
-        <List
-          key={engine}
-          title={ENGINE_NAMES[engine] ?? engine}
-          count={list.length}
-          actions={index === 0 ? adding.button : undefined}
-        >
-          {list.map(({ name, target, entry, removable }) => {
-            const isDefault = [name, target].includes(defaultOf(engine) ?? '');
-            return (
-              <Row
-                key={name}
-                title={name}
-                badges={
-                  <>
-                    {isDefault && chain[0] === engine ? (
-                      <Badge tone="acc">default for new tasks</Badge>
-                    ) : null}
-                    {isDefault && chain[0] !== engine ? (
-                      <Badge>default for {ENGINE_NAMES[engine] ?? engine}</Badge>
-                    ) : null}
-                    {entry?.disabled ? <Badge>off</Badge> : null}
-                  </>
-                }
-                sub={target === name ? undefined : `→ ${target}`}
-                actions={
-                  isDefault || entry?.disabled ? null : (
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      onClick={() =>
-                        void settings.patch({ engines: { [engine]: { model: name } } })
-                      }
-                    >
-                      Make default
-                    </Button>
-                  )
-                }
-                menu={
-                  <MenuItem
-                    title={off(name) ? 'Enable' : 'Disable'}
-                    onClick={() =>
-                      void send(() => client.models[off(name) ? 'enable' : 'disable'](name))
-                    }
-                  />
-                }
-                remove={
-                  removable
-                    ? {
-                        title: `Remove ${name}?`,
-                        body: 'Tasks that ask for it stop running.',
-                        link: name,
-                        onRemove: () => send(() => client.models.remove(name)),
-                      }
-                    : undefined
-                }
+      <Card look="filled" title="Chain">
+        <p class="body muted">Tasks try these in order; drag a model to move it.</p>
+        {skipped.length ? (
+          <Notice tone="warning" slim>
+            <Icon d={iAlert} />
+            <span class="grow">
+              {skipped.join(', ')} {skipped.length > 1 ? 'have' : 'has'} no credential, so tasks
+              skip {skipped.length > 1 ? 'them' : 'it'}.
+            </span>
+            <LinkButton
+              variant="outline"
+              size="sm"
+              href="/dash/[org]/settings/[tab]"
+              params={{ org, tab: 'credentials' }}
+            >
+              Add credential
+            </LinkButton>
+          </Notice>
+        ) : null}
+        <div class="chain">
+          {chain.map((spec, index) => (
+            <Fragment key={`${index}:${spec}`}>
+              {index ? <span class="chain-arrow" aria-hidden="true">→</span> : null}
+              <ChainItem
+                shape={models}
+                spec={spec}
+                index={index}
+                count={chain.length}
+                runsOn={models.runsOn?.[spec]}
+                onChange={next => save({ chain: chain.map((each, at) => (at === index ? next : each)) })}
+                onMove={to => move(index, to)}
+                onRemove={() => save({ chain: chain.filter((_, at) => at !== index) })}
+                onDrop={from => move(from, index)}
+                onAdd={adding.show}
               />
-            );
-          })}
-        </List>
-      ))}
+            </Fragment>
+          ))}
+          {admin ? (
+            <Menu
+              class="chain-add"
+              label="Add to the chain"
+              summary={
+                <>
+                  <Icon d={iPlus} />
+                  Add
+                </>
+              }
+              summaryClass="chain-add-btn"
+            >
+              {unused.map(([name]) => (
+                <Fragment key={name}>
+                  {headings[name] ? <MenuLabel>{headings[name]}</MenuLabel> : null}
+                  <MenuItem
+                    title={name}
+                    end={<small class="muted">{target(models, name) || models.builtin[name]}</small>}
+                    onClick={() => save({ chain: [...chain, name] })}
+                  />
+                </Fragment>
+              ))}
+              <MenuItem icon={iPlus} title="Add a model" onClick={adding.show} />
+            </Menu>
+          ) : null}
+        </div>
+      </Card>
+      <Card look="filled" title="Review">
+        <p class="body muted">coder review and the review tool run this model, then the chain.</p>
+        <div class="chain" title={models.runsOn?.[review]}>
+          <ModelPick
+            shape={models}
+            value={review}
+            onChange={spec => save({ reviewModel: spec })}
+            onAdd={adding.show}
+            compact
+          />
+        </div>
+      </Card>
+      <List look="filled"
+        title="Models"
+        count={own.length + builtins.length}
+        actions={
+          admin ? (
+            <>
+              <Button size="sm" variant="secondary" leftIcon={iPlus} onClick={() => setAliasing(true)}>
+                Add alias
+              </Button>
+              {adding.button}
+            </>
+          ) : undefined
+        }
+      >
+        {own.map(name => {
+          const entry = models.models[name];
+          const off = entry === false || (typeof entry === 'object' && entry?.disabled);
+          const replaces = typeof entry === 'string' && name in models.builtin;
+          return (
+            <Row
+              key={name}
+              title={name}
+              actions={
+                off ? <Badge>off</Badge> : replaces ? <Badge tone="acc">replaces built-in</Badge> : null
+              }
+              sub={target(models, name)}
+              menu={
+                admin ? (
+                  <>
+                    {typeof entry === 'string' || entry === false ? (
+                      <MenuItem icon={iPencil} title="Edit" onClick={() => setAliasing(name)} />
+                    ) : null}
+                    {typeof entry === 'object' && entry ? (
+                      <MenuItem
+                        icon={off ? iCheck : iOff}
+                        title={off ? 'Enable' : 'Disable'}
+                        onClick={() => void send(() => client.models[off ? 'enable' : 'disable'](name))}
+                      />
+                    ) : null}
+                  </>
+                ) : undefined
+              }
+              remove={
+                admin
+                  ? {
+                      title: replaces || off ? `Reset ${name}?` : `Remove ${name}?`,
+                      body:
+                        replaces || off
+                          ? `${name} runs the built-in ${models.builtin[name]} again.`
+                          : 'Tasks that ask for it stop running.',
+                      label: replaces || off ? 'Reset' : 'Remove',
+                      icon: replaces || off ? iUndo : iTrash,
+                      link: name,
+                      onRemove: () => send(() => client.models.remove(name)),
+                    }
+                  : undefined
+              }
+            />
+          );
+        })}
+        {builtins.map(name => (
+          <Row
+            key={name}
+            title={name}
+            actions={<Badge>built-in</Badge>}
+            sub={models.builtin[name]}
+            menu={
+              admin ? (
+                <>
+                  <MenuItem icon={iPencil} title="Override" onClick={() => setAliasing(name)} />
+                  <MenuItem
+                    icon={iOff}
+                    title="Disable"
+                    onClick={() => void send(() => client.models.disable(name))}
+                  />
+                </>
+              ) : undefined
+            }
+          />
+        ))}
+      </List>
+      {aliasing ? (
+        <AliasDialog
+          shape={models}
+          editing={aliasing === true ? undefined : aliasing}
+          onSave={act => send(act, 'Not saved')}
+          onClose={() => setAliasing(undefined)}
+        />
+      ) : null}
       {adding.open ? (
         <AddModel
-          builtin={models.builtin}
           credentials={credentials}
           admin={admin}
-          taken={{
-            ...models.models,
-            ...Object.assign({}, ...Object.values(models.builtin)),
-          }}
-          efforts={Object.fromEntries(
-            ENGINES.map(engine => [
-              engine,
-              settings.value.engines?.[engine]?.effort ??
-                config.effective.engines?.[engine]?.effort,
-            ]),
-          )}
           onAdd={act => send(act, 'Not saved')}
           onClose={adding.close}
         />

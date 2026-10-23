@@ -1,18 +1,20 @@
 import { type Params } from '../routes/match';
 import { isDeepStrictEqual } from 'node:util';
 import { assertNotReserved, agentsFromSources, repoAgentOverride } from '../../agent/load';
-import { parseAgentsUsage } from '../../agent/definition';
+import { parseAgentsUsage, usageEntry } from '../../agent/definition';
 import { type ServerContext } from '../context';
 import { getAgent, getVersion, publishAgent, setAgentSettings, toAgent } from './records';
 import { syncApps } from './repo';
 import { deleteLocalAgent, syncLocalAgents, writeLocalAgent } from '../store/local';
 import { effectiveConfig, shownConfig, updateConfig } from '../settings/config';
+import { splitEngineSpec } from '../../core/config';
 import { resolveTaskOptions } from '../../core/dispatch';
 import { modelProblem } from '../settings/credentials';
 import { json } from '../routes/http';
 import { prepareAgent } from './catalog';
 import { CoderError } from '../../core/errors';
 import type { AppSync } from '../../client/types';
+import type { AgentUsage } from '../../agent/types';
 import type { AgentRecord, AgentVersionRecord } from '../store/types';
 
 const FILE_LIMIT = 256 * 1024;
@@ -51,18 +53,21 @@ async function publishedApps(ctx: ServerContext, version: AgentVersionRecord): P
   });
 }
 
-/** An agent's settings in the shape they are saved in: engine and model resolved from the model's alias or `engine:model`, refused unless a workspace credential runs them. */
+/** An agent's settings in the shape they are saved in: engine, model and effort resolved from its model spec or saved split, refused unless a workspace credential runs them. */
 export async function agentSettings(ctx: ServerContext, slug: string, body: unknown) {
-  const parsed = parseAgentsUsage({ [slug]: body })[slug];
+  const usage = body && typeof body === 'object' ? usageEntry(body as AgentUsage) : body;
+  const parsed = parseAgentsUsage({ [slug]: usage })[slug];
   if (!parsed || typeof parsed !== 'object') throw new Error('settings must be an object');
   if (parsed.model) {
+    // The engine it runs on, with the model and effort as given.
+    const typed = splitEngineSpec(parsed.model);
     const selected = resolveTaskOptions(
       { engine: parsed.engine, model: parsed.model, effort: parsed.effort },
-      { ...effectiveConfig(ctx, await shownConfig(ctx)), engines: {} },
+      effectiveConfig(ctx, await shownConfig(ctx)),
     );
     parsed.engine = selected.engine;
-    parsed.model = selected.model ?? undefined;
-    parsed.effort = selected.effort ?? undefined;
+    parsed.model = typed.model;
+    parsed.effort = typed.effort ?? parsed.effort;
   }
   const problem = await modelProblem(ctx, parsed, Boolean(ctx.taskPrincipal));
   if (problem) throw new Error(problem);
@@ -89,7 +94,7 @@ export async function saveAgentSettings(ctx: ServerContext, slug: string, body: 
       { status: 409 },
     );
   await updateConfig(ctx, config => {
-    config.agents = { ...config.agents, [slug]: settings };
+    config.agents = { ...config.agents, [slug]: usageEntry(settings) };
   });
   await syncLocalAgents(ctx.store, ctx.local.cwd, ctx.integrations);
 

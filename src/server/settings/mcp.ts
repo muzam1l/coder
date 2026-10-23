@@ -1,6 +1,11 @@
 import { type Found } from '../../client/types';
+import { safeEqual } from '../../utils/crypto';
+import { sign } from '../auth/nonce';
 import { type ServerContext } from '../context';
-import { json } from '../routes/http';
+import { pinnedRequest, publicAddress } from '../outbound';
+import { json, notFound } from '../routes/http';
+import { type Params } from '../routes/match';
+import { MemoryCache } from './models';
 
 const RUNNERS: Record<string, [string, ...string[]]> = {
   npm: ['npx', '-y'],
@@ -34,6 +39,10 @@ type ArgumentInput = {
 
 type Remote = { type: string; url: string; headers?: Input[] };
 
+type Icon = { src: string; mimeType?: string; sizes?: string[]; theme?: 'light' | 'dark' };
+
+export type IconFile = { type: string; bytes: Buffer<ArrayBuffer> };
+
 type Package = {
   registryType: string;
   identifier: string;
@@ -49,6 +58,8 @@ type Detail = {
   version?: string;
   title?: string;
   description?: string;
+  websiteUrl?: string;
+  icons?: Icon[];
   remotes?: Remote[];
   packages?: Package[];
   /** GitHub's registry adds the repository's own display name. */
@@ -116,6 +127,159 @@ function entryOf(server: Detail) {
     env: inputs(pkg.environmentVariables),
     headers: [],
   };
+}
+
+const ICON_BYTES = 64 * 1024;
+const ICON_SIDE = 2048;
+const RASTER = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+
+/** The image type from its magic bytes, and its width and height from its header; PNG, JPEG and WebP only. */
+function sniff(bytes: Buffer): { type: string; width: number; height: number } | undefined {
+  if (bytes.length < 32) return undefined;
+  if (
+    bytes.toString('hex', 0, 8) === '89504e470d0a1a0a' &&
+    bytes.toString('latin1', 12, 16) === 'IHDR'
+  )
+    return { type: 'image/png', width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  if (bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WEBP') {
+    const chunk = bytes.toString('latin1', 12, 16);
+    const bits = bytes.readUInt32LE(21);
+    if (chunk === 'VP8X')
+      return {
+        type: 'image/webp',
+        width: 1 + bytes.readUIntLE(24, 3),
+        height: 1 + bytes.readUIntLE(27, 3),
+      };
+    if (chunk === 'VP8L')
+      return {
+        type: 'image/webp',
+        width: 1 + (bits & 0x3fff),
+        height: 1 + ((bits >> 14) & 0x3fff),
+      };
+    if (chunk === 'VP8 ')
+      return {
+        type: 'image/webp',
+        width: bytes.readUInt16LE(26) & 0x3fff,
+        height: bytes.readUInt16LE(28) & 0x3fff,
+      };
+    return undefined;
+  }
+  if (bytes.toString('hex', 0, 3) !== 'ffd8ff') return undefined;
+  // A JPEG's size is in its frame header, after the segments before it.
+  for (let at = 2; at + 9 <= bytes.length; at += 2 + bytes.readUInt16BE(at + 2)) {
+    if (bytes[at] !== 0xff) return undefined;
+    const marker = bytes[at + 1]!;
+    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker))
+      return {
+        type: 'image/jpeg',
+        width: bytes.readUInt16BE(at + 7),
+        height: bytes.readUInt16BE(at + 5),
+      };
+  }
+
+  return undefined;
+}
+
+function checkIcon(bytes: Buffer<ArrayBuffer>): IconFile | undefined {
+  const image = bytes.length <= ICON_BYTES ? sniff(bytes) : undefined;
+  if (!image || !image.width || !image.height) return undefined;
+
+  return Math.max(image.width, image.height) <= ICON_SIDE ? { type: image.type, bytes } : undefined;
+}
+
+const iconSignature = (ctx: ServerContext, src: string) => sign(ctx, `mcp-icon:${src}`);
+
+const originOf = (value?: string) =>
+  value && URL.canParse(value) ? new URL(value).origin : undefined;
+
+/** The server's icon from our own origin: raster, hosted on its remote's or website's origin, nearest 32 to 64 px. */
+function iconOf(ctx: ServerContext, server: Detail): string | undefined {
+  const origins = new Set(
+    [...(server.remotes ?? []).map(remote => remote.url), server.websiteUrl].map(originOf),
+  );
+  const distance = ({ sizes = [] }: Icon) =>
+    Math.min(
+      256,
+      ...sizes
+        .map(size => parseInt(size))
+        .filter(side => side > 0)
+        .map(side => (side < 32 ? (32 - side) * 8 : Math.max(0, side - 64))),
+    );
+  const shown = ({ src }: Icon) => {
+    if (src.startsWith('data:')) {
+      const file = checkIcon(
+        Buffer.from(/^data:[^,]*;base64,(.*)$/s.exec(src)?.[1] ?? '', 'base64'),
+      );
+      return file && `data:${file.type};base64,${file.bytes.toString('base64')}`;
+    }
+    const url = URL.canParse(src) ? new URL(src) : undefined;
+    if (
+      url?.protocol !== 'https:' ||
+      url.username ||
+      url.password ||
+      !origins.has(url.origin) ||
+      /\.(svg|gif)$/i.test(url.pathname)
+    )
+      return undefined;
+
+    return `/mcp-icons/${iconSignature(ctx, src)}?${new URLSearchParams({ src })}`;
+  };
+
+  return (server.icons ?? [])
+    .filter(icon => !icon.mimeType || RASTER.includes(icon.mimeType))
+    .sort((a, b) => Number(!!a.theme) - Number(!!b.theme) || distance(a) - distance(b))
+    .map(shown)
+    .find(Boolean);
+}
+
+/** Fetches with no credentials or redirects, from the public address it checked; null when the icon is refused. */
+async function fetchIcon(ctx: ServerContext, src: string): Promise<IconFile | null> {
+  try {
+    const url = new URL(src);
+    if (url.protocol !== 'https:') return null;
+    const address = await publicAddress(url.hostname);
+    const init: RequestInit = {
+      headers: { accept: RASTER.join(',') },
+      credentials: 'omit',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(3_000),
+    };
+    const response = ctx.fetch
+      ? await ctx.fetch(url, init)
+      : await pinnedRequest(url, init, address, undefined, ICON_BYTES);
+    if (response.status !== 200) return null;
+
+    return checkIcon(Buffer.from(await response.arrayBuffer())) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** An icon the registry search signed, checked and cached; anyone may load it, only the search names new ones. */
+export async function mcpIcon(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+  url: URL,
+): Promise<Response> {
+  const src = url.searchParams.get('src') ?? '';
+  if (!safeEqual(iconSignature(ctx, src), params.signature ?? '')) return notFound();
+  const settings = (ctx.settings ??= {});
+  const icons = (settings.mcpIcons ??= new MemoryCache<IconFile | null>({
+    ttlMs: 3_600_000,
+    max: 300,
+    now: ctx.now,
+  }));
+  const icon = await icons.get(src, () => fetchIcon(ctx, src));
+  if (!icon) return notFound();
+
+  return new Response(icon.bytes, {
+    headers: {
+      'content-type': icon.type,
+      'cache-control': 'public, max-age=604800, immutable',
+      'x-content-type-options': 'nosniff',
+    },
+  });
 }
 
 type RegistryRow = {
@@ -286,6 +450,7 @@ export class RegistryIndex {
           )
             continue;
           const entry = entryOf(server);
+          const icon = entry && iconOf(ctx, server);
           const verified =
             /^[a-z0-9-]+(?:\.[a-z0-9-]+)+\//i.test(server.name) &&
             !/^io\.github(?:\.|\/)/i.test(server.name);
@@ -304,6 +469,7 @@ export class RegistryIndex {
                   description: server.description ?? '',
                   ...(verified ? { verified: true } : {}),
                   ...(source.curated ? { curated: true } : {}),
+                  ...(icon ? { icon } : {}),
                   ...entry,
                 }
               : undefined,

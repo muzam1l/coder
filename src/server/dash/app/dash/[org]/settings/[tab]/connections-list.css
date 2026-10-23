@@ -1,118 +1,191 @@
-.conns .reach {
+/* one row per service: its workspace side, then the viewer's own */
+table.conns {
+  width: 100%;
+  min-width: 620px;
+  border-collapse: collapse;
+}
+.conns th {
+  padding: 10px 16px 8px;
+  font-size: 10.5px;
+  font-weight: 400;
+  letter-spacing: 0.2em;
+  text-align: left;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+.conns td {
+  height: 52px;
+  padding: 0 16px;
+  border-top: 1px solid var(--line);
+  vertical-align: middle;
+}
+.conns th:first-child,
+.conns td:first-child {
+  width: 26%;
+}
+.conn-svc {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
 }
-.conn-badges {
-  display: inline-flex;
+.conn-svc b {
+  font-weight: 500;
+}
+.conn-mark {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  background: var(--wash2);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+.conn-cell {
+  display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+}
+.conn-app {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.conn-cell .grow {
+  flex: 1;
+}
+.conn-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ok);
+}
+.conn-dot.warn {
+  background: var(--warn);
+}
+.conn-dot.off {
+  background: var(--dim);
+}
+.conn-name {
+  overflow-wrap: anywhere;
+}
+.conn-cell .dim .ic {
+  width: 13px;
+  height: 13px;
+}
+.conn-others {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--dim);
+  cursor: default;
+}
+.conn-others .ic {
+  width: 14px;
+  height: 14px;
 }
 
-/* the kind picker and its help line sit above the kind's own form */
-.conn-add {
+/* the add dialog: one search, then who the picked service acts as */
+.conn-find {
+  display: grid;
+  gap: 8px;
+}
+.conn-hits {
+  max-height: 360px;
+  overflow-y: auto;
+  margin: 0 -10px;
+}
+.conn-hits > .pop-label:first-child {
+  border-top: 0;
+}
+.conn-hits .badge {
+  margin-left: 6px;
+}
+.conn-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.conn-title .icon-btn {
+  margin-left: -8px;
+}
+.conn-scope {
   display: grid;
   gap: 10px;
 }
-.conn-add .seg-btns {
-  width: max-content;
-  max-width: 100%;
-}
-/* text fields share the row evenly; a picker keeps its width but never past the card */
-.conn-add + .add-form .add-grid > .field {
-  flex: 1 1 260px;
-}
-.conn-add + .add-form .add-grid > div.field {
-  flex: none;
-  max-width: 100%;
-}
-.conn-add + .add-form .add-grid > .field:has(> .select) {
-  max-width: min(100%, 420px);
-}
-/* platform and access get room for their names; scope sits at the row's right end */
-.conn-add + .add-form .add-grid > div.field:has([aria-label='Platform']),
-.conn-add + .add-form .add-grid > div.field:has([aria-label='Authentication']),
-.conn-add + .add-form .add-grid > div.field:has([aria-label='Access']) {
-  flex: 1 1 220px;
-  max-width: 360px;
-}
-.conn-add + .add-form .add-grid > div.field:has([aria-label='Platform']) > .select,
-.conn-add + .add-form .add-grid > div.field:has([aria-label='Authentication']) > .select,
-.conn-add + .add-form .add-grid > div.field:has([aria-label='Access']) > .select {
-  width: 100%;
-}
-.conn-add + .add-form .add-grid > div.field:has([aria-label='Scope']) {
-  margin-left: auto;
-}
-/* an MCP server's access and scope line up under its name and URL */
-.conn-access {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(max(260px, calc(50% - 7px)), 1fr));
-}
-.conn-add + .add-form .conn-access > div.field:has(> .select) {
-  max-width: none;
-  margin-left: 0;
-}
-.conn-access .select {
-  width: 100%;
-}
-.add-form .select:has([aria-label='Platform']) {
-  min-width: 160px;
-}
-
-/* registry results float under the search, so the form under it never moves */
-.registry {
-  position: relative;
-  max-width: 560px;
-}
-.registry-pop {
-  position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
-  z-index: 40;
-  width: 100%;
-  max-height: 300px;
-  overflow-y: auto;
-  padding: 6px;
-  border: 1px solid var(--line2);
-  background: var(--tile);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
-}
-.registry-pop .pop-item b {
-  font-weight: 500;
-}
-.registry-pop .badge {
-  margin-left: 6px;
+.conn-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
 }
 .registry-note {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 10px;
+  padding: 8px 12px;
   font-size: 12px;
   color: var(--muted);
-}
-.registry-note > :first-child {
-  flex: 1;
-}
-.registry-picked {
-  margin-top: 8px;
-  font-size: 12px;
 }
 .registry-note.err {
   color: var(--bad);
 }
-
 .conn-key input {
   flex: 1 1 200px;
 }
-
 .add-form > .notice {
   margin-top: 12px;
 }
 
-@media (max-width: 760px) {
-  .conn-add + .add-form .add-grid > div.field:has([aria-label='Scope']) {
-    margin-left: 0;
-  }
+/* the page itself holds the table: no frame, the add button on top */
+.conns-hint {
+  padding: 10px 16px 14px;
+  font-size: 12px;
+  color: var(--dim);
+}
+.conns .btn.ghost,
+.conn-cell .btn.ghost {
+  padding: 0 6px;
+  color: var(--acc);
+}
+.conns .btn.ghost:hover {
+  background: var(--accbg);
+}
+.conn-title .icon-btn {
+  background: none;
+}
+.conn-hits .pop-item small.dim {
+  color: var(--dim);
+  font-size: 11px;
+}
+.add-modal .notice {
+  min-width: 0;
+}
+.add-modal .notice.slim .grow {
+  min-width: 0;
+  white-space: normal;
+}
+.conn-step {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.agent-apps {
+  display: grid;
+}
+.agent-app {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  border-bottom: 1px solid var(--line);
+}
+.agent-app b {
+  font-weight: 500;
 }

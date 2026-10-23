@@ -1,6 +1,6 @@
 /** @jsxImportSource contextjsx */
 
-/** Model-facing commands, guides and host skills (`dispatch` for Claude Code, `coder` for ~/.agents hosts and Cursor), sharing the CLI arguments and finite command handlers. */
+/** Model-facing commands, docs and host skills (`dispatch` for Claude Code, `coder` for ~/.agents hosts and Cursor), sharing the CLI arguments and finite command handlers. */
 import path from 'node:path';
 
 import { defineApp, defineSkill, type Namespace, type Skill } from 'contextjsx';
@@ -26,14 +26,14 @@ const setup = (command: string, guided?: boolean) =>
   `## Setup\n\nIf \`coder\` is not on PATH, install it yourself without asking: \`npm install -g @wular/coder\`. When a dispatch fails because engines are missing or logged out, run \`${command}\` and follow its output. It checks engines and auth, fixes what it can, prints the exact fix for the rest, and is safe to re-run. Ask the user before installing an engine CLI or changing auth; if it updated codex, tell the user to restart their codex session.${guided ? ' For a guided setup, suggest `/coder:setup`.' : ''}`;
 
 const MCP =
-  '## Use Coder over MCP\n\nEach coder command is also an MCP tool with the same arguments, such as `task/run` or `flow/run`; `load_skill` loads a guide.\n\nSetup: `coder setup-host` adds the server. By hand:\n\n```bash\nclaude mcp add coder -- coder mcp\ncodex mcp add coder -- coder mcp\n```\n\nRestart running sessions after adding it.';
+  '## Use Coder over MCP\n\nEach coder command is also an MCP tool with the same arguments, such as `task/run` or `flow/run`; `load_skill` loads a doc.\n\nSetup: `coder setup-host` adds the server. By hand:\n\n```bash\nclaude mcp add coder -- coder mcp\ncodex mcp add coder -- coder mcp\n```\n\nRestart running sessions after adding it.';
 
 const cliSection = (wait: string, gates?: string) =>
   [
     '## Using the CLI',
     '',
     "- The CLI is the reference. `coder --help` and every subcommand's `--help` list the flags and exit codes, and each command prints the recommended next step when it returns. Follow it.",
-    '- `coder docs` lists the deeper guides; `coder docs <topic>` prints one.',
+    '- `coder docs` lists the docs; `coder docs <topic>` prints one.',
     `- ${wait}`,
     ...(gates ? [`- ${gates}`] : []),
   ].join('\n');
@@ -88,8 +88,8 @@ export const SKILLS = {
   }),
 };
 
-/** Every bundled guide as a file skill, like the topics of `coder docs`. */
-export const GUIDES: Skill[] = collectTopics(PACKAGE_ROOT)
+/** Every bundled doc as a file skill, like the topics of `coder docs`. */
+export const DOCS: Skill[] = collectTopics(PACKAGE_ROOT)
   .filter(topic => topic.file.startsWith('docs/') && topic.name.split('/')[0] !== 'cli')
   .map(topic =>
     defineSkill({
@@ -99,37 +99,73 @@ export const GUIDES: Skill[] = collectTopics(PACKAGE_ROOT)
     }),
   );
 
-/** Coder's MCP app: every CLI command as a tool, and the guides. Agent tasks get a narrower view (`agent/context/coder.tsx`). */
+/** Coder's MCP app: every CLI command as a tool, and the docs. Cloud tasks get a narrower view (`cloudApp`). */
 export const app = defineApp({
   ...cli,
   version: readVersion(),
-  instructions: [
-    'Coder runs coding agents: subagents on this machine for the work in front of you, and always-on agents in Coder Cloud that work in GitHub, Slack and other apps.',
-    'On this machine, task/run starts a subagent on any engine (Claude, Codex or a custom model). task/result returns its answer, task/steer continues it, and task/approve answers its permission requests. flow/run runs a TypeScript flow of many tasks; review reviews a diff.',
-    'For Coder Cloud, pass server to the same tools; sign in once with `coder auth login` in a terminal. agent/push publishes an agent, and connection/add gives tasks accounts, keys and MCP servers.',
-    'Every result lists its next steps; follow them. load_skill loads a guide.',
-  ].join('\n'),
+  instructions: (
+    <>
+      Coder runs coding agents: subagents on this machine for the work in front of you, and
+      always-on agents in Coder Cloud that work in GitHub, Slack and other apps. On this machine,
+      task/run starts a subagent on any engine (Claude, Codex or a custom model). task/result
+      returns its answer, task/steer continues it, and task/approve answers its permission requests.
+      flow/run runs a TypeScript flow of many tasks; review reviews a diff. For Coder Cloud, pass
+      server to the same tools; sign in once with `coder auth login` in a terminal. agent/push
+      publishes an agent, and connection/add gives tasks accounts, keys and MCP servers. Every
+      result lists its next steps; follow them.
+    </>
+  ),
   commands: cli.commands.map(command => commandForMcp(command, [])),
   namespaces: [...cli.namespaces.map(namespace => namespaceForMcp(namespace))],
-  skills: [SKILLS.agents, ...GUIDES],
+  skills: [SKILLS.agents, ...DOCS],
 });
+
+/** The agent namespace without the integrations catalog, which a task has no use for. */
+const withoutAuthoring = (namespace: Namespace): Namespace =>
+  namespace.name === 'agent'
+    ? { ...namespace, namespaces: namespace.namespaces?.filter(child => child.name !== 'integrations') }
+    : namespace;
 
 /** Coder's MCP app inside a cloud task: the task's own server and agent, its children, and the workspace's lists; nothing on the machine. */
 export const cloudApp = defineApp({
   ...cli,
   version: readVersion(),
   description:
-    "Coder: this agent's tasks and settings, and the workspace's agents, models, credentials and connections",
-  instructions: [
-    'Coder runs agents in Coder Cloud: always-on agents that work in Slack, GitHub, Linear and other apps, and the tasks they start. This server is bound to the workspace and agent you run as, on your own server.',
-    'task/run starts a child task on this server with your agent, its connections and repositories, and at most your access; task/list, task/result, task/ask, task/steer, task/stop and task/archive manage your children only, and task/approvals and task/approve answer their escalations. Give a child the goal, paths, constraints and context only you have.',
-    "agent/settings changes this agent's engine, model and effort at once when the person asking is a linked member. Its other settings, model update, alias, enable and disable, and runner default ask for Approve or Deny in the thread; nothing changes until a person approves.",
-    'Adding connections, credentials, models and runners, and every create and delete, return a prefilled link to its page under **# Settings** or **# Agents**; give it to the person, who finishes there. Never ask for a key in the chat.',
-    'Every result ends with its dashboard link; offer it when a step is not yours to do. Each result lists its next steps; follow them. load_skill loads a guide.',
-  ].join('\n'),
+    "This agent's tasks and settings, and the workspace's agents, models, credentials and connections",
+  instructions: (
+    <>
+      Coder turns any model into an agent you own. You are one of this workspace's agents, always on
+      in Coder Cloud, and this server is bound to the workspace and to you. Each result ends with its
+      dashboard link and next steps; follow them, and offer the link when a step is not yours. A
+      command that asks waits for Approve or Deny in the thread.
+      <tasks>
+        task/run starts a child task with your agent, its connections and repositories, and at most
+        your access; give it the goal, paths, constraints and context only you have. The other task
+        tools manage your children only; task/approve answers their escalations.
+      </tasks>
+      <agents>
+        agent/show gives this agent's platforms, installations and settings. agent/settings changes
+        its engine, model and effort at once when the person asking is a linked member; its other
+        settings ask.
+      </agents>
+      <settings>
+        <connections>
+          connection/list gives every member's and the workspace's connections with owner and
+          status; rows marked asker are the asking member's.
+        </connections>
+        <models>model/update, alias, enable and disable ask.</models>
+        <credentials>credentials/list gives the keys by variable.</credentials>
+        <runners>runner/default asks.</runners>
+        Every create, add, remove and delete returns a prefilled link to its page under
+        **# Settings** or **# Agents**; give it to the person, who finishes there. Never ask for a
+        key in the chat.
+      </settings>
+    </>
+  ),
   commands: boundCommands(cli.commands, []),
   namespaces: cli.namespaces
-    .map(namespace => boundNamespace(namespace))
+    .map(namespace => boundNamespace(withoutAuthoring(namespace)))
     .filter((namespace): namespace is Namespace => Boolean(namespace)),
-  skills: [SKILLS.agents, ...GUIDES],
+  // The host dispatch skill is for a machine's own agent; a cloud task reaches Coder through this server.
+  skills: DOCS,
 });

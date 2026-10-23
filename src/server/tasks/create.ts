@@ -16,7 +16,6 @@ import type {
   AgentApp,
   AgentEvent,
   AgentTask,
-  AgentUsage,
   Installation,
   TaskSource,
   TaskUsage,
@@ -26,13 +25,13 @@ import type { AgentRecord, TaskStatus } from '../store/types';
 import { ACCESS, strictestAccess, type Access } from '../../core/config';
 import { agentWithVersion, ensureBuiltinAgents, toAgent } from '../agents/records';
 import type { ServerContext } from '../context';
-import type { TaskPrincipal } from './access';
+import { turnStarter, type TaskPrincipal } from './access';
 import { syncLocalAgents } from '../store/local';
 import { runLocalTask } from './local';
-import { credentialFix, resolveEngine } from '../settings/credentials';
+import { credentialFix, modelAttempts, resolveModels } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { dispatchTokens, installationToken } from './context';
-import { chooseRunner } from '../runners/select';
+import { chooseRunner, visibleRunner } from '../runners/select';
 import {
   CoderError,
   ignoredAddDirs,
@@ -54,7 +53,6 @@ export interface NewTask {
   flow?: string;
   args?: Record<string, unknown>;
   model?: string;
-  effort?: string;
   access?: Access;
   runner?: string;
   mcp?: string[];
@@ -120,14 +118,17 @@ function childTask(parent: TaskPrincipal, input: NewTask): NewTask {
 
 export const MAX_PROMPT_CHARS = 64 * 1024;
 const SLUG = /^[a-z0-9][a-z0-9_-]*$/i;
-const EFFORTS = new Set(['low', 'medium', 'high']);
+
+/** Why an option a task no longer takes is refused, naming the ones in its place. */
+export function unknownOption(input: unknown, keys: string[]): string | undefined {
+  const key = keys.find(key => input instanceof Object && key in input);
+  if (key)
+    return `Unknown task option "${key}". Give model as <name>[/<effort>] or <engine>/<model>[/<effort>], and access as read-only or auto.`;
+}
 
 export function check(input: NewTask): void {
-  for (const key of ['engine', 'permissions', 'background'])
-    if (key in input)
-      throw new TaskInputError(
-        `Unknown task option "${key}". Use model as a name or engine:model, and access read-only or auto.`,
-      );
+  const unknown = unknownOption(input, ['engine', 'effort', 'permissions', 'background']);
+  if (unknown) throw new TaskInputError(unknown);
   const flow = input.flow ?? 'default';
   if (!SLUG.test(flow)) throw new TaskInputError(`Invalid flow "${flow}"`);
   if (input.prompt !== undefined && typeof input.prompt !== 'string')
@@ -139,8 +140,6 @@ export function check(input: NewTask): void {
     throw new TaskInputError('repo must be owner/name');
   if (input.pr !== undefined && (!Number.isInteger(input.pr) || input.pr < 1 || !input.repo))
     throw new TaskInputError('pr needs a repo and a pull request number');
-  if (input.effort !== undefined && !EFFORTS.has(input.effort))
-    throw new TaskInputError(`Unknown effort "${input.effort}"`);
   if (input.access !== undefined && !ACCESS.includes(input.access))
     throw new TaskInputError(`Unknown access "${input.access}". Use read-only or auto.`);
   if (
@@ -250,18 +249,11 @@ async function repoEvent(
   return { event, author: integration.author?.(app.name) ?? app.name };
 }
 
-/** The engine, model and effort asked for, resolved together; undefined when nothing was asked. */
-async function taskPick(
-  ctx: ServerContext,
-  model: string | undefined,
-  effort: string | undefined,
-): Promise<TaskUsage['pick']> {
-  if (!model) return effort ? { effort: effort as AgentUsage['effort'] } : undefined;
+/** The engine, model and effort a model spec asks for; undefined when nothing was asked. */
+async function taskPick(ctx: ServerContext, model: string | undefined): Promise<TaskUsage['pick']> {
+  if (!model) return undefined;
   try {
-    const selected = resolveTaskOptions(
-      { model, effort },
-      { ...effectiveConfig(ctx, await shownConfig(ctx)), engines: {} },
-    );
+    const selected = resolveTaskOptions({ model }, effectiveConfig(ctx, await shownConfig(ctx)));
     return {
       engine: selected.engine,
       model: selected.model ?? undefined,
@@ -279,11 +271,13 @@ export async function createTask(
   input: NewTask,
 ): Promise<TaskStatus> {
   const parent = ctx.taskPrincipal;
+  const parentTask = parent && (await ctx.store.get('task', parent.task))?.task;
   if (parent) input = childTask(parent, input);
   check(input);
   const cwd = taskCwd(ctx, input);
   const now = (ctx.now ?? Date.now)();
-  const requestedBy = ctx.session?.user.id;
+  // A child runs on its parent's turn's account.
+  const requestedBy = parentTask ? turnStarter(parentTask) : ctx.session?.user.id;
   const slug = input.agent || defaultAgent();
   if (!slug) throw new TaskInputError('Name an agent: this server has no default agent.');
   if (slug === defaultAgent()) await ensureBuiltinAgents(ctx, now);
@@ -298,21 +292,11 @@ export async function createTask(
   });
   if (!record || !version) throw new TaskInputError(`No agent "${slug}"`, 404);
   assertEnabled(ctx, slug, record);
-  const pick = await taskPick(ctx, input.model, input.effort);
+  const pick = (await taskPick(ctx, input.model)) ?? parentTask?.usage?.pick;
   const agent = toAgent(record, version, pick, ctx.integrations);
-  const settings = effectiveSettings(agent);
-
-  const { engine, credential, usable, chain, credentials } = await resolveEngine(
-    ctx,
-    settings,
-    requestedBy,
-  );
-  if (!usable && chosen.runner !== 'http')
-    throw new TaskInputError(
-      `No ${engine} credential is connected`,
-      409,
-      await credentialFix(ctx, engine),
-    );
+  const { models, first } = await resolveModels(ctx, effectiveSettings(agent), requestedBy);
+  const attempts = modelAttempts(models, chosen.runner === 'http');
+  if (!attempts.length) throw await noCredential(ctx, models, first.engine);
 
   const id = `${now.toString(36)}-${randomBytes(4).toString('hex')}`;
   const repo = input.repo ? await repoEvent(ctx, id, input, requestedBy) : undefined;
@@ -341,9 +325,7 @@ export async function createTask(
     ...(input.appendSystem ? { appendSystem: input.appendSystem } : {}),
     ...(input.addDirs?.length && !ignored ? { addDirs: input.addDirs } : {}),
     definition: agent.definition,
-    engineChain: chain,
-    engineCredentials: credentials,
-    ...(credential ? { credential } : {}),
+    models: attempts,
     ...(requestedBy ? { requestedBy } : {}),
     ...(parent
       ? {
@@ -353,7 +335,7 @@ export async function createTask(
         }
       : {}),
     ...(agent.files ? { files: agent.files } : {}),
-    usage: { ...agent.usage, engine, ...(pick ? { pick } : {}) },
+    usage: { ...agent.usage, ...(pick ? { pick } : {}) },
     tools: parent ? declaredTools(agent, input.access) : {},
     connections: await connectionGrants(
       ctx,
@@ -395,7 +377,47 @@ export function taskTurns(status: TaskStatus): TaskTurn[] {
   ];
 }
 
-/** The agent as it is now, for a task's next turn: definition, usage, files and tools by the current access mode, and the engine of the task's pick else the agent's settings. A disabled agent fails the turn; one the store no longer holds keeps the task's snapshot. */
+/** Refuses a turn no listed model runs: in a starter's thread, another member's turn without a workspace credential points at the starter. */
+async function noCredential(
+  ctx: ServerContext,
+  models: Array<{ model: string }>,
+  engine: string,
+  task?: Pick<AgentTask, 'requestedBy' | 'event' | 'source'>,
+): Promise<TaskInputError> {
+  const fix = await credentialFix(ctx, engine);
+  const actor = task?.event?.actor;
+  if (task?.requestedBy && actor && task.source === task.event?.integration) {
+    const starter = `@${actor.login ?? actor.id}`;
+
+    return new TaskInputError(
+      `This thread runs on ${starter}'s subscription. Ask ${starter}, or an admin can add a workspace key: [Add a key](${fix})`,
+      409,
+      fix,
+    );
+  }
+
+  return new TaskInputError(
+    `No credential runs ${models.map(run => run.model).join(' or ')}`,
+    409,
+    fix,
+  );
+}
+
+/** The runner a turn runs on: its starter's own turns may use their personal runner, anyone else's the workspace's; a dashboard task keeps its runner while the turn may use it. */
+async function turnRunner(
+  ctx: ServerContext,
+  task: AgentTask,
+  starter: string | undefined,
+): Promise<Pick<AgentTask, 'runner' | 'runnerId'>> {
+  const stored = task.runnerId ? await ctx.store.get('runner', task.runnerId) : undefined;
+  if (task.source !== task.event?.integration && (!stored || visibleRunner(stored, starter)))
+    return { runner: task.runner, ...(task.runnerId ? { runnerId: task.runnerId } : {}) };
+  const chosen = await chooseRunner(ctx, { requestedBy: starter, agent: task.definition.runner });
+
+  return { runnerId: undefined, ...chosen };
+}
+
+/** The agent as it is now, for a task's next turn: definition, usage, files and tools by the current access mode, the models the turn's asker may run it on, and its runner. A disabled agent fails the turn; one the store no longer holds keeps the task's snapshot. */
 export async function refreshedTask(
   ctx: ServerContext,
   task: AgentTask,
@@ -403,14 +425,7 @@ export async function refreshedTask(
   Partial<
     Pick<
       AgentTask,
-      | 'definition'
-      | 'usage'
-      | 'tools'
-      | 'files'
-      | 'access'
-      | 'engineChain'
-      | 'engineCredentials'
-      | 'credential'
+      'definition' | 'usage' | 'tools' | 'files' | 'access' | 'models' | 'runner' | 'runnerId'
     >
   >
 > {
@@ -441,18 +456,19 @@ export async function refreshedTask(
   }
   const match = event && matchAgent(event, agent, task.access);
   const usage = { ...agent.usage, ...pick };
-  const { engine, credential, chain, credentials } = await resolveEngine(
-    ctx,
-    effectiveSettings({ ...agent, usage }),
-    task.requestedBy,
-  );
+  const starter = turnStarter(task);
+  const [route, { models, first }] = await Promise.all([
+    turnRunner(ctx, task, starter),
+    resolveModels(ctx, effectiveSettings({ ...agent, usage }), starter),
+  ]);
+  const attempts = modelAttempts(models, route.runner === 'http');
+  if (!attempts.length) throw await noCredential(ctx, models, first.engine, task);
 
   return {
     definition: agent.definition,
-    usage: { ...usage, engine, ...(pick ? { pick } : {}) },
-    engineChain: chain,
-    engineCredentials: credentials,
-    credential,
+    usage: { ...usage, ...(pick ? { pick } : {}) },
+    models: attempts,
+    ...route,
     tools: match?.tools ?? declaredTools(agent, task.access),
     ...(agent.files ? { files: agent.files } : {}),
     access: agentAccess(agent, task.access),
@@ -460,10 +476,9 @@ export async function refreshedTask(
 }
 
 /** Ask a finished task something new: the same task runs again with the earlier turns as its thread. */
-/** What a resumed turn may change: model and effort, and access only downward. */
+/** What a resumed turn may change: its model, and access only downward. */
 interface TurnOverrides {
   model?: string;
-  effort?: string;
   access?: Access;
 }
 
@@ -481,11 +496,9 @@ export async function continueTask(
     throw new TaskInputError('outputSchema must be an object');
   if (!text.trim()) throw new TaskInputError('text is required');
   if (text.length > MAX_PROMPT_CHARS) throw new TaskInputError('text is longer than 64 KB');
-  const { model, effort, access } = overrides;
+  const { model, access } = overrides;
   if (model !== undefined && (typeof model !== 'string' || !model.trim()))
     throw new TaskInputError('model must be text');
-  if (effort !== undefined && !EFFORTS.has(effort))
-    throw new TaskInputError(`Unknown effort "${effort}"`);
   if (access !== undefined && !ACCESS.includes(access))
     throw new TaskInputError(`Unknown access "${access}". Use read-only or auto.`);
   const now = (ctx.now ?? Date.now)();
@@ -503,11 +516,7 @@ export async function continueTask(
   const context = status.task.context ?? {};
   const turns = taskTurns(status);
   turns.at(-1)!.finishedAt ??= now;
-  const pick = model
-    ? await taskPick(ctx, model, effort)
-    : effort
-      ? { ...status.task.usage?.pick, effort: effort as AgentUsage['effort'] }
-      : status.task.usage?.pick;
+  const pick = model ? await taskPick(ctx, model) : status.task.usage?.pick;
   const current = await refreshedTask(ctx, {
     ...status.task,
     usage: { ...status.task.usage, pick },

@@ -1,0 +1,58 @@
+.hosts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 16px 0;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+  border-bottom: 1px solid var(--line);
+}
+.host {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  background: var(--wash2);
+}
+.host button {
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+}
+.host button:hover {
+  color: var(--fg);
+}
+.host .ic {
+  width: 13px;
+  height: 13px;
+}
+.hosts > input:not([type='checkbox']):not([type='radio']) {
+  flex: 1;
+  width: auto;
+  min-width: 180px;
+  min-height: 28px;
+  height: 28px;
+  padding: 0 6px;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  outline: none;
+}
+.hosts-switch {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 16px 16px;
+  cursor: pointer;
+}
+
+.hosts:focus-within {
+  border-bottom-color: var(--acc);
+}

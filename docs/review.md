@@ -1,3 +1,7 @@
+---
+description: coder review, a read-only review of local changes or a pull request.
+---
+
 # Review
 
 `coder review`, or `/review <pr>` in the dashboard's **# Tasks → [New task]**, runs one read-only review task over local changes or a pull request, checks every finding against the repository, and prints the ones that hold. With `--post` it comments inline on the pull request and keeps one sticky summary; a posted finding is never posted again, even after its line moves. A local review covers everything since the merge-base with the origin default branch, committed or not, and never touches the index or working tree.
@@ -10,20 +14,20 @@ coder review --pr 42 --post          # pull request 42, posted as comments
 
 ## Flags
 
-| Flag                    | Meaning                                                                                                                          | Default                                            |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- |
-| `--effort <level>`      | Model reasoning effort and review depth: `low` reports critical and major defects, `medium` any defect, `high` also minor issues | Repository configuration, `medium`                 |
-| `--base <ref>`          | Older side of a local diff                                                                                                       | Merge-base of `HEAD` and the origin default branch |
-| `--head <ref>`          | Newer side of a local diff, commits only                                                                                         | The working tree                                   |
-| `--pr <n \| url>`       | Pull request number in the origin repo, or a GitHub pull request URL                                                             | Local diff                                         |
-| `--since <sha>`         | Keep only pull request hunks changed after this commit                                                                           | Head in the previous sticky summary                |
-| `--path <p>`            | Review only this pathspec; repeatable                                                                                            | Everything                                         |
-| `--exclude <p>`         | Leave this pathspec out; repeatable                                                                                              | Nothing                                            |
-| `--post`                | Post inline comments and update the sticky summary; needs `--pr`                                                                 | Print only                                         |
-| `--md`                  | Print Markdown                                                                                                                   | Enabled unless `--json` is used                    |
-| `--json`                | Print `{ findings, summary, runId }`                                                                                             | Disabled                                           |
-| `--model <alias\|slug>` | Model for the review task, or `engine:model`                                                                                                        | Repository configuration                           |
-| `--cwd <dir>`           | Checkout to review                                                                                                               | Current directory                                  |
+| Flag | Meaning | Default |
+| --- | --- | --- |
+| `--base <ref>` | Older side of a local diff | Merge-base of `HEAD` and the origin default branch |
+| `--head <ref>` | Newer side of a local diff, commits only | The working tree |
+| `--pr <n \| url>` | Pull request number in the origin repo, or a GitHub pull request URL | Local diff |
+| `--since <sha>` | Keep only pull request hunks changed after this commit | Head in the previous sticky summary |
+| `--path <p>` | Review only this pathspec; repeatable | Everything |
+| `--exclude <p>` | Leave this pathspec out; repeatable | Nothing |
+| `--post` | Post inline comments and update the sticky summary; needs `--pr` | Print only |
+| `--md` | Print Markdown | Enabled unless `--json` is used |
+| `--json` | Print `{ findings, summary, runId }` | Disabled |
+| `--model <spec>` | [Model spec](models.md#pick-a-model) for the review task | The workspace's `reviewModel` |
+| `--depth <low\|medium\|high>` | What to report: `low` critical and major defects, `medium` any defect a maintainer would act on, `high` also minor issues | `medium` |
+| `--cwd <dir>` | Checkout to review | Current directory |
 
 `--pr` cannot be combined with `--base` or `--head`, and `--json` cannot be combined with `--md`.
 
@@ -41,4 +45,4 @@ The command exits `0` when the review completes, even with findings, `1` when th
 
 ## From a task
 
-Every task has a `review` tool. It reviews the task's uncommitted changes in the background, or those since `base`, and sends the findings to the task as a message. One review runs at a time, at most 5 per task.
+Every task has a `review` tool. It reviews the task's uncommitted changes in the background, or those since `base`, and sends the findings to the task as a message. One review runs at a time, at most 5 per turn.

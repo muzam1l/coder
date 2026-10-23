@@ -24,18 +24,14 @@ import { createJsonlTail, writeJsonFileAtomic } from '../../utils/fsx';
 import { logEntry } from './view';
 import { runTurn } from '../engines/codex';
 import { runClaudeTurn } from '../engines/claude';
-import {
-  SIMULATE_APPROVAL_ENV,
-  approvedActions,
-  codexApprovalHandler,
-  escalate,
-} from '../approvals';
+import { SIMULATE_APPROVAL_ENV, codexApprovalHandler, escalate } from '../approvals';
 import {
   ACCESS_MODES,
   isEndpointModel,
   loadConfig,
   persistModelPatch,
   codexTurnNetwork,
+  turnHosts,
   resolveCodexModel,
   strictestAccess,
   MACHINE_SANDBOX_ENV,
@@ -45,8 +41,9 @@ import { resolveMcpServers } from '../dispatch';
 import { injectedConnectionEnvironment, redactConnectionSecrets } from '../connection-env';
 import type { Task, ProgressUpdate, TurnResult } from '../types';
 import { gitToolEnvironment } from '../../agent/mcp';
-import { promptServers, turnToolServers } from './mcp';
+import { turnToolServers } from './mcp';
 import { taskSystemPrompt, type SystemPromptParts } from './context/system';
+import { serverScope } from '../tool-search/context';
 
 // Agent tasks serve several people in one workspace, so the engine keeps no memories between them.
 const AGENT_MEMORY_OFF = {
@@ -70,21 +67,24 @@ async function turnTools(
   const onWarning = (message: string) =>
     onProgress({ kind: 'warning', phase: 'starting', message });
   const access = strictestAccess(task.access, task.promptParts?.access);
-  const tools = turnToolServers(
+  const tools = await turnToolServers(
     task,
     resolveTaskDir(cwd, task.id),
     resolveMcpServers(task.mcp, process.env, undefined, { onWarning }),
     { access },
   );
+  if (tools.listed.length)
+    onProgress({
+      kind: 'status',
+      phase: 'starting',
+      message: `This turn's servers are ${tools.listed.map(server => server.name).join(', ')}.`,
+    });
   const systemPrompt = task.promptParts
     ? taskSystemPrompt({
         ...task.promptParts,
         ...parts,
         access,
-        approved: approvedActions(resolveTaskDir(cwd, task.id)),
-        tools: tools.tools,
-        servers: await promptServers(tools.listed),
-        ...(tools.dashboard ? { dashboard: tools.dashboard } : {}),
+        connections: tools.listed.some(server => serverScope(server)),
       })
     : task.systemPrompt;
 
@@ -236,12 +236,8 @@ async function executeCodexTurn(
 
   const mode = ACCESS_MODES[task.access ?? 'auto'] ?? ACCESS_MODES.auto;
   const auto = mode.approvalMode === 'auto';
-  // The allowlist in auto, as on Claude; it matters only where the network is off.
-  const network = codexTurnNetwork(
-    task.access ?? 'auto',
-    config.engines.codex?.network,
-    auto ? config.approvals.allowedNetworkHosts : [],
-  );
+  const hosts = turnHosts(task.access ?? 'auto', config.network);
+  const network = codexTurnNetwork(task.access ?? 'auto', hosts);
   // Auto review answers Codex's approval requests; one that still reaches Coder is declined.
   const approvals = {
     approvalPolicy: mode.approvalPolicy,
@@ -334,7 +330,7 @@ async function executeClaudeTurn(
       effort: task.effort,
       access: task.access,
       approvalTaskId: task.id,
-      allowedNetworkHosts: mode.approvalMode === 'auto' ? config.approvals.allowedNetworkHosts : [],
+      allowedNetworkHosts: turnHosts(task.access ?? 'auto', config.network),
       additionalDirectories: task.addDirs,
       scratch: scratchDir(task.id),
       local: task.promptParts?.local ?? true,
@@ -456,6 +452,22 @@ async function withReadOnlyGit<T>(directories: string[], turn: () => Promise<T>)
   }
 }
 
+/** A runner task's follow-up turn takes the connections its server resolves for it now. */
+async function followUpServers(task: Task): Promise<Pick<Task, 'mcp' | 'mcpBindings'>> {
+  if (process.env.CODER_MCP_MODE !== 'cloud' || !task.name?.startsWith('agent:')) return {};
+  const [{ liveConnections }, { turnServers }] = await Promise.all([
+    import('../../runner/task'),
+    import('./actions'),
+  ]);
+  const connected = await liveConnections(task)(task.connections ?? []);
+  for (const name of Object.keys(process.env))
+    if (name.startsWith('CODER_CONNECTION_')) delete process.env[name];
+  Object.assign(process.env, connected.env);
+  const { selected, bindings } = turnServers(task, connected.mcp);
+
+  return { mcp: selected.mcp, mcpBindings: bindings };
+}
+
 // Close admission and claim the last queued follow-ups under the same fence as steer callers.
 export async function drainSteerQueue(cwd: string, taskId: string): Promise<void> {
   for (;;) {
@@ -475,15 +487,17 @@ export async function drainSteerQueue(cwd: string, taskId: string): Promise<void
     });
     if (!followUps.length) return;
     for (const text of followUps) {
-      const resumeTask = writeTask(cwd, taskId, {
-        status: 'running',
-        currentPrompt: text,
-        resumedAt: new Date().toISOString(),
-        error: undefined,
-        resumeThreadId: loadTask(cwd, taskId)?.threadId ?? null,
-      });
-      appendTaskLog(cwd, taskId, { message: 'Running steered follow-up.' });
       try {
+        const current = loadTask(cwd, taskId);
+        const resumeTask = writeTask(cwd, taskId, {
+          status: 'running',
+          currentPrompt: text,
+          resumedAt: new Date().toISOString(),
+          error: undefined,
+          resumeThreadId: current?.threadId ?? null,
+          ...(current ? await followUpServers(current) : {}),
+        });
+        appendTaskLog(cwd, taskId, { message: 'Running steered follow-up.' });
         await executeTurnFor(resumeTask)(cwd, resumeTask, { echo: false });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);

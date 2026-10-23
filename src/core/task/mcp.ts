@@ -10,13 +10,15 @@ import type { McpServerSpec, Task } from '../types';
 import { mcpClient, type McpToolInfo } from '../connections';
 import {
   connect,
+  searchInstructions,
   toolSearchServer,
   type CredentialSource,
+  type ListedServer,
   type SearchEndpoint,
 } from '../tool-search';
 import { taskFlow } from './async';
-import { asyncTools, taskApp } from './context/tools';
-import type { PromptServer } from './context/system';
+import { tokenEnvName, toolServerToken } from '../../agent/mcp';
+import { asyncTools, taskApp, taskTools } from './context/tools';
 
 // Codex hands stdio servers only its default environment; history and reviews need these to find state, config and engines.
 // Only set ones: a set CLAUDE_CONFIG_DIR, even the default, moves Claude's login to another keychain entry.
@@ -40,14 +42,11 @@ const toolEnvironment = () =>
 const readOnlyServer = (server: McpServerSpec, access: Access) =>
   Boolean(server.readOnly) || strictestAccess(server.access, access) === 'read-only';
 
-/** A turn's servers for its engine: Coder's task tools and the tool search over the task's own, read-only ones marked `readOnly`; and the task's own for the prompt. */
+/** A turn's servers for its engine: Coder's task tools and the tool search over the task's own, read-only ones marked `readOnly`; and the task's own. */
 interface TurnTools {
   servers: McpServerSpec[];
-  tools: string[];
-  /** The task's own servers, for the prompt's server list. */
+  /** The task's own servers, behind the tool search. */
   listed: McpServerSpec[];
-  /** The workspace's dashboard on the conversation endpoint's server. */
-  dashboard?: string;
 }
 
 /** Every tool a server lists, within the startup window. */
@@ -60,13 +59,13 @@ export async function listServerTools(server: McpServerSpec): Promise<McpToolInf
   }
 }
 
-/** The turn's MCP servers: Coder's task tools bound to the conversation endpoint, then the tool search over the task's own, a conversation's Coder server first. Every stdio server knows it runs inside a task. */
-export function turnToolServers(
+/** The turn's MCP servers: Coder's task tools bound to the conversation endpoint, then the tool search over the task's own, a conversation's Coder server first, with its instructions for this turn. Every stdio server knows it runs inside a task. */
+export async function turnToolServers(
   task: Pick<Task, 'conversation' | 'flowRunId' | 'access'>,
   taskDir: string,
   servers: McpServerSpec[],
   options: { access: Access },
-): TurnTools {
+): Promise<TurnTools> {
   const endpoint = (name: string) =>
     servers.find(server => server.name === name && !server.command && !server.url);
   const conversation = endpoint('conversation');
@@ -91,6 +90,11 @@ export function turnToolServers(
     ),
   );
   const tools = taskToolNames(task);
+  // An async tool posts as the app of its platform's tool server.
+  const platformTokens = asyncTools.flatMap(tool => {
+    const token = tool.platform && toolServerToken(servers, tool.platform);
+    return token ? [[tokenEnvName(tool.platform!), token]] : [];
+  });
   const reply = conversation?.env?.CODER_REPLY_URL;
   const token = conversation?.env?.CODER_REPLY_TOKEN;
   // Connections are reconnected on the dashboard of the server the conversation endpoint is on.
@@ -100,7 +104,12 @@ export function turnToolServers(
   return {
     servers: [
       ...(tools.length
-        ? [taskToolServer(path.join(taskDir, 'job.json'), tools, conversation?.env)]
+        ? [
+            taskToolServer(path.join(taskDir, 'job.json'), tools, {
+              ...conversation?.env,
+              ...Object.fromEntries(platformTokens),
+            }),
+          ]
         : []),
       ...(own.length
         ? [
@@ -114,15 +123,14 @@ export function turnToolServers(
                 own,
                 reconnect,
                 reply && token ? { url: reply, token } : undefined,
+                searchInstructions(await startedServers(own)),
               ),
               alwaysLoad: true,
             },
           ]
         : []),
     ].map(inTask),
-    tools,
     listed: own,
-    ...(coder?.env?.CODER_DASHBOARD ? { dashboard: coder.env.CODER_DASHBOARD } : {}),
   };
 }
 
@@ -139,6 +147,7 @@ export function taskToolServer(
     env: { ...env, ...toolEnvironment(), CODER_HISTORY_TASK: file },
     tools,
     alwaysLoad: true,
+    instructions: instructions(taskTools(tools)),
   };
 }
 
@@ -152,7 +161,7 @@ function coderServer(env: Record<string, string> = {}): McpServerSpec {
   };
 }
 
-/** A connection's token from the task's server, which refreshes it then; none when it needs reconnecting. A refusal, such as a Just me connection waiting for its owner, is the error the model reads. */
+/** A connection's token from the task's server, which refreshes it then; none when it needs reconnecting. A refusal, such as a personal connection waiting for its owner, is the error the model reads. */
 export const serverCredential =
   (endpoint: SearchEndpoint, request: typeof fetch = fetch): CredentialSource =>
   async (spec, refused) => {
@@ -175,9 +184,9 @@ export const serverCredential =
   };
 
 /** The Coder server's description, instructions and tool names from the app `coder mcp` serves with its env, so only the tool search starts it. */
-async function coderPrompt(
+async function coderStarted(
   env: Record<string, string> = {},
-): Promise<Pick<PromptServer, 'description' | 'started'>> {
+): Promise<Pick<ListedServer, 'description' | 'started'>> {
   const apps = await import('../../context');
   const app = env.CODER_MCP_MODE === 'cloud' ? apps.cloudApp : apps.app;
   const tools = walk(app).commands.flatMap(entry =>
@@ -185,20 +194,21 @@ async function coderPrompt(
   );
 
   return {
-    ...(app.description ? { description: app.description } : {}),
+    description: app.description,
     started: {
-      instructions: instructions(app),
+      // As `coder mcp` serves them, less the tool names the tool search lists itself.
+      instructions: instructions(app, { tools: false }),
       tools: [...tools, ...(app.skills?.length ? ['load_skill'] : [])],
     },
   };
 }
 
-/** The prompt's servers; each `start` one is connected now for its description, instructions and tool names, except the Coder server, read in-process. */
-export function promptServers(servers: McpServerSpec[]): Promise<PromptServer[]> {
+/** The turn's servers; each `start` one is connected now for its description, instructions and tool names, except the Coder server, read in-process. */
+function startedServers(servers: McpServerSpec[]): Promise<ListedServer[]> {
   return Promise.all(
     servers.map(async server => {
       if (server.connect !== 'start') return server;
-      if (server.name === CODER_APP_NAME) return { ...server, ...(await coderPrompt(server.env)) };
+      if (server.name === CODER_APP_NAME) return { ...server, ...(await coderStarted(server.env)) };
       const connected = await connect(server, 10_000).catch(() => undefined);
       await connected?.client.close().catch(() => {});
       const description = connected?.serverInfo?.description;

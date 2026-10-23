@@ -13,7 +13,7 @@ import {
   PM_COMMANDS,
 } from './update-check';
 import { readVersion, resolveMarketplaceDir, CLI_PATH, readManifestVersion } from './runtime';
-import type { Availability, Engine, CoderConfig } from './types';
+import type { Availability, CoderConfig } from './types';
 import { getCodexAuthStatus, getCodexAvailability } from './engines/codex';
 import { getClaudeAuthStatus, getClaudeAvailability } from './engines/claude';
 import { DEFAULT_CONFIG, loadConfig, resolveUserConfigFile, writeUserConfig } from './config';
@@ -304,12 +304,11 @@ export async function setupHostCore(
 
   const configFile = resolveUserConfigFile();
   if (!fs.existsSync(configFile)) {
-    // Seed the chain from what's installed; codex-first when neither is present.
-    const chain: Engine[] = availability.available
-      ? ['codex', 'claude']
-      : claude.available
-        ? ['claude', 'codex']
-        : ['codex', 'claude'];
+    // Seed the chain from what's installed; Codex first when neither is present.
+    const chain =
+      !availability.available && claude.available
+        ? ['claude/opus', 'codex/sol']
+        : ['codex/sol', 'claude/opus'];
     writeUserConfig({ ...DEFAULT_CONFIG, chain });
   }
 

@@ -3,23 +3,22 @@ import { type ProbeResult } from '../../client/types';
 import { type Params } from '../routes/match';
 import { type ServerContext } from '../context';
 import {
-  CLAUDE_EFFORTS,
-  CLAUDE_MODELS,
-  CODEX_EFFORTS,
-  CODEX_MODELS,
+  BUILTIN_MODELS,
   isAliasModel,
   isBuiltinAlias,
   isEndpointModel,
   parseEngineSpec,
+  splitEngineSpec,
   removeModel,
+  toggleModel,
   withDefaults,
   type CoderConfig,
   type CustomModelConfig,
   type ModelEntry,
 } from '../../core/config';
 import { probeEndpoint } from '../../core/models';
-import { credentialEnv } from './credentials';
-import { ConfigError, shownConfig, body, change } from './config';
+import { credentialEnv, runsOnEach } from './credentials';
+import { ConfigError, effectiveConfig, shownConfig, body, change } from './config';
 import { json } from '../routes/http';
 
 const MODEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
@@ -33,7 +32,7 @@ const PROVIDER_HOSTS = new Set([
 
 export function modelList(config: Partial<CoderConfig>) {
   return {
-    builtin: { codex: CODEX_MODELS, claude: CLAUDE_MODELS },
+    builtin: BUILTIN_MODELS,
     models: config.models ?? {},
   };
 }
@@ -119,7 +118,8 @@ async function knownHost(ctx: ServerContext, baseUrl: string, envKey: string): P
 
   const models = (await shownConfig(ctx)).models ?? {};
   return Object.values(models).some(
-    entry => 'baseUrl' in entry && entry.envKey === envKey && new URL(entry.baseUrl).host === host,
+    entry =>
+      isEndpointModel(entry) && entry.envKey === envKey && new URL(entry.baseUrl).host === host,
   );
 }
 
@@ -129,7 +129,13 @@ export async function listModels(
   params: Params,
   url: URL,
 ): Promise<Response> {
-  return json(modelList(await shownConfig(ctx)));
+  const shown = await shownConfig(ctx);
+  const { chain, reviewModel } = effectiveConfig(ctx, shown);
+
+  return json({
+    ...modelList(shown),
+    runsOn: await runsOnEach(ctx, [...chain, reviewModel], ctx.session?.user.id),
+  });
 }
 
 export async function createModel(
@@ -202,7 +208,7 @@ export async function aliasModel(
   return change(ctx, config => aliasEntry(config, params.name!, spec));
 }
 
-/** Names an engine spec, such as `fast` for `codex:luna`. */
+/** Names an engine spec, such as `fast` for `codex/luna`; an engine's own name sets what its bare name runs, `custom` an endpoint. */
 export function aliasEntry(config: Partial<CoderConfig>, name: string, spec: string | undefined) {
   if (!MODEL_NAME.test(name)) throw new ConfigError(`Invalid alias name "${name}"`);
 
@@ -211,18 +217,16 @@ export function aliasEntry(config: Partial<CoderConfig>, name: string, spec: str
     throw new ConfigError(`"${name}" is a custom model name`);
 
   const parsed = parseEngineSpec(spec, withDefaults(config));
-  if (!parsed?.model || parsed.engine === 'custom')
+  const engine = name === 'codex' || name === 'claude' || name === 'custom' ? name : undefined;
+  if (engine && parsed?.engine !== engine)
+    throw new ConfigError(`The ${engine} alias names a ${engine} model`);
+  if (!parsed?.model || (parsed.engine === 'custom' && engine !== 'custom'))
     throw new ConfigError(`"${spec}" does not name a codex or claude model`);
 
-  const builtins = parsed.engine === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
-  const effort = spec!.split(':').some(part => CODEX_EFFORTS.has(part) || CLAUDE_EFFORTS.has(part));
+  const typed = splitEngineSpec(spec!);
   config.models = {
     ...config.models,
-    [name]: {
-      provider: parsed.engine,
-      model: builtins[parsed.model] ?? parsed.model,
-      ...(effort && parsed.effort ? { effort: parsed.effort } : {}),
-    },
+    [name]: [parsed.engine, typed.model ?? parsed.model, typed.effort].filter(Boolean).join('/'),
   };
 }
 
@@ -246,11 +250,5 @@ export async function enableModel(
 
 /** Turns any model name off or back on: a built-in, a custom model or an alias. */
 export function toggleEntry(config: Partial<CoderConfig>, name: string, disabled: boolean) {
-  const models = (config.models ??= {});
-  const entry = models[name];
-  if (entry && (isEndpointModel(entry) || isAliasModel(entry))) {
-    if (disabled) entry.disabled = true;
-    else delete entry.disabled;
-  } else if (disabled) models[name] = { disabled: true };
-  else delete models[name];
+  toggleModel((config.models ??= {}), name, disabled);
 }

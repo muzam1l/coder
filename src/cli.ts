@@ -497,6 +497,50 @@ export const renderTopHelp = () =>
     readVersion(),
   );
 
+/** A cloud task's shell: the commands Coder's cloud MCP serves, bound to the task's server, each printing what its tool returns. */
+async function dispatchCloud(argv: string[]): Promise<void> {
+  const { cloudApp } = await import('./context');
+  const words = argv[0] === 'help' ? argv.slice(1) : argv;
+  const found = resolve(cloudApp, words);
+  const unknown = (word: string | undefined) => {
+    if (word !== undefined && !wantsHelp([word]))
+      fail(`Unknown command "${word}".`, { hint: 'See all commands: coder --help' });
+  };
+  if (!found) {
+    unknown(words[0]);
+    const rows = walk(cloudApp).commands.flatMap(entry =>
+      entry.command.mcp === false
+        ? []
+        : [{ usage: `coder ${entry.path.join(' ')}`, blurb: entry.command.description }],
+    );
+
+    return void process.stdout.write(
+      `${[cloudApp.description, '', outStyle.bold('Commands:'), ...keyRows(rows, outStyle)].join('\n')}\n`,
+    );
+  }
+  if ('namespace' in found) {
+    unknown(found.rest[0]);
+    return void process.stdout.write(renderGroupHelp(found.namespace, cloudApp, {}));
+  }
+  if (found.command.mcp === false) unknown(found.path.join(' '));
+  if (wantsHelp(found.rest))
+    return void process.stdout.write(renderCommandHelp(found.command, cloudApp));
+  let args: Args<Shape>;
+  try {
+    args = parse(found.command, found.rest);
+  } catch (error) {
+    if (!(error instanceof ParseError)) throw error;
+    fail(error.message, { hint: `Help: coder ${found.path.join(' ')} --help` });
+  }
+  const result = await found.command.run(args, {});
+  const text = found.command.mcp ? found.command.mcp.text?.(result) : undefined;
+  const next = found.command.next?.({ result, args }) ?? [];
+
+  process.stdout.write(
+    `${[text ?? JSON.stringify(result), ...next.map(step => `${step.usage}  # ${step.blurb}`)].join('\n')}\n`,
+  );
+}
+
 /** Run one Coder command line: help, a group's menu, an internal command or a command. */
 export async function dispatch(argv: string[]): Promise<void> {
   const [first, ...rest] = argv;
@@ -505,6 +549,9 @@ export async function dispatch(argv: string[]): Promise<void> {
     process.stdout.write(`${readVersion()}\n`);
     return;
   }
+
+  const { taskSocket } = await import('./client/http');
+  if (taskSocket() && !INTERNAL[argv.slice(0, 2).join(' ')]) return dispatchCloud(argv);
 
   // Top-level help: `coder`, `coder help [topic]`, `coder --help`, `coder -h`.
   if (first === undefined || first === 'help' || first === '--help' || first === '-h') {

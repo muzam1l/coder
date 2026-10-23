@@ -39,7 +39,7 @@ export function Modal({
   dismiss?: boolean;
   busy?: boolean;
   cancel?: string;
-  /** A red cancel button beside other actions, when cancelling stops work in progress. */
+  /** A red ghost cancel button, when cancelling stops work in progress. */
   cancelDanger?: boolean;
   /** Where focus lands when it opens; an action marks itself `autofocus`. */
   focus?: 'cancel' | 'actions';
@@ -82,18 +82,21 @@ export function Modal({
           {dismiss ? <IconButton icon={iX} label="Close" onClick={close} /> : null}
         </header>
         {children}
-        <div class="actions">
-          <Button
-            variant={alone ? 'primary' : 'ghost'}
-            danger={!alone && cancelDanger}
-            disabled={busy}
-            autofocus={focus === 'cancel'}
-            onClick={close}
-          >
-            {cancel}
-          </Button>
-          {actions}
-        </div>
+        {/* With a close button and nothing to do, a lone Cancel would only repeat it. */}
+        {dismiss && alone ? null : (
+          <div class="actions">
+            <Button
+              variant={alone && !cancelDanger ? 'primary' : 'ghost'}
+              danger={cancelDanger}
+              disabled={busy}
+              autofocus={focus === 'cancel'}
+              onClick={close}
+            >
+              {cancel}
+            </Button>
+            {actions}
+          </div>
+        )}
       </form>
     </dialog>
   );

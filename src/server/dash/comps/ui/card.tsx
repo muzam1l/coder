@@ -4,12 +4,19 @@ import type { ComponentChildren } from 'preact';
 import { Button } from './button';
 import { iPlus } from './icons';
 
+/** How a card stands off the page: `outlined` has a border on the panel background, `filled` no border on a stronger surface. */
+export type CardLook = 'outlined' | 'filled';
+
+const cardClass = (look: CardLook, ...more: Array<string | undefined>) =>
+  ['card frame', look === 'filled' ? 'filled' : undefined, ...more].filter(Boolean).join(' ');
+
 export function Card({
   id,
   title,
   count,
   actions,
   tone,
+  look = 'outlined',
   children,
 }: {
   id?: string;
@@ -17,10 +24,11 @@ export function Card({
   count?: number | string;
   actions?: ComponentChildren;
   tone?: 'accent' | 'danger';
+  look?: CardLook;
   children: ComponentChildren;
 }) {
   return (
-    <section id={id} class={tone ? `card frame ${tone}` : 'card frame'}>
+    <section id={id} class={cardClass(look, tone)}>
       {title ? (
         <div class="bar">
           <h2>
@@ -42,6 +50,7 @@ export function FoldCard({
   actions,
   open = 'Add',
   opened,
+  look = 'outlined',
   children,
 }: {
   title: ComponentChildren;
@@ -51,10 +60,11 @@ export function FoldCard({
   open?: string;
   /** Starts unfolded, as when there is nothing in the list under it yet. */
   opened?: boolean;
+  look?: CardLook;
   children: ComponentChildren;
 }) {
   return (
-    <details class="card frame fold" open={opened}>
+    <details class={cardClass(look, 'fold')} open={opened}>
       <summary class="bar">
         <h2>{title}</h2>
         <span class="fold-note">{note}</span>

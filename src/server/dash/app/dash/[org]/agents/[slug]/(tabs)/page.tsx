@@ -9,9 +9,7 @@ import { Card, Empty } from '@/comps/ui/card';
 import { Settle } from '@/comps/frame/stream';
 import { editableAgent } from '@/api/types';
 import { LIST_PAGE } from '@/utils/paged';
-import { defaultLabel } from '@/app/dash/[org]/settings/model-options';
-import type { Defaults } from '@/app/dash/[org]/tasks/composer';
-import { DEFAULT_ENGINE } from '@coder/core/types';
+import { modelSource } from '@/app/dash/[org]/settings/model-options';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
 
 const VersionsList = dynamic(() => import('./versions-list').then(m => m.VersionsList), {
@@ -35,19 +33,14 @@ function OverviewBody({
   agent,
   org,
   history,
-  defaults,
   tz,
 }: {
   agent: AgentRow;
   org: string;
   history: Paged<VersionRow>;
-  defaults: Defaults;
   tz: string;
 }) {
   const current = history.items.find(version => version.version === agent.currentVersion);
-  const definition = agent.definition;
-  const engine = agent.settings?.engine ?? definition?.engine;
-  const base = engine ? defaults.engines[engine] : undefined;
 
   return (
     <>
@@ -64,17 +57,15 @@ function OverviewBody({
             </dd>
           </div>
           <div>
-            <dt>Engine</dt>
-            <dd>{engine ?? defaultLabel('first available engine')}</dd>
-          </div>
-          <div>
             <dt>Model</dt>
-            <dd>{agent.settings?.model ?? definition?.model ?? defaultLabel(base?.model)}</dd>
+            <dd>{modelSource(agent)}</dd>
           </div>
-          <div>
-            <dt>Effort</dt>
-            <dd>{agent.settings?.effort ?? definition?.effort ?? defaultLabel(base?.effort)}</dd>
-          </div>
+          {agent.runsOn ? (
+            <div>
+              <dt>Runs on</dt>
+              <dd>{agent.runsOn}</dd>
+            </div>
+          ) : null}
           {agent.local ? (
             agent.commit && (
               <div>
@@ -147,14 +138,11 @@ export default async function AgentPage({
   const tz = zoneOf(request);
   const agent = loadAgent(request, slug);
   const versions = load(request).agents.versions(slug, { cursor: '', limit: LIST_PAGE });
-  const config = load(request)
-    .config.get()
-    .catch(() => undefined);
 
   return (
     <Settle
       load={() =>
-        Promise.all([agent, versions, config]).then(([row, history, shown]) => (
+        Promise.all([agent, versions]).then(([row, history]) => (
           <>
             {row.needsModel ? (
               <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
@@ -163,10 +151,6 @@ export default async function AgentPage({
               agent={row}
               org={orgOf(request)}
               history={history}
-              defaults={{
-                engine: shown?.effective.chain?.[0] ?? DEFAULT_ENGINE,
-                engines: shown?.effective.engines ?? {},
-              }}
               tz={tz}
             />
           </>

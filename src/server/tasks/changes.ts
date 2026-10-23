@@ -22,6 +22,8 @@ import { clearDefaults } from '../settings/runners';
 import type { TaskStatus } from '../store/types';
 import { syncApprovals } from './approvals';
 import { taskClaims, taskTokenHash, type TaskPrincipal } from './access';
+import { resume } from './conversation';
+import { scheduleKick } from './kick';
 import { ACTIVE_STATES, addInbox, readInbox } from './queue';
 
 /** A Confirm write: what changes, applied by the same core function its route calls. */
@@ -290,7 +292,13 @@ async function describe(
       'model-enable': 'Enable',
       'model-disable': 'Disable',
     }[change.kind];
-    const actions = diffLines(config.models?.[change.name] ?? {}, next.models?.[change.name] ?? {});
+    // An endpoint diffs by field; an alias or false as one value.
+    const fields = (entry: unknown) =>
+      entry && typeof entry === 'object' ? entry : entry === undefined ? {} : { model: entry };
+    const actions = diffLines(
+      fields(config.models?.[change.name]),
+      fields(next.models?.[change.name]),
+    );
 
     return {
       reason: `${verb} model ${change.name} for the workspace.`,
@@ -433,8 +441,8 @@ export async function actAsRefusal(
     links?.find(link => link.name)?.name ||
     (owner === current.requestedBy ? current.context?.user?.name : undefined) ||
     'its owner';
-  const waiting = `Waiting for ${person} to approve acting as them on ${connection.name}.`;
-  if (steered) return waiting;
+  const waiting = `Waiting for ${person} to approve acting as them on ${connection.name}`;
+  if (steered) return `${waiting}.`;
   if (asked?.response)
     return `${person} declined acting as them on ${connection.name} for this task.`;
   const now = (ctx.now ?? Date.now)();
@@ -472,7 +480,7 @@ export async function actAsRefusal(
     );
   }
 
-  return waiting;
+  return `${waiting}; this task continues once they answer.`;
 }
 
 /** Why `approver` may not approve `request` in `scope`; undefined when they may. */
@@ -557,15 +565,20 @@ const record = (ctx: ServerContext, status: TaskStatus, approval: Approval) =>
     { unanswered: approval.id },
   );
 
-/** Shows a recorded answer in the conversation; a running task hears it as a message. */
-async function announce(ctx: ServerContext, status: TaskStatus, answered: Approval) {
+/** Shows a recorded answer in the conversation; a running task hears it as a message, a finished one resumes with it as a turn `approver` asks. */
+async function announce(
+  ctx: ServerContext,
+  status: TaskStatus,
+  answered: Approval,
+  approver: Approver | undefined,
+) {
   await ctx.store.delete('delivery', askedKey(status.task.id, answered.id));
   (ctx.waitUntil ?? (() => {}))(
     syncApprovals(ctx, status.task, [answered]).catch(error =>
       console.error(`coder server: could not show the decision on ${answered.id}`, error),
     ),
   );
-  const current = await ctx.store.get('task', status.task.id);
+  let current = await ctx.store.get('task', status.task.id);
   const operation = changeOf(answered)!.operation;
   const text =
     operation.kind !== 'act-as'
@@ -573,6 +586,15 @@ async function announce(ctx: ServerContext, status: TaskStatus, answered: Approv
       : answered.response!.decision === 'accept'
         ? `${operation.user.name} approved acting as them on ${operation.connection.name} for this task. Use it now.`
         : `${operation.user.name} declined acting as them on ${operation.connection.name} for this task.`;
+  if (current && !ACTIVE_STATES.includes(current.status)) {
+    const mustReply = current.task.context?.mustReply === true;
+    if (await resume(ctx, current, text, mustReply, {}, approver?.id)) {
+      scheduleKick(ctx, true);
+      return answered;
+    }
+    // Another message resumed it first.
+    current = await ctx.store.get('task', status.task.id);
+  }
   if (current && ACTIVE_STATES.includes(current.status))
     await addInbox(ctx, current, 'steer', { text });
 
@@ -639,7 +661,7 @@ export async function decideChange(
     };
     if (!(await record(ctx, status, denied))) return answeredBefore(approvalId);
 
-    return json(await announce(ctx, status, denied));
+    return json(await announce(ctx, status, denied, approver));
   }
 
   if (decision !== 'accept')
@@ -679,12 +701,12 @@ export async function decideChange(
       { approvals: [refused] },
       (ctx.now ?? Date.now)(),
     );
-    await announce(ctx, status, refused);
+    await announce(ctx, status, refused, approver);
 
     return json({ error: moved }, 409);
   }
 
-  return json(await announce(ctx, status, accepted));
+  return json(await announce(ctx, status, accepted, approver));
 }
 
 /** A decision from the dashboard: the signed-in member is the approver. */

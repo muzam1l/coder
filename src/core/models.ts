@@ -4,10 +4,9 @@ import path from 'node:path';
 
 import { getCodexAvailability } from './engines/codex';
 import {
-  CLAUDE_EFFORTS,
-  CLAUDE_MODELS,
-  CODEX_EFFORTS,
-  CODEX_MODELS,
+  BUILTIN_MODELS,
+  EFFORTS,
+  aliasTarget,
   endpointCandidates,
   isAliasModel,
   isBuiltinAlias,
@@ -15,12 +14,14 @@ import {
   loadConfig,
   normalizeBaseUrl,
   parseEngineSpec,
+  splitEngineSpec,
   removeModel,
+  toggleModel,
   configTargetFile,
 } from './config';
 import { CoderError } from './dispatch';
 import { ensureCodexInstalled } from './hosts';
-import type { AliasModelConfig, CoderConfig, CustomModelConfig, ModelEntry } from './types';
+import type { CoderConfig, CustomModelConfig, ModelEntry } from './types';
 import type { ProbeResult } from '../client/types';
 import { writeConfigFile } from './config';
 import { connect, type ServerOptions } from './remote';
@@ -175,26 +176,36 @@ function writeModels(targetFile: string, mutate: (models: Record<string, ModelEn
   });
 }
 
+/** One engine's built-in aliases, as name -> the model id each runs. */
+const builtinIds = (engine: string, builtin: Record<string, string> = BUILTIN_MODELS) =>
+  Object.fromEntries(
+    Object.entries(builtin).flatMap(([name, spec]) => {
+      const [own, model] = spec.split('/');
+      return own === engine && model ? [[name, model]] : [];
+    }),
+  );
+
 // Compute the model-list rows shared by the text and JSON views (and the SDK):
-// the per-provider rows, the custom endpoints, and any bare toggles.
+// the per-provider rows, the custom endpoints, and any names turned off.
 function buildModelRows(config: CoderConfig) {
   const models = config.models ?? {};
   const endpoints = Object.entries(models).filter((pair): pair is [string, CustomModelConfig] =>
     isEndpointModel(pair[1]),
   );
-  const specOf = (entry: AliasModelConfig) =>
-    `${entry.provider}:${entry.model}${entry.effort ? `:${entry.effort}` : ''}`;
   const aliasDetails = Object.entries(models)
-    .filter((pair): pair is [string, AliasModelConfig] => isAliasModel(pair[1]))
+    .filter((pair): pair is [string, string] => isAliasModel(pair[1]))
     .map(([name, entry]) => {
       // An alias replaces a built-in row when it reuses its name (shadowing)
       // or resolves to the same concrete model id.
-      const builtins = entry.provider === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
-      const concrete = builtins[entry.model] ?? entry.model;
+      const target = aliasTarget(entry, config);
+      const builtins = builtinIds(target.engine);
+      const concrete = (target.model && builtins[target.model]) ?? target.model;
+      const specOf = () =>
+        [target.engine, target.model, target.effort].filter(Boolean).join('/');
       const replaces = isBuiltinAlias(name)
         ? name
         : Object.entries(builtins).find(([, id]) => id === concrete)?.[0];
-      return { name, spec: specOf(entry), replaces, disabled: Boolean(entry.disabled) };
+      return { name, spec: specOf(), replaces, disabled: false };
     });
   // A name-shadowing alias always claims the built-in row (it shadows
   // resolution); a same-model alias only claims it when nothing shadows.
@@ -208,7 +219,7 @@ function buildModelRows(config: CoderConfig) {
       overriding.set(alias.replaces, alias);
     }
   }
-  const disabled = (name: string) => Boolean(models[name]?.disabled);
+  const disabled = (name: string) => models[name] === false;
   const standaloneAliases = aliasDetails.filter(
     alias => ![...overriding.values()].some(item => item.name === alias.name),
   );
@@ -228,17 +239,15 @@ function buildModelRows(config: CoderConfig) {
         : { alias, model, builtin: true, disabled: disabled(alias) };
     }),
     ...standaloneAliases
-      .filter(alias => alias.spec.startsWith(`${provider}:`))
+      .filter(alias => alias.spec.startsWith(`${provider}/`))
       .map(({ name, spec, disabled }) => ({ alias: name, spec, disabled })),
   ];
-  // Bare toggles on non-built-in names (raw engine slugs, entries from another
+  // Names turned off that are no built-in (raw engine slugs, entries from another
   // config layer) have no section of their own; surface them so a disabled
   // slug is never invisible.
   const toggledSlugs = Object.entries(models)
-    .filter(
-      ([name, entry]) => !isEndpointModel(entry) && !isAliasModel(entry) && !isBuiltinAlias(name),
-    )
-    .map(([name, entry]) => ({ name, disabled: Boolean(entry.disabled) }));
+    .filter(([name, entry]) => entry === false && !isBuiltinAlias(name))
+    .map(([name]) => ({ name, disabled: true }));
   return { models, endpoints, providerRows, toggledSlugs, disabled };
 }
 
@@ -256,8 +265,8 @@ async function modelListData(cwd: string, server?: ServerOptions) {
     })),
   );
   return {
-    codex: providerRows('codex', listed?.builtin.codex ?? CODEX_MODELS),
-    claude: providerRows('claude', listed?.builtin.claude ?? CLAUDE_MODELS),
+    codex: providerRows('codex', builtinIds('codex', listed?.builtin)),
+    claude: providerRows('claude', builtinIds('claude', listed?.builtin)),
     custom: probed,
     ...(toggledSlugs.length ? { toggles: toggledSlugs } : {}),
   };
@@ -327,7 +336,7 @@ const ADD_USAGE =
 const UPDATE_USAGE =
   'Usage: coder model update <name> [--base-url <url>] [--model <id>] [--env-key VAR] [--context-window <tokens>]';
 const ALIAS_USAGE =
-  'Usage: coder model alias <name> <spec>   (e.g. coder model alias fast codex:luna)';
+  'Usage: coder model alias <name> <spec>   (e.g. coder model alias fast codex/luna)';
 const LIST_HINT = 'List them: coder model list';
 
 function checkModelName(
@@ -341,7 +350,7 @@ function checkModelName(
       'invalid-option',
       `Invalid model name "${name}". Use lowercase kebab-case (e.g. qwen-local).`,
     );
-  if (RESERVED.has(name) || (kind === 'model' && isBuiltinAlias(name)))
+  if (EFFORTS.has(name) || (kind === 'model' && (RESERVED.has(name) || isBuiltinAlias(name))))
     throw new CoderError('invalid-option', `"${name}" is reserved; pick another name.`);
 }
 
@@ -447,7 +456,7 @@ function modelAliasCore(
   name: string | undefined,
   spec: string | undefined,
   opts: { workspace?: boolean } = {},
-): AliasModelConfig & { alias: string; file: string } {
+): { alias: string; model: string; file: string } {
   checkModelName(name, 'alias', ALIAS_USAGE);
   const config = loadConfig(cwd);
   const existing = config.models?.[name];
@@ -471,28 +480,25 @@ function modelAliasCore(
     throw new CoderError('invalid-option', `Alias spec "${spec}" does not resolve to a model.`, {
       hint: ALIAS_USAGE,
     });
-  if (parsed.engine === 'custom') {
+  // An engine's own alias is what its bare name runs, so it stays on that engine.
+  if (RESERVED.has(name) && parsed.engine !== name)
+    throw new CoderError('invalid-option', `The ${name} alias names a ${name} model.`, {
+      hint: ALIAS_USAGE,
+    });
+  if (parsed.engine === 'custom' && name !== 'custom') {
     throw new CoderError(
       'invalid-option',
       `"${spec}" names a custom model, which is already dispatchable by name; aliases target codex/claude models.`,
     );
   }
-  // Effort is only baked in when the spec named one; engine-default effort stays a dispatch concern.
-  const effortGiven = spec
-    .split(':')
-    .some(part => CODEX_EFFORTS.has(part.trim()) || CLAUDE_EFFORTS.has(part.trim()));
-  // Store the concrete model id so the alias never dangles if a built-in name is later shadowed.
-  const builtins = parsed.engine === 'claude' ? CLAUDE_MODELS : CODEX_MODELS;
-  const entry: AliasModelConfig = {
-    provider: parsed.engine,
-    model: builtins[parsed.model] ?? parsed.model,
-    ...(effortGiven && parsed.effort ? { effort: parsed.effort } : {}),
-  };
+  // The spec as typed, with its engine; effort only when it named one.
+  const typed = splitEngineSpec(spec);
+  const entry = [parsed.engine, typed.model ?? parsed.model, typed.effort].filter(Boolean).join('/');
   const targetFile = configTargetFile(cwd, opts.workspace);
   writeModels(targetFile, models => {
     models[name] = entry;
   });
-  return { alias: name, ...entry, file: targetFile };
+  return { alias: name, model: entry, file: targetFile };
 }
 
 // Print-free core: remove an alias entry.
@@ -527,31 +533,8 @@ function modelToggleCore(
     throw new CoderError('invalid-option', 'Missing model name.', {
       hint: `Usage: coder model ${disable ? 'disable' : 'enable'} <name>`,
     });
-  const configuredElsewhere = Boolean(loadConfig(cwd).models?.[name]);
   const targetFile = configTargetFile(cwd, opts.workspace);
-  writeModels(targetFile, models => {
-    const entry = models[name];
-    if (!entry) {
-      // No entry here: a bare toggle; enable only matters when another layer defines it.
-      if (disable) {
-        models[name] = { disabled: true };
-      } else if (configuredElsewhere) {
-        models[name] = { disabled: false };
-      }
-      return;
-    }
-    if (isEndpointModel(entry) || isAliasModel(entry)) {
-      if (disable) {
-        entry.disabled = true;
-      } else {
-        delete entry.disabled;
-      }
-    } else if (disable) {
-      entry.disabled = true;
-    } else {
-      delete models[name];
-    }
-  });
+  writeModels(targetFile, models => toggleModel(models, name, disable));
   return { name, disabled: disable, file: targetFile };
 }
 
@@ -587,7 +570,7 @@ export const models = {
         ? undefined
         : { ...server, organization: server.organization ?? workspace },
     ),
-  /** Alias a name to an engine spec, e.g. alias('fast', 'codex:luna'). */
+  /** Alias a name to an engine spec, e.g. alias('fast', 'codex/luna'). */
   alias: (name: string, spec: string, opts: { workspace?: boolean } & ModelServer = {}) =>
     opts.server === undefined
       ? modelAliasCore(path.resolve(opts.cwd ?? '.'), name, spec, opts)

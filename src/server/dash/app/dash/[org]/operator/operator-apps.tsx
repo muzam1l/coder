@@ -4,7 +4,7 @@ import '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/page.css';
 
 import { useState } from 'preact/hooks';
 
-import { useRouter } from '@wular/pnext/navigation/client';
+import { useRouter, useSearchParams } from '@wular/pnext/navigation/client';
 import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
 import { ClientError } from '@coder/client';
@@ -94,7 +94,11 @@ function SetUpDialog({
 /** One shared app per platform for the built-in agent in every workspace; Set up opens its create dialog, Update brings it up to date as an agent's Platforms tab does. */
 export function OperatorApps({ first }: { first: Apps }) {
   const nav = useRouter();
-  const [open, setOpen] = useState<OperatorAppRow>();
+  // A Set up shared app link from Connections opens that platform's dialog at once.
+  const asked = useSearchParams().get('setup');
+  const [open, setOpen] = useState(
+    first.platforms.find(row => row.integration === asked && !row.app),
+  );
   const [updating, setUpdating] = useState<{ row: OperatorAppRow; check: AppCheck }>();
   const action = useAction();
 

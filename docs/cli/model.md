@@ -7,7 +7,7 @@ manage models: built-ins, aliases, custom endpoints
 Manage the models coder can dispatch to. `add` connects any OpenAI-compatible
 endpoint (Ollama, vLLM, OpenRouter, ...) as the custom engine, alongside the
 built-in codex/claude models. Name your own shortcuts with `alias`
-(e.g. fast -> codex:luna); disable/enable turns any model off and on.
+(e.g. fast -> codex/luna); disable/enable turns any model off and on.
 
 ## `model list [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
@@ -16,7 +16,7 @@ list built-ins, custom models, and aliases
 List built-in aliases, configured custom models, and user aliases. Only custom
 models on this machine are probed; --server lists the workspace's.
 
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -28,7 +28,7 @@ connect a model
 
 Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,
 vLLM, OpenRouter, ...). It currently runs on the codex engine pointed at your
-URL and is usable anywhere a model is: --model <name> or --model custom:<name>, or as an
+URL and is usable anywhere a model is: --model <name> or --model custom/<name>, or as an
 agent default in config. Alias: `coder model setup`.
 
 - `<name>` the name to dispatch it by
@@ -95,13 +95,13 @@ re-enable a disabled model
 
 ## `model alias [name] [spec] [--workspace] [--json] [--cwd <cwd>]`
 
-name a spec, e.g. fast codex:luna
+name a spec, e.g. fast codex/luna
 
-Save an alias for an engine spec, e.g. fast -> codex:luna. An alias may reuse a
-built-in name to override it.
+Save an alias for an engine spec, e.g. fast -> codex/luna. An alias may reuse a
+built-in name to override it; an engine name sets what that bare engine runs.
 
 - `<name>` the alias
-- `<spec>` the engine spec, such as codex:luna
+- `<spec>` the engine spec, such as codex/luna
 - `--workspace` target <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
 - `--cwd <cwd>` workspace directory; default current

@@ -6,7 +6,7 @@ import path from 'node:path';
 import type { McpServerSpec } from '../core/types';
 import { INTEGRATIONS } from '../integrations';
 import type { AgentEvent, AgentTask, Connection } from './types';
-import { connectionEnvironment } from '../core/connections';
+import { connectionEnvironment, connectionServerName } from '../core/connections';
 
 /** `APP_TOKEN_<UPPER_ID>`: the env var carrying one integration's token inside a task. */
 export function tokenEnvName(integration: string): string {
@@ -14,7 +14,7 @@ export function tokenEnvName(integration: string): string {
 }
 
 /** A server name from a handle key: `github:Acme Org` becomes `github-acme-org`. */
-const serverName = (key: string) =>
+export const serverName = (key: string) =>
   key
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
@@ -26,7 +26,7 @@ export function agentToolServer(
   tools: string[],
   context: { token: string; event?: AgentEvent; account?: string; owner?: string },
 ): McpServerSpec {
-  const { name, tools: catalog, repos, reach } = INTEGRATIONS[integration]!;
+  const { tools: catalog, repos } = INTEGRATIONS[integration]!;
   const { readOnly, ...spec } = catalog.server(tools, context.event, context.token, context.owner);
   const env = Object.entries(spec.env ?? {}).find(([, value]) => value === context.token)?.[0];
   const access = tools.some(tool => !catalog.presets['read-only'].includes(tool))
@@ -42,25 +42,12 @@ export function agentToolServer(
     name: serverName(handleKey(integration, context.account)),
     integration,
     ...(account ? { account } : {}),
-    description: context.account
-      ? (reach?.(context.account) ?? `${name} ${context.account}`)
-      : `${name}, where this conversation is`,
     access,
     ...(readOnly ? { readOnly } : {}),
     ...(env ? { credentialFields: { env } } : {}),
     ...(repos?.credentialUsername ? { gitCredential: true } : {}),
   };
 }
-
-/** The platforms a task has tools on, for its prompt; `personal` where a person can connect their own account. */
-export const taskPlatforms = (task: Pick<AgentTask, 'tools'>) =>
-  Object.entries(task.tools ?? {}).flatMap(([id, tools]) => {
-    const integration = INTEGRATIONS[id];
-
-    return integration && tools?.length
-      ? [{ id, name: integration.name, ...(integration.auth.user ? { personal: true } : {}) }]
-      : [];
-  });
 
 /** A tool server name for an installation: the event's own keeps its integration id, every other one adds its account. */
 export const handleKey = (integration: string, account?: string) =>
@@ -110,9 +97,9 @@ export function taskToolServers(
   });
 }
 
-/** A Just me platform connection's tool server, named for the connection; its token loads on first use. */
+/** A platform connection's tool server, named by `connectionServerName`; its token loads on first use. */
 export function connectionToolServer(
-  connection: Pick<Connection, 'id' | 'name' | 'provider' | 'owner' | 'account' | 'login'>,
+  connection: Pick<Connection, 'id' | 'provider' | 'owner' | 'account' | 'login'>,
   tools: string[],
   event?: AgentEvent,
 ): McpServerSpec {
@@ -130,8 +117,7 @@ export function connectionToolServer(
 
   return {
     ...server,
-    name: connection.id,
-    description: connection.name,
+    name: connectionServerName(connection),
     connection: connection.id,
     credentialOnUse: server.credentialFields,
     owner: connection.owner,
@@ -225,7 +211,7 @@ export async function gitToolEnvironment(
     await fs.writeFile(path.join(root, 'tokens.json'), JSON.stringify({ credentials, endpoint }), {
       mode: 0o600,
     });
-    // The installation covering the owner, else the Just me accounts (the owner's own first), else any installation.
+    // The installation covering the owner, else the personal accounts (the owner's own first), else any installation.
     await fs.writeFile(
       helper,
       `const fs = require('node:fs');

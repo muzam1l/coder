@@ -9,6 +9,12 @@ export function arg<T extends z.ZodMiniType>(schema: T, description = '', value?
 export const flag = (description?: string) => arg(z.optional(z.boolean()), description);
 export const str = (description?: string, value?: string) =>
   arg(z.optional(z.string()), description, value);
+/** `--model`: one model spec, with what it applies to after it. */
+export const modelOption = (scope?: string) =>
+  str(
+    `model name[/effort] or engine/model[/effort] (sol/low, claude/opus, codex/gpt-6.1-sol/high)${scope ? ` ${scope}` : ''}`,
+    '<name[/effort]|engine/model[/effort]>',
+  );
 /** A repeatable value flag: `--add-dir a --add-dir b` collects `['a', 'b']`; as the last positional, the remaining words. */
 export const strList = (description?: string, value?: string) =>
   arg(z.optional(z.array(z.string())), description, value);
@@ -42,7 +48,7 @@ export const tailOption = (description?: string) =>
   );
 
 export const serverOptions = {
-  server: optStr('act on your Coder server', '[url]'),
+  server: optStr('act on the Coder server', '[url]'),
   workspace: str('with --server: the workspace to act in (default: the saved one)', '<slug>'),
   yes: flag('with --server: connect to a server used for the first time without asking'),
 };

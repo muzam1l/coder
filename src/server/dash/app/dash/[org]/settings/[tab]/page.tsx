@@ -1,13 +1,12 @@
 import './runners-list.css';
 import './connections-list.css';
-import './engines-list.css';
 import './credentials-list.css';
 import './list.css';
 import { dynamic } from '@wular/pnext/dynamic';
 import { notFound } from '@wular/pnext/navigation';
-import { DEFAULT_CONFIG } from '@coder/core/types';
 
-import { load } from '@/api/load';
+import { createUrl, load, loadAgent, unwrap } from '@/api/load';
+import { stepOf } from '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/platform-state';
 import { Settle, Stream } from '@/comps/frame/stream';
 import { Loading } from '@/comps/ui/card';
 import { SETTINGS } from '@/app/dash/[org]/settings/settings-head';
@@ -35,7 +34,7 @@ const ConnectionsList = dynamic(() => import('./connections-list').then(m => m.C
 const OutcomeToast = dynamic(() =>
   import('@/app/dash/[org]/setup/outcome-toast').then(m => m.OutcomeToast),
 );
-const EnginesList = dynamic(() => import('./engines-list').then(m => m.EnginesList));
+const AdvancedList = dynamic(() => import('./advanced-list').then(m => m.AdvancedList));
 const RunnersList = dynamic(() => import('./runners-list').then(m => m.RunnersList));
 
 /** One settings tab. */
@@ -80,13 +79,58 @@ export default async function SettingsTabPage({
       .integrations.list()
       .catch(() => []);
     const me = load(request).me();
+    // Which agents use each platform, for the Install menu; one page holds every agent a workspace has.
+    const agents = load(request)
+      .agents.list({ cursor: '', limit: 200 })
+      .then(page =>
+        page.items.map(({ id, name, platforms, source }) => ({
+          id,
+          name,
+          platforms: platforms.map(each => each.id),
+          ...(source === 'builtin' ? { builtin: true } : {}),
+        })),
+      )
+      .catch(() => []);
+    // Each built-in agent's step on each platform it uses, as its Platforms tab shows it, for the Workspace column.
+    const builtins = agents
+      .then(list =>
+        Promise.all(
+          list
+            .filter(agent => agent.builtin)
+            .map(async ({ id, name }) => {
+              const [row, apps, installations] = await Promise.all([
+                loadAgent(request, id),
+                load(request).apps.list(id).then(unwrap),
+                load(request).installations.list(id, { limit: 200, active: true }).then(unwrap),
+              ]);
+              const platforms = Object.keys(row.definition?.integrations ?? {});
+              return {
+                id,
+                name,
+                steps: Object.fromEntries(
+                  platforms.map(platform => [
+                    platform,
+                    stepOf(platform, apps, installations, createUrl(row, apps, platform)),
+                  ]),
+                ),
+              };
+            }),
+        ),
+      )
+      .catch(() => []);
     const search = new URL(request.url).searchParams;
     const outcome = readOutcome(search);
     const signIn = search.get('outcome');
     return (
       <Settle
         load={async () => {
-          const [first, integrations, who] = await Promise.all([rows, catalog, me]);
+          const [first, integrations, who, used, own] = await Promise.all([
+            rows,
+            catalog,
+            me,
+            agents,
+            builtins,
+          ]);
           return (
             <>
               {outcome ? (
@@ -117,6 +161,9 @@ export default async function SettingsTabPage({
                 local={localServer(who)}
                 admin={isAdmin(who)}
                 operator={who.operator === true}
+                viewer={who.user?.name ?? undefined}
+                agents={used}
+                builtins={own}
               />
             </>
           );
@@ -125,13 +172,14 @@ export default async function SettingsTabPage({
     );
   }
 
-  if (tab === 'engines') {
+  if (tab === 'advanced') {
     const config = load(request).config.get();
+    const me = load(request).me();
     return (
       <Settle
         load={() =>
-          config.then(first => (
-            <EnginesList first={first} defaults={DEFAULT_CONFIG.engines ?? {}} />
+          Promise.all([config, me]).then(([first, who]) => (
+            <AdvancedList first={first} admin={isAdmin(who)} />
           ))
         }
       />

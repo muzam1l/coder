@@ -4,7 +4,6 @@ import type { RunnerRow } from '@coder/client/types';
 import { localServer } from '@/api/types';
 import { modelsByEngine } from '@/app/dash/[org]/settings/model-options';
 import type { Choice, Defaults, Lists } from './composer';
-import { DEFAULT_ENGINE } from '@coder/core/types';
 
 export const PLACEHOLDER = 'What should the agent do? Type / for flows and reviews.';
 
@@ -12,7 +11,6 @@ export const CHOICE: Choice = {
   repo: '',
   cwd: '',
   agent: '',
-  engine: '',
   model: '',
   effort: '',
   access: 'auto',
@@ -75,7 +73,7 @@ export async function loadComposer(api: ServerClient) {
     flows: options.flows,
     folders: options.folders,
   };
-  const defaults: Defaults = { engine: options.engine ?? DEFAULT_ENGINE, engines: options.engines };
+  const defaults: Defaults = { chain: options.chain, builtin: options.models.builtin };
 
   return { data, defaults, connectLabel: options.connectLabel ?? 'Connect repositories' };
 }

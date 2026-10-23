@@ -86,7 +86,6 @@ export interface TaskFilter {
   statuses?: TaskStatus['status'][];
   agent?: string;
   source?: TaskSource;
-  reviewKey?: string;
   archived?: boolean;
   /** Case-insensitive match on the request text, agent, or task id. */
   q?: string;
@@ -157,7 +156,6 @@ export function matchesTask(status: TaskStatus, filter: TaskFilter): boolean {
   } else if (states && !states.includes(status.status)) return false;
   if (filter.agent && status.task.agent !== filter.agent) return false;
   if (filter.source && status.task.source !== filter.source) return false;
-  if (filter.reviewKey && reviewKey(status.task) !== filter.reviewKey) return false;
   if (filter.parent && status.task.parent !== filter.parent) return false;
   if (filter.runnerId && status.task.runnerId !== filter.runnerId) return false;
   if (filter.archived !== undefined && filter.archived !== (status.archivedAt !== undefined))
@@ -207,9 +205,9 @@ export type TaskRefresh = Pick<AgentTask, 'prompt' | 'context'> &
       | 'tools'
       | 'files'
       | 'access'
-      | 'engineChain'
-      | 'engineCredentials'
-      | 'credential'
+      | 'models'
+      | 'runner'
+      | 'runnerId'
     >
   >;
 
@@ -245,6 +243,7 @@ export type TaskPatch = Partial<
     | 'archivedAt'
     | 'autoArchived'
     | 'approval'
+    | 'fallbacks'
   >
 > & { answer?: unknown; approvals?: Approval[]; resolvedModel?: string };
 
@@ -950,12 +949,20 @@ export class StoreQueue implements TaskQueue {
     return this.serial(async () => {
       const current = await this.read(id);
       if (!current || !DONE.has(current.status) || !this.allowed(current, fence)) return false;
+      // Answers recorded since the continuation read the task are newer than its copy.
+      const context = task.context && {
+        ...task.context,
+        approvals: mergeApprovals(
+          task.context.approvals ?? [],
+          current.task.context?.approvals ?? [],
+        ),
+      };
 
       await this.store.put(
         'task',
         id,
         {
-          task: { ...current.task, ...task },
+          task: { ...current.task, ...task, ...(context ? { context } : {}) },
           status: 'queued',
           attempts: 0,
           logSeq: current.logSeq,

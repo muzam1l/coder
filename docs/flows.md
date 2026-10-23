@@ -1,16 +1,10 @@
+---
+description: Flows, TypeScript files that run many coder tasks with gates and resume.
+---
+
 # Flows
 
-Orchestrate many coder tasks with a plain TypeScript file. A flow is code, not config: loops, conditionals, and nesting are just JavaScript, while dispatch, concurrency, journaling, and resume come from the runtime. Every task a flow spawns is a regular coder task, so `coder list`, `coder task steer`, and `coder task stop` work on them like any other.
-
-Like tasks, flows are normally authored by your host agent: you describe the wave, the harness writes the flow file into `.coder/flows/`, and you review or edit it before it runs. The file is the contract; everything below is what goes in it.
-
-Watch a run live - progress and overview of its tasks as the wave goes:
-
-```sh
-coder flow stream [run-id]
-```
-
-## A first flow
+A flow is a plain TypeScript file that runs many coder tasks. Loops, conditionals and nesting are JavaScript; dispatch, concurrency, journaling and resume come from the runtime. Each task it starts is a regular task, so `coder list`, `coder task steer` and `coder task stop` work on it. A host agent usually writes the flow into `.coder/flows/` from a description, and a person reviews it before it runs.
 
 ```ts
 // .coder/flows/audit-routes.ts
@@ -26,224 +20,63 @@ export default await pipeline(routes.data.files, file =>
 );
 ```
 
-Run it:
+`coder flow run audit-routes --wait` runs it and streams progress. Without `--wait` it runs in the background and `coder flow stream` follows it. `/flow <name>` in **# Tasks → [New task]** runs one from the dashboard.
 
-```bash
-coder flow run audit-routes --wait
-```
+A flow is an ES module with top-level `await`, and its default export is the result. `@wular/coder/flow` and `zod` come with Coder.
 
-`--wait` streams the run's progress right there; without it the run goes to the background and `coder flow stream` shows the same lines any time. If the run dies mid-wave, `coder flow resume` continues it without re-running finished steps. In the dashboard, `/flow <name>` in **# Tasks → [New task]** runs one.
+## Primitives
 
-## Flows are plain modules
+- **`task(prompt, opts?)`:** runs one task and waits for it.
+  - Options are the `coder run` flags (`model`, `access`, `name`, `appendSystem`, `cwd`, `addDirs`), plus `returns`: a zod schema for structured output, validated with one corrective retry, landing on `r.data`.
+  - Returns `{ taskId, status, output, data?, tokens, model }`, and throws if the task fails.
+  - Unlike the SDK's `task.run()`, it waits, and inside a run it's journaled and concurrency-limited.
+- **`steer(taskId, text, opts?)`:** one more turn on a task this run started, like `coder task steer --wait`. It returns the same shape as `task()` without `data`.
+- **`gate(cmd, opts?)`:** a shell checkpoint returning `{ ok, code, output }`. A failing gate doesn't throw; it's a decision point. Never interpolate model output into `cmd`, because that hands the model a shell. Pass it through a file or environment variable instead.
+- **`pipeline(items, ...stages)`:** moves each item through the stages independently.
+  - An item enters the next stage as soon as it finishes the last one, without waiting for the batch.
+  - Each stage gets `(previous, item, index)`.
+  - The result is the last stage's value per item, or `null` for an item whose stage threw.
+  - Use `Promise.all` for one plain parallel batch.
+- **`args`:** the input, from `--args '<json>'` or `key=value` pairs, typed `unknown`. For a validated, typed input, export a zod schema as `args` and a default async function that receives the parsed value. The runtime checks the input before any task starts.
+- **`flow(name, args?)`:** runs another flow inline, sharing the journal, concurrency and ledger. Nesting is one level deep.
+- **`log(msg)`:** a progress line in the flow log and `coder flow stream`.
 
-A flow is an ordinary TypeScript module: import the primitives, use top-level `await`, and `export default` the result. `@wular/coder/flow` and `zod` come with Coder, so the repository installs neither. Input comes in through the `args` import (see [`args`](#args)):
+## Limits
 
-```ts
-// .coder/flows/verify-wave.ts
-import { task, pipeline, args } from '@wular/coder/flow';
+- `--concurrency`: tasks at once. Defaults to the machine's CPU count.
+- `--max-tasks`: total tasks per run, a backstop against loops. Defaults to CPU count × 10.
 
-export default await pipeline(args.clusters as string[], c => task(`Verify cluster ${c}.`));
-```
-
-## The primitives
-
-### `task(prompt, opts?)`
-
-Dispatch one coder task and await its result.
-
-```ts
-const r = await task('Explain the auth module', {
-  model: 'sol',
-  access: 'read-only',
-});
-r.output; // final message text
-```
-
-Options are the same as the `coder run` flags (`model`, `effort`, `access`, `name`, `appendSystem`, `cwd`, and `addDirs` for `--add-dir` - see `coder run --help`), plus one of its own:
-
-- `returns` - a zod schema for structured output instead of prose. The runtime passes the schema natively, validates the reply (one corrective retry on mismatch), and the parsed value lands on `r.data`:
-
-```ts
-const r = await task('List every file that imports the legacy cache API.', {
-  returns: z.object({ files: z.array(z.string()) }),
-});
-
-r.data.files; // string[], validated
-```
-
-Returns `{ taskId, status, output, data?, tokens, model }`. If the task fails, `task()` throws; catch the error to inspect the failed result or retry.
-
-> Note: unlike the SDK's `task.run()`, which returns a task id right away and leaves waiting to you, the flow `task()` waits for the result in one call, and inside a run it is journaled and concurrency-limited.
-
-### `steer(taskId, text, opts?)`
-
-Give a task this run started one more turn on its own thread, under the same task id, and await it. It mirrors `coder task steer --wait`, with the same `model`, `effort` and `access` overrides:
-
-```ts
-const draft = await task('Draft the schema for the new orders table.');
-const fixed = await steer(draft.taskId, 'Now add the indexes.');
-```
-
-Returns the same shape as `task()` without `data`, throws if the turn fails, and is journaled like `task()`.
-
-### `gate(cmd, opts?)`
-
-A deterministic shell checkpoint. Gates are never agents: they run the command and return `{ ok, code, output }`. A failing gate does not throw, because a failed gate is a decision point, not an error:
-
-```ts
-const g = await gate('bun tsc');
-if (!g.ok) {
-  // retry with g.output in the prompt, park the item, or bail - your call
-}
-```
-
-The command runs through the shell, so treat it like any shell string: never interpolate task output (or other model-derived text) into it - `gate(`test -n "${r.output}"`)` hands the model shell access. Write fixed commands, or pass model output through a file/env var the command reads.
-
-### `pipeline(items, ...stages)`
-
-The workhorse. Give it a list of items and one or more stage functions; every item moves through the stages independently, as fast as its own work finishes.
-
-```ts
-const results = await pipeline(
-  files, // items
-  file => task(`Fix the tests in ${file}.`), // stage 1
-  (r, file) => gate(`bun test ${file}`), // stage 2
-);
-```
-
-How to read it:
-
-- Stage 1 runs for each file (up to the concurrency limit). The moment `a.ts` finishes stage 1, it enters stage 2, even if `b.ts` is still in stage 1. There is no waiting for the whole batch between stages.
-- Each stage receives `(previousStageResult, originalItem, index)`, so later stages always know which item they are working on.
-- `results` is one entry per item: whatever the last stage returned for it.
-- If a stage throws for an item, that item becomes `null` in the results and skips its remaining stages; the other items are unaffected.
-
-Prefer `pipeline` for anything multi-stage: fast items never wait for slow ones.
-
-Use `Promise.all` for plain parallel batches:
-
-```ts
-const findings = await Promise.all(areas.map(area => task(`Audit ${area}.`)));
-```
-
-### `args`
-
-The flow's input, from `--args '<json>'` or bare `key=value` pairs:
-
-```ts
-import { args } from '@wular/coder/flow';
-
-const items = (args.items ?? []) as string[];
-```
-
-Properties are typed `unknown` - assert or default them as you go, or use the function form below for real types.
-
-To validate and type the input with zod, shape the flow as two exports:
-
-- `export const args` - a zod schema for the input
-- `export default` - an async function holding the flow body
-
-The runtime checks the input against the schema first, and only if it passes runs the default function, passing the parsed input as its parameter. (Top-level flows can't get this fail-fast check: importing one already executes it.)
-
-```ts
-export const args = z.object({ clusters: z.array(z.string()) });
-
-export default async ({ clusters }: z.infer<typeof args>) => {
-  // clusters is string[], validated before any task dispatched
-};
-```
-
-### `flow(name, args?)`
-
-Run another flow inline and get its result:
-
-```ts
-const verified = await flow('verify-wave', { clusters });
-```
-
-The name resolves like `coder flow run <name>` does (see [Where flows live](#where-flows-live)). Sub-flows share the parent's journal, concurrency, and ledger, and nesting is one level deep: a sub-flow calling `flow()` throws.
-
-### `log(msg)`
-
-Emit a progress line, shown in the flow log and `coder flow stream`:
-
-```ts
-log(`${parked.length} clusters parked`);
-```
-
-## Concurrency and ceilings
-
-Two knobs, sensible defaults, mentioned together because they scale off the same number:
-
-- **`--concurrency`** - tasks running at once. Defaults to the machine's CPU count. Tasks are engine subprocesses doing mostly network waiting, so this is about engine quota and machine load, not about a flow "using up" your cores.
-- **`--max-tasks`** - total tasks one run may dispatch, a backstop against runaway loops. Defaults to CPU count x 10.
-
-Token usage is recorded per model in the run's ledger and shown by `coder flow result`. Bookkeeping, not enforcement.
+Tokens per model go to the run's ledger, shown by `coder flow result`.
 
 ## Resume
 
-Every `task`, `gate`, and `flow` call is recorded in the run's journal along with a fingerprint of its inputs (the prompt or command, plus options).
+Every `task`, `gate` and `flow` call is journaled with a fingerprint of its inputs. `coder flow resume <run-id>` runs the module again from the top:
+- Calls with the same inputs return their recorded results at once.
+- The first changed or new call, and everything after it, runs for real.
 
-`coder flow resume <run-id>` simply imports the module again, fresh, and lets it execute top to bottom. Each call is checked against the journal in order:
-
-1. Inputs identical to last time? Return the recorded result instantly; nothing is dispatched.
-2. First call whose inputs differ (or that is new)? It runs for real, and so does everything after it.
-
-What that means in practice:
-
-- **Crash mid-wave** (quota, network, closed laptop): resume replays the finished steps from the journal in milliseconds and continues from where it stopped.
-- **Edit step 3, resume**: steps 1-2 replay from the journal, step 3 onward runs fresh. Iterating on a half-broken flow costs only the part you changed.
-- **Nothing changed**: the whole run replays from the journal and just returns its result again.
-
-The one rule this buys: **a flow must produce the same prompts on every run**. Do not build prompts from `Date.now()`, `Math.random()`, or unordered directory listings; pass timestamps and seeds in via `--args`. A prompt that differs between runs looks like an edit, and everything after it re-runs.
+So a crash resumes where it stopped, and an edit to step 3 re-runs from step 3. A flow must build the same prompts on every run: no `Date.now()`, `Math.random()` or unordered directory listings in prompts; pass those in with `--args`.
 
 ## Where flows live
 
-`coder flow run <name>` (and `flow(name)` inside a flow) looks for `<name>.ts` or `<name>.mjs` in:
+`coder flow run <name>` and `flow(name)` look for `<name>.ts` or `<name>.mjs` in:
+1. `.coder/flows/`, from the current directory up to the repo root, nearest first.
+2. `~/.coder/flows/`, in every workspace.
+3. Built-in flows, which a repo flow of the same name overrides.
 
-1. `.coder/flows/` walking up from the current directory to the repo root, nearest first. In a monorepo, a flow in `packages/app/.coder/flows/` wins over one at the root when you run from inside `packages/app`.
-2. `~/.coder/flows/` - global flows, available in every workspace.
+A path runs that file directly. `coder flow discover` lists what's runnable here. The built-in `review` is the `coder review` code review. It takes `pr`, `post`, `base`, `head`, `since`, `model` and `depth` and returns `{ findings, summary }`.
 
-An explicit path (`coder flow run ./scratch/one-off.ts`) bypasses discovery entirely. `coder flow discover` shows every flow discoverable from where you stand.
+## Running
 
-### Built-in flows
+- `--dry-run` executes the flow with dispatch stubbed and prints every resolved prompt and gate command.
+- `--wait` follows in the foreground; Ctrl-C detaches and the run continues.
+- `coder flow stop` is the only way to end a run. It stops its running tasks too (`--keep-tasks` lets them finish) and keeps the journal for `resume`.
+- Runs appear in `coder list` with their tasks grouped under them.
 
-Coder ships a few flows of its own; they resolve after the directories above, so a repo flow of the same name overrides them. `coder flow discover` lists them with scope `builtin`.
+All commands: [`coder flow`](cli/flow.md). From code: the [SDK](sdk.md).
 
-- `review`: the `coder review` code review. Args: `pr` (number or GitHub URL), `post` (comment on the PR), `base`/`head`/`since` (as the CLI flags), `engine`/`model`/`effort`. Returns `{ findings, summary }`. `coder flow run review --args '{"pr":42,"post":true}'`
+## Guidance
 
-## CLI
-
-```bash
-coder flow run <name|path> [--wait] [--args '<json>' | key=value...]
-    [--concurrency N] [--max-tasks N] [--json] [--dry-run]
-coder flow list                 # recent runs: id, name, status, tasks, tokens, age
-coder flow discover             # flows runnable here: workspace + global
-coder flow result [run-id]      # progress and result: tasks, gates, token ledger
-                                #   --tail <n|all>: last n step rows (default all; 0 = final result only)
-coder flow stream [run-id]      # replay the progress lines and keep following live
-                                #   --tail <n|all>: replay the last n events (default all)
-coder flow stop [run-id]        # stop a run and its tasks (--keep-tasks to let them finish)
-coder flow resume [run-id]      # continue a stopped or edited run; same flags as run
-coder flow archive <run-id>     # hide a run from the recent list (or --all-stopped)
-coder flow delete <run-id>      # delete a run's record (or --all-archived)
-```
-
-Runs show up in `coder list` alongside tasks, with the run's tasks grouped under it. Any `[run-id]` defaults to the most recent run.
-
-`coder flow run` prints the run id and orchestrates in the background. `--wait` follows the run in the foreground, rendering progress live as tasks start and finish; Ctrl-C detaches and the run keeps going, just like a task. `coder flow stop` is the only way to end a run: it stops the orchestrator and the tasks it still has running (pass `--keep-tasks` to let those finish), leaving the journal ready for `resume`. A finished run's result (the flow's default export) is shown by `coder flow result`.
-
-On a TTY, `--wait` and `flow stream` render a live view (spinner, in-place task rows); when piped, output degrades to plain append-only lines. Styling honors the standard `NO_COLOR` and `FORCE_COLOR` env vars.
-
-`--dry-run` executes the script with dispatch stubbed out: it prints every resolved prompt and gate command with placeholder results, so you can review exactly what would be sent before spending tokens.
-
-## SDK
-
-Flows sit on top of the coder SDK, and the SDK is public: everything the CLI does, your own code can do, including running flows programmatically. See [SDK](sdk.md).
-
-## Design notes
-
-- **Gates are shell, not agents.** Verification must be deterministic and cheap. An agent judging "did tsc pass" is slower, costlier, and occasionally wrong.
-- **Park, don't die.** A failed item should not kill the wave. Return it as data, keep the rest flowing, fix it manually or in the next run.
-- **Saturation beats phases.** Prefer `pipeline` so fast items never wait for slow ones; reach for `Promise.all` barriers only when a step truly needs all prior results.
-- **The flow executes; you decide.** Keep judgment (what to fix next, whether a spec is ready) in your session, and let flows run the wave you already designed. A flow that invents its own plan mid-run is a flow you cannot review with `--dry-run`.
+- **Gates are shell, not agents:** verification stays deterministic and cheap.
+- **Park, don't die:** return a failed item as data and keep the wave going.
+- **Prefer `pipeline`:** fast items never wait for slow ones.
+- **Judgment stays in the session:** a flow runs the wave already designed. A flow that plans mid-run can't be reviewed with `--dry-run`.

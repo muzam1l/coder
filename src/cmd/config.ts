@@ -1,9 +1,9 @@
-/** `coder config [list|get|set|unset]`: the effective config, or one dotted key in the user (or --workspace) file. */
+/** `coder config [list|get|set|unset|migrate]`: the effective config, one dotted key, or the config version of the user (or --workspace) file. */
 import process from 'node:process';
 
-import type { configSet } from '../core/config';
+import type { configSet, migrateConfigFile } from '../core/config';
 import { CoderError } from '../core/errors';
-import type { CoderConfig, EngineConfig } from '../core/types';
+import type { CoderConfig } from '../core/types';
 import { renderCommandHelp } from '../tui/help';
 import { outStyle, printJson } from '../tui/output';
 import { flag, str, strList } from '../utils/args';
@@ -28,18 +28,19 @@ function parseValue(raw: string): unknown {
 type ConfigResult =
   | { action: 'list'; config: CoderConfig; file: string }
   | { action: 'get'; value: unknown }
-  | { action: 'set' | 'unset'; set: ReturnType<typeof configSet> };
+  | { action: 'set' | 'unset'; set: ReturnType<typeof configSet> }
+  | ({ action: 'migrate' } & ReturnType<typeof migrateConfigFile>);
 
 export const commandConfig = command({
   name: 'config',
   description: 'read or write config',
   usage:
-    'Read or write configuration. `list` prints the effective config; get/set/unset\ntarget a dotted key (e.g. engines.codex.model). Writes go to ~/.coder/config.json.',
+    'Read or write configuration. `list` prints the effective config; get/set/unset\ntarget a dotted key (e.g. chain); migrate rewrites the file at this Coder\'s config\nversion. Writes go to ~/.coder/config.json.',
   access: 'write',
   approvalPolicy: 'deny',
   args: {
-    action: str('list, get, set or unset'),
-    key: str('a dotted key, such as engines.codex.model'),
+    action: str('list, get, set, unset or migrate'),
+    key: str('a dotted key, such as chain or reviewModel'),
     value: strList('with set: the value; JSON, or a comma list'),
     workspace: flag('target <repo>/.coder/config.json instead of the user file'),
   },
@@ -47,8 +48,9 @@ export const commandConfig = command({
     positional: ['action', 'key', 'value'],
     examples: [
       'coder config list  # print the effective config',
-      'coder config set chain codex,claude  # set the engine fallback chain',
-      'coder config get engines.codex.model  # read one value',
+      'coder config set chain codex/sol,claude/opus  # the default model, then its fallbacks',
+      'coder config get reviewModel  # read one value',
+      'coder config migrate --workspace  # rewrite the repo file at config version 1',
     ],
   },
   async run({
@@ -57,7 +59,9 @@ export const commandConfig = command({
     cwd,
   }): Promise<ConfigResult | undefined> {
     if (!action || action === 'help') return undefined;
-    const { config, resolveUserConfigFile } = await import('../core/config');
+    const { config, migrateConfigFile, resolveUserConfigFile } = await import('../core/config');
+    if (action === 'migrate')
+      return { action, ...migrateConfigFile(cwd, options.workspace) };
     if (action === 'list')
       return {
         action,
@@ -65,11 +69,11 @@ export const commandConfig = command({
         file: resolveUserConfigFile(),
       };
     if (action === 'get') {
-      if (!key) throw usage('coder config get <key>  (e.g. chain, engines.codex.model)');
+      if (!key) throw usage('coder config get <key>  (e.g. chain, reviewModel)');
       return { action, value: config.get(key, { cwd }) };
     }
     if (action !== 'set' && action !== 'unset')
-      throw usage('coder config <list|get|set|unset> [<key> [value]] [--workspace]');
+      throw usage('coder config <list|get|set|unset|migrate> [<key> [value]] [--workspace]');
     if (!key || (action === 'set' && valueParts.length === 0))
       throw usage(`coder config ${action} <key>${action === 'set' ? ' <value>' : ''}`);
     return {
@@ -83,26 +87,38 @@ export const commandConfig = command({
   },
   json(result) {
     const r = result!;
-    return r.action === 'list' ? r.config : r.action === 'get' ? (r.value ?? null) : r.set;
+    return r.action === 'list'
+      ? r.config
+      : r.action === 'get'
+        ? (r.value ?? null)
+        : r.action === 'migrate'
+          ? { file: r.file, version: r.version, notes: r.notes }
+          : r.set;
   },
   print(result) {
     if (!result) return void process.stdout.write(renderCommandHelp(commandConfig));
     if (result.action === 'list') return printConfigList(result.config, result.file);
     if (result.action === 'get') return printConfigValue(result.value);
+    if (result.action === 'migrate')
+      return void process.stdout.write(
+        [
+          ...result.notes,
+          result.version === 1
+            ? `${result.file} is already config version 1.`
+            : `Rewrote ${result.file} from config version ${result.version} to 1.`,
+        ].join('\n') + '\n',
+      );
     printConfigSet(result.set);
   },
 });
 
 function printConfigList(cfg: CoderConfig, file: string): void {
   const s = outStyle;
-  const summary = (engine?: EngineConfig) =>
-    [engine?.model, engine?.effort].filter(Boolean).join('/') || '-';
   process.stdout.write(
     [
       `${s.dim('chain')}      ${cfg.chain.join(' -> ')}`,
-      `${s.dim('codex')}      ${summary(cfg.engines.codex)}`,
-      `${s.dim('claude')}     ${summary(cfg.engines.claude)}`,
-      `${s.dim('approvals')}  hosts=[${cfg.approvals.allowedNetworkHosts.join(', ')}]`,
+      `${s.dim('review')}     ${cfg.reviewModel}`,
+      `${s.dim('network')}    hosts=[${cfg.network.allowedHosts.join(', ')}]`,
       `${s.dim('file')}       ${file}`,
     ].join('\n') + '\n',
   );

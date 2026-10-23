@@ -288,7 +288,12 @@ export async function claudeTurn(
     fs.writeFileSync(file, content!, { encoding: 'utf8', flag: 'wx', mode: 0o600 });
   }
   processTiming('claude.prepare', { resume: Boolean(options.resumeSessionId) });
-  const env = engineEnvironment({ ...process.env, ...options.env });
+  // Claude Code cuts server instructions at 4096 characters by default; the tool search's run longer.
+  const env = engineEnvironment({
+    CLAUDE_CODE_MAX_MCP_DESCRIPTION_LENGTH: '16384',
+    ...process.env,
+    ...options.env,
+  });
   const version = claudeVersion(options.executable ?? 'claude', env, cwd);
   const args = buildClaudeTurnArgs(
     cwd,

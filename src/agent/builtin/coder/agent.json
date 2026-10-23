@@ -4,9 +4,7 @@
   "integrations": {
     "github": {
       "events": {
-        "pull_request": {
-          "flow": "review"
-        },
+        "pull_request": true,
         "mention": true,
         "issue": true,
         "comment": {

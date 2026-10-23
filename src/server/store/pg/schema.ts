@@ -25,8 +25,9 @@ import type {
   TaskContext,
   TaskSource,
   TaskUsage,
+  ModelAttempt,
 } from '../../../agent/types';
-import type { Approval } from '../../../core/types';
+import type { Approval, Task } from '../../../core/types';
 import type { Space } from '../../../integrations/types';
 import type { StoredConfig } from '../../settings/config';
 import type { ApprovalPost } from '../../tasks/approvals';
@@ -259,8 +260,7 @@ export const task = pgTable(
     space: text(),
     parent: text(),
     connections: jsonb().$type<string[]>(),
-    engineChain: jsonb().$type<string[]>(),
-    engineCredentials: jsonb().$type<Record<string, string>>(),
+    models: jsonb().$type<ModelAttempt[]>(),
     name: text(),
     cwd: text(),
     prompt: text(),
@@ -270,7 +270,6 @@ export const task = pgTable(
     addDirs: jsonb().$type<string[]>(),
     author: text(),
     definition: jsonb().$type<AgentDefinition>().notNull(),
-    credential: text(),
     requestedBy: text(),
     runnerId: text(),
     engineSettings: jsonb().$type<TaskUsage>(),
@@ -282,10 +281,12 @@ export const task = pgTable(
     settingsUrl: text(),
     result: jsonb().$type<TaskOutcome>(),
     error: text(),
+    fallbacks: jsonb().$type<NonNullable<Task['fallbacks']>>(),
     tokens: jsonb(),
-    /** What the finished task cost: the engine and model that ran, runner time and tokens summed over its turns. */
+    /** What the finished task cost: the engine, model and credential that ran, runner time and tokens summed over its turns. */
     engine: text(),
     model: text(),
+    credential: text(),
     runnerMs: integer(),
     tokenCount: bigint({ mode: 'number' }),
     usageTokens: jsonb(),

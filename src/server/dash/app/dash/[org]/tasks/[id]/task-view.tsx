@@ -50,6 +50,9 @@ import { toastError, useTaskEvents, watchTask } from '@/comps/frame/task-toasts'
 
 type Tab = 'conversation' | 'activity';
 
+/** A fallback's model as people read it: the model part of its spec. */
+const modelOf = (spec: string) => spec.split('/')[1] ?? spec;
+
 function messageOf(value: unknown, fallback: string): string {
   if (typeof value === 'string') return value;
   if (!value || typeof value !== 'object') return fallback;
@@ -526,7 +529,9 @@ export function TaskView({
       <TaskHead task={task} tz={tz} />
       {task.fallbacks?.map((fallback, index) => (
         <p key={index} class="flash" role="status">
-          {fallback.engine} was unavailable. {fallback.detail} This task is using {fallback.next}.
+          {modelOf(fallback.model)} was unavailable. {fallback.detail} This task is using{' '}
+          {modelOf(fallback.next)}
+          {fallback.next === fallback.model ? ' on another credential' : ''}.
         </p>
       ))}
       <nav class="tabs" role="tablist" aria-label="Task">

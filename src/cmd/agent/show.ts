@@ -19,6 +19,7 @@ function agentDetail(agent: AgentDetail, cwd: string) {
       source: agent.source,
       definition: agent.definition,
       ...(agent.settings ? { usage: agent.settings } : {}),
+      ...(agent.installations ? { installations: agent.installations } : {}),
     };
   return {
     id: agent.id,
@@ -39,9 +40,12 @@ function printAgentDetail(detail: ReturnType<typeof agentDetail>): void {
     ['source', dir ? `${detail.source} (${dir})` : detail.source],
     ['description', def.description],
     ['access', usage?.access === 'read-only' || def.access === 'read-only' ? 'Read-only' : 'Auto'],
-    ['engine', usage?.engine ?? def.engine],
-    ['model', usage?.model ?? def.model],
-    ['effort', usage?.effort ?? def.effort],
+    [
+      'model',
+      usage?.engine || usage?.model
+        ? [usage.engine, usage.model, usage.effort].filter(Boolean).join('/')
+        : def.model,
+    ],
   ];
   const width = Math.max(...facts.map(([k]) => k.length)) + 2;
 
@@ -68,13 +72,29 @@ function printAgentDetail(detail: ReturnType<typeof agentDetail>): void {
       { style: s, border: true },
     )}`,
   );
+
+  const installations = 'installations' in detail ? (detail.installations ?? []) : [];
+  if (installations.length)
+    process.stdout.write(
+      `\n${renderTable(
+        [
+          { header: 'integration', value: r => r.integration, paint: c => s.cyan(c) },
+          { header: 'account', value: r => r.account },
+          { header: 'app', value: r => r.app },
+        ],
+        installations,
+        { style: s, border: true },
+      )}`,
+    );
 }
 
 export const commandAgentShow = command({
   name: 'show',
-  description: 'one agent in full: settings, integrations, events, tools',
-  usage:
-    'Describe one agent as it will run here, or its active version on a server: its settings, access and per-integration events.',
+  description: 'one agent in full: settings, integrations, events, tools, installations',
+  usage: [
+    'Describe one agent as it will run here, or its active version on a server.',
+    'It lists its settings, access and per-integration events, and on a server its installations.',
+  ].join(' '),
   access: 'read',
   args: { id: str('the agent'), ...serverOptions },
   cli: {

@@ -10,7 +10,7 @@ import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
 import { formatDate } from '@/utils/format';
 import { iAlert, iPlus, iRight, iSliders, iSteer, iX } from '@/comps/ui/icons';
-import { useRouter } from '@wular/pnext/navigation/client';
+import { useRouter, useSearchParams } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Loading } from '@/comps/ui/card';
 import { Button, IconButton } from '@/comps/ui/button';
@@ -20,7 +20,6 @@ import { Select, type Option } from '@/comps/ui/select';
 import {
   MenuItem,
   MenuLabel,
-  MenuLink,
   MenuNote,
   MenuOption,
   MenuPanel,
@@ -31,12 +30,9 @@ import { connectRepositories } from '@/app/dash/[org]/agents/editor/connect-repo
 import {
   ACCESS,
   EFFORTS,
-  ENGINES,
-  ENGINE_NAMES,
-  defaultLabel,
-  modelValue,
-  splitModel,
+  specName,
 } from '@/app/dash/[org]/settings/model-options';
+import { ModelChoices } from '@/app/dash/[org]/settings/model-pick';
 import { folderName } from '@/app/dash/[org]/tasks/list/task';
 import { watchTask } from '@/comps/frame/task-toasts';
 import { CHOICE, PLACEHOLDER, loadComposer, savedChoice, usableAgent } from './composer-data';
@@ -49,18 +45,22 @@ export interface Choice {
   /** A folder on the local server's machine; unset is the server's own. */
   cwd: string;
   agent: string;
-  engine: string;
+  /** A model name; unset runs the chain. */
   model: string;
   effort: string;
   access: string;
   runner: string;
 }
 
-/** The workspace's defaults, per engine, for settings left unset. */
+/** The workspace's chain, which an unset model runs, and the built-in aliases that name its models. */
 export interface Defaults {
-  engine: string;
-  engines: Record<string, { model?: string; effort?: string } | undefined>;
+  chain: string[];
+  builtin: Record<string, string>;
 }
+
+/** A spec with `effort` in place of its own. */
+export const withEffort = (spec: string, effort: string) =>
+  [...spec.split('/').filter(part => !EFFORTS.some(([key]) => key === part)), effort].join('/');
 
 type Pull = { number: number; title: string; author?: string; createdAt?: string };
 export type Lists = {
@@ -104,43 +104,6 @@ const folderOptions = (folders: LocalFolders, added: LocalFolder[], value: strin
     folders.picker ? [PICK, 'Choose…'] : [OTHER, 'Type a path…'],
     [CLONE, 'Repository…'],
   ];
-};
-
-/** The chain.s default first, then one section per engine: its own default and its models. */
-function modelSections(
-  groups: Record<string, string[]>,
-  defaults: Defaults,
-): Array<[string, Option[]]> {
-  const sections: Array<[string, Option[]]> = [
-    [
-      '',
-      [
-        [
-          '',
-          `Default · ${[ENGINE_NAMES[defaults.engine] ?? defaults.engine, defaults.engines[defaults.engine]?.model].filter(Boolean).join(' ')}`,
-        ],
-      ],
-    ],
-  ];
-  for (const engine of ENGINES) {
-    if (!groups[engine]?.length) continue;
-    sections.push([
-      ENGINE_NAMES[engine] ?? engine,
-      [
-        // Custom models have no engine default to fall back on.
-        ...(engine === 'custom'
-          ? []
-          : [[modelValue(engine, ''), defaultLabel(defaults.engines[engine]?.model)] as Option]),
-        ...groups[engine]!.map((model): Option => [modelValue(engine, model), model]),
-      ],
-    ]);
-  }
-  return sections;
-}
-
-const resolved = (options: Option[], value?: string): Option[] => {
-  const label = options.find(([key]) => key === value)?.[1];
-  return [['', defaultLabel(label?.toLowerCase())], ...options];
 };
 
 /** A setting as one row naming its pick; the chevron unfolds its options in place, as a model's efforts do. */
@@ -461,18 +424,15 @@ function Composer({
       return void setDismissed(false);
     const review = pr ?? (command === 'review' ? Number(name.replace('#', '')) : undefined);
     if (review && !choice.repo) return toastFailure('Pick a repository first.');
-    const { agent, engine, model, effort, access, runner } = choice;
+    const { agent, model, effort, access, runner } = choice;
     const [repo, cwd] = lists.folders ? ['', choice.cwd] : [choice.repo, ''];
-    const selectedModel =
-      model || defaults.engines[engine]?.model ||
-      (lists.models[engine]?.length === 1 ? lists.models[engine]?.[0] : undefined);
-    if (engine && !selectedModel) return toastFailure('Choose a model.');
+    // An effort on the Default row goes on the chain's first model; the rest still follow.
+    const first = model || (effort ? defaults.chain[0] : '');
     const fields = Object.fromEntries(
       Object.entries({
         repo,
         cwd,
-        model: engine ? `${engine}:${selectedModel}` : model,
-        effort,
+        model: first && effort ? withEffort(first, effort) : first,
         access: access === 'auto' ? '' : access,
         runner,
       }).filter(([, value]) => value),
@@ -601,16 +561,15 @@ function Composer({
     };
   }, [open, text]);
 
-  const engine = choice.engine || defaults.engine;
-  const own = defaults.engines[engine] ?? {};
+  const head = defaults.chain[0] ?? '';
   const agents: Option[] = lists.agents.some(([id]) => id === choice.agent)
     ? lists.agents
     : [...lists.agents, [choice.agent, choice.agent]];
   // What a task gets: the model, effort and access, the workspace's defaults dimmer.
   const picks = (
     [
-      [choice.model || own.model, Boolean(choice.model)],
-      [choice.effort || own.effort, Boolean(choice.effort)],
+      [choice.model || specName(head, defaults.builtin), Boolean(choice.model)],
+      [choice.effort, Boolean(choice.effort)],
       [choice.access, choice.access !== 'auto'],
     ] as const
   ).filter(([text]) => text);
@@ -772,76 +731,19 @@ function Composer({
           onBeforeToggle={place}
         >
           <MenuLabel>Model</MenuLabel>
-          <div role="group" aria-label="Model" class="pop-radios">
-            {modelSections(lists.models, defaults).map(([engine, items]) => (
-              <Fragment key={engine}>
-                {engine ? <p class="pop-group">{engine}</p> : null}
-                {items.map(([value, label]) => {
-                  const on = value === modelValue(choice.engine, choice.model);
-                  const picked = splitModel(value);
-                  const efforts = resolved(
-                    EFFORTS,
-                    defaults.engines[picked.engine || defaults.engine]?.effort,
-                  );
-                  const effortLabel =
-                    on && choice.effort
-                      ? efforts.find(([key]) => key === choice.effort)?.[1]
-                      : undefined;
-                  const showing = expanded === value;
-                  return (
-                    <Fragment key={value}>
-                      <MenuRow>
-                        <MenuRadio
-                          on={on}
-                          onPick={() => {
-                            apply({ ...picked, effort: '' });
-                            document.getElementById(`${id}-settings`)?.hidePopover();
-                          }}
-                          end={effortLabel ? <small>{effortLabel.toLowerCase()}</small> : null}
-                        >
-                          {label}
-                        </MenuRadio>
-                        <button
-                          type="button"
-                          class="pop-chev"
-                          data-keep
-                          aria-label={`Effort for ${label}`}
-                          aria-expanded={showing}
-                          onClick={() => setExpanded(showing ? undefined : value)}
-                        >
-                          <Icon d={iRight} />
-                        </button>
-                      </MenuRow>
-                      {showing ? (
-                        <div role="group" aria-label={`Effort for ${label}`} class="pop-sub">
-                          {efforts.map(([effort, text]) => (
-                            <MenuRadio
-                              key={effort}
-                              on={on && choice.effort === effort}
-                              onPick={() => {
-                                apply({ ...picked, effort });
-                                document.getElementById(`${id}-settings`)?.hidePopover();
-                              }}
-                            >
-                              {text}
-                            </MenuRadio>
-                          ))}
-                        </div>
-                      ) : null}
-                    </Fragment>
-                  );
-                })}
-              </Fragment>
-            ))}
-            <MenuLink
-              class="add-models"
-              href="/dash/[org]/settings/[tab]"
-              params={{ org, tab: 'models' }}
-              icon={iPlus}
-            >
-              Add models
-            </MenuLink>
-          </div>
+          <ModelChoices
+            groups={lists.models}
+            first={{
+              label: `Default: ${defaults.chain.map(spec => specName(spec, defaults.builtin)).join(', then ')}`,
+              efforts: true,
+            }}
+            model={choice.model}
+            effort={choice.effort}
+            onPick={(model, effort) => {
+              apply({ model, effort });
+              document.getElementById(`${id}-settings`)?.hidePopover();
+            }}
+          />
           <MenuLabel>Access</MenuLabel>
           <div role="group" aria-label="Access">
             {ACCESS.map(([value, label]) => (
@@ -931,6 +833,16 @@ export function NewTaskButton({ agent }: { agent?: string }) {
     dialog.current?.showModal();
     loading.current ??= loadComposer(client).then(setSetup, reason => setError(reasonText(reason)));
   };
+
+  // The Create menu's `?new` link opens the composer, then drops the param.
+  const asked = useSearchParams().has('new');
+  useEffect(() => {
+    if (!asked) return;
+    const url = new URL(location.href);
+    url.searchParams.delete('new');
+    history.replaceState(history.state, '', url);
+    open();
+  }, [asked]);
 
   return (
     <>

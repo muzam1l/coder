@@ -8,8 +8,6 @@ export type { TokenUsage } from './task/view';
 
 export type {
   Engine,
-  EngineConfig,
-  AliasModelConfig,
   CoderConfig,
   CustomModelConfig,
   Effort,
@@ -19,27 +17,16 @@ export type {
 
 /** Built-in config every file and flag merges over; import-free so the shipped dashboard can read it. */
 export const DEFAULT_CONFIG: CoderConfig = {
-  // Agents are tried in order; the next one is the fallback when the previous
-  // fails to start (missing binary, auth, quota, rate limit).
-  chain: ['codex', 'claude', 'custom'],
-  engines: {
-    codex: {
-      model: 'gpt-6.1-sol',
-      effort: 'high',
-    },
-    claude: {
-      model: 'opus',
-      effort: 'medium',
-    },
-  },
+  // Models are tried in order; the first is the default, each next one the fallback
+  // when the one before fails to start (missing binary, auth, quota, rate limit).
+  version: 1,
+  chain: ['codex/sol', 'claude/opus'],
+  reviewModel: 'codex/astra/medium',
   models: {},
-  approvals: {
-    allowedNetworkHosts: [],
+  network: {
+    allowedHosts: [],
   },
 };
-
-/** The engine an agent runs on when its settings name none. */
-export const DEFAULT_ENGINE = DEFAULT_CONFIG.chain[0]!;
 
 /** RFC 7396 merge patch: objects merge, null deletes, anything else replaces; `__proto__` stays a plain key. */
 export function mergePatch<T>(target: T, patch: unknown): T {
@@ -98,11 +85,11 @@ export interface McpServerSpec {
   /** The integration a platform tool server reaches, and the account of its installation. */
   integration?: string;
   account?: string;
-  /** A Just me connection's member, as `Connection.owner`; its first use asks them. */
+  /** A personal connection's member, as `Connection.owner`; its first use asks them. */
   owner?: string;
-  /** What the server reaches and the access it allows, as the prompt lists it. */
+  /** One line naming the server's identity and what it reaches, as the tool search lists it. */
   description?: string;
-  /** What the server's own tools do, for a server that sends no instructions. */
+  /** What the server's tools do; shown before the server's own instructions. On an `alwaysLoad` server, the instructions it serves. */
   instructions?: string;
   access?: Access;
 }
@@ -127,7 +114,7 @@ export interface Task {
   // separate from the task prompt so previews (list/result/stream) show only the task itself.
   appendSystem?: string | null;
   // What the engine's system prompt says, rendered on every turn with the task's servers.
-  promptParts?: Omit<SystemPromptParts, 'servers'>;
+  promptParts?: SystemPromptParts;
   // A system prompt as given, for a task without promptParts.
   systemPrompt?: string;
   model?: string | null;
@@ -152,7 +139,7 @@ export interface Task {
   completedAt?: string;
   resumedAt?: string;
   error?: string;
-  fallbacks?: Array<{ engine: Engine; detail: string; next: Engine }>;
+  fallbacks?: Array<{ model: string; detail: string; next: string }>;
   archived?: boolean;
   archivedAt?: string;
   // Archived by the auto-archive sweep, which lists take up on their next read rather than as an event.
@@ -186,7 +173,7 @@ export const HISTORY_LOST = 'History lost, starting fresh';
 
 /** Task options after resolving CLI flags against config defaults. */
 export interface ResolvedTaskOptions {
-  /** codex, claude, or custom; also the chain position. */
+  /** codex, claude, or custom. */
   engine: Engine;
   model: string | null;
   effort: Effort | null;

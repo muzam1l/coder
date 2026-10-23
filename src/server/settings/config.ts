@@ -1,7 +1,10 @@
 import fs from 'node:fs';
 import { type Params } from '../routes/match';
 import {
+  CONFIG_VERSION,
+  configJsonSchema,
   loadConfig,
+  upgradeConfig,
   withDefaults,
   type CoderConfig,
   resolveUserConfigFile,
@@ -22,16 +25,25 @@ export type StoredConfig = Partial<CoderConfig>;
 
 export class ConfigError extends Error {}
 
-export const taskConfig = async (store: Store) => (await store.get('config', 'workspace')) ?? {};
+/** The stored workspace config; one at another config version is refused until the deploy migration rewrites it. */
+export async function taskConfig(store: Store): Promise<StoredConfig> {
+  const stored = await store.get('config', 'workspace');
+  if (stored && stored.version !== CONFIG_VERSION)
+    throw new ConfigError(
+      `The workspace config is config version ${stored.version ?? 0}; this Coder reads version ${CONFIG_VERSION}.`,
+    );
 
-/** `$CODER_HOME/config.json`, the file `coder config` reads and writes. */
+  return stored ?? {};
+}
+
+/** `$CODER_HOME/config.json`, the file `coder config` reads and writes, at this Coder's config version. */
 function userConfig(): Partial<CoderConfig> {
   const file = resolveUserConfigFile();
   if (!fs.existsSync(file)) return {};
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
+    return upgradeConfig(JSON.parse(fs.readFileSync(file, 'utf8'))).config;
   } catch (error) {
-    throw new ConfigError(`Invalid JSON in ${file}: ${(error as Error).message}`);
+    throw new ConfigError(`Invalid config in ${file}: ${(error as Error).message}`);
   }
 }
 
@@ -70,7 +82,11 @@ function assertConfig(next: unknown): asserts next is Partial<CoderConfig> {
   if (errors.length) throw new ConfigError(errors.join('; '));
 }
 
-async function storeConfig(where: Where, next: unknown): Promise<Partial<CoderConfig>> {
+async function storeConfig(where: Where, value: unknown): Promise<Partial<CoderConfig>> {
+  const next =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? { ...value, version: CONFIG_VERSION }
+      : value;
   assertConfig(next);
   if (next.mcp) throw new ConfigError('Add a connection in Settings to attach an MCP server');
   if (where.local) {
@@ -113,6 +129,9 @@ export async function change(
 ): Promise<Response> {
   return updateConfig(ctx, apply).then(json).catch(taskError);
 }
+
+/** `GET /schema/config.v1.json`: the config file's JSON Schema, which a file's `$schema` names. */
+export const configSchemaDocument = () => json(configJsonSchema());
 
 export async function readConfig(
   req: Request,

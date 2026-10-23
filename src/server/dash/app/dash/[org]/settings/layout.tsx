@@ -50,7 +50,7 @@ export default function SettingsTabsLayout({
           label,
         }))}
       />
-      <div class="tab-body">{children}</div>
+      <div class="tab-body settings-body">{children}</div>
     </Page>
   );
 }

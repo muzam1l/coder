@@ -115,7 +115,8 @@ import {
 } from '../tasks/admin';
 import { taskEvents, taskStream } from '../tasks/stream';
 import { decideRequest, listPendingApprovals } from '../tasks/changes';
-import { patchConfiguration, readConfig } from '../settings/config';
+import { configSchemaDocument, patchConfiguration, readConfig } from '../settings/config';
+import { CONFIG_SCHEMA_URL } from '../../core/config';
 import {
   aliasModel,
   createModel,
@@ -126,7 +127,7 @@ import {
   probe,
   updateModel,
 } from '../settings/models';
-import { mcpRegistry } from '../settings/mcp';
+import { mcpIcon, mcpRegistry } from '../settings/mcp';
 import {
   listConnections,
   createConnection,
@@ -154,6 +155,8 @@ const pagesRoutes = [
   route('GET', CLI_CLIENT_PATH, cliDocument, { guard: metadataAllowed }),
   route('GET', RESOURCE_PATH, resourceDocument, { guard: metadataAllowed }),
   route('GET', '/health', (req, ctx) => health(ctx)),
+  route('GET', '/mcp-icons/:signature', mcpIcon),
+  route('GET', new URL(CONFIG_SCHEMA_URL).pathname, configSchemaDocument),
   route('GET', '/', home, { guard: pageSession }),
   route('GET', '/login', signIn, { guard: signInAllowed }),
   ...mount('/login', loginPage, signInAllowed).filter(entry => entry.method !== 'GET'),

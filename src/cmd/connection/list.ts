@@ -9,13 +9,7 @@ import { describe } from './add';
 
 type Listed = Awaited<ReturnType<typeof connection.list>>;
 
-const STATUS: Record<Listed['connections'][number]['status'], string> = {
-  ok: 'ok',
-  authorize: 'not signed in',
-  reconnect: 'needs reconnecting',
-};
-
-function printConnections({ connections, declared }: Listed): void {
+function printConnections({ connections, declared = [] }: Listed): void {
   const s = outStyle;
   process.stdout.write(
     connections.length
@@ -28,10 +22,14 @@ function printConnections({ connections, declared }: Listed): void {
               value: row => (row.access === 'read-only' ? 'Read-only' : 'Auto'),
             },
             {
-              header: 'for',
-              value: row => (row.mine ? 'you' : row.owner ? row.owner : 'workspace'),
+              header: 'scope',
+              value: row => row.scope,
             },
-            { header: 'status', value: row => STATUS[row.status] },
+            {
+              header: 'owner',
+              value: row => row.owner?.name ?? row.owner?.id ?? '',
+            },
+            { header: 'status', value: row => row.status },
           ],
           connections,
           s,
@@ -56,23 +54,28 @@ function printConnections({ connections, declared }: Listed): void {
 export const commandConnectionList = command({
   name: 'list',
   description: 'list connections and the MCP servers this repository declares',
-  usage:
-    'Your connections, and the MCP servers this repository and its agents declare with whether each is approved on this machine.',
+  usage: [
+    "Every workspace connection and every member's own, with its status.",
+    'In a task, one it is not granted is disabled, and one it has names its tool search server.',
+    'On this machine, also the MCP servers this repository and its agents declare, with whether each is approved here.',
+  ].join(' '),
   access: 'read',
   args: serverOptions,
   run: async ({ options, cwd }) => {
     const { connection } = await import('../../core/connection');
     return connection.list({ ...options, cwd });
   },
-  next: ({ result: { connections, declared } }) =>
+  next: ({ result: { connections, declared = [] } }) =>
     nextSteps([
       ...declared
         .filter(row => !row.approved)
         .map(row => `Approve: coder connection approve ${row.name}`),
       ...connections
-        .filter(row => row.status === 'reconnect')
-        .map(row => `Reconnect: coder connection reconnect ${row.id}`),
-      ...(connections.length ? [] : ['Add one: coder connection add <name> --env <NAME>']),
+        .filter(row => row.status === 'needs-auth' && !row.agent && (!row.owner || row.asker))
+        .map(
+          row => `Reconnect: coder connection reconnect ${row.id}${row.owner ? ' --personal' : ''}`,
+        ),
+      ...(connections.length ? [] : ['Add one: coder connection add <name> --url <url>']),
     ]),
   print: printConnections,
 });

@@ -4,7 +4,9 @@ import * as z from 'zod/mini';
 import {
   accessSchema,
   mcpEntrySchema,
+  modelSpecSchema,
   schemaIssues,
+  splitEngineSpec,
   strictestAccess,
   type Access,
 } from '../core/config';
@@ -21,20 +23,23 @@ import type {
 } from './types';
 
 const slug = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
-const effort = z.enum(['low', 'medium', 'high']);
 
 const eventOptionsSchema = z.strictObject({
-  flow: z.optional(slug),
   match: z.optional(z.string().check(z.minLength(1))),
 });
 
+// A refinement, not a union, so a wrong value gets this one error.
+const eventValueSchema = z
+  .unknown()
+  .check(
+    z.refine(
+      value => value === true || eventOptionsSchema.safeParse(value).success,
+      'events take a list of names, or a map of each name to true or { "match": "<regex>" }',
+    ),
+  );
+
 const definitionIntegrationSchema = z.strictObject({
-  events: z.optional(
-    z.union([
-      z.array(z.string()),
-      z.record(z.string(), z.union([slug, eventOptionsSchema, z.literal(true)])),
-    ]),
-  ),
+  events: z.optional(z.union([z.array(z.string()), z.record(z.string(), eventValueSchema)])),
 });
 
 const agentDefinitionSchema = z.strictObject({
@@ -42,10 +47,8 @@ const agentDefinitionSchema = z.strictObject({
   $schema: z.optional(z.string()),
   name: z.optional(z.string().check(z.minLength(1))),
   description: z.optional(z.string()),
-  engine: z.optional(z.string()),
   runner: z.optional(z.string().check(z.minLength(1))),
-  model: z.optional(z.string()),
-  effort: z.optional(effort),
+  model: z.optional(modelSpecSchema),
   access: z.optional(accessSchema),
   mcp: z.optional(z.record(slug, mcpEntrySchema)),
   integrations: z._default(z.record(z.string(), definitionIntegrationSchema), {}),
@@ -57,9 +60,7 @@ const usageIntegrationSchema = z.strictObject({
 
 const agentUsageSchema = z.strictObject({
   connections: z.optional(z.array(z.string())),
-  engine: z.optional(z.string()),
-  model: z.optional(z.string()),
-  effort: z.optional(effort),
+  model: z.optional(modelSpecSchema),
   access: z.optional(accessSchema),
   integrations: z.optional(z.record(z.string(), usageIntegrationSchema)),
   disabled: z.optional(z.boolean()),
@@ -140,7 +141,21 @@ export function parseAgentsUsage(json: unknown): Record<string, boolean | AgentU
   const parsed = agentsUsageSchema.safeParse(json);
   if (!parsed.success)
     throw new Error(`Invalid agents usage: ${schemaIssues(parsed.error.issues).join('; ')}`);
-  return parsed.data as Record<string, boolean | AgentUsage>;
+  return Object.fromEntries(
+    Object.entries(parsed.data).map(([id, usage]) => {
+      if (typeof usage === 'boolean' || !usage.model) return [id, usage];
+      const { model, ...rest } = usage;
+
+      return [id, { ...rest, ...splitEngineSpec(model) }];
+    }),
+  );
+}
+
+/** Usage as `agents.<id>` in config takes it: its engine, model and effort as one `model` spec. */
+export function usageEntry({ engine, model, effort, ...rest }: AgentUsage) {
+  return engine || model
+    ? { ...rest, model: [engine, model, effort].filter(Boolean).join('/') }
+    : rest;
 }
 
 /** Event names a definition wires for one integration. */
@@ -158,7 +173,7 @@ export function eventOptions(
   if (Array.isArray(wiring.events)) return wiring.events.includes(type) ? {} : undefined;
   if (!Object.prototype.hasOwnProperty.call(wiring.events, type)) return undefined;
   const value = wiring.events[type]!;
-  return value === true ? {} : typeof value === 'string' ? { flow: value } : value;
+  return value === true ? {} : value;
 }
 
 /** The definition with each match set on every integration that has its event; an empty regex clears it. */
@@ -171,14 +186,11 @@ export function withMatches(
       const events = wiring.events ?? [];
       const map = Array.isArray(events) ? Object.fromEntries(events.map(e => [e, true])) : events;
       if (!Object.keys(map).some(event => event in matches)) return [id, wiring];
-      const next = Object.entries(map).map(([event, value]) => {
-        if (!(event in matches)) return [event, value];
-        const options =
-          typeof value === 'object' ? value : typeof value === 'string' ? { flow: value } : {};
-        const { match: _, ...rest } = options;
-        const set = matches[event] ? { ...rest, match: matches[event] } : rest;
-        return [event, Object.keys(set).length ? set : true];
-      });
+      const next = Object.entries(map).map(([event, value]) =>
+        event in matches
+          ? [event, matches[event] ? { match: matches[event] } : true]
+          : [event, value],
+      );
       return [id, { ...wiring, events: Object.fromEntries(next) }];
     }),
   );
@@ -243,17 +255,19 @@ export function resolveEvents(agent: Agent, integrationId: string): string[] {
   return allow === undefined ? used : used.filter(event => allow.includes(event));
 }
 
-/** Engine settings a task runs with: usage overrides definition. */
-export function effectiveSettings(agent: Agent): {
+/** Engine settings a task runs with: the usage's model choice, else the definition's. */
+export function effectiveSettings(agent: {
+  definition?: Pick<AgentDefinition, 'model'>;
+  usage?: AgentUsage;
+}): {
   engine?: string;
   model?: string;
   effort?: AgentUsage['effort'];
 } {
-  return {
-    engine: agent.usage?.engine ?? agent.definition.engine,
-    model: agent.usage?.model ?? agent.definition.model,
-    effort: agent.usage?.effort ?? agent.definition.effort,
-  };
+  const { engine, model, effort } = agent.usage ?? {};
+  if (engine || model) return { engine, model, effort };
+
+  return agent.definition?.model ? splitEngineSpec(agent.definition.model) : {};
 }
 
 /** Effective tools for every integration the agent declares and the catalog knows. */
@@ -266,12 +280,12 @@ export function declaredTools(agent: Agent, access?: Access): Record<string, str
   return result;
 }
 
-/** Whether this one agent handles the event, and with which flow and tools per integration. */
+/** Whether this one agent handles the event, and with which tools per integration. */
 export function matchAgent(
   event: AgentEvent,
   agent: Agent,
   access?: Access,
-): { flow: string; tools: Record<string, string[]> } | undefined {
+): { tools: Record<string, string[]> } | undefined {
   const integration = INTEGRATIONS[event.integration];
   if (!integration) return undefined;
   if (!resolveEvents(agent, event.integration).includes(event.type)) return undefined;
@@ -279,7 +293,7 @@ export function matchAgent(
   if (!options) return undefined;
   if (options.match !== undefined && !new RegExp(options.match).test(event.text)) return undefined;
 
-  return { flow: options.flow ?? 'default', tools: declaredTools(agent, access) };
+  return { tools: declaredTools(agent, access) };
 }
 
 /** Local `coder agent run` helper: every agent the event matches. */

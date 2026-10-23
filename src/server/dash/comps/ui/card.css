@@ -137,3 +137,9 @@
     opacity: 1;
   }
 }
+
+/* filled: no border, the stronger surface sets the card off instead */
+.card.frame.filled {
+  border-color: transparent;
+  background: var(--surface);
+}

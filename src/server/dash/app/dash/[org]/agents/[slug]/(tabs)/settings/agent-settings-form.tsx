@@ -11,69 +11,40 @@ import { useOrg } from '@/comps/nav/org';
 import { Link } from '@wular/pnext/link';
 import { editableAgent, eventNames } from '@/api/types';
 import { ConfirmDialog } from '@/comps/ui/confirm';
-import type { AgentRow, AgentSettings, ConnectionRow, IntegrationInfo } from '@coder/client/types';
+import type {
+  AgentRow,
+  AgentSettings,
+  ConnectionRow,
+  IntegrationInfo,
+  ModelsShape,
+} from '@coder/client/types';
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { AgentToggle } from '@/app/dash/[org]/agents/agent/agent-toggle';
 import { Field } from '@/comps/ui/field';
 import { Button } from '@/comps/ui/button';
 import { Select, type Option } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
-import {
-  ACCESS,
-  EFFORTS,
-  ENGINE_NAMES,
-  defaultLabel,
-  modelHeadings,
-  modelOptions,
-  modelValue,
-  splitModel,
-} from '@/app/dash/[org]/settings/model-options';
-import type { Defaults } from '@/app/dash/[org]/tasks/composer';
-
-function Choice({
-  name,
-  label,
-  hint,
-  value,
-  options,
-  blank,
-}: {
-  name: string;
-  label: string;
-  hint?: string;
-  value?: string;
-  options: Option[];
-  blank: string;
-}) {
-  const list: Option[] =
-    value && !options.some(([key]) => key === value) ? [...options, [value, value]] : options;
-  return (
-    <Field label={label} hint={hint} group>
-      <Select
-        name={name}
-        label={label}
-        defaultValue={value ?? ''}
-        options={[['', blank], ...list]}
-      />
-    </Field>
-  );
-}
+import { ACCESS, chainChoice, specName } from '@/app/dash/[org]/settings/model-options';
+import { ModelPick } from '@/app/dash/[org]/settings/model-pick';
+import { ChainHint } from '@/app/dash/[org]/settings/chain-hint';
 
 type Panel = 'run' | 'platforms' | 'manage';
 
-/** How this agent runs here: engine settings and access, every platform's events on one panel, and deleting it. One Save. */
+/** How this agent runs here: its model and access, every platform's events on one panel, and deleting it. One Save. */
 export function AgentSettingsForm({
   agent,
   catalog,
-  models,
-  defaults,
+  shape,
+  chain,
   runners,
   connections,
 }: {
   agent: AgentRow;
   catalog: IntegrationInfo[];
-  models: Record<string, string[]>;
-  defaults: Defaults;
+  /** The workspace's models, for the model picker. */
+  shape: ModelsShape;
+  /** The workspace chain, which runs when no model is set. */
+  chain: string[];
   runners: Option[];
   /** The workspace's connections, to narrow. */
   connections: ConnectionRow[];
@@ -90,38 +61,17 @@ export function AgentSettingsForm({
   const [deleting, setDeleting] = useState(false);
   const form = useRef<HTMLFormElement>(null);
   const settings = agent.settings ?? {};
-  const [model, setModel] = useState(modelValue(settings.engine, settings.model));
+  // Settings save a spec split; it shows whole again.
+  const [model, setModel] = useState(
+    settings.model?.includes('/')
+      ? settings.model
+      : [settings.engine, settings.model, settings.effort].filter(Boolean).join('/'),
+  );
   const [narrowed, setNarrowed] = useState(settings.connections ? 'some' : '');
   const declared = agent.definition?.integrations ?? {};
   const platforms = Object.keys(declared).sort();
   const own = agent.definition;
-  const engine = own?.engine;
   const deletable = agent.source !== 'builtin';
-  const modelChoices: Option[] = [
-    ...modelOptions(
-      models,
-      defaultLabel(
-        engine
-          ? [ENGINE_NAMES[engine] ?? engine, own?.model ?? defaults.engines[engine]?.model]
-              .filter(Boolean)
-              .join(' · ')
-          : 'first available engine',
-      ),
-    ),
-    ...(!settings.engine && settings.model
-      ? [[modelValue(undefined, settings.model), settings.model] as Option]
-      : []),
-  ];
-  const unrunnable = Object.fromEntries(
-    modelChoices.flatMap(([value]) => {
-      const runs = splitModel(value).engine;
-      const hint =
-        runs === 'custom' ? 'needs its API key' : `needs a ${ENGINE_NAMES[runs]} credential`;
-      return runs && (agent.unrunnable?.includes(runs) || agent.unrunnable?.includes(value))
-        ? [[value, hint]]
-        : [];
-    }),
-  );
 
   // Filters every panel's fields by label, current value and platform, and moves to a panel that has a match.
   useLayoutEffect(() => {
@@ -169,16 +119,11 @@ export function AgentSettingsForm({
     event.preventDefault();
     const values = new FormData(event.currentTarget as HTMLFormElement);
     const text = (key: string) => String(values.get(key) ?? '').trim();
-    const next: Omit<AgentSettings, 'engine'> = {};
-    for (const key of ['effort', 'runner'] as const) if (text(key)) next[key] = text(key);
+    const next: Omit<AgentSettings, 'engine' | 'effort'> = {};
+    if (text('runner')) next.runner = text('runner');
     if (text('access') !== (own?.access ?? 'auto'))
       next.access = text('access') as AgentSettings['access'];
-    const picked = splitModel(model);
-    const selected =
-      picked.model || defaults.engines[picked.engine]?.model ||
-      (models[picked.engine]?.length === 1 ? models[picked.engine]?.[0] : undefined);
-    if (picked.engine && !selected) return setSaved('Choose a model.');
-    if (selected) next.model = picked.engine ? `${picked.engine}:${selected}` : selected;
+    if (model.trim()) next.model = model.trim();
     if (narrowed) next.connections = values.getAll('connection').map(String);
     for (const id of platforms) {
       const entry: NonNullable<AgentSettings['integrations']>[string] = {};
@@ -209,27 +154,29 @@ export function AgentSettingsForm({
         </div>
         <section class="vpanel" data-panel="run" hidden={panel !== 'run'}>
           <h2>How it runs</h2>
-          <p class="muted">Anything left on Default follows the agent's own definition.</p>
+          <p class="muted">Anything left empty follows the agent's own definition, then the workspace chain.</p>
           <div class="fields">
-            <Field label="Model" hint="picking a model picks its engine" group>
-              <Select
-                label="Model"
+            <Field
+              label="Model"
+              hint={
+                <ChainHint
+                  org={org}
+                  own={agent.definition?.model && specName(agent.definition.model, shape.builtin)}
+                />
+              }
+              group
+            >
+              <ModelPick
+                shape={shape}
+                empty={
+                  agent.definition?.model
+                    ? { label: `Its own, ${specName(agent.definition.model, shape.builtin)}`, sub: 'from agent.json' }
+                    : chainChoice(chain, shape)
+                }
                 value={model}
-                options={modelChoices}
-                unavailable={unrunnable}
-                headings={modelHeadings(models)}
                 onChange={setModel}
               />
             </Field>
-            <Choice
-              name="effort"
-              label="Effort"
-              value={settings.effort}
-              options={EFFORTS}
-              blank={defaultLabel(
-                own?.effort ?? defaults.engines[(splitModel(model).engine ?? engine)!]?.effort,
-              )}
-            />
             <Field label="Access" hint="what its tasks, platforms and connections may do" group>
               <Select
                 name="access"

@@ -2,3 +2,5 @@ dist
 node_modules
 .pnext
 migrations
+# Docs keep flat tables: padding costs model tokens.
+docs

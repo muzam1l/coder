@@ -1,4 +1,8 @@
-# Access and approvals
+---
+description: Access levels, approvals in the CLI and in threads, who sees a task, and the sandbox.
+---
+
+# Approvals
 
 Tasks, agents and connections run `auto` (default) or `read-only`. An `auto` task changes code and uses every tool, and the engine's reviewer decides what leaves the sandbox. A `read-only` task changes nothing and uses only read-only tools. The strictest wins: a read-only agent, parent task or connection makes the task read-only.
 
@@ -24,7 +28,7 @@ In a conversation, anyone with write access answers: **[Approve]** or **[Deny]**
 
 ## Agents in a thread
 
-Ask an agent on Slack, GitHub or Linear to start work and follow it; results come back to the thread. It acts as its own app, and as you only through your Just me connection once you approve **Act as you on GitHub for this task?**.
+Ask an agent on Slack, GitHub or Linear to start work and follow it; results come back to the thread. It acts as its own app, or as the person asking through their personal connection ([Connections](connections.md#workspace-or-personal)).
 
 - **At once**: starting, steering and stopping its tasks, and changing its own model and effort.
 - **After [Approve] in the thread**: its other settings, workspace model changes and the default runner. Agent changes need a connected member, workspace changes an admin, personal ones the person who asked. A member can **[Ask an admin]**.
@@ -34,10 +38,10 @@ The tasks it starts get its repositories, connections and access, or less. It an
 
 ## Who sees a task
 
-On a Coder server, owners and admins see every task, and you see your own. Tasks from the dashboard, the CLI and public channels, repositories or teams show to every member. Tasks from DMs and private places show to members who can see that place, through their connected account; unknown privacy counts as private. A task started by another task follows it.
+On a Coder server, owners and admins see every task, and each member sees their own. Tasks from the dashboard, the CLI and public channels, repositories or teams show to every member. Tasks from DMs and private places show to members who can see that place, through their connected account; unknown privacy counts as private. A task started by another task follows it.
 
 Whoever sees a task can steer, stop and delete it; a DM task only its author steers. Slack and GitHub membership changes show at once, Linear's on its next activity after a day.
 
 ## Sandbox
 
-Each task gets a scratch folder, `$TMPDIR/coder/<task-id>`, for temp files, package caches and git writes; `coder task delete` removes it. Hosts in [`approvals.allowedNetworkHosts`](config.md#approvals) are reachable without review.
+Each task gets a scratch folder, `$TMPDIR/coder/<task-id>`, for temp files, package caches and git writes; `coder task delete` removes it. Hosts in [`network.allowedHosts`](config.md#full-shape) are reachable without review.

@@ -20,6 +20,7 @@ import { requestControl } from '../control';
 import { CLI_PATH } from '../../runtime';
 import { WORKER_ENV } from '../../dispatch';
 import { engineEnvironment } from '../../connections';
+import { taskSocket } from '../../../client/http';
 import { parseVersion } from '../../hosts';
 import { compareVersions } from '../../update-check';
 import type {
@@ -278,6 +279,9 @@ export function buildClaudeTurnArgs(
       '--append-system-prompt-file',
       systemPromptPath ?? path.join(options.taskRoot ?? cwd, '.claude-system.md'),
     );
+  // Claude reuses a conversation's first system prompt on resume unless told not to; each turn lists its own servers.
+  if (options.systemPrompt && version && compareVersions(version, '2.1.267') >= 0)
+    args.push('--system-prompt-snapshot', 'off');
   if (options.excludeDynamicSections) args.push('--exclude-dynamic-system-prompt-sections');
   if (options.settingSources) args.push('--setting-sources', options.settingSources);
   if (options.outputSchema) {
@@ -366,6 +370,7 @@ export function buildClaudeTurnArgs(
     options.scratch,
     options.local ?? true,
     hook,
+    [taskSocket()].filter(socket => socket !== undefined),
   );
   const base = turnSettings ? JSON.parse(turnSettings) : {};
   // Read-only servers' calls go to the hook, which lists the server once and refuses tools not marked read-only.

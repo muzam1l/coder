@@ -24,7 +24,6 @@ export interface GateResult {
 /** Options shared with `coder run`, plus `returns`. */
 export interface FlowTaskOptions<T = unknown> {
   model?: string;
-  effort?: string;
   access?: Access;
   mcp?: string | McpServerSpec[];
   name?: string;
@@ -37,7 +36,6 @@ export interface FlowTaskOptions<T = unknown> {
 /** Overrides for one more turn, as `coder task steer` takes them. */
 export interface FlowSteerOptions {
   model?: string;
-  effort?: string;
   access?: Access;
 }
 

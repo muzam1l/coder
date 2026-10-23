@@ -4,7 +4,7 @@
 
 run, follow and steer coding tasks
 
-## `task run [prompt] [--output-schema <output-schema>] [--name <name>] [--agent <agent>] [--append-system <append-system>] [--wait] [--model <model>] [--effort <effort>] [--access <access>] [--mcp <mcp>] [--connections <connections>] [--add-dir <add-dir>] [--server <server>] [--workspace <workspace>] [--yes] [--repo <repo>] [--runner <runner>] [--json] [--cwd <cwd>]`
+## `task run [prompt] [--output-schema <output-schema>] [--name <name>] [--agent <agent>] [--append-system <append-system>] [--wait] [--model <model>] [--access <access>] [--mcp <mcp>] [--connections <connections>] [--add-dir <add-dir>] [--server <server>] [--workspace <workspace>] [--yes] [--repo <repo>] [--runner <runner>] [--json] [--cwd <cwd>]`
 
 run a task (background; --wait blocks)
 
@@ -33,8 +33,7 @@ Recommended, unless the user prefers otherwise or a model is unavailable:
 - `--agent <agent>` run as that agent: its system.md, engine settings, MCP servers and flows; flags override them
 - `--append-system <append-system>` standing instructions appended to Coder's system prompt (kept out of prompt previews)
 - `--wait` follow the task until the answer is ready
-- `--model <model>` model alias, custom name or engine:model (codex:gpt-6.1-sol, claude:opus)
-- `--effort <effort>` reasoning effort
+- `--model <model>` model name[/effort] or engine/model[/effort] (sol/low, claude/opus, codex/gpt-6.1-sol/high)
 - `--access <access>` read-only also restricts platforms and connections; auto lets the engine review what leaves the sandbox (default: auto)
 - `--mcp <mcp>` attach MCP servers from `mcp` in .coder/config.json by name (or all), or an inline JSON array [{"name","command","args","env","tools"}]; none by default, all adds your engine's own MCP servers
 - `--connections <connections>` use only these connections (coder connection list), within the agent's
@@ -78,7 +77,7 @@ move to --archived. Shortcut: `coder list`.
 - `--limit <limit>` tasks per page (default: 50; all for every task)
 - `--cursor <cursor>` continue from the previous page cursor
 - `--dir <dir>` only tasks launched in that workspace
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -103,7 +102,7 @@ tasks in one call, or their approvals and answers never reach you one by one.
 - `--wait` block until the task finishes or needs an approval, then print
 - `--turns` every turn's answer (a steered task accretes turns)
 - `--tail <tail>` include the last n progress-log steps (default: 0, final result only)
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -137,7 +136,7 @@ following, and `next`: the command that continues it while the task runs.
 - `--tail <tail>` replay the last n log lines first (default: 1)
 - `--trim <trim>` budget for tool output and thinking (default: 1200 chars, 12 lines)
 - `--from <from>` return the log from event n on instead of following it
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -148,7 +147,7 @@ coder task watch  # follow the most recent task to completion
 coder task watch <task-id> --from 0 --json  # the log so far, and the command that continues it
 ```
 
-## `task steer [task-id] [text] [--wait] [--model <model>] [--effort <effort>] [--access <access>] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
+## `task steer [task-id] [text] [--wait] [--model <model>] [--access <access>] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
 continue a task's thread
 
@@ -160,10 +159,9 @@ task's engine, model, and access unless overridden.
 - `<task-id>` the task to continue
 - `<text>` the follow-up instructions
 - `--wait` run in the foreground and block until the answer is ready
-- `--model <model>` override the task's model for this follow-up
-- `--effort <effort>` override the task's reasoning effort
+- `--model <model>` model name[/effort] or engine/model[/effort] (sol/low, claude/opus, codex/gpt-6.1-sol/high) for this follow-up
 - `--access <access>` lower the task's access for this follow-up
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -173,7 +171,7 @@ task's engine, model, and access unless overridden.
 coder task steer task-abc "now add tests"  # continue that task with a follow-up
 ```
 
-## `task ask [task-id] [question] [--model <model>] [--effort <effort>] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
+## `task ask [task-id] [question] [--model <model>] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
 ask about a task without interrupting it
 
@@ -184,9 +182,8 @@ running or stopped. To change what the task does, use `coder task steer`.
 
 - `<task-id>` the task to ask about
 - `<question>` the question
-- `--model <model>` sidecar model (default: the task's own)
-- `--effort <effort>` sidecar reasoning effort
-- `--server <server>` act on your Coder server
+- `--model <model>` model name[/effort] or engine/model[/effort] (sol/low, claude/opus, codex/gpt-6.1-sol/high) for the sidecar (default: the task's own)
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -203,7 +200,7 @@ interrupt a running task
 Interrupt a running task and mark it cancelled.
 
 - `<task-id>` the task to stop
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -220,7 +217,7 @@ brings it back.
 
 - `<task-id>` the task to archive
 - `--all-stopped` archive every stopped (finished) task
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -235,7 +232,7 @@ delete every archived task at once. A running task must be stopped first.
 
 - `<task-id>` the task to delete
 - `--all-archived` delete every archived task
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -249,7 +246,7 @@ List pending approvals across all tasks, --denied the denied ones (still answera
 
 - `<task-id>` one task (default: approvals of every task)
 - `--denied` denied approvals instead of pending ones
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -267,7 +264,7 @@ Approval ids are unique, so the task id is optional.
 - `<approval-id>` the approval to answer
 - `--deny` reject the request instead of accepting
 - `--reason <reason>` why it is denied; the task reads it
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output

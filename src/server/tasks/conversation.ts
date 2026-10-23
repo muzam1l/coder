@@ -370,7 +370,7 @@ async function steerRunning(
       : undefined;
   if (turn && !ACTIVE_STATES.includes(turn.status)) return false;
 
-  // A message's author, `null` when unknown; only its owner's messages keep a Just me connection this turn.
+  // A message's author, `null` when unknown; only its owner's messages keep a personal connection this turn.
   const value = asker === undefined ? { text } : { text, asker };
 
   return Boolean(await addInbox(ctx, status, 'steer', value, batch));
@@ -381,7 +381,7 @@ const runsHere = (ctx: ServerContext, task: TaskStatus['task']) =>
   Boolean(ctx.local) && !task.event?.repo && task.runner === 'local' && !task.runnerId;
 
 /** A stopped task resumes with the same engine history and this turn's reply requirement: locally in place, hosted through `continueTask`; false when another sender resumed it first. */
-async function resume(
+export async function resume(
   ctx: ServerContext,
   status: TaskStatus,
   text: string,
@@ -400,8 +400,12 @@ async function resume(
       text,
     );
   } catch (error) {
-    if (error instanceof TaskInputError && error.status === 409) return false;
-    throw error;
+    if (!(error instanceof TaskInputError && error.status === 409)) throw error;
+    // A turn no credential runs is answered, not run.
+    if (!error.fix || !task.event) return false;
+    const app = await ctx.store.get('app', task.event.appId);
+    const { eventReplies } = await import('../chat');
+    if (app) await (await eventReplies(ctx, app, task.event)).problem(error.message);
   }
   return true;
 }

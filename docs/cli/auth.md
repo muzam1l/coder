@@ -10,7 +10,7 @@ sign in through the browser
 
 Sign in with Wular Auth in your browser. The CLI keeps the tokens in ~/.coder/session.json, and commands that talk to a server then act as you.
 
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--device` show a code to approve on another device; the default without a local browser

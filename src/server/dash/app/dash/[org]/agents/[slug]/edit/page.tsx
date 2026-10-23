@@ -55,13 +55,13 @@ export default async function AgentEditPage({
     <Page>
       <Settle
         load={() =>
-          Promise.all([catalog, run]).then(([integrations, { models, defaults }]) =>
+          Promise.all([catalog, run]).then(([integrations, { shape, defaults }]) =>
             editableAgent(agent) ? (
               <AgentEditor
                 catalog={integrations}
                 agent={agent}
                 section={section}
-                models={models}
+                shape={shape}
                 defaults={defaults}
               />
             ) : (

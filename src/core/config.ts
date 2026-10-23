@@ -22,21 +22,23 @@ interface AccessMode {
   approvalsReviewer: 'auto_review' | null;
 }
 
-// Model aliases per engine. Values map alias -> concrete identifier.
-export const CODEX_MODELS: Record<string, string> = {
-  luna: 'gpt-6-luna',
-  sol: 'gpt-6.1-sol',
-  astra: 'gpt-6-astra',
+/** Built-in aliases, each a model spec as a user's alias is; a user alias of the same name overrides one. */
+export const BUILTIN_MODELS: Record<string, string> = {
+  luna: 'codex/gpt-6-luna',
+  sol: 'codex/gpt-6.1-sol',
+  astra: 'codex/gpt-6-astra',
+  sonnet: 'claude/sonnet',
+  opus: 'claude/opus',
+  fable: 'claude/fable',
+  codex: 'codex/sol',
+  claude: 'claude/opus',
 };
-export const CODEX_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
 
-// Native claude CLI aliases; passed through as-is.
-export const CLAUDE_MODELS: Record<string, string> = {
-  sonnet: 'sonnet',
-  opus: 'opus',
-  fable: 'fable',
-};
-export const CLAUDE_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
+/** The efforts a spec may end with; no model or alias takes one as its name. */
+export const EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
+
+/** The effort a model runs at when its spec, or its alias, names none. */
+export const DEFAULT_EFFORT = 'medium';
 
 /**
  * The one access setting, mapped per engine.
@@ -127,7 +129,7 @@ export const CLAUDE_SANDBOX_UNAVAILABLE_PATTERN =
 /** Set by runners that use machine isolation for writable turns. */
 export const MACHINE_SANDBOX_ENV = 'CODER_MACHINE_SANDBOX';
 
-// approvals.allowedNetworkHosts entries as claude sandbox allowedDomains:
+// network.allowedHosts entries as claude sandbox allowedDomains:
 // a bare hostname also covers its subdomains (matching the codex policy's
 // endsWith check), bare IPv6 gets bracket form, IPs / host:port / already
 // bracketed entries pass through as-is.
@@ -178,6 +180,8 @@ export function claudeAutoMode(local: boolean, allowedNetworkHosts: string[]) {
  *
  * Without the OS sandbox the machine is the boundary, so Bash runs unprompted as it did sandboxed.
  *
+ * `unixSockets` are the sockets Bash may connect to on macOS, such as a cloud task's server socket; Linux ignores the list.
+ *
  * The scratch folder is writable in auto, and git writes work only there: the
  * checkout's and the extra directories' `.git` are write-denied, and the rest of the temp directory
  * is not writable by default (a deny there would also close the scratch inside it). In auto a
@@ -193,6 +197,7 @@ export function claudeTurnSettings(
   scratch?: string,
   local = true,
   approvalHook?: string,
+  unixSockets: string[] = [],
 ): string | null {
   const directories = additionalDirectories;
   if (!osSandbox)
@@ -215,7 +220,11 @@ export function claudeTurnSettings(
         allowUnsandboxedCommands: false,
         autoAllowBashIfSandboxed: true,
         // Configured hosts only: read-only gets no allowlist of its own.
-        network: { strictAllowlist: true, ...(domains.length ? { allowedDomains: domains } : {}) },
+        network: {
+          strictAllowlist: true,
+          ...(domains.length ? { allowedDomains: domains } : {}),
+          ...(unixSockets.length ? { allowUnixSockets: unixSockets } : {}),
+        },
         filesystem: {
           denyWrite: [cwd, ...additionalDirectories],
         },
@@ -235,6 +244,7 @@ export function claudeTurnSettings(
       autoAllowBashIfSandboxed: true,
       network: {
         allowedDomains: domains,
+        ...(unixSockets.length ? { allowUnixSockets: unixSockets } : {}),
         // An allowlisted loopback host also lets commands serve on it (macOS only), so a local dev server runs sandboxed.
         ...(allowedNetworkHosts.some(host => LOOPBACK_HOSTS.has(host))
           ? { allowLocalBinding: true }
@@ -263,31 +273,23 @@ export function claudeTurnSettings(
  * are the source of truth for the config domain types (types.ts re-exports the
  * z.infer'd types).
  */
-// Providers run a turn; engines are what you dispatch and chain: the two
+// Providers run a turn; engines are what you dispatch: the two
 // providers plus "custom", the user's OpenAI-compatible models on codex.
-const providerSchema = z.enum(['codex', 'claude']);
 const engineSchema = z.enum(['codex', 'claude', 'custom']);
 const effortSchema = z.enum(['low', 'medium', 'high']);
 export const accessSchema = z.enum(ACCESS, { error: 'Use read-only or auto' });
-const engineEntrySchema = z.partial(
-  z.strictObject({
-    model: z.string().check(z.minLength(1)),
-    effort: effortSchema,
-  }),
-);
-// Codex alone exposes network access as its own switch; it defaults to the
-// access (`auto` allows the network, `read-only` denies it).
-const codexEngineEntrySchema = z.partial(
-  z.strictObject({
-    model: z.string().check(z.minLength(1)),
-    effort: effortSchema,
-    network: z.boolean(),
-  }),
-);
-// One `models` entry, discriminated by shape:
-// - baseUrl present  -> a custom OpenAI-compatible endpoint (the custom engine)
-// - provider present -> an alias onto a built-in engine (codex/claude)
-// - neither          -> a bare toggle for a built-in name ({ "disabled": true })
+/** The config version this Coder reads and writes; a file without one is version 0. */
+export const CONFIG_VERSION = 1;
+export const MODEL_SPEC_FORMS =
+  'Use <name>[/<effort>] or <engine>/<model>[/<effort>], such as sol, sol/low, claude/opus or codex/gpt-6.1-sol/high.';
+/** One model choice: `<name>[/<effort>]` or `<engine>/<model>[/<effort>]`. */
+export const modelSpecSchema = z
+  .string()
+  .check(z.refine(spec => Boolean(specParts(spec)), MODEL_SPEC_FORMS));
+// One `models` entry, by shape:
+// - a string         -> an alias: the model spec its name runs
+// - false            -> a built-in or alias turned off
+// - an object        -> a custom OpenAI-compatible endpoint (the custom engine); its model is the provider's id
 const customModelSchema = z.strictObject({
   baseUrl: z.url(),
   model: z.string().check(z.minLength(1)),
@@ -300,18 +302,11 @@ const customModelSchema = z.strictObject({
   contextWindow: z.optional(z.number().check(z.int(), z.positive())),
   disabled: z.optional(z.boolean()),
 });
-const aliasModelSchema = z.strictObject({
-  provider: providerSchema,
-  model: z.string().check(z.minLength(1)),
-  effort: z.optional(effortSchema),
-  disabled: z.optional(z.boolean()),
-});
-const toggleModelSchema = z.strictObject({
-  disabled: z.boolean(),
-});
-const modelEntrySchema = z.union([customModelSchema, aliasModelSchema, toggleModelSchema]);
-const approvalsSchema = z.strictObject({
-  allowedNetworkHosts: z.array(z.string()),
+const modelEntrySchema = z.union([modelSpecSchema, z.literal(false), customModelSchema]);
+// Hosts auto tasks reach without review; `readOnlyTasks` lets read-only tasks reach them too.
+const networkSchema = z.strictObject({
+  allowedHosts: z.array(z.string()),
+  readOnlyTasks: z.optional(z.boolean()),
 });
 // Agent and flow names reach shell commands inside runners, so keep them to safe slugs.
 const agentNameSchema = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
@@ -323,9 +318,7 @@ const agentUsageIntegrationSchema = z.strictObject({
 const agentUsageSchema = z.union([
   z.boolean(),
   z.strictObject({
-    engine: z.optional(z.string()),
-    model: z.optional(z.string()),
-    effort: z.optional(effortSchema),
+    model: z.optional(modelSpecSchema),
     access: z.optional(accessSchema),
     runner: z.optional(z.enum(['local', 'local-docker', 'vercel-sandbox', 'github-actions'])),
     integrations: z.optional(z.record(z.string(), agentUsageIntegrationSchema)),
@@ -364,14 +357,11 @@ export const mcpEntrySchema = z
     ),
   );
 const effectiveConfigSchema = z.strictObject({
-  chain: z.array(engineSchema).check(z.minLength(1)),
-  engines: z.partial(
-    z.strictObject({
-      codex: codexEngineEntrySchema,
-      claude: engineEntrySchema,
-      custom: engineEntrySchema,
-    }),
-  ),
+  $schema: z.optional(z.string()),
+  version: z.literal(CONFIG_VERSION),
+  // Models in the order tasks try them, the first the default; and the model reviews run on.
+  chain: z.array(modelSpecSchema).check(z.minLength(1)),
+  reviewModel: modelSpecSchema,
   // The one model namespace: custom endpoints, engine aliases, and built-in
   // disable toggles all live here, keyed by the name used at dispatch. A user
   // entry named after a built-in alias shadows it.
@@ -384,29 +374,36 @@ const effectiveConfigSchema = z.strictObject({
   agents: z.optional(z.record(agentNameSchema, agentUsageSchema)),
   // MCP servers tasks may attach by name (`--mcp docs,sentry` or `--mcp all`); `.mcp.json` shape plus `tools`.
   mcp: z.optional(z.record(agentNameSchema, mcpEntrySchema)),
-  approvals: approvalsSchema,
+  network: networkSchema,
 });
 export type McpConfigEntry = z.infer<typeof mcpEntrySchema> & { repository?: boolean };
 /** What a single config file may contain: any strict subset. */
 const configSchema = z.partial(
-  z.extend(effectiveConfigSchema, { approvals: z.partial(approvalsSchema) }),
+  z.extend(effectiveConfigSchema, { network: z.partial(networkSchema) }),
 );
+
+/** Where a config file's `$schema` points; each Coder server serves it at this path. */
+export const CONFIG_SCHEMA_URL = `https://coder.wular.ai/schema/config.v${CONFIG_VERSION}.json`;
+
+/** A config file's JSON Schema, which editors validate it with. */
+export const configJsonSchema = () => ({
+  $id: CONFIG_SCHEMA_URL,
+  ...z.toJSONSchema(configSchema, { unrepresentable: 'any' }),
+});
 
 export type Engine = z.infer<typeof engineSchema>;
 export type Effort = z.infer<typeof effortSchema>;
-export type EngineConfig = z.infer<typeof engineEntrySchema>;
 export type CustomModelConfig = z.infer<typeof customModelSchema>;
-export type AliasModelConfig = z.infer<typeof aliasModelSchema>;
 export type ModelEntry = z.infer<typeof modelEntrySchema>;
 
 /** A custom OpenAI-compatible endpoint entry. */
-export function isEndpointModel(entry: ModelEntry): entry is CustomModelConfig {
-  return 'baseUrl' in entry;
+export function isEndpointModel(entry: ModelEntry | undefined): entry is CustomModelConfig {
+  return typeof entry === 'object' && entry !== null;
 }
 
-/** An alias entry onto a built-in engine. */
-export function isAliasModel(entry: ModelEntry): entry is AliasModelConfig {
-  return 'provider' in entry;
+/** An alias entry: the model spec its name runs. */
+export function isAliasModel(entry: ModelEntry | undefined): entry is string {
+  return typeof entry === 'string';
 }
 export type CoderConfig = z.infer<typeof effectiveConfigSchema>;
 
@@ -415,15 +412,14 @@ export function strictestAccess(...levels: (Access | null | undefined)[]): Acces
   return levels.includes('read-only') ? 'read-only' : 'auto';
 }
 
-/** Codex network access: the explicit `engines.codex.network` override, else `auto` only. */
-export function resolveCodexNetworkAccess(access: Access, override?: boolean): boolean {
-  return override ?? access === 'auto';
-}
+/** The hosts a turn reaches without review: the allowlist in auto, and in read-only when `readOnlyTasks` is on. */
+export const turnHosts = (access: Access, network: CoderConfig['network']) =>
+  access === 'auto' || network.readOnlyTasks ? network.allowedHosts : [];
 
-/** A Codex turn's network: its mode's, or, when that is off, on behind Codex's
- * network proxy with only the given hosts allowed (subdomains too; loopback and IPs exact). */
-export function codexTurnNetwork(access: Access, override: boolean | undefined, hosts: string[]) {
-  const networkAccess = resolveCodexNetworkAccess(access, override);
+/** A Codex turn's network: full in auto, else on behind Codex's network proxy with only the
+ * given hosts allowed (subdomains too; loopback and IPs exact), else off. */
+export function codexTurnNetwork(access: Access, hosts: string[]) {
+  const networkAccess = access === 'auto';
   if (networkAccess || !hosts.length) return { networkAccess, configOverrides: {} };
   const domains = hosts.map(host => {
     const name = host.replace(/^\[(.*)\](?::\d+)?$/, '$1').replace(/^([^:]+):\d+$/, '$1');
@@ -449,17 +445,29 @@ function isNetworkHost(host: string): boolean {
   return bracketed ? net.isIPv6(bracketed[1]!) : host.length <= 253 && HOST_NAME.test(host);
 }
 
-/** Drop a model entry and every engine default that names it. */
+/** Turn a model name off or back on: an endpoint by its flag, any other name by false. */
+export function toggleModel(models: Record<string, ModelEntry>, name: string, disable: boolean) {
+  const entry = models[name];
+  if (isEndpointModel(entry)) {
+    if (disable) entry.disabled = true;
+    else delete entry.disabled;
+  } else if (disable) models[name] = false;
+  else if (entry === false) delete models[name];
+}
+
+/** Drop a model entry and every model setting that names it. */
 export function removeModel(
-  config: {
-    models?: Record<string, unknown>;
-    engines?: Record<string, { model?: unknown } | undefined>;
-  },
+  config: { models?: Record<string, unknown>; chain?: unknown[]; reviewModel?: unknown },
   name: string,
 ): void {
   delete config.models?.[name];
-  for (const entry of Object.values(config.engines ?? {}))
-    if (entry?.model === name) delete entry.model;
+  // An engine's alias falls back to its built-in model, so its entries stay.
+  const names = (spec: unknown) =>
+    !isEngine(name) && typeof spec === 'string' && spec.split('/').slice(0, 2).includes(name);
+  if (names(config.reviewModel)) delete config.reviewModel;
+  const chain = config.chain?.filter(spec => !names(spec));
+  if (chain?.length) config.chain = chain;
+  else delete config.chain;
 }
 
 /** One line per schema issue, each union branch's included, without a loaded Zod locale. */
@@ -480,34 +488,147 @@ export function schemaIssues(
   );
 }
 
+/**
+ * Version 0 to 1: engine defaults become the engines' aliases, aliases one spec string and toggles
+ * false, approval hosts and the Codex network switch the network section, colon specs slash specs, and an
+ * agent's engine, model and effort one spec. Pure JSON to JSON, with a note per change.
+ */
+function toVersion1(old: Record<string, any>): { config: Record<string, any>; notes: string[] } {
+  const config = structuredClone(old);
+  const notes: string[] = [];
+  const slash = (value: unknown, at: string) => {
+    if (typeof value !== 'string' || !value.includes(':')) return value;
+    const next = value.replaceAll(':', '/');
+    notes.push(`${at}: "${value}" is now "${next}"`);
+
+    return next;
+  };
+  const spec = (engine: unknown, model: unknown, effort: unknown) =>
+    [engine, model ?? (effort ? splitEngineSpec(BUILTIN_MODELS[engine as string]!).model : undefined), effort]
+      .filter(Boolean)
+      .join('/');
+
+  const models: Record<string, any> = { ...config.models };
+  for (const [name, entry] of Object.entries(models)) {
+    if (typeof entry === 'string') models[name] = slash(entry, `models.${name}`);
+    if (!entry || typeof entry !== 'object' || 'baseUrl' in entry) continue;
+    if ('provider' in entry || 'model' in entry) {
+      models[name] = entry.disabled
+        ? false
+        : 'provider' in entry
+          ? spec(entry.provider, entry.model, entry.effort)
+          : String(slash(entry.model, `models.${name}`));
+      notes.push(`models.${name}: the alias is now ${JSON.stringify(models[name])}`);
+    } else if (entry.disabled === true) {
+      models[name] = false;
+      notes.push(`models.${name}: the toggle is now false`);
+    } else {
+      delete models[name];
+      notes.push(`models.${name}: an enable toggle is not needed and was removed`);
+    }
+  }
+  const network: Record<string, unknown> = {};
+  for (const [engine, entry] of Object.entries<Record<string, any>>(config.engines ?? {})) {
+    const { model, effort } = entry ?? {};
+    if ((model || effort) && models[engine] === undefined && (model || engine !== 'custom')) {
+      models[engine] = spec(engine, model, effort);
+      notes.push(`engines.${engine}: its model is now the alias models.${engine} = "${models[engine]}"`);
+    }
+    if (engine === 'codex' && entry?.network === true) {
+      network.readOnlyTasks = true;
+      notes.push('engines.codex.network is now network.readOnlyTasks, for every engine');
+    } else if (engine === 'codex' && entry?.network === false) {
+      notes.push('engines.codex.network: false was removed; auto tasks keep their network');
+    }
+  }
+  delete config.engines;
+  if (config.approvals && typeof config.approvals === 'object') {
+    const { allowedNetworkHosts, ...rest } = config.approvals;
+    if (allowedNetworkHosts) {
+      network.allowedHosts = allowedNetworkHosts;
+      notes.push('approvals.allowedNetworkHosts is now network.allowedHosts');
+    }
+    if (Object.keys(rest).length) config.approvals = rest;
+    else delete config.approvals;
+  }
+  if (Object.keys(network).length) config.network = { ...config.network, ...network };
+  if (Object.keys(models).length) config.models = models;
+  if (Array.isArray(config.chain))
+    config.chain = config.chain.map((entry: unknown, index: number) => slash(entry, `chain.${index}`));
+  if (config.reviewModel) config.reviewModel = slash(config.reviewModel, 'reviewModel');
+  for (const [id, usage] of Object.entries<any>(config.agents ?? {})) {
+    if (!usage || typeof usage !== 'object') continue;
+    if (usage.engine || usage.effort) {
+      const { engine, model, effort, ...rest } = usage;
+      config.agents[id] = {
+        ...rest,
+        model: spec(engine ?? inferEngine(model, { models }), model, effort),
+      };
+      notes.push(`agents.${id}: its engine, model and effort are now model "${config.agents[id].model}"`);
+    } else if (usage.model) usage.model = slash(usage.model, `agents.${id}.model`);
+  }
+  config.version = 1;
+
+  return { config, notes };
+}
+
+/** Each patch turns its index's config version into the next; a config runs those from its version on. */
+export const CONFIG_PATCHES = [toVersion1];
+
+/** A config as this Coder reads it, patched from its version (0 when it has none) with a note per change; a newer one is refused. */
+export function upgradeConfig(raw: Record<string, any>): {
+  config: Record<string, any>;
+  notes: string[];
+  version: number;
+} {
+  const version = typeof raw.version === 'number' ? raw.version : 0;
+  if (version > CONFIG_VERSION)
+    throw new Error(`Written by a newer Coder (config version ${version}); run coder upgrade.`);
+  let config = raw;
+  const notes: string[] = [];
+  for (const patch of CONFIG_PATCHES.slice(version)) {
+    const next = patch(config);
+    config = next.config;
+    notes.push(...next.notes);
+  }
+
+  return { config, notes, version };
+}
+
 /** Returns human-readable errors; empty array means valid. */
 export function validateConfig(candidate: unknown): string[] {
   const result = configSchema.safeParse(candidate);
   if (!result.success) return schemaIssues(result.error.issues);
   const config = deepMerge(DEFAULT_CONFIG, result.data);
   const errors: string[] = [];
-  for (const [index, host] of (result.data.approvals?.allowedNetworkHosts ?? []).entries()) {
+  for (const [index, host] of (result.data.network?.allowedHosts ?? []).entries()) {
     if (!isNetworkHost(host))
-      errors.push(
-        `approvals.allowedNetworkHosts.${index}: "${host}" is not a host name or IP address`,
-      );
+      errors.push(`network.allowedHosts.${index}: "${host}" is not a host name or IP address`);
   }
   for (const [name, entry] of Object.entries(result.data.models ?? {})) {
-    if (name === 'codex' || name === 'claude' || name === 'custom') {
-      errors.push(`models.${name}: reserved engine name`);
+    if (EFFORTS.has(name)) {
+      errors.push(`models.${name}: ${name} is an effort, not a model name`);
       continue;
     }
-    if (isAliasModel(entry)) {
-      // Alias expansion is one level: the target must be an engine model id or
-      // built-in alias, never another config entry.
-      const target = config.models?.[entry.model];
-      if (target && !isEndpointModel(target)) {
-        errors.push(`models.${name}: alias target "${entry.model}" is itself a config entry`);
-      }
+    // Alias expansion is one level: the target must be an engine model id,
+    // a built-in alias or, for `custom` alone, an endpoint; never another alias.
+    const target = isAliasModel(entry) ? aliasTarget(entry, config) : undefined;
+    const targetEntry = target?.model ? config.models?.[target.model] : undefined;
+    if (isEngine(name)) {
+      if (target?.engine !== name)
+        errors.push(`models.${name}: The ${name} alias names a ${name} model, such as ${name}/<model>`);
+      else if (name === 'custom' && !(targetEntry && isEndpointModel(targetEntry)))
+        errors.push(`models.custom: "${target.model ?? ''}" names no custom model`);
+      continue;
     }
-    // A bare { "disabled" } toggle is valid on any name: built-ins, entries
-    // defined in another config layer (the per-entry merge folds the flag in),
-    // or raw model slugs passed straight to an engine.
+    if (target?.engine === 'custom') {
+      errors.push(`models.${name}: Only custom aliases a custom model`);
+      continue;
+    }
+    if (targetEntry && !isEndpointModel(targetEntry))
+      errors.push(`models.${name}: alias target "${target!.model}" is itself a config entry`);
+    // False is valid on any name: built-ins, entries defined in another config
+    // layer, or raw model slugs passed straight to an engine.
   }
   return errors;
 }
@@ -563,28 +684,57 @@ export function resolveWorkspaceConfigFile(workspaceRoot: string): string {
 /** A server task's workspace config, as JSON; the repo's config may then only narrow it. */
 export const WORKSPACE_CONFIG_ENV = 'CODER_WORKSPACE_CONFIG';
 
-/** What a repo config may change under a server workspace config: fewer engines, models, and hosts, other engine defaults. */
+/** What a repo config may change under a server workspace config: fewer chain entries, models, and hosts, another review model. */
 function narrowed(base: CoderConfig, repo: Partial<CoderConfig>): Partial<CoderConfig> {
-  const hosts = repo.approvals?.allowedNetworkHosts?.filter(host =>
-    base.approvals.allowedNetworkHosts.includes(host),
+  const hosts = repo.network?.allowedHosts?.filter(host =>
+    base.network.allowedHosts.includes(host),
   );
-  const engines = Object.fromEntries(
-    Object.entries(repo.engines ?? {}).map(([engine, entry]) => [
-      engine,
-      {
-        ...(entry?.model ? { model: entry.model } : {}),
-        ...(entry?.effort ? { effort: entry.effort } : {}),
-      },
-    ]),
+  const disabled = Object.entries(repo.models ?? {}).filter(
+    ([, entry]) => entry === false || (isEndpointModel(entry) && entry.disabled),
   );
-  const disabled = Object.entries(repo.models ?? {}).filter(([, entry]) => entry.disabled === true);
   return {
     ...(repo.mcp ? { mcp: repo.mcp } : {}),
-    ...(repo.chain ? { chain: repo.chain.filter(engine => base.chain.includes(engine)) } : {}),
-    engines,
-    models: Object.fromEntries(disabled.map(([name]) => [name, { disabled: true }])),
-    ...(hosts ? { approvals: { ...base.approvals, allowedNetworkHosts: hosts } } : {}),
+    ...(repo.chain ? { chain: repo.chain.filter(spec => base.chain.includes(spec)) } : {}),
+    ...(repo.reviewModel ? { reviewModel: repo.reviewModel } : {}),
+    models: Object.fromEntries(disabled.map(([name]) => [name, false])),
+    ...(hosts ? { network: { ...base.network, allowedHosts: hosts } } : {}),
   };
+}
+
+/** A layer as this Coder reads it: an older user file is rewritten in place beside a `.bak`, an older repo file patched in memory until `coder config migrate`. */
+function loadedLayer(source: string, raw: Record<string, unknown>, repository: boolean) {
+  const { config, version } = upgradeConfig(raw);
+  if (version === CONFIG_VERSION || !source.endsWith('.json')) return config;
+  if (repository) {
+    process.stderr.write(
+      `${source} is config version ${version}; coder config migrate rewrites it.\n`,
+    );
+    return config;
+  }
+  fs.copyFileSync(source, `${source}.bak`);
+  fs.writeFileSync(source, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  process.stderr.write(
+    `Updated ${source} to config version ${CONFIG_VERSION}; the old one is ${source}.bak.\n`,
+  );
+
+  return config;
+}
+
+/** Rewrite a config file at this Coder's version: the user's, or the repo's with `workspace`. Returns the file and a note per change. */
+export function migrateConfigFile(
+  cwd: string,
+  workspace?: boolean,
+): { file: string; version: number; notes: string[] } {
+  const file = configTargetFile(cwd, workspace);
+  const raw = readJsonIfExists(file);
+  if (!raw) return { file, version: CONFIG_VERSION, notes: [] };
+  const { config, notes, version } = upgradeConfig(raw as Record<string, unknown>);
+  const errors = validateConfig(config);
+  if (errors.length) throw new Error(`Invalid config in ${file}:\n  ${errors.join('\n  ')}`);
+  if (version !== CONFIG_VERSION)
+    fs.writeFileSync(file, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+
+  return { file, version, notes };
 }
 
 export function loadConfig(cwd: string): CoderConfig {
@@ -598,10 +748,11 @@ export function loadConfig(cwd: string): CoderConfig {
   layers.push([repoFile, readJsonIfExists(repoFile)]);
   let config: CoderConfig = DEFAULT_CONFIG;
   const repositoryMcp = new Set<string>();
-  for (const [source, value] of layers) {
-    if (!value) {
+  for (const [source, raw] of layers) {
+    if (!raw) {
       continue;
     }
+    const value = loadedLayer(source, raw as Record<string, unknown>, source === repoFile);
     const errors = validateConfig(value);
     if (errors.length) {
       throw new Error(`Invalid config in ${source}:\n  ${errors.join('\n  ')}`);
@@ -650,10 +801,11 @@ export function persistModelPatch(
     let raw: any;
     try {
       raw = readJsonIfExists(filePath);
+      raw = raw && upgradeConfig(raw).config;
     } catch {
       continue;
     }
-    if (!raw?.models?.[alias]) {
+    if (!isEndpointModel(raw?.models?.[alias])) {
       continue;
     }
     Object.assign(raw.models[alias], patch);
@@ -732,21 +884,34 @@ export function resolveCustomModel(
   };
 }
 
+/** The Codex model id a name runs: a built-in Codex alias's, else the name itself. */
 export function resolveCodexModel(alias?: string | null): string | null {
   if (!alias) {
     return null;
   }
-  return CODEX_MODELS[alias] ?? alias;
+  const [engine, model] = (BUILTIN_MODELS[alias] ?? '').split('/');
+
+  return engine === 'codex' && model ? model : alias;
 }
 
-/** A built-in alias name (codex or claude), independent of config state. */
+/** A built-in alias name, independent of config state. */
 export function isBuiltinAlias(name: string): boolean {
-  return name in CODEX_MODELS || name in CLAUDE_MODELS;
+  return Object.hasOwn(BUILTIN_MODELS, name);
 }
 
-/** Disabled via its entry's `disabled` flag (any entry kind, incl. toggles). */
+/** The spec a name aliases: the user's entry, else the built-in; none for a name turned off or no alias. */
+function aliasOf(config: Pick<CoderConfig, 'models'>, name: string): string | undefined {
+  const entry = config.models?.[name];
+  if (entry !== undefined) return isAliasModel(entry) ? entry : undefined;
+
+  return isBuiltinAlias(name) ? BUILTIN_MODELS[name] : undefined;
+}
+
+/** Turned off: false, or an endpoint marked disabled. */
 function isModelDisabled(config: CoderConfig, name?: string | null): boolean {
-  return Boolean(name && config.models?.[name]?.disabled);
+  const entry = name ? config.models?.[name] : undefined;
+
+  return entry === false || (isEndpointModel(entry) && Boolean(entry.disabled));
 }
 
 /**
@@ -759,14 +924,43 @@ export function assertModelEnabled(config: CoderConfig, name?: string | null): v
   }
 }
 
+const isEngine = (value?: string): value is Engine =>
+  value === 'codex' || value === 'claude' || value === 'custom';
+
+/** A model spec's parts by position, or undefined when it has another shape. */
+function specParts(spec: string): { engine?: Engine; model?: string; effort?: Effort } | undefined {
+  const parts = spec.split('/').map(part => part.trim());
+  const [first, second, third] = parts;
+  const isEffort = (value?: string): value is Effort => Boolean(value && EFFORTS.has(value));
+  if (!first || isEffort(first) || parts.length > 3) return undefined;
+  const name = isEngine(first) ? { engine: first } : { model: first };
+  if (parts.length === 1) return name;
+  if (parts.length === 2 && isEffort(second)) return { ...name, effort: second };
+  if (!isEngine(first) || !second || isEffort(second)) return undefined;
+  const builtin = BUILTIN_MODELS[second];
+  if (builtin && !builtin.startsWith(`${first}/`)) return undefined;
+  if (third !== undefined && !isEffort(third)) return undefined;
+
+  return { engine: first, model: second, ...(third ? { effort: third } : {}) };
+}
+
+/** Split `<name>[/<effort>]` or `<engine>/<model>[/<effort>]`; a lone name is an engine or a model. */
+export function splitEngineSpec(spec: string): {
+  engine?: Engine;
+  model?: string;
+  effort?: Effort;
+} {
+  const parts = specParts(spec);
+  if (!parts) throw new Error(`Invalid model "${spec}". ${MODEL_SPEC_FORMS}`);
+
+  return parts;
+}
+
 /**
- * Parse a "<engine>:<model?>:<effort?>"-style spec, e.g. "codex", "codex:luna",
- * "codex:sol:high", "claude:opus:high", "astra:high" (engine inferred).
- *
- * A user alias entry (config.models with `provider`) named by the model part
- * is expanded one level; alias targets are never themselves entries (enforced
- * at save time), so no recursion is possible. Throws when the resolved model
- * is disabled in config.
+ * Resolve a model spec against config: a name, the engines' included, runs its
+ * alias (the user's, else the built-in), expanded one level; an engine is
+ * inferred for a lone model name; an unset effort is the alias's, else medium.
+ * Throws when the resolved model is disabled in config.
  */
 export function parseEngineSpec(
   spec: string | null | undefined,
@@ -775,72 +969,82 @@ export function parseEngineSpec(
   if (!spec) {
     return null;
   }
-  const raw = String(spec).trim();
-  const parts = raw.split(':').map(part => part.trim());
-  if (!parts.length || parts.length > 3 || parts.some(part => !part)) {
-    throw new Error(`Invalid engine spec "${spec}".`);
-  }
-  let engine: Engine | null = null;
-  let model: string | null = null;
-  let effort: Effort | null = null;
+  const parts = splitEngineSpec(String(spec).trim());
+  let engine = parts.engine ?? null;
+  let model = parts.model ?? null;
+  let effort = parts.effort ?? null;
 
-  const isEffort = (value: string): value is Effort =>
-    CODEX_EFFORTS.has(value) || CLAUDE_EFFORTS.has(value);
-
-  for (const part of parts) {
-    if (part === 'codex' || part === 'claude' || part === 'custom') {
-      if (engine) {
-        throw new Error(`Invalid engine spec "${spec}".`);
-      }
-      engine = part;
-    } else if (isEffort(part) && !effort) {
-      effort = part;
-    } else if (!model) {
-      model = part;
-    } else {
-      throw new Error(`Invalid engine spec "${spec}".`);
+  assertModelEnabled(config, model ?? engine);
+  const entry = aliasOf(config, model ?? engine ?? '');
+  if (entry) {
+    const target = aliasTarget(entry, config);
+    const runs = target.engine;
+    if (engine && engine !== runs) {
+      throw new Error(`Alias "${model ?? engine}" runs on ${runs}, not ${engine}.`);
     }
+    engine = runs;
+    effort = parts.effort ?? target.effort ?? null;
+    model = target.model ?? null;
   }
 
-  // One-level alias expansion: the model part names an alias entry. Its
-  // targets are never entries themselves (enforced at save/validate time).
-  const entry = model ? config.models?.[model] : undefined;
-  if (entry && isAliasModel(entry)) {
-    if (entry.disabled) {
-      throw new Error(`model "${model}" is disabled in config`);
-    }
-    if (engine && engine !== entry.provider) {
-      throw new Error(`Alias "${model}" runs on ${entry.provider}, not ${engine}.`);
-    }
-    engine = entry.provider;
-    effort = effort ?? entry.effort ?? null;
-    model = entry.model;
-  }
+  engine ??= inferEngine(model ?? undefined, config);
+  assertModelEnabled(config, model);
 
-  if (!engine) {
-    if (model && model in CLAUDE_MODELS) {
-      engine = 'claude';
-    } else if (model && entry && isEndpointModel(entry)) {
-      engine = 'custom';
-    } else {
-      engine = 'codex';
-    }
-  }
-
-  const defaults = config.engines[engine] ?? {};
-  const resolvedModel = model ?? defaults.model ?? null;
+  // A built-in Codex name that remains, such as the `sol` of `codex/sol`, runs its id.
+  const resolvedModel = engine === 'codex' ? resolveCodexModel(model) : model;
   assertModelEnabled(config, resolvedModel);
   return {
     engine,
     model: resolvedModel,
-    effort: effort ?? defaults.effort ?? null,
+    effort: effort ?? DEFAULT_EFFORT,
   };
 }
 
-export function writeUserConfig(config: CoderConfig): string {
+/** The engine a lone model name runs on: a custom endpoint's, Claude for a Claude-looking slug, else Codex. */
+function inferEngine(model: string | undefined, config: Pick<CoderConfig, 'models'>): Engine {
+  const entry = model ? config.models?.[model] : undefined;
+  if (isEndpointModel(entry)) return 'custom';
+
+  return model && /^(?:claude-|opus|sonnet|haiku|fable)/i.test(model) ? 'claude' : 'codex';
+}
+
+/** What an alias runs: its spec's parts, its engine inferred when the spec names none. */
+export function aliasTarget(
+  spec: string,
+  config: Pick<CoderConfig, 'models'>,
+): { engine: Engine; model?: string; effort?: Effort } {
+  const target = splitEngineSpec(spec);
+
+  return { ...target, engine: target.engine ?? inferEngine(target.model, config) };
+}
+
+/** A resolved model as people read it: the built-in name that runs it, such as `sol`, else its id. */
+export function modelName(option: { engine: string; model: string | null }): string {
+  const spec = `${option.engine}/${option.model}`;
+
+  return (
+    Object.keys(BUILTIN_MODELS).find(name => !isEngine(name) && BUILTIN_MODELS[name] === spec) ??
+    option.model ??
+    option.engine
+  );
+}
+
+/** Whether two resolved choices run the same model, whatever their effort. */
+export function sameModel(
+  a: { engine: Engine; model: string | null },
+  b: { engine: Engine; model: string | null },
+): boolean {
+  return a.engine === b.engine && resolveCodexModel(a.model) === resolveCodexModel(b.model);
+}
+
+export function writeUserConfig(config: Partial<CoderConfig>): string {
   const filePath = resolveUserConfigFile();
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  fs.writeFileSync(
+    filePath,
+    `${JSON.stringify({ ...config, version: CONFIG_VERSION }, null, 2)}\n`,
+    'utf8',
+  );
   return filePath;
 }
 
@@ -904,9 +1108,9 @@ export function configSet(
 // went empty (older coder versions reject unknown/empty config keys outright),
 // validate, write.
 export function writeConfigFile(targetFile: string, mutate: (config: Record<string, any>) => void) {
-  const current: Record<string, any> = fs.existsSync(targetFile)
-    ? JSON.parse(fs.readFileSync(targetFile, 'utf8'))
-    : {};
+  const current: Record<string, any> = upgradeConfig(
+    fs.existsSync(targetFile) ? JSON.parse(fs.readFileSync(targetFile, 'utf8')) : {},
+  ).config;
   mutate(current);
   if (current.models && Object.keys(current.models).length === 0) {
     delete current.models;

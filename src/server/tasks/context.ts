@@ -9,12 +9,22 @@ import {
 } from '../runners/kinds/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
 import type { AgentEvent, Installation } from '../../agent/types';
+import { effectiveSettings } from '../../agent/definition';
 import type { EngineCredential, Store, TaskStatus } from '../store/types';
 import { dropKey, heldKey, type HeldToken } from '../store/types';
 import type { ServerContext } from '../context';
 import type { CoderConfig } from '../../core/config';
-import { taskConfig } from '../settings/config';
-import { resolveCredential } from '../settings/credentials';
+import { effectiveConfig, taskConfig } from '../settings/config';
+import {
+  credentialNames,
+  modelAttempts,
+  parseCredentialId,
+  pickCredentials,
+  resolveModels,
+} from '../settings/credentials';
+import { isEndpointModel, splitEngineSpec } from '../../core/config';
+import { modelList, resolveTaskOptions } from '../../core/dispatch';
+import { turnStarter } from './access';
 import {
   resolvedTaskConnections,
   connectionSecretValues,
@@ -289,7 +299,7 @@ export async function taskContext(
   connectionEnv: Record<string, string>;
   connectionSecrets: string[];
 }> {
-  const task = status.task;
+  const task = await withModels(ctx, status.task);
   const [tokens, config, credential]: [
     Record<string, string>,
     Partial<CoderConfig>,
@@ -302,7 +312,7 @@ export async function taskContext(
 
   let postToken: string | undefined;
   const event = task.event;
-  if (task.flow === 'default' && event?.chat && task.source === event.integration) {
+  if (event?.chat && task.source === event.integration) {
     const integration = ctx.integrations[event.integration]!;
     const read = integration.tools.presets['read-only'];
     const tools = task.tools[event.integration] ?? [];
@@ -332,9 +342,7 @@ export async function taskContext(
     actAsRefusal(ctx, task, connection),
   );
   const dashboard = await taskDashboard(ctx);
-  const engineCredentials = task.engineChain?.length
-    ? await taskEngineCredentials(ctx, task)
-    : undefined;
+  const engineCredentials = await taskEngineCredentials(ctx, task, effectiveConfig(ctx, config));
   const connectionEnv = { ...resolved.env };
   const warnings = [...resolved.warnings];
   for (const name of Object.keys(connectionEnv)) {
@@ -403,57 +411,82 @@ export async function taskContext(
   };
 }
 
-/** The model a task's turn starts with: its own pick, else the default of its engine, the first of its chain when none is pinned. */
-export function runModel(task: TaskStatus['task'], config: CoderConfig) {
-  const picked = { ...task.definition, ...task.usage };
-  const engine = picked.engine ?? task.engineChain?.[0] ?? config.chain[0];
+/** The model a task's turn starts with: the first of its list. */
+export function firstModel(task: TaskStatus['task']) {
+  const first = task.models?.[0]?.model;
 
-  return picked.model ?? config.engines?.[engine as keyof CoderConfig['engines']]?.model;
+  return first ? splitEngineSpec(first).model : undefined;
 }
 
-/** The task's engine credential; a member's own runner falls back to the machine's logins. */
+/** The engine a credential row runs: a subscription's or an engine key's own, else the custom models'. */
+function credentialEngine(id: string): EngineCredential['engine'] {
+  const { name } = parseCredentialId(id);
+  if (name === 'claude' || name === 'ANTHROPIC_API_KEY' || name === 'CLAUDE_CODE_OAUTH_TOKEN')
+    return 'claude';
+
+  return name === 'codex' || name === 'OPENAI_API_KEY' ? 'codex' : 'custom';
+}
+
+/** The task with the attempts its turn runs: those frozen at admission, else the ones its asker may run now. */
+async function withModels(ctx: ServerContext, task: TaskStatus['task']) {
+  if (task.models) return task;
+  const { models } = await resolveModels(ctx, effectiveSettings(task), turnStarter(task));
+
+  return { ...task, models: modelAttempts(models, Boolean(task.runnerId || ctx.local)) };
+}
+
+/** The credential a task's turn starts on: its first attempt's; one without runs on a member's own runner or a local server's logins. */
 export async function taskCredential(
   ctx: ServerContext,
   task: TaskStatus['task'],
 ): Promise<EngineCredential> {
-  const engine = (task.usage?.engine ??
-    task.definition.engine ??
-    'claude') as EngineCredential['engine'];
-  const selected = task.credential
-    ? await ctx.store.get('credential', task.credential)
-    : (await resolveCredential(ctx, engine, task.requestedBy, { model: task.usage?.model }))?.value;
+  const [first] = (await withModels(ctx, task)).models ?? [];
+  const engine = (first ? splitEngineSpec(first.model).engine : 'claude') as EngineCredential['engine'];
+  const selected = first?.credential && (await ctx.store.get('credential', first.credential));
   if (selected) return { engine, ...decryptCredential(ctx.config, selected) };
   if (!task.runnerId && !ctx.local) throw new Error('no-credential');
 
   return { engine, env: {} };
 }
 
-export async function taskEngineCredentials(ctx: ServerContext, task: TaskStatus['task']) {
-  const engine = task.usage?.engine ?? task.definition.engine;
-  const chain = task.engineChain ?? [];
-  const remaining = chain.slice(Math.max(0, chain.indexOf(engine ?? '')) + 1);
-  const rows = await Promise.all(
-    remaining.map(async engine => {
-      const id = task.engineCredentials?.[engine];
-      const value = id ? await ctx.store.get('credential', id) : undefined;
-      return value && (!value.owner || value.owner === task.requestedBy)
-        ? {
-            id: id!,
-            credential: {
-              engine: engine as EngineCredential['engine'],
-              ...decryptCredential(ctx.config, value),
-            },
-          }
-        : undefined;
-    }),
-  );
-
-  return [
-    ...(task.credential
-      ? [{ id: task.credential, credential: await taskCredential(ctx, task) }]
-      : []),
-    ...rows.flatMap(row => (row ? [row] : [])),
+/** Every credential a turn may switch to, best first: the starter's own on their turn, then the workspace's, for each model its list, its review model and its flow steps reach. */
+export async function taskEngineCredentials(
+  ctx: ServerContext,
+  task: TaskStatus['task'],
+  config: CoderConfig,
+) {
+  const option = (model?: string) => {
+    try {
+      return [resolveTaskOptions({ model }, config)];
+    } catch {
+      return [];
+    }
+  };
+  const { models } = await withModels(ctx, task);
+  const options = [
+    ...(models ?? []).flatMap(attempt => option(attempt.model)),
+    ...option(config.reviewModel).flatMap(first => modelList(config, first)),
+    ...option().flatMap(first => modelList(config, first)),
   ];
+  const names = [...new Set(options.flatMap(each => credentialNames(each, config)))];
+  const starter = turnStarter(task);
+  const listed = await ctx.store.listCredentials({ owner: task.requestedBy });
+  const frozen = new Set(models?.flatMap(attempt => attempt.credential ?? []));
+  const picked = pickCredentials(listed, names, starter);
+  const rows = [
+    ...listed.filter(
+      row =>
+        frozen.has(row.id) &&
+        !picked.includes(row) &&
+        (!row.value.owner || row.value.owner === starter),
+    ),
+    ...picked,
+  ];
+
+  return rows.map(row => ({
+    id: row.id,
+    credential: { engine: credentialEngine(row.id), ...decryptCredential(ctx.config, row.value) },
+  }));
 }
 
 const hostOf = (url: string | undefined) =>
@@ -468,9 +501,9 @@ export function brokeredKeys(
   if (credential.engine !== 'custom') return BROKERED;
   const models = config.models ?? {};
   const selected = task.usage?.model ? models[task.usage.model] : undefined;
-  const entries = selected && 'baseUrl' in selected ? [selected] : Object.values(models);
+  const entries = isEndpointModel(selected) ? [selected] : Object.values(models);
   const custom = entries.flatMap(entry =>
-    'baseUrl' in entry && entry.envKey && URL.canParse(entry.baseUrl)
+    isEndpointModel(entry) && entry.envKey && URL.canParse(entry.baseUrl)
       ? [
           {
             name: entry.envKey,
@@ -500,7 +533,7 @@ export async function taskHosts(
   const hosts = engineHosts(credential.engine, credential.env);
   if (credential.engine === 'custom')
     for (const entry of Object.values(config.models ?? {}))
-      if ('baseUrl' in entry) hosts.push(...hostOf(entry.baseUrl));
+      if (isEndpointModel(entry)) hosts.push(...hostOf(entry.baseUrl));
 
   for (const id of await turnConnections(ctx, task)) {
     const connection = await findConnection(ctx, id, taskAsker(task));
@@ -510,7 +543,7 @@ export async function taskHosts(
   for (const id of integrations) hosts.push(...(ctx.integrations[id]?.hosts ?? []));
   for (const entry of Object.values(task.definition.mcp ?? {})) hosts.push(...hostOf(entry.url));
   for (const name of task.mcp ?? []) hosts.push(...hostOf(config.mcp?.[name]?.url));
-  for (const host of config.approvals?.allowedNetworkHosts ?? []) {
+  for (const host of config.network?.allowedHosts ?? []) {
     const name = host.replace(/^\[(.*)\](?::\d+)?$/, '$1').replace(/^([^:]+):\d+$/, '$1');
     hosts.push(name, ...(net.isIP(name) ? [] : [`*.${name}`]));
   }
@@ -523,12 +556,14 @@ export async function taskHosts(
 export async function machineFirewall(ctx: ServerContext, task: TaskStatus['task']) {
   const credential = await taskCredential(ctx, task);
   if (!credential) return undefined;
+  const config = await taskConfig(ctx.store);
   const credentials = [
     credential,
-    ...(await taskEngineCredentials(ctx, task)).map(row => row.credential),
+    ...(await taskEngineCredentials(ctx, task, effectiveConfig(ctx, config))).map(
+      row => row.credential,
+    ),
   ];
   const hosts = await Promise.all(credentials.map(value => taskHosts(ctx, task, value)));
-  const config = await taskConfig(ctx.store);
 
   return {
     credential: Object.assign({}, ...credentials.map(value => value.env).reverse()) as Record<
@@ -579,16 +614,13 @@ async function storedPlatformSecrets(
 }
 
 export async function taskLogSecrets(ctx: ServerContext, status: TaskStatus): Promise<string[]> {
-  const [connections, credential, platform]: [string[], EngineCredential, string[]] =
-    await Promise.all([
-      readTaskConnectionSecrets(ctx, status.task),
-      taskCredential(ctx, status.task).catch(error => {
-        if (error instanceof Error && error.message === 'no-credential')
-          return { engine: 'codex' as const, env: {} };
-        throw error;
-      }),
-      storedPlatformSecrets(ctx, status.task),
-    ]);
+  const [connections, credentials, platform] = await Promise.all([
+    readTaskConnectionSecrets(ctx, status.task),
+    taskConfig(ctx.store).then(config =>
+      taskEngineCredentials(ctx, status.task, effectiveConfig(ctx, config)),
+    ),
+    storedPlatformSecrets(ctx, status.task),
+  ]);
   const recovered =
     ctx.store instanceof LocalStore &&
     status.task.event &&
@@ -604,7 +636,10 @@ export async function taskLogSecrets(ctx: ServerContext, status: TaskStatus): Pr
   if (recovered.length)
     await taskConnectionSecrets(ctx, status.task.id, [...connections, ...platform, ...recovered]);
 
-  return [...connections, ...platform, ...recovered, ...credentialSecrets(credential.env)].filter(
-    value => value.length >= 8,
-  );
+  return [
+    ...connections,
+    ...platform,
+    ...recovered,
+    ...credentials.flatMap(row => credentialSecrets(row.credential.env)),
+  ].filter(value => value.length >= 8);
 }

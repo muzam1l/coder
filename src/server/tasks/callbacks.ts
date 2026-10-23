@@ -1,10 +1,12 @@
 import { type Params } from '../routes/match';
 import { usageTarget } from './usage';
 import { type Approval } from '../../core/types';
+import { effectiveSettings } from '../../agent/definition';
 import { type TaskStatus, type TaskLogLine, type UsageRecord } from '../store/types';
 import { type ServerContext } from '../context';
-import { runModel, taskContext, uninstall } from './context';
-import { effectiveConfig } from '../settings/config';
+import { firstModel, taskContext, taskEngineCredentials, uninstall } from './context';
+import { effectiveConfig, taskConfig } from '../settings/config';
+import { splitEngineSpec } from '../../core/config';
 import { writeBackCodexAuth } from '../settings/credentials';
 import { storeLogs, taskRedactor, taskWarnings } from './logs';
 import { stopTaskMachine } from './kick';
@@ -62,6 +64,10 @@ type TaskCallback = {
   installationRevoked?: true;
   /** Sent by the machine when the task never reported its own outcome. */
   machine?: true;
+  /** The model and credential that run the turn now, and each model that failed before them. */
+  model?: string;
+  credential?: string;
+  fallbacks?: TaskStatus['fallbacks'];
 };
 
 export type CallbackContext = ServerContext & {
@@ -235,6 +241,8 @@ export async function reportResult(
             : {}),
         ...(body.answer !== undefined ? { answer: body.answer } : {}),
         ...(body.approvals ? { approvals: body.approvals } : {}),
+        ...(body.fallbacks ? { fallbacks: body.fallbacks } : {}),
+        ...(body.model ? { resolvedModel: splitEngineSpec(body.model).model ?? body.model } : {}),
       },
       now,
       {
@@ -266,6 +274,8 @@ export async function reportResult(
   };
   // Posts, usage and the log marker land with the outcome; a machine that must stop first marks its logs after.
   const stops = !runner || runner.kind === 'vercel-sandbox' || runner.kind === 'local-docker';
+  const ran = body.model ? splitEngineSpec(body.model) : undefined;
+  const { engine, model } = ran ?? effectiveSettings(authorized.task);
   const completed = await ctx.queue.completeTask(
     ctx.organizationId,
     id,
@@ -289,17 +299,9 @@ export async function reportResult(
         taskId: id,
         agent: authorized.task.agent,
         target: usageTarget(authorized.task),
-        ...((authorized.task.usage?.engine ?? authorized.task.definition.engine)
-          ? {
-              engine: authorized.task.usage?.engine ?? authorized.task.definition.engine,
-            }
-          : {}),
-        ...((authorized.task.usage?.model ?? authorized.task.definition.model)
-          ? {
-              model: authorized.task.usage?.model ?? authorized.task.definition.model,
-            }
-          : {}),
-        credential: authorized.task.credential ?? 'unknown',
+        ...(engine ? { engine } : {}),
+        ...(model ? { model } : {}),
+        credential: body.credential ?? authorized.task.models?.[0]?.credential ?? 'unknown',
         runnerElapsedMs: Math.max(0, now - (authorized.startedAt ?? now)),
         ...(body.tokens !== undefined ? { tokens: body.tokens } : {}),
         at: now,
@@ -447,14 +449,17 @@ export async function refreshCredential(
     authJson?: unknown;
     credentialId?: unknown;
   };
-  if (typeof body.authJson !== 'string' || !authorized.task.credential)
-    return json({ error: 'Invalid credential update' }, 400);
-
-  const credentialId =
-    typeof body.credentialId === 'string' ? body.credentialId : authorized.task.credential;
+  const credentialId = body.credentialId;
   if (
-    credentialId !== authorized.task.credential &&
-    credentialId !== authorized.task.engineCredentials?.codex
+    typeof body.authJson !== 'string' ||
+    typeof credentialId !== 'string' ||
+    !(
+      await taskEngineCredentials(
+        ctx,
+        authorized.task,
+        effectiveConfig(ctx, await taskConfig(ctx.store)),
+      )
+    ).some(row => row.id === credentialId)
   )
     return json({ error: 'Invalid credential update' }, 400);
 
@@ -463,7 +468,7 @@ export async function refreshCredential(
   });
 }
 
-/** A turn's OAuth connection token or Just me key on first use, `refused` naming by fingerprint a token its server refused; the refresh token stays here. A Just me one first needs its owner's approval, else is refused with the reason the model reads. One that needs reconnecting answers `needs-auth`, logged once per task. */
+/** A turn's OAuth connection token or personal key on first use, `refused` naming by fingerprint a token its server refused; the refresh token stays here. A personal one first needs its owner's approval, else is refused with the reason the model reads. One that needs reconnecting answers `needs-auth`, logged once per task. */
 export async function taskConnection(req: Request, ctx: CallbackContext): Promise<Response> {
   const body = (await req.json().catch(() => undefined)) as
     | { connection?: unknown; refused?: unknown; url?: unknown; connectionCreatedAt?: unknown }
@@ -512,7 +517,7 @@ export async function readContext(
   try {
     const { connectionSecrets: _secrets, ...context } = await taskContext(ctx, authorized);
     // The list shows the model each task runs with, so the turn records it as it starts.
-    const model = runModel(authorized.task, effectiveConfig(ctx, context.config));
+    const model = firstModel(authorized.task);
     if (model && model !== authorized.task.usage?.resolvedModel)
       await ctx.queue.patchTask(
         ctx.organizationId,

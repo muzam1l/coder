@@ -3,6 +3,7 @@ export const iAgent =
   'M12 8V4H8M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2ZM2 14h2M20 14h2M15 13v2M9 13v2';
 export const iActivity = 'M22 12h-4l-3 9L9 3l-3 9H2';
 export const iChart = 'M3 3v18h18M18 17V9M13 17V5M8 17v-3';
+export const iFirst = 'M5 5v14M19 12H9M13 8l-4 4 4 4';
 export const iLeft = 'm15 18-6-6 6-6';
 export const iDown = 'm6 9 6 6 6-6';
 export const iRight = 'm9 18 6-6-6-6';
@@ -13,6 +14,7 @@ export const iSun =
 export const iMoon = 'M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z';
 export const iMonitor =
   'M4 4h16a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1ZM8 20h8M12 16v4';
+export const iLock = 'M6 11h12v9H6zM8 11V8a4 4 0 0 1 8 0v3';
 export const iKey =
   'M2 15.5a5.5 5.5 0 1 0 11 0a5.5 5.5 0 1 0 -11 0M21 2l-9.6 9.6M15.5 7.5l3 3L22 7l-3-3';
 export const iUsers =
@@ -32,6 +34,8 @@ export const iInfo = 'M12 16v-4M12 8h.01M3 12a9 9 0 1 0 18 0a9 9 0 1 0-18 0';
 export const iDots =
   'M4 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0M18 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0';
 export const iPlus = 'M12 5v14M5 12h14';
+export const iOff = 'M5.6 5.6l12.8 12.8M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0';
+export const iUndo = 'M9 14 4 9l5-5M4 9h10a6 6 0 0 1 0 12h-3';
 export const iPencil = 'M4 20h4L19 9l-4-4L4 16v4ZM13 7l4 4';
 export const iMessage = 'M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12Z';
 export const iSteer = 'M4 12h12M12 6l6 6-6 6';

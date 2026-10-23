@@ -60,7 +60,7 @@ export class ClientError extends CoderError {
   }
 }
 
-type ClientAuth = { token: string } | { cookie: true };
+type ClientAuth = { token?: string } | { cookie: true };
 interface ClientOptions {
   fetch?: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   organization?: string;
@@ -154,7 +154,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   private send(path: string, init: RequestInit): Promise<Response> {
     const headers = new Headers(init.headers);
     if (init.body && !headers.has('content-type')) headers.set('content-type', 'application/json');
-    if (!this.cookie) headers.set('authorization', `Bearer ${this.token}`);
+    if (this.token) headers.set('authorization', `Bearer ${this.token}`);
     if (this.organization) headers.set('x-coder-organization', this.organization);
     return this.fetchImpl(`${this.url}${path}`, {
       ...init,
@@ -204,7 +204,14 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
             ? Array<Pick<AgentRow, 'id' | 'name'>>
             : D['agent'][]
     > => this.request(queryPath('/admin/agents', options ?? {})),
-    get: <Q extends { versions?: boolean; content?: boolean; handles?: boolean } = {}>(
+    get: <
+      Q extends {
+        versions?: boolean;
+        content?: boolean;
+        handles?: boolean;
+        installations?: boolean;
+      } = {},
+    >(
       slug: string,
       options?: Q,
     ): Promise<Q extends { versions: false } ? AgentRow : D['detail']> =>
@@ -213,6 +220,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
           ...(options?.versions === false ? { versions: 0 } : {}),
           ...(options?.content === false ? { content: 0 } : {}),
           ...(options?.handles ? { handles: 1 } : {}),
+          ...(options?.installations ? { installations: 1 } : {}),
         }),
       ),
     versions: (slug: string, options: PageQuery = {}): Promise<Paged<VersionRow>> =>
@@ -245,7 +253,10 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         unchanged: result.unchanged,
         ...(result.apps?.length ? { apps: result.apps } : {}),
       })),
-    settings: (slug: string, settings: Omit<AgentSettings, 'engine'>): Promise<D['record']> =>
+    settings: (
+      slug: string,
+      settings: Omit<AgentSettings, 'engine' | 'effort'>,
+    ): Promise<D['record']> =>
       this.request(`/admin/agents/${encodeURIComponent(slug)}/settings`, {
         method: 'PATCH',
         body: JSON.stringify(settings),
@@ -320,13 +331,12 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       text: string,
       options: {
         model?: string;
-        effort?: string;
         access?: Access;
         outputSchema?: object;
       } = {},
     ) => this.post(`/admin/tasks/${encodeURIComponent(id)}/steer`, { text, ...options }),
-    ask: (id: string, question: string) =>
-      this.post(`/admin/tasks/${encodeURIComponent(id)}/ask`, { question }),
+    ask: (id: string, question: string, options: { model?: string } = {}) =>
+      this.post(`/admin/tasks/${encodeURIComponent(id)}/ask`, { question, ...options }),
     approve: (
       id: string,
       approvalId: string,

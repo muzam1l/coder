@@ -1,93 +1,67 @@
+---
+description: Every setting in ~/.coder/config.json and a repository's .coder/config.json.
+---
+
 # Configuration
 
-The Coder configuration reference. Machine defaults live in `~/.coder/config.json`; `.coder/config.json` in a repo overrides them per project. Merge order, later wins:
+`~/.coder/config.json` holds a machine's settings, and `.coder/config.json` in a repo overrides them for that repo. Later wins:
 
 1. Built-in defaults
 2. `~/.coder/config.json`
 3. `<repo>/.coder/config.json`
-4. CLI flags on the dispatch itself (`--model`, `--effort`, `--access`)
+4. Flags on the task (`--model`, `--access`)
 
-Read and write values in the dashboard under **# Settings → (Engines)** and **(Models)**, or from the CLI (`--workspace` targets the repo file instead of the user file):
+On a Coder server, the workspace's settings take the place of the user file, and a repo can only shorten `chain` or set its own `reviewModel`. The dashboard edits them under **# Settings**; the CLI with `coder config` (`--workspace` writes the repo file):
 
 ```bash
 coder config list
-coder config get <key>
-coder config set chain '["codex", "claude", "custom"]'
-coder config set engines.codex.model sol
+coder config set chain '["codex/sol", "claude/opus"]'
+coder config migrate          # rewrite an older file in the current shape
 ```
 
 ## Full shape
 
 ```json
 {
-  "chain": ["codex", "claude", "custom"],
-  "engines": {
-    "codex": { "model": "sol", "effort": "high", "network": true },
-    "claude": { "model": "opus", "effort": "medium" },
-    "custom": { "model": "qwen" }
-  },
+  "$schema": "https://coder.wular.ai/schema/config.v1.json",
+  "version": 1,
+  "chain": ["codex/sol", "claude/opus", "qwen"],
+  "reviewModel": "codex/astra",
   "models": {
+    "claude": "claude/sonnet/high",
+    "fast": "codex/luna/low",
     "qwen": { "baseUrl": "http://localhost:11434/v1", "model": "qwen2.5-coder:32b" },
-    "fast": { "provider": "codex", "model": "gpt-6-luna" },
-    "big": { "provider": "claude", "model": "opus", "effort": "high" },
-    "astra": { "disabled": true }
+    "astra": false
   },
-  "approvals": {
-    "allowedNetworkHosts": ["localhost", "127.0.0.1", "registry.npmjs.org"]
-  },
-  "agents": {
-    "review": false,
-    "helper": {
-      "access": "read-only"
-    }
-  },
-  "mcp": {
-    "docs": { "command": "npx", "args": ["-y", "docs-mcp"], "tools": ["search"] }
-  }
+  "agents": { "coder": { "model": "sol", "access": "read-only" }, "helper": false },
+  "mcp": { "docs": { "command": "npx", "args": ["-y", "docs-mcp"], "tools": ["search"] } },
+  "network": { "allowedHosts": ["localhost", "registry.npmjs.org"], "readOnlyTasks": true }
 }
 ```
 
-## `chain`
+Every value that names a model is a [model spec](models.md#pick-a-model): `sol`, `sol/low`, `claude/opus` or `codex/gpt-6.1-sol/high`. A spec without an effort runs at `medium`.
 
-Fallback order. When an engine can't start (missing binary, auth, quota), the task automatically retries on the next entry. Default `["codex", "claude"]`.
-
-## `engines`
-
-Per-engine defaults, used when a dispatch doesn't override them:
-
-| Key           | Values                                                                                                                                        |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `model`       | codex: `luna`, `sol` (default), `astra` · claude: `sonnet`, `opus` (default), `fable` · custom: any name from `models` · or any full model id |
-| `effort`      | `low`, `medium`, `high`                                                                                                                       |
-
-A task's access is `auto` or `read-only` (`--access`, or **# Tasks → [New task]**), the same on every engine: `auto` lets the engine's own reviewer decide actions outside the sandbox (see [approvals](#approvals)), `read-only` changes nothing and uses only read-only tools. A read-only agent or parent task makes its tasks read-only; `engines.codex.network` overrides network access for every mode when set.
-
-A task reaches only its workspace unless you give it more. Pass `--add-dir <dir>` to `coder run` once for each sibling repo or shared folder the task needs. Relative paths resolve against the workspace and each one must already exist. Read-only tasks can read these directories but never write them, while auto tasks can write them just like the workspace. Claude receives them as `--add-dir` and `permissions.additionalDirectories`, so its OS sandbox follows the same rules. Codex already reads everywhere in read-only, and in auto it receives them as extra writable roots in the turn's sandbox policy. The directories are saved on the task, `coder result` lists them, and steering keeps them.
+| Key | Meaning | Default |
+|---|---|---|
+| `version` | The config's format; Coder writes it | `1` |
+| `chain` | Models in order. The first runs a task with no model of its own; the next ones take over when a model can't start (missing CLI, sign-in, quota, rate limit). A task's or agent's model goes first and the rest follow. | `["codex/sol", "claude/opus"]` |
+| `reviewModel` | The model `coder review` and the `review` tool use | `"codex/astra"` |
+| `models` | Names a spec can use: an alias (a spec string), `false` to turn a name off, or an endpoint (below) | built-in aliases |
+| `agents` | How this repo runs each agent: [Usage](agents/index.md#usage) | |
+| `mcp` | Servers a task attaches with `--mcp`: [Connections](connections.md#mcp-servers-in-config) | |
+| `network.allowedHosts` | Hosts, with their subdomains, that auto tasks reach without review ([Approvals](approvals.md)) | `[]` |
+| `network.readOnlyTasks` | Read-only tasks also reach `allowedHosts`, on every engine | `false` |
 
 ## `models`
 
-One namespace for every model you can name as `--model`, keyed by that name. An entry's shape decides what it is:
+- **Alias:** `"fast": "codex/luna/low"`. Built-in aliases are `luna`, `sol`, `astra`, `sonnet`, `opus`, `fable`, and the engine names `codex` (sol) and `claude` (opus). An alias of the same name overrides one, so `"claude": "claude/sonnet/high"` makes `--model claude` run sonnet at high. `coder model alias` and `unalias`.
+- **Off:** `"astra": false`. The name can't be picked or fallen back to. `coder model disable` and `enable`.
+- **Endpoint:** `{ "baseUrl", "model", "envKey"?, "wireApi"?, "contextWindow"?, "disabled"? }`, an OpenAI-compatible model where `model` is the provider's id. `coder model add`, `update` and `remove`; [Models](models.md#connect-a-model).
 
-| Shape                                                   | Meaning                                                                                                | Managed by                      |
-| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ------------------------------- |
-| `{ "baseUrl", "model", "envKey"?, "wireApi"? }`         | custom OpenAI-compatible endpoint (the `custom` engine)                                                | `coder model add/update/remove` |
-| `{ "provider": "codex"\|"claude", "model", "effort"? }` | alias onto a built-in engine                                                                           | `coder model alias/unalias`     |
-| `{ "disabled": true }`                                  | bare toggle turning off any model name (built-in, entry from another config layer, or raw engine slug) | `coder model disable/enable`    |
+## Versions
 
-Every shape also accepts `"disabled": true` to park the entry without deleting it. An entry named after a built-in alias (e.g. `luna`) shadows it. See [Models](models.md).
+An older file (no `version`, or a lower one) is brought up to date when it loads. The user file is rewritten, with the old one kept as `config.json.bak`. A repo file is updated in memory only, since teammates may run an older Coder; `coder config migrate --workspace` rewrites it. A file from a newer Coder is refused with the upgrade command.
 
-## `approvals`
+## Extra directories
 
-| Key                   | Meaning                                                                                                           |
-| --------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| `allowedNetworkHosts` | Hosts (and their subdomains) tasks reach without review. Default `[]`. Also in the dashboard, **# Settings → (Engines)**. |
-
-How tasks ask for more: [Access and approvals](access.md).
-
-## `agents`
-
-Per-agent usage: enable, override, scope. Reference and examples in [Agents](agents/index.md#usage).
-
-## `mcp`
-
-Servers tasks can attach with `--mcp <name>`, in the `.mcp.json` entry shape. Reference and CLI in [MCP](mcp.md).
+A task reaches only its workspace unless given more: `--add-dir <dir>` on `coder task run`, once per folder. Each one must exist. Read-only tasks read them, auto tasks also write them, and steering keeps them.

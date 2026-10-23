@@ -1,10 +1,14 @@
+---
+description: The dashboard's pages and what each manages; coder dash runs it locally.
+---
+
 # Dashboard
 
 The dashboard is Coder's web UI at `/dash`, which opens the current workspace at `/dash/<workspace>`. `coder dash` runs it on this machine as a UI over the CLI's own config, agents and tasks, with no account and no database.
 
-To self-host your own Coder in the cloud, see [Self-hosting](self-host.md). There the same dashboard serves a workspace.
+Self-hosted Coder serves the same dashboard per workspace; see [Self-host](self-host.md).
 
-Paths name what you click: **# Page** in the sidebar, **(Tab)**, **[Button]**. **# Settings → (Engines)** opens the Engines tab of Settings.
+Paths name what to click: **# Page** in the sidebar, **(Tab)**, **[Button]**. **# Settings → (Models)** opens the Models tab of Settings.
 
 `coder dash` is short for `coder server serve`:
 
@@ -34,7 +38,7 @@ coder dash --port 3100
 - **Local**: every task on this machine, including those started with `coder task run`.
 - **Cloud**: the workspace's tasks, from the dashboard, `coder task run --server` and platform events. A task from a 1:1 DM shows only to its requester and to owners and admins. Its requester steers it; admins can view, stop and delete it.
 
-Local dashboard tasks open as soon as their worker starts. If the engine then fails to start, the task shows the failure and its output. `coder task run` still waits for startup and tries the next engine in its chain.
+Local dashboard tasks open as soon as their worker starts. If the engine then fails to start, the task shows the failure and its output. `coder task run` still waits for startup and tries the next model in its chain.
 
 Archiving hides a task from the default list. A running task keeps running, and steering an archived task brings it back.
 
@@ -42,22 +46,19 @@ Archiving hides a task from the default list. A running task keeps running, and 
 
 **Settings**: what every task runs with.
 
-- **Connections**: MCP servers, accounts and API keys tasks reach, as `coder connection add` adds them.
+- **Connections**: one row per service, its workspace side and the member's own: platform apps and sign-ins, and MCP servers, as `coder connection add` adds them.
 - **Credentials**: the engine logins tasks run with.
   - **Local**: this machine's `claude` and `codex` logins, with **[Sign in]** and **[Sign out]** running each CLI's own commands here.
   - **Cloud**: encrypted personal and workspace [credentials](self-host.md#credentials), as `coder credentials add` adds them.
-- **Engines** and **Models**: engine defaults and models.
+- **Models**: the chain and the review model, each a model and an effort, then aliases and custom models.
   - **Local**: the user config, as `coder config` and `coder model` edit it.
   - **Cloud**: the workspace's config, which a repo's own `.coder/config.json` can only narrow.
 - **Runners**: where tasks run, each with its own engine logins; `coder runner add` adds one.
   - **Local**: this machine.
-  - **Cloud**: the server's default runner plus the [runners](self-host.md#runners) you add. Personal runners are yours; workspace runners need an owner or admin. Secrets are encrypted.
+  - **Cloud**: the server's default runner plus the [runners](runners.md) members add. Workspace runners need an owner or admin. Secrets are encrypted.
+- **Advanced**: the network: hosts tasks reach without review, and whether read-only tasks reach them too.
 
-Add a runner from the catalog under **# Settings → (Runners)**. Your own machine pairs with one command, `coder runner serve --url <server> --token <token>`, behind a public HTTPS tunnel (`--runner-url`). The token lasts 15 minutes and works once. A paired machine calls home every minute and shows offline after five without one. Local and Docker kinds exist only on a local server.
-
-A task runs on the runner it names, else its agent's runner, your default, the workspace default, then the server's own.
-
-For GitHub Actions, save `coder server workflow` as `.github/workflows/coder-agent.yml` and select that file in the runner form. Its worker command is `coder agent run --task`; the task result comes back through the server callback. Job logs appear after GitHub archives them when the job finishes. For Vercel Sandbox, supply the team and project IDs, or set `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID` on the server. Sandbox logs stream while the task runs. See [runner setup](self-host.md#runners) for authentication and workflow inputs.
+Adding runners, pairing a member's machine and which runner a task uses: [Runners](runners.md).
 
 ## Platform events
 

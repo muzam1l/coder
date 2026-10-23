@@ -97,7 +97,9 @@ export interface ToolServer {
   credentialFields?: { env?: string; header?: string };
   /** Only tools the server marks read-only may be called. */
   readOnly?: boolean;
-  /** What the server's own tools do, for a server that sends no instructions. */
+  /** Whose token the server runs on and what it reaches, in one line. */
+  description?: string;
+  /** What the server's tools do; shown before the server's own instructions. */
   instructions?: string;
 }
 
@@ -108,7 +110,7 @@ export interface IntegrationTools {
   install?: string;
   /** Hosts `install` downloads from, redirects included. */
   installHosts?: string[];
-  /** `owner` is set when `token` is a member's own, from a Just me connection. */
+  /** `owner` is set when `token` is a member's own, from a personal connection. */
   server(
     tools: string[],
     event: PlatformEvent | undefined,
@@ -286,7 +288,7 @@ export interface IntegrationApp {
     credentials: unknown,
     input: { fetch: typeof fetch },
   ): Promise<void>;
-  /** Where a person uninstalls the app from an installation by hand. */
+  /** Where a person manages or uninstalls the app on one installation by hand. */
   installationUrl?(installation: PlatformInstallation): string;
   /** Where the browser goes to install an existing app; `state` comes back to installCallback. With `installation`, a fresh authorization that verifies it. */
   installUrl(
@@ -680,8 +682,6 @@ export interface Integration {
   readonly featured?: true;
   /** How a model works with this platform and its tools, for a prompt about its events. */
   readonly prompt?: string;
-  /** What an installation on `account` reaches, for the prompt's server list. */
-  readonly reach?: (account: string) => string;
   /** The most characters one posted reply may hold; a longer reply goes out as several, split between paragraphs. */
   readonly replyLimit?: number;
   readonly events: Record<string, EventSpec>;

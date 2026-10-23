@@ -30,6 +30,7 @@ import {
   turnPending,
   hasPendingSteers,
   processStarts,
+  formatEngineSpec,
 } from './state';
 import { createJsonlTail, readJsonFile } from '../utils/fsx';
 import { getCodexAvailability } from './engines/codex';
@@ -38,16 +39,14 @@ import { claudeVersionEnvironment, getClaudeAvailability } from './engines/claud
 import { ensureCodexInstalled, modelVersionWarning } from './hosts';
 import {
   ACCESS_MODES,
-  CLAUDE_EFFORTS,
-  CLAUDE_MODELS,
   CLAUDE_SANDBOX_UNAVAILABLE_PATTERN,
-  CODEX_EFFORTS,
-  CODEX_MODELS,
   assertModelEnabled,
-  isAliasModel,
+  isBuiltinAlias,
   isEndpointModel,
   loadConfig,
   parseEngineSpec,
+  sameModel,
+  splitEngineSpec,
   resolveCodexModel,
   type McpConfigEntry,
   mcpEntrySchema,
@@ -103,87 +102,60 @@ class FallbackSignal extends Error {
 // Option resolution (throwing variant, moved out of cmd/task.ts)
 // ---------------------------------------------------------------------------
 
+/** Whether a spec resolves, not turned off. */
+function runnable(spec: string, config: CoderConfig): boolean {
+  try {
+    return Boolean(parseEngineSpec(spec, config));
+  } catch {
+    return false;
+  }
+}
+
 export function resolveTaskOptions(
   options: Record<string, any>,
   config: CoderConfig,
 ): ResolvedTaskOptions {
-  // A bare model implies its engine: sonnet/opus/fable -> claude,
-  // luna/sol/astra -> codex, a configured custom-model name -> custom.
-  // Internal engine overrides keep fallback dispatch pinned.
-  let engine = options.engine;
-  const explicitEngine = Boolean(engine);
-  let modelInput = options.model as string | undefined;
-  let effortInput = options.effort as Effort | undefined;
-  const aliasEntry = (name: string | null | undefined) => {
-    const entry = name ? config.models?.[name] : undefined;
-    return entry && isAliasModel(entry) ? entry : undefined;
-  };
-  const endpointEntry = (name: string | null | undefined) => {
-    const entry = name ? config.models?.[name] : undefined;
-    return entry && isEndpointModel(entry) ? entry : undefined;
-  };
-  const parseModel = (name: string) => {
-    try {
-      return parseEngineSpec(name, config);
-    } catch (error) {
-      throw new CoderError(
-        'invalid-option',
-        `Invalid model "${name}". Use a model name or engine:model. ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  };
-  if (modelInput?.includes(':') || aliasEntry(modelInput)) {
-    const parsed = parseModel(modelInput!);
-    if (parsed) {
-      if (!explicitEngine) {
-        engine = parsed.engine;
-      }
-      modelInput = parsed.model ?? undefined;
-      effortInput = effortInput ?? parsed.effort ?? undefined;
-    }
-  }
-  if (!engine && modelInput) {
-    if (modelInput in CLAUDE_MODELS) {
-      engine = 'claude';
-    } else if (modelInput in CODEX_MODELS) {
-      engine = 'codex';
-    } else if (endpointEntry(modelInput)) {
-      engine = 'custom';
-    } else if (/^(?:claude-|opus|sonnet|haiku|fable)/i.test(modelInput)) {
-      engine = 'claude';
-    }
-  }
-  engine = engine ?? config.chain[0] ?? 'codex';
-  if (engine !== 'codex' && engine !== 'claude' && engine !== 'custom') {
+  const invalid = (error: unknown) =>
+    new CoderError('invalid-option', error instanceof Error ? error.message : String(error));
+  const requested: string | undefined = options.engine;
+  if (requested !== undefined && requested !== 'codex' && requested !== 'claude' && requested !== 'custom') {
     const hint =
-      engine in CODEX_MODELS || engine in CLAUDE_MODELS || engine in (config.models ?? {})
-        ? ` "${engine}" is a model; use --model ${engine}.`
+      isBuiltinAlias(requested) || requested in (config.models ?? {})
+        ? ` "${requested}" is a model; use --model ${requested}.`
         : '';
     throw new CoderError(
       'invalid-option',
-      `Invalid engine "${engine}". Use --model <model> or --model <engine:model>.${hint}`,
+      `Invalid engine "${requested}". Use --model <model> or --model <engine/model>.${hint}`,
     );
   }
-  const engineDefaults = config.engines[engine as Engine] ?? {};
-  let model = modelInput ?? engineDefaults.model ?? null;
-  let effort = effortInput ?? engineDefaults.effort ?? null;
-  if (aliasEntry(model)) {
-    const parsed = parseModel(model!);
-    if (parsed) {
-      if (!explicitEngine) {
-        engine = parsed.engine;
-      }
-      model = parsed.model;
-      effort = effortInput ?? parsed.effort ?? effort;
-    }
+  // Parts, as agent settings and fallbacks give them, make one spec; none runs the chain's first.
+  const spec: string = options.model
+    ? requested && !String(options.model).includes('/')
+      ? `${requested}/${options.model}`
+      : options.model
+    : (requested ?? config.chain.find(entry => runnable(entry, config)) ?? config.chain[0]!);
+  let parsed: NonNullable<ReturnType<typeof parseEngineSpec>>;
+  let typed: ReturnType<typeof splitEngineSpec>;
+  try {
+    typed = splitEngineSpec(spec);
+    parsed = parseEngineSpec(spec, config)!;
+  } catch (error) {
+    throw invalid(error);
   }
+  const engine = parsed.engine;
+  let model = parsed.model;
+  const effort = (typed.effort ?? options.effort ?? parsed.effort) as Effort | null;
+  const endpointEntry = (name: string | null | undefined) => {
+    const entry = name ? config.models?.[name] : undefined;
+    return isEndpointModel(entry) ? entry : undefined;
+  };
   const access = options.access ?? 'auto';
 
   // A disabled built-in alias must never reach an engine.
   try {
     assertModelEnabled(config, model);
   } catch (error) {
-    throw new CoderError('invalid-option', error instanceof Error ? error.message : String(error));
+    throw invalid(error);
   }
 
   // The custom engine groups the user's configured (OpenAI-compatible) models;
@@ -201,31 +173,17 @@ export function resolveTaskOptions(
         'invalid-option',
         model
           ? `No custom model named "${model}". Configured: ${names.join(', ') || 'none'}.`
-          : 'No custom model to run: pass --model <name> or set engines.custom.model.',
+          : 'No custom model to run: pass --model <name> or list custom/<name> in chain.',
         {
-          hint: 'Use --model <name> or --model custom:<name>. Add one: coder model add <name> --base-url <url> --model <id>',
+          hint: 'Use --model <name> or --model custom/<name>. Add one: coder model add <name> --base-url <url> --model <id>',
         },
       );
     }
   }
-  const claude = engine === 'claude';
-
   if (!(access in ACCESS_MODES)) {
     throw new CoderError(
       'invalid-option',
       `Invalid --access "${access}". Use one of: ${Object.keys(ACCESS_MODES).join(', ')}`,
-    );
-  }
-  if (!claude && effort && !CODEX_EFFORTS.has(effort)) {
-    throw new CoderError(
-      'invalid-option',
-      `Invalid codex --effort "${effort}". Use one of: ${[...CODEX_EFFORTS].join(', ')}`,
-    );
-  }
-  if (claude && effort && !CLAUDE_EFFORTS.has(effort)) {
-    throw new CoderError(
-      'invalid-option',
-      `Invalid claude --effort "${effort}". Use one of: ${[...CLAUDE_EFFORTS].join(', ')}`,
     );
   }
 
@@ -538,8 +496,10 @@ export interface DispatchOptions {
   connectionSource?: Task['connectionSource'];
   /** Extra directories the task may reach, resolved against cwd. */
   addDirs?: string[];
-  /** Called with (engine, detail, next) when an engine falls through the chain. */
-  onFallback?: (info: { engine: Engine; detail: string; next: Engine }) => void;
+  /** The credential a cloud attempt runs on; an undefined value unsets the variable. */
+  credentialEnv?: NodeJS.ProcessEnv;
+  /** Called with the failed model, why, and the model tried next. */
+  onFallback?: (info: { model: string; detail: string; next: string }) => void;
   /** Called with a note when a missing codex binary is installed on the spot. */
   onNote?: (note: string) => void;
   /** A durable local delivery retries the same task. */
@@ -564,7 +524,7 @@ interface DispatchResult {
 export function spawnWorker(
   cwd: string,
   taskId: string,
-  connectionEnv: Record<string, string> = {},
+  connectionEnv: NodeJS.ProcessEnv = {},
   checked = false,
 ): ChildProcess {
   const taskDir = resolveTaskDir(cwd, taskId);
@@ -638,7 +598,11 @@ async function attemptOnce(
     opts.availability?.[resolved.engine === 'custom' ? 'codex' : resolved.engine] ??
     (resolved.engine !== 'claude'
       ? getCodexAvailability(cwd)
-      : getClaudeAvailability('claude', { ...process.env, ...opts.connectionEnv }, cwd));
+      : getClaudeAvailability(
+          'claude',
+          { ...process.env, ...opts.connectionEnv, ...opts.credentialEnv },
+          cwd,
+        ));
   const resolvedEntry = resolved.model ? config.models?.[resolved.model] : undefined;
   if (!availability.available && resolvedEntry && isEndpointModel(resolvedEntry)) {
     const install = ensureCodexInstalled(availability);
@@ -713,7 +677,7 @@ async function attemptOnce(
     appendTaskLog(cwd, taskId, { kind: 'warning', message: HISTORY_LOST });
   const logFile = path.join(resolveTaskDir(cwd, taskId), 'log.jsonl');
   const logStart = fs.existsSync(logFile) ? fs.statSync(logFile).size : 0;
-  const worker = spawnWorker(cwd, taskId, opts.connectionEnv, true);
+  const worker = spawnWorker(cwd, taskId, { ...opts.connectionEnv, ...opts.credentialEnv }, true);
   opts.onWorker?.(taskId, worker);
 
   if (!waitForStartup)
@@ -824,7 +788,7 @@ export function buildFallbackPayload(
  */
 export async function dispatchTask(
   opts: DispatchOptions,
-  internal: { waitForStartup?: boolean; config?: CoderConfig } = {},
+  internal: { waitForStartup?: boolean; config?: CoderConfig; models?: ResolvedTaskOptions[] } = {},
 ): Promise<DispatchResult> {
   if (process.env[WORKER_ENV]) {
     throw new CoderError(
@@ -856,21 +820,22 @@ export async function dispatchTask(
     nativeMcp: opts.nativeMcp ?? mcp.nativeMcp,
   };
 
-  // First attempt uses the full request (model/effort/name).
-  // A chain fallback re-resolves fresh for the next engine, deliberately dropping
-  // model, effort, and name. The next engine uses its own config default.
-  let resolveInput: Record<string, any> = {
-    engine: opts.engine,
-    model: opts.model,
-    effort: opts.effort,
-    access: opts.access,
-  };
+  // The first attempt runs the request as asked, name included; each fallback model runs as listed.
+  const list =
+    internal.models ??
+    modelList(
+      config,
+      resolveTaskOptions(
+        { engine: opts.engine, model: opts.model, effort: opts.effort, access: opts.access },
+        config,
+      ),
+    );
+  let resolved = list[0]!;
   let taskExtras = {
     name: opts.name,
   };
 
   for (;;) {
-    const resolved = resolveTaskOptions(resolveInput, config);
     try {
       return await attemptOnce(
         config,
@@ -883,7 +848,7 @@ export async function dispatchTask(
       if (!(error instanceof FallbackSignal)) {
         throw error;
       }
-      const next = nextFallbackEngine(error.engine, config);
+      const next = nextModel(list, resolved);
       if (!next) {
         const payload = buildFallbackPayload(
           error.engine,
@@ -894,13 +859,38 @@ export async function dispatchTask(
         );
         throw new CoderError('chain-exhausted', payload.error, { payload });
       }
-      opts.onFallback?.({ engine: error.engine, detail: error.detail, next });
-      resolveInput = { engine: next, access: opts.access };
+      opts.onFallback?.({
+        model: formatEngineSpec(resolved),
+        detail: error.detail,
+        next: formatEngineSpec(next),
+      });
+      resolved = next;
       taskExtras = {
         name: undefined,
       };
     }
   }
+}
+
+/** The models a task tries in order: its first, then the chain without it and without disabled or unrunnable models. */
+export function modelList(config: CoderConfig, first: ResolvedTaskOptions): ResolvedTaskOptions[] {
+  const list = [first];
+  for (const spec of config.chain) {
+    try {
+      const next = resolveTaskOptions({ model: spec, access: first.access }, config);
+      if (!list.some(listed => sameModel(listed, next))) list.push(next);
+    } catch {}
+  }
+
+  return list;
+}
+
+/** The model after `current` in a task's list; undefined at its end. */
+export function nextModel(
+  list: ResolvedTaskOptions[],
+  current: { engine: Engine; model: string | null },
+): ResolvedTaskOptions | undefined {
+  return list[Math.max(0, list.findIndex(listed => sameModel(listed, current))) + 1];
 }
 
 // ---------------------------------------------------------------------------
@@ -918,12 +908,6 @@ export interface TaskResult {
   task: Task;
 }
 
-function nextFallbackEngine(engine: Engine, config: CoderConfig): Engine | undefined {
-  return config.chain
-    .slice(config.chain.indexOf(engine) + 1)
-    .find(next => next !== 'custom' || Object.values(config.models ?? {}).some(isEndpointModel));
-}
-
 function turnHasSideEffects(result: TurnResult | null, toolUsed = false): boolean {
   return Boolean(
     toolUsed ||
@@ -932,15 +916,11 @@ function turnHasSideEffects(result: TurnResult | null, toolUsed = false): boolea
   );
 }
 
-/** The next engine for a failed turn that did no work; null means its chain is exhausted. */
-export function turnFallbackEngine(
-  cwd: string,
-  waited: TaskResult,
-  config?: CoderConfig,
-): Engine | null | undefined {
-  if (waited.status !== 'failed') return undefined;
+/** Whether a failed turn did no work, so it may run again on the next credential or model. */
+export function turnMayFallBack(cwd: string, waited: TaskResult): boolean {
+  if (waited.status !== 'failed') return false;
   const r = waited.result;
-  if (!r || !isStartupError(r.error?.message ?? '')) return undefined;
+  if (!r || !isStartupError(r.error?.message ?? '')) return false;
   const since = Date.parse(
     waited.turns.at(-2)?.at ?? waited.task.resumedAt ?? waited.task.createdAt,
   );
@@ -949,9 +929,21 @@ export function turnFallbackEngine(
       (entry.kind === 'tool' || entry.kind === 'reply') &&
       (!entry.at || Date.parse(entry.at) >= since),
   );
-  if (turnHasSideEffects(r, toolUsed)) return undefined;
-  if (waited.turns.at(-1)?.lastReply) return undefined;
-  return nextFallbackEngine(waited.task.engine as Engine, config ?? loadConfig(cwd)) ?? null;
+
+  return !turnHasSideEffects(r, toolUsed) && !waited.turns.at(-1)?.lastReply;
+}
+
+/** The model after a failed turn that did no work, from the task's list; null at its end, undefined when the turn may not fall back. */
+export function turnFallbackModel(
+  cwd: string,
+  waited: TaskResult,
+  list: ResolvedTaskOptions[],
+): ResolvedTaskOptions | null | undefined {
+  if (!turnMayFallBack(cwd, waited)) return undefined;
+  return (
+    nextModel(list, { engine: waited.task.engine as Engine, model: waited.task.model ?? null }) ??
+    null
+  );
 }
 
 export function readResultJson(cwd: string, taskId: string, task?: Task): TurnResult | null {

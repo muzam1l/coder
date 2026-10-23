@@ -98,10 +98,10 @@ import { countTokens } from '../../tasks/usage';
 const orgKey = (organizationId: SQL, kind: string) =>
   sql`('[' || to_json(${organizationId})::text || ',' || to_json(${kind}::text)::text || ']:')`;
 
-/** The task's own credential row, as `credentialId` names it, with its secret. */
+/** The credential row of the task's first attempt, as `credentialId` names it, with its secret. */
 const credentialOf = (row: SQL) =>
   sql`(select ${withSecret(sql`to_jsonb(c)`, sql`s.value`)} from ${engineCredential} c join ${secret} s on s.id = c.secret_id
-    where c.organization_id = ${row}.organization_id and coalesce(c.owner || '/', '') || c.label = ${row}.credential)`;
+    where c.organization_id = ${row}.organization_id and coalesce(c.owner || '/', '') || c.label = ${row}.models->0->>'credential')`;
 const configOf = (organizationId: SQL) =>
   sql`(select ${workspace.config} from ${workspace} where ${workspace.organizationId} = ${organizationId})`;
 const runnerOf = (row: SQL) =>
@@ -312,14 +312,14 @@ export class DrizzleQueue implements TaskQueue {
           : sql``
       } inserted as (
         insert into ${task} (organization_id, public_id, source, status, agent, flow, review_key, runner_kind, access,
-          installation_id, event, audience, space, parent, connections, engine_chain, engine_credentials, name, cwd, prompt, args, mcp, append_system, add_dirs, author, definition, credential, requested_by,
+          installation_id, event, audience, space, parent, connections, models, name, cwd, prompt, args, mcp, append_system, add_dirs, author, definition, requested_by,
           runner_id, engine_settings, tools, context, files, failure_reply, task_url, settings_url, attempts, created_at, updated_at)
         select ${organizationId}, ${agentTask.id}, ${agentTask.source}, 'queued', ${agentTask.agent}, ${agentTask.flow}, ${reviewKey(agentTask) ?? null}, ${agentTask.runner}, ${agentTask.access ?? null},
           ${event ? sql`coalesce((select id from ${install} where key = ${`${event.appId}:${event.installationId}`} and organization_id = ${organizationId}), 0)` : sql`null`},
-          ${json(event)}, ${audience}, ${space ?? null}, ${agentTask.parent ?? null}, ${json(agentTask.connections)}, ${json(agentTask.engineChain)}, ${json(agentTask.engineCredentials)},
+          ${json(event)}, ${audience}, ${space ?? null}, ${agentTask.parent ?? null}, ${json(agentTask.connections)}, ${json(agentTask.models)},
           ${agentTask.name ?? null}, ${agentTask.cwd ?? null}, ${agentTask.prompt ?? null}, ${json(agentTask.args)}, ${json(agentTask.mcp)},
           ${agentTask.appendSystem ?? null}, ${json(agentTask.addDirs)}, ${agentTask.author ?? null}, ${json(agentTask.definition)},
-          ${agentTask.credential ?? null}, ${agentTask.requestedBy ?? null}, ${agentTask.runnerId ?? null}, ${json(agentTask.usage)}, ${json(agentTask.tools)},
+          ${agentTask.requestedBy ?? null}, ${agentTask.runnerId ?? null}, ${json(agentTask.usage)}, ${json(agentTask.tools)},
           ${json(agentTask.context)}, ${json(agentTask.files)}, ${agentTask.failureReply ?? null}, ${agentTask.taskUrl ?? null}, ${agentTask.settingsUrl ?? null},
           0, ${stamp}::timestamptz, ${stamp}::timestamptz
         from capacity where allowed ${session ? sql`and ${session.create} and not exists (select 1 from target)` : sql``} ${delivery ? sql`and exists (select 1 from receipt)` : sql``}
@@ -494,7 +494,7 @@ export class DrizzleQueue implements TaskQueue {
           from ${install} i join ${app} a on a.id = i.app_id join ${secret} cs on cs.id = a.credentials_secret_id left join ${secret} ts on ts.id = i.token_secret_id
           where i.key = touched.event->>'appId' || ':' || (touched.event->>'installationId') and i.organization_id = touched.organization_id and i.deleted_at is null) end as installation,
         case when ${secrets} then ${credentialOf(sql`touched`)} end as credential,
-        case when ${secrets} and touched.credential is null then (select coalesce(jsonb_agg(${withSecret(sql`to_jsonb(c)`, sql`s.value`)}), '[]'::jsonb)
+        case when ${secrets} then (select coalesce(jsonb_agg(${withSecret(sql`to_jsonb(c)`, sql`s.value`)}), '[]'::jsonb)
           from ${engineCredential} c join ${secret} s on s.id = c.secret_id where c.organization_id = touched.organization_id
           and (c.owner is null or c.owner = touched.requested_by)) end as credentials,
         case when ${context} then ${configOf(org)} end as config,
@@ -731,46 +731,58 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     fence: TaskFence,
   ): Promise<boolean> {
-    const [row] = await this.db
-      .update(task)
-      .set({
-        prompt: next.prompt ?? null,
-        context: next.context ?? null,
-        ...(next.definition ? { definition: next.definition } : {}),
-        ...(next.usage ? { engineSettings: next.usage } : {}),
-        ...(next.tools ? { tools: next.tools } : {}),
-        ...('files' in next ? { files: next.files ?? null } : {}),
-        ...('access' in next ? { access: next.access ?? null } : {}),
-        ...(next.engineChain ? { engineChain: next.engineChain } : {}),
-        ...(next.engineCredentials ? { engineCredentials: next.engineCredentials } : {}),
-        ...('credential' in next ? { credential: next.credential ?? null } : {}),
-        status: 'queued',
-        attempts: 0,
-        generation: sql`${task.generation} + 1`,
-        inboxAck: -1,
-        result: null,
-        error: null,
-        tokens: null,
-        handle: null,
-        tokenHash: null,
-        lastSeenAt: null,
-        logCursor: null,
-        logsComplete: null,
-        startedAt: null,
-        finishedAt: null,
-        cancelRequestedAt: null,
-        approval: null,
-        answer: null,
-        archivedAt: null,
-        updatedAt: new Date(now),
-      })
-      .where(
-        this.fence(organizationId, id, {
-          ...fence,
-          statuses: ['completed', 'failed', 'cancelled'],
-        }),
-      )
-      .returning({ id: task.id });
+    const [row] = await this.db.transaction(async tx => {
+      const [known] = await tx
+        .select({ context: task.context })
+        .from(task)
+        .where(this.where(organizationId, id))
+        .for('update');
+      // Answers recorded since the continuation read the task are newer than its copy.
+      const context = next.context && {
+        ...next.context,
+        approvals: mergeApprovals(next.context.approvals ?? [], known?.context?.approvals ?? []),
+      };
+      return tx
+        .update(task)
+        .set({
+          prompt: next.prompt ?? null,
+          context: context ?? null,
+          ...(next.definition ? { definition: next.definition } : {}),
+          ...(next.usage ? { engineSettings: next.usage } : {}),
+          ...(next.tools ? { tools: next.tools } : {}),
+          ...('files' in next ? { files: next.files ?? null } : {}),
+          ...('access' in next ? { access: next.access ?? null } : {}),
+          ...(next.models ? { models: next.models } : {}),
+          ...(next.runner ? { runnerKind: next.runner } : {}),
+          ...('runnerId' in next ? { runnerId: next.runnerId ?? null } : {}),
+          status: 'queued',
+          attempts: 0,
+          generation: sql`${task.generation} + 1`,
+          inboxAck: -1,
+          result: null,
+          error: null,
+          tokens: null,
+          handle: null,
+          tokenHash: null,
+          lastSeenAt: null,
+          logCursor: null,
+          logsComplete: null,
+          startedAt: null,
+          finishedAt: null,
+          cancelRequestedAt: null,
+          approval: null,
+          answer: null,
+          archivedAt: null,
+          updatedAt: new Date(now),
+        })
+        .where(
+          this.fence(organizationId, id, {
+            ...fence,
+            statuses: ['completed', 'failed', 'cancelled'],
+          }),
+        )
+        .returning({ id: task.id });
+    });
     return Boolean(row);
   }
 
@@ -802,7 +814,7 @@ export class DrizzleQueue implements TaskQueue {
     with finished as (
       update ${task} set status = ${outcome.status}, result = ${JSON.stringify(outcome.result ?? null)}::jsonb,
         error = ${outcome.error ?? null}, tokens = ${JSON.stringify(outcome.tokens ?? null)}::jsonb,
-        engine = ${record.engine ?? null}, model = ${record.model ?? null}, runner_ms = coalesce(runner_ms, 0) + ${record.runnerElapsedMs},
+        engine = ${record.engine ?? null}, model = ${record.model ?? null}, credential = ${record.credential ?? null}, runner_ms = coalesce(runner_ms, 0) + ${record.runnerElapsedMs},
         token_count = coalesce(token_count, 0) + ${countTokens(record.tokens)}, usage_tokens = ${addTokens(sql`usage_tokens`, record.tokens)},
         last_seen_at = ${at}::timestamptz, finished_at = ${at}::timestamptz, updated_at = ${at}::timestamptz${context}
       where ${this.fence(organizationId, id, { attempts: completion.attempts, tokenHash: completion.tokenHash, statuses: ['running', 'waiting'] })}
@@ -859,7 +871,6 @@ export class DrizzleQueue implements TaskQueue {
       opts.status === 'waiting' ? awaiting : undefined,
       opts.agent ? eq(task.agent, opts.agent) : undefined,
       opts.source ? eq(task.source, opts.source) : undefined,
-      opts.reviewKey ? eq(task.reviewKey, opts.reviewKey) : undefined,
       opts.parent ? eq(task.parent, opts.parent) : undefined,
       opts.runnerId ? eq(task.runnerId, opts.runnerId) : undefined,
       opts.archived === undefined
@@ -909,9 +920,9 @@ export class DrizzleQueue implements TaskQueue {
             sql`jsonb_strip_nulls(jsonb_build_object('user', ${task.context}->'user', 'approvals', ${task.context}->'approvals', 'turns', case when ${task.context}->'turns'->0 is not null then jsonb_build_array(jsonb_build_object('prompt', ${task.context}->'turns'->0->'prompt')) end))`.as(
               'context',
             ),
-          // The engine, model and effort the list shows, from what ran or else the agent's defaults, and the model its turn recorded.
+          // The engine, model and effort the list shows, from what ran or else the agent's model spec, and the model its turn recorded.
           usage:
-            sql`jsonb_strip_nulls(jsonb_build_object('engine', coalesce(${task.engineSettings}->>'engine', ${task.definition}->>'engine'), 'model', coalesce(${task.engineSettings}->>'model', ${task.definition}->>'model'), 'effort', coalesce(${task.engineSettings}->>'effort', ${task.definition}->>'effort'), 'resolvedModel', ${task.engineSettings}->>'resolvedModel'))`.as(
+            sql`jsonb_strip_nulls(case when coalesce(${task.engineSettings}->>'engine', ${task.engineSettings}->>'model') is not null then jsonb_build_object('engine', ${task.engineSettings}->>'engine', 'model', ${task.engineSettings}->>'model', 'effort', ${task.engineSettings}->>'effort') else jsonb_build_object('model', ${task.definition}->>'model') end || jsonb_build_object('resolvedModel', ${task.engineSettings}->>'resolvedModel'))`.as(
               'usage',
             ),
           status: task.status,

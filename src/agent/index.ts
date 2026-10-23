@@ -7,7 +7,7 @@ import { connect, pushAgents, type ServerOptions } from '../core/remote';
 import { CoderError } from '../core/dispatch';
 import type { ServerAgent, TaskLogLine, TaskStatus } from '../server/store/types';
 import type { UsageGroup } from '../server/tasks/usage';
-import { matchAgents, withMatches } from './definition';
+import { matchAgents, usageEntry, withMatches } from './definition';
 import { execAgent, taskFromEvent } from './exec';
 import { INTEGRATIONS } from '../integrations';
 import { init, loadAgents } from './load';
@@ -40,7 +40,7 @@ export const agents = {
       return agent;
     }
     const api = connect(opts);
-    const record = await api.agents.get(id);
+    const record = await api.agents.get(id, { installations: true });
     const version = await api.agents.version(id, record.currentVersion);
     return { ...record, definition: version.definition };
   },
@@ -50,7 +50,6 @@ export const agents = {
     id: string | undefined,
     opts: AgentOptions & {
       model?: string;
-      effort?: string;
       access?: string;
       connections?: string[];
       /** Platform to the events it answers there. */
@@ -62,12 +61,10 @@ export const agents = {
   ) {
     if (!id)
       throw new CoderError('invalid-option', 'Missing agent id.', {
-        hint: 'Usage: coder agent settings <id> --model <model|engine:model>',
+        hint: 'Usage: coder agent settings <id> --model <name[/effort]|engine/model[/effort]>',
       });
     const change: Record<string, unknown> = Object.fromEntries(
-      (['model', 'effort', 'access'] as const).flatMap(key =>
-        opts[key] ? [[key, opts[key]]] : [],
-      ),
+      (['model', 'access'] as const).flatMap(key => (opts[key] ? [[key, opts[key]]] : [])),
     );
     if (opts.connections !== undefined) change.connections = opts.connections;
     const events = Object.entries(opts.events ?? {});
@@ -76,7 +73,7 @@ export const agents = {
     if (!Object.keys(change).length && !events.length && !version)
       throw new CoderError(
         'invalid-option',
-        'Give --model, --effort, --access, --connections, --events, --instructions or --match.',
+        'Give --model, --access, --connections, --events, --instructions or --match.',
       );
     const api = connect(opts);
     const record = await api.agents.get(id);
@@ -105,11 +102,7 @@ export const agents = {
         }),
       );
     }
-    const settings = { ...record.settings };
-    if (settings.engine && settings.model) {
-      settings.model = `${settings.engine}:${settings.model}`;
-      delete settings.engine;
-    }
+    const settings = usageEntry(record.settings ?? {});
     const saved = Object.keys(change).length
       ? await held(api.agents.settings(id, { ...settings, ...change }))
       : undefined;
@@ -131,7 +124,6 @@ export const agents = {
     name: string | undefined,
     event: AgentEvent | string | undefined,
     opts: AgentOptions & {
-      flow?: string;
       wait?: boolean;
       onLog?: (line: TaskLogLine) => void;
       onDone?: (status: TaskStatus) => void;
@@ -167,9 +159,7 @@ export const agents = {
     const agents = await loadAgents(cwd, INTEGRATIONS);
     const agent = agents.find(candidate => candidate.id === name);
     if (!agent) throw new CoderError('invalid-option', `No agent named "${name}".`);
-    const match = matchAgents(value, agents).find(candidate => candidate.agent.id === name);
-    const flow = opts.flow ?? match?.flow;
-    if (!flow)
+    if (!matchAgents(value, agents).some(candidate => candidate.agent.id === name))
       throw new CoderError(
         'invalid-option',
         `Agent "${name}" does not match event "${value.type}".`,
@@ -177,9 +167,9 @@ export const agents = {
     return execAgent({
       cwd,
       agent: name,
-      flow,
+      flow: 'default',
       task: {
-        ...taskFromEvent(agent, flow, value),
+        ...taskFromEvent(agent, value),
         tools: {},
       },
       post: false,

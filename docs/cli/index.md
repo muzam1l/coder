@@ -12,9 +12,9 @@ Coder turns any model into an agent you own: tasks on this machine, from your co
 - [runner](runner.md): run your server's tasks on this machine
 - [auth](auth.md): sign in to Coder and manage saved server sessions
 - [model](model.md): manage models: built-ins, aliases, custom endpoints
-- [connection](connection.md): platform accounts, API keys and MCP servers tasks use
+- [connection](connection.md): platform accounts and MCP servers tasks use
 
-## `review [--base <base>] [--head <head>] [--pr <pr>] [--since <since>] [--path <path>] [--exclude <exclude>] [--post] [--md] [--model <model>] [--effort <effort>] [--json] [--cwd <cwd>]`
+## `review [--base <base>] [--head <head>] [--pr <pr>] [--since <since>] [--path <path>] [--exclude <exclude>] [--post] [--md] [--model <model>] [--depth <depth>] [--json] [--cwd <cwd>]`
 
 review changed code with a built-in flow
 
@@ -34,8 +34,8 @@ Related: `coder flow watch`, `coder docs review`.
 - `--exclude <exclude>` leave this path out, relative to cwd (repeatable)
 - `--post` post deduplicated inline comments and sticky PR summary
 - `--md` markdown output (the default)
-- `--model <model>` model alias, custom name or engine:model for the review task
-- `--effort <effort>` reasoning effort and review depth (default: medium depth)
+- `--model <model>` model name[/effort] or engine/model[/effort] (sol/low, claude/opus, codex/gpt-6.1-sol/high) for the review task (default: reviewModel)
+- `--depth <depth>` what to report: low only critical and major, high nits too (default: medium)
 - `--json` JSON output
 - `--cwd <cwd>` workspace directory; default current
 
@@ -44,6 +44,7 @@ coder review  # review the branch plus uncommitted work
 coder review --base main  # review everything since main locally
 coder review --path src --exclude src/gen  # review src without generated code
 coder review --pr 42 --post  # review and post to pull request 42
+coder review --depth high  # report nits too
 ```
 
 ## `config [action] [key] [value] [--workspace] [--json] [--cwd <cwd>]`
@@ -51,10 +52,11 @@ coder review --pr 42 --post  # review and post to pull request 42
 read or write config
 
 Read or write configuration. `list` prints the effective config; get/set/unset
-target a dotted key (e.g. engines.codex.model). Writes go to ~/.coder/config.json.
+target a dotted key (e.g. chain); migrate rewrites the file at this Coder's config
+version. Writes go to ~/.coder/config.json.
 
-- `<action>` list, get, set or unset
-- `<key>` a dotted key, such as engines.codex.model
+- `<action>` list, get, set, unset or migrate
+- `<key>` a dotted key, such as chain or reviewModel
 - `<value>` with set: the value; JSON, or a comma list
 - `--workspace` target <repo>/.coder/config.json instead of the user file
 - `--json` JSON output
@@ -62,8 +64,9 @@ target a dotted key (e.g. engines.codex.model). Writes go to ~/.coder/config.jso
 
 ```sh
 coder config list  # print the effective config
-coder config set chain codex,claude  # set the engine fallback chain
-coder config get engines.codex.model  # read one value
+coder config set chain codex/sol,claude/opus  # the default model, then its fallbacks
+coder config get reviewModel  # read one value
+coder config migrate --workspace  # rewrite the repo file at config version 1
 ```
 
 ## `setup-host [hosts] [--json] [--cwd <cwd>]`
@@ -130,7 +133,7 @@ serve Coder's commands as MCP tools over stdio
 
 Serve Coder's commands as MCP tools over stdio, so a harness can run them.
 
-Commands return their JSON payloads and next steps. Load guides with load_skill;
+Commands return their JSON payloads and next steps. Load docs with load_skill;
 blocking commands keep their CLI flags and behavior, subject to the client's tool timeout.
 
 ```sh

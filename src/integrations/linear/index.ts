@@ -29,10 +29,8 @@ export const linear: Integration = {
   sample: 'linear:2f1e6a1c-0000-4000-8000-000000000001:s:5b7d3c2a-0000-4000-8000-000000000002',
   prompt: [
     'A conversation is a Linear agent session on an issue.',
-    'get_issue reads an issue by id or identifier such as ENG-123.',
     'Replies are Markdown; link pull requests and issues by full URL.',
   ].join('\n'),
-  reach: account => `Linear workspace ${account}`,
   events: {
     mention: {
       description: 'Agent session started or prompted by mentioning or assigning the agent',

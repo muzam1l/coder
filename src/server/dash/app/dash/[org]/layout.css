@@ -48,6 +48,10 @@
   padding: 16px 12px;
   border-right: 1px solid var(--line);
 }
+.side-main {
+  display: grid;
+  gap: 16px;
+}
 .side nav {
   display: grid;
   gap: 2px;
@@ -224,6 +228,11 @@ button.side-toggle {
 }
 .side-min .side nav a {
   justify-content: center;
+  gap: 0;
+  padding: 0;
+  font-size: 0;
+}
+.side-min .create .btn {
   gap: 0;
   padding: 0;
   font-size: 0;

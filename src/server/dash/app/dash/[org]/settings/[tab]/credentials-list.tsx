@@ -139,7 +139,6 @@ function SignIn({
   onError: (reason: string) => void;
   onCancel: () => void;
 }) {
-  const [openedUrl, setOpenedUrl] = useState<string>();
   // The link a code was pasted for; claude offers a new link when it rejects the code.
   const [sentUrl, setSentUrl] = useState<string>();
 
@@ -178,41 +177,30 @@ function SignIn({
     void client.credentials.loginCode(login.id, code).catch(reason => onError(reasonText(reason)));
   };
 
-  const ready = Boolean(login.url);
   const verifying = login.state === 'verifying';
-  const opened = Boolean(login.url) && openedUrl === login.url;
   const rejected = Boolean(sentUrl) && login.state === 'open' && login.url !== sentUrl;
-  const open = `Open ${engine.signIn} sign-in`;
 
   return (
     <Modal
       class="sign-in"
       title={`Sign in with ${engine.signIn}`}
       cancelDanger
-      focus="actions"
       onClose={onCancel}
-      actions={
-        <Button
-          href={login.url}
-          external
-          variant={opened ? 'outline' : 'primary'}
-          loading={!ready}
-          autoFocus
-          onClick={() => setOpenedUrl(login.url)}
-        >
-          {opened ? 'Open again' : open}
-        </Button>
-      }
     >
       <p class="muted">Coder signs in on a private machine and keeps the sign-in for your tasks.</p>
+      <div class="sign-link">
+        {login.url ? (
+          <>
+            <Button href={login.url} external autoFocus>
+              Open {new URL(login.url).host}
+            </Button>
+            <CopyButton value={login.url} label="Copy link" />
+          </>
+        ) : (
+          <Loading label="Starting the sign-in machine…" inline />
+        )}
+      </div>
       <ol class="steps-list sign-steps" role="status">
-        <li>
-          {ready ? (
-            'The sign-in machine is ready.'
-          ) : (
-            <Loading label="Starting the sign-in machine…" inline />
-          )}
-        </li>
         {login.engine === 'codex' ? (
           <>
             <li>
@@ -225,7 +213,7 @@ function SignIn({
               ) : null}
             </li>
             <li>
-              {ready ? (
+              {login.url ? (
                 <Loading label="Waiting for your approval on the sign-in page…" inline />
               ) : (
                 'Approve it there.'
@@ -308,7 +296,7 @@ export function EngineLogins({ status: initial }: { status: EngineStatus }) {
         const own = status[engine.id];
         const signingIn = busy === `${engine.id}:login`;
         return (
-          <Card key={engine.id} title={engine.name}>
+          <Card look="filled" key={engine.id} title={engine.name}>
             <div class="cred-new">
               {own?.signedIn ? (
                 <span class="signed grow">
@@ -447,11 +435,11 @@ export function CredentialsList({
   return (
     <>
       {signIns.length ? (
-        <Card title="Subscriptions">
+        <Card look="filled" title="Subscriptions">
           <div class="cred-engine">
             <p class="muted cred-note">
-              Yours only, other members sign in themselves. A subscription runs your own tasks and
-              your 1:1 DMs with agents, never the workspace's shared threads.
+              Personal: each member signs in with their own. A subscription runs its owner's tasks and
+              1:1 DMs with agents, never the workspace's shared threads.
             </p>
             <table class="rows creds">
               <tbody>
@@ -466,14 +454,20 @@ export function CredentialsList({
                       sub={row ? account.filter(Boolean).join(' · ') : undefined}
                       actions={
                         <>
-                          <Button
-                            {...(row ? { variant: 'secondary', size: 'sm' } : {})}
-                            autoFocus={focus === engine.id && !row}
-                            disabled={Boolean(active)}
-                            onClick={() => replacing(engine, () => signIn(engine.id))}
-                          >
-                            {row ? 'Sign in again' : `Sign in with ${engine.signIn}`}
-                          </Button>
+                          {row ? (
+                            <span class="signed">
+                              <Icon d={iCheck} />
+                              Connected
+                            </span>
+                          ) : (
+                            <Button
+                              autoFocus={focus === engine.id}
+                              disabled={Boolean(active)}
+                              onClick={() => signIn(engine.id)}
+                            >
+                              Sign in with {engine.signIn}
+                            </Button>
+                          )}
                           {active ? (
                             <SignIn
                               login={active}
@@ -497,8 +491,22 @@ export function CredentialsList({
                       }
                       alignMenu
                       menu={
-                        engine.id === 'claude' ? (
-                          <MenuItem title="Paste a setup token" onClick={() => setPasting(true)} />
+                        row || engine.id === 'claude' ? (
+                          <>
+                            {row ? (
+                              <MenuItem
+                                title="Sign in again"
+                                disabled={Boolean(active)}
+                                onClick={() => replacing(engine, () => signIn(engine.id))}
+                              />
+                            ) : null}
+                            {engine.id === 'claude' ? (
+                              <MenuItem
+                                title="Paste a setup token"
+                                onClick={() => setPasting(true)}
+                              />
+                            ) : null}
+                          </>
                         ) : undefined
                       }
                       remove={
@@ -555,7 +563,7 @@ export function CredentialsList({
           </div>
         </Card>
       ) : null}
-      <Card title="API keys" count={keys.length || undefined}>
+      <Card look="filled" title="API keys" count={keys.length || undefined}>
         <div class="cred-engine">
           <p class="muted cred-note">
             Tasks read each key as its variable. Claude uses ANTHROPIC_API_KEY, Codex uses

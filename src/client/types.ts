@@ -32,7 +32,7 @@ export interface TaskRow {
       thread?: { number?: number };
     };
     /** The agent's engine settings, and what this task ran with over them. */
-    definition?: { engine?: string; model?: string; effort?: string };
+    definition?: { model?: string };
     usage?: { engine?: string; model?: string; effort?: string };
   };
   status: TaskState;
@@ -61,7 +61,7 @@ export interface TaskRow {
   /** The first lines of its log, when read one task at a time. */
   logs?: TaskLog[];
   turns?: TaskTurn[];
-  fallbacks?: Array<{ engine: string; detail: string; next: string }>;
+  fallbacks?: Array<{ model: string; detail: string; next: string }>;
 }
 
 export interface TaskLog {
@@ -76,9 +76,7 @@ export interface TaskLog {
 export interface AgentDefinition {
   name?: string;
   description?: string;
-  engine?: string;
   model?: string;
-  effort?: string;
   access?: Access;
   integrations?: Record<string, { events?: string[] | Record<string, unknown> }>;
 }
@@ -121,11 +119,16 @@ export interface AgentRow {
   versions?: VersionRow[];
   /** The names it answers to, one per app that wakes on mentions, with the platform's display name. */
   handles?: Array<{ name: string; integration: string; platform: string }>;
+  /** Where its apps are installed: the platform, the account and the app's name. */
+  installations?: Array<{ integration: string; account: string; app: string }>;
   /** Platform events it failed to handle in the last day, with the newest; absent when none. */
   deliveries?: { failed: number; recent: FailedDeliveryRow[] };
-  /** Nothing can run its engine for the caller: no credential of theirs or the workspace's, no sign-in on this machine. */
+  /** The model it runs first for the caller, by name, and where its list runs for them. */
+  model?: string;
+  runsOn?: string;
+  /** Nothing can run any of its models for the caller: no credential of theirs or the workspace's, no sign-in on this machine. */
   needsModel?: true;
-  /** Engines, and custom models as `custom:<name>`, that no workspace credential runs, so its settings can't pick them. */
+  /** Engines, and custom models as `custom/<name>`, that no workspace credential runs, so its settings can't pick them. */
   unrunnable?: string[];
   /** Why its definition is invalid; it answers no events until fixed. */
   problems?: string[];
@@ -342,6 +345,8 @@ export interface InstallationRow {
   deletedAt?: number;
   /** The app was removed or uninstalled on the platform. */
   uninstalled?: boolean;
+  /** Where the app is managed on this installation, on its platform. */
+  installationUrl?: string;
   settings?: {
     model?: string;
     engine?: string;
@@ -443,19 +448,18 @@ export interface TaskQuery extends PageQuery {
   source?: string;
   q?: string;
 }
-export type EngineEntry = {
-  model?: string;
-  effort?: string;
-};
-export type ModelEntry = {
-  provider?: string;
-  baseUrl?: string;
-  model?: string;
-  envKey?: string;
-  effort?: string;
-  contextWindow?: number;
-  disabled?: boolean;
-};
+/** An alias's model spec, false for a name turned off, or a custom endpoint. */
+export type ModelEntry =
+  | string
+  | false
+  | {
+      baseUrl: string;
+      model: string;
+      envKey?: string;
+      wireApi?: 'chat' | 'responses';
+      contextWindow?: number;
+      disabled?: boolean;
+    };
 export type McpEntry = {
   command?: string;
   args?: string[];
@@ -466,10 +470,11 @@ export type McpEntry = {
   headers?: Record<string, string>;
 };
 export type Config = {
+  version?: number;
   chain?: string[];
-  engines?: Record<string, EngineEntry | undefined>;
+  reviewModel?: string;
   models?: Record<string, ModelEntry>;
-  approvals?: { allowedNetworkHosts?: string[] };
+  network?: { allowedHosts?: string[]; readOnlyTasks?: boolean };
 };
 export type RunnerKind = 'local' | 'local-docker' | 'vercel-sandbox' | 'github-actions' | 'http';
 export interface RunnerSpec {
@@ -531,8 +536,11 @@ export type MergePatch<T> = T extends unknown[]
     : T;
 export type ConfigPatch = MergePatch<Config>;
 export type ModelsShape = {
-  builtin: Record<string, Record<string, string>>;
+  /** Built-in aliases, name -> model spec. */
+  builtin: Record<string, string>;
   models: Record<string, ModelEntry>;
+  /** Where each chain model and the review model run for the caller, by spec. */
+  runsOn?: Record<string, string>;
 };
 export interface ProbeResult {
   reachable: boolean;
@@ -550,9 +558,12 @@ export interface ConnectionRow {
   name: string;
   /** `mcp`, `env` for an API key tasks read from `env`, or the integration id whose API it reaches. */
   provider: string;
-  /** Set on a member's own connection; `mine` when that member is the viewer. */
-  owner?: string;
-  mine?: true;
+  scope: 'personal' | 'workspace';
+  /** Set on a member's own connection; `asker` when that member is the one asking. */
+  owner?: { id: string; name?: string };
+  asker?: true;
+  /** Set on an agent's app installation, managed on that agent's Platforms tab. */
+  agent?: string;
   /** `read-only` exposes only its read-only tools; absent or `auto` follows the task. */
   access?: Access;
   auth: 'none' | 'key' | 'oauth';
@@ -562,8 +573,10 @@ export interface ConnectionRow {
   /** The environment variable an `env` connection's key is in. */
   env?: string;
   account?: string;
-  /** `authorize`: OAuth not finished yet; `reconnect`: its secret stopped working. */
-  status: 'ok' | 'authorize' | 'reconnect';
+  /** `needs-auth`: its sign-in is unfinished or its secret stopped working; `disabled`: not granted to the task listing it. */
+  status: 'connected' | 'needs-auth' | 'disabled';
+  /** The task's tool search name for it, when the task has it. */
+  server?: string;
   createdAt: number;
 }
 
@@ -574,8 +587,8 @@ export interface ConnectionInput {
   id?: string;
   /** `mcp`, `env` with `keyIn.env`, or an integration id to connect a member's own account there. */
   provider?: string;
-  /** `me` makes it the viewer's own instead of the workspace's. */
-  owner?: 'me';
+  /** MCP servers and task secrets default to workspace scope; platform accounts are personal. */
+  scope?: 'personal' | 'workspace';
   access?: Access;
   endpoint?: McpEntry;
   auth?: 'none' | 'key' | 'oauth';
@@ -599,6 +612,8 @@ export type Found = {
   curated?: true;
   title: string;
   description: string;
+  /** The server's icon, served from this server. */
+  icon?: string;
   type: string;
   command?: string;
   args?: string[];
@@ -643,8 +658,8 @@ export interface LocalFolders {
 /** What the New task composer offers: enabled agents with the default first, the workspace's defaults, models, runners, built-in flows, and on a local server its folders. */
 export interface ComposerOptions {
   agents: Array<{ id: string; name: string; default?: true }>;
-  engine?: string;
-  engines: Record<string, { model?: string; effort?: string } | undefined>;
+  /** The workspace's models in the order tasks try them, the first the default. */
+  chain: string[];
   models: ModelsShape;
   runners: Array<Pick<RunnerRow, 'id' | 'name' | 'default'>>;
   flows: string[];
@@ -664,7 +679,6 @@ export type TaskInput = {
   flow?: string;
   args?: Record<string, unknown>;
   model?: string;
-  effort?: string;
   access?: Access;
   runner?: string;
   mcp?: string[];

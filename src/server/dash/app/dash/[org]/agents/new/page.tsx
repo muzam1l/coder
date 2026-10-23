@@ -27,7 +27,7 @@ export default function NewAgentPage({ request }: { request?: Request }) {
       <Settle
         load={() =>
           Promise.all([catalog, run, installations.catch(() => []), me.catch((): Me => ({}))]).then(
-            ([integrations, { models, defaults }, installed, who]) => {
+            ([integrations, { shape, defaults }, installed, who]) => {
               const reach = integrations.filter(entry => entry.repositories);
               const connected = installed.some(
                 ({ value }) =>
@@ -40,7 +40,7 @@ export default function NewAgentPage({ request }: { request?: Request }) {
                 <AgentEditor
                   catalog={integrations}
                   suggested={suggestName()}
-                  models={models}
+                  shape={shape}
                   defaults={defaults}
                   template={template}
                   connected={connected}

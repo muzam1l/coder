@@ -39,6 +39,11 @@
     inset: anchor(bottom) auto auto anchor(left);
     margin: 8px 0 0;
   }
+  /* never narrower than its button; a side that would leave the screen flips to the other */
+  .menu > .pop {
+    min-width: max(260px, anchor-size(width));
+    position-try-fallbacks: flip-inline;
+  }
   .more > .more-list {
     position-try-fallbacks: flip-block;
   }
@@ -65,10 +70,6 @@
 }
 .pop {
   z-index: 40;
-  min-width: 180px;
-}
-/* lists with sections or descriptions need the room */
-.pop:has(.pop-label, .pop-item.rich, .pop-row) {
   min-width: 260px;
 }
 .menu.up > .pop {

@@ -73,8 +73,13 @@ function hasIndex(dir: string): boolean {
   return fs.existsSync(path.join(dir, 'index.md'));
 }
 
-// One-line description from a doc: its first heading joined with the first
-// sentence of its first paragraph. Robust to missing pieces.
+const FRONTMATTER = /^---\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)\s*/;
+
+/** A doc's text without its frontmatter. */
+const docBody = (text: string) => text.replace(FRONTMATTER, '');
+
+// One-line description from a doc: its frontmatter `description:`, else the first
+// sentence of its first paragraph, else its first heading. Robust to missing pieces.
 function describeDoc(absPath: string): string {
   let text = '';
   try {
@@ -82,7 +87,9 @@ function describeDoc(absPath: string): string {
   } catch {
     return '';
   }
-  const lines = text.split('\n');
+  const declared = FRONTMATTER.exec(text)?.[1]?.match(/^description:\s*(.*?)\s*$/m)?.[1];
+  if (declared) return declared;
+  const lines = docBody(text).split('\n');
   let heading = '';
   let paragraph = '';
   let inFence = false;
@@ -144,7 +151,7 @@ export function docsCore(
   const absPath = path.join(root, match.file);
   let content: string;
   try {
-    content = fs.readFileSync(absPath, 'utf8');
+    content = docBody(fs.readFileSync(absPath, 'utf8'));
   } catch {
     throw new CoderError(
       'invalid-option',

@@ -2,7 +2,6 @@
 import process from 'node:process';
 
 import type { PluginResult, SetupHostReport } from '../core/hosts';
-import type { Engine } from '../core/types';
 import { bad, good, outStyle } from '../tui/output';
 import { strList } from '../utils/args';
 import { command, nextSteps, type CommandNext } from '../cli';
@@ -92,13 +91,9 @@ function printSetupHost(
   }
   lines.push('');
 
-  const engineSummary = (engine: Engine) => {
-    const entry = config.engines?.[engine] ?? {};
-    return [entry.model, entry.effort].filter(Boolean).join('/');
-  };
   lines.push(
     head('Config'),
-    `  chain: ${(config.chain ?? []).join(' -> ')}   codex: ${engineSummary('codex')}   claude: ${engineSummary('claude')}`,
+    `  chain: ${config.chain.join(' -> ')}   review: ${config.reviewModel}`,
   );
 
   process.stdout.write(`${lines.join('\n')}\n`);

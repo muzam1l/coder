@@ -5,7 +5,7 @@ import { CoderError } from '../../core/errors';
 import type { SteerResult } from '../../core/task';
 import type { Access } from '../../core/types';
 import { outStyle } from '../../tui/output';
-import { flag, serverOptions, str, strList } from '../../utils/args';
+import { flag, modelOption, serverOptions, str, strList } from '../../utils/args';
 import { command } from '../../cli';
 import { finishedNext, waitingNext } from './result';
 
@@ -54,8 +54,7 @@ export const commandSteer = command({
     'task-id': str('the task to continue'),
     text: strList('the follow-up instructions'),
     wait: flag('run in the foreground and block until the answer is ready'),
-    model: str("override the task's model for this follow-up", '<alias|slug>'),
-    effort: str("override the task's reasoning effort", '<low|medium|high>'),
+    model: modelOption('for this follow-up'),
     access: str("lower the task's access for this follow-up", '<read-only|auto>'),
     ...serverOptions,
   },

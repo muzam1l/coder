@@ -1,0 +1,134 @@
+/* a model picker: one button, the composer's model menu under it */
+.model-pick {
+  display: inline-flex;
+  min-width: 0;
+}
+.field .model-pick {
+  display: flex;
+  max-width: 420px;
+}
+.model-pick-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 10px 7px 12px;
+  border: 1px solid var(--line2);
+  background: var(--field);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.model-pick-btn small {
+  font-size: 10px;
+}
+.model-pick-btn .grow {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.model-pick-btn .ic {
+  color: var(--dim);
+}
+.model-pick-btn:focus-visible {
+  outline: none;
+  border-color: var(--acc);
+  box-shadow: 0 0 0 3px var(--accbg);
+}
+.model-pick.compact .model-pick-btn {
+  min-height: 32px;
+  padding: 5px 10px 5px 12px;
+  border-color: transparent;
+  background: var(--wash2);
+}
+.model-pick.compact .model-pick-btn:hover {
+  background: var(--line2);
+}
+.model-pop {
+  position: fixed;
+  inset: auto;
+  width: 300px;
+  overflow-y: auto;
+}
+
+/* the model rows, here and in the composer */
+.model-choices .pop-item {
+  width: 100%;
+  min-height: 30px;
+  font-size: 12px;
+}
+.model-choices .add-models {
+  margin-top: 4px;
+  color: var(--muted);
+}
+.model-choices .add-models .ic {
+  width: 14px;
+  height: 14px;
+}
+.model-choices .pop-group {
+  margin: 6px 10px 2px;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+/* the chevron beside a row opens its choices under it */
+.pop-chev {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  align-self: stretch;
+  padding: 0 8px 0 10px;
+  width: auto;
+  border: 0;
+  background: none;
+  color: var(--dim);
+  cursor: pointer;
+}
+.pop-chev:focus-visible {
+  outline-offset: -2px;
+}
+.pop-chev:hover,
+.pop-chev[aria-expanded='true'] {
+  color: var(--fg);
+  background: var(--wash);
+}
+.pop-chev small {
+  font-size: 10px;
+}
+.pop-chev .ic {
+  width: 14px;
+  height: 14px;
+  transition: rotate 0.15s;
+}
+.pop-chev[aria-expanded='true'] .ic {
+  rotate: 90deg;
+}
+.pop-sub {
+  padding-left: 32px;
+}
+/* a row's effort choices, beside the row */
+.pop-flyout {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+  min-width: 170px;
+}
+.pop-chev:has(+ .pop-flyout:popover-open) {
+  color: var(--fg);
+  background: var(--wash);
+}
+.pop-chev:has(+ .pop-flyout:popover-open) .ic {
+  rotate: 0deg;
+}
+/* a row's effort shows on the picked row, and on the row under the pointer or focus; elsewhere only its chevron, in the same place */
+.model-choices .pop-row .pop-chev small {
+  visibility: hidden;
+}
+.model-choices .pop-row:is(:hover, :focus-within, :has([aria-checked='true']), :has(.pop-flyout:popover-open))
+  .pop-chev
+  small {
+  visibility: visible;
+}

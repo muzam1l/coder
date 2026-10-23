@@ -71,7 +71,7 @@ coder dash
 
 > **Recommended setup:** Claude Code as the host (Fable, low or medium effort) and Codex (sol) as the engine, the best split of performance and cost.
 
-[Models](docs/models.md) · [Configuration](docs/config.md) · [Access and approvals](docs/access.md) · [MCP](docs/mcp.md)
+[Models](docs/models.md) · [Configuration](docs/config.md) · [Approvals](docs/approvals.md) · [Connections](docs/connections.md)
 
 ## Coder Cloud
 
@@ -135,4 +135,4 @@ Run all of Coder Cloud on your own infrastructure: one server, one Postgres data
 
 Everything else is at **[coder.wular.ai/docs](https://coder.wular.ai/docs)**.
 
-`coder --help` lists every command, and `coder docs [topic]` prints the bundled guides. `coder upgrade` keeps the CLI and host plugins current.
+`coder --help` lists every command, and `coder docs [topic]` prints the bundled docs. `coder upgrade` keeps the CLI and host plugins current.

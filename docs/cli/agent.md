@@ -12,7 +12,7 @@ list local or server-owned agents
 
 Without --server, one row per built-in and workspace agent. With --server, list the agent records and current versions owned by that Coder server.
 
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -20,12 +20,12 @@ Without --server, one row per built-in and workspace agent. With --server, list 
 
 ## `agent show [id] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
-one agent in full: settings, integrations, events, tools
+one agent in full: settings, integrations, events, tools, installations
 
-Describe one agent as it will run here, or its active version on a server: its settings, access and per-integration events.
+Describe one agent as it will run here, or its active version on a server. It lists its settings, access and per-integration events, and on a server its installations.
 
 - `<id>` the agent
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -35,17 +35,16 @@ Describe one agent as it will run here, or its active version on a server: its s
 coder agent show coder  # what the built-in agent listens to and may do
 ```
 
-## `agent settings [id] [--model <model>] [--effort <effort>] [--access <access>] [--connections <connections>] [--events <events>] [--instructions <instructions>] [--match <match>] [--server <server>] [--yes] [--json]`
+## `agent settings [id] [--model <model>] [--access <access>] [--connections <connections>] [--events <events>] [--instructions <instructions>] [--match <match>] [--server <server>] [--yes] [--json]`
 
 change an agent's settings on your Coder server
 
-Set the model, effort, access, connections or events of an agent in the
+Set the model, access, connections or events of an agent in the
 saved workspace, or publish its next version with new instructions or matches.
 Settings you leave out stay as they are.
 
 - `<id>` the agent
-- `--model <model>` model alias, custom name or engine:model
-- `--effort <effort>` low, medium or high
+- `--model <model>` model name[/effort] or engine/model[/effort] (sol/low, claude/opus, codex/gpt-6.1-sol/high)
 - `--access <access>` read-only or auto, at most its definition
 - `--connections <connections>` the connections its tasks may use, by id
 - `--events <events>` the events it answers on a platform
@@ -88,7 +87,7 @@ upload workspace agents to a Coder server
 Upload one workspace agent, or every agent in .coder/agents when no id is given. The server creates a new immutable version only when its definition, prompt, or files changed.
 
 - `<id>` the agent (default: every workspace agent)
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
@@ -98,7 +97,7 @@ Upload one workspace agent, or every agent in .coder/agents when no id is given.
 coder agent push helper  # upload helper
 ```
 
-## `agent run [agent] [file] [--server <server>] [--workspace <workspace>] [--yes] [--wait] [--flow <flow>] [--task <task>] [--json] [--cwd <cwd>]`
+## `agent run [agent] [file] [--server <server>] [--workspace <workspace>] [--yes] [--wait] [--task <task>] [--json] [--cwd <cwd>]`
 
 run a recorded event through an agent, offline or on a server
 
@@ -110,7 +109,6 @@ Run a recorded platform event (AgentEvent JSON) through an agent. With --server 
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--wait` with --server: follow the task log here until it finishes, then print the reply
-- `--flow <flow>` override the matched flow
 - `--task <task>` a runner's form: run that server task here
 - `--json` JSON output
 - `--cwd <cwd>` workspace directory; default current
@@ -126,7 +124,7 @@ aggregate usage by agent, installation, or engine
 
 - `--since <since>` period such as 7d or 24h, or milliseconds since epoch
 - `--by <by>` agent, installation, or engine
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output

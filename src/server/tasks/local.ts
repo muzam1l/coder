@@ -27,7 +27,7 @@ import {
   stoppedMessage,
   withDecisions,
 } from '../../core/approvals';
-import { loadConfig, type Access } from '../../core/config';
+import { isEndpointModel, loadConfig, splitEngineSpec, type Access } from '../../core/config';
 import { logEntry, SKIPPED } from '../../core/task/view';
 import {
   CoderError,
@@ -84,6 +84,7 @@ import {
   refreshedTask,
   TaskInputError,
   taskCwd,
+  unknownOption,
   type NewTask,
 } from './create';
 import { rememberPost } from './conversation';
@@ -384,7 +385,7 @@ export async function startLocalTask(
         addDirs: input.addDirs,
         engine: input.model ? undefined : agent?.engine,
         model: input.model ?? agent?.model,
-        effort: input.effort ?? agent?.effort,
+        effort: input.model ? undefined : agent?.effort,
         access: agent?.access ?? input.access,
         ...(agent
           ? {
@@ -434,8 +435,8 @@ export interface LocalStart {
   cwd: string;
   input?: NewTask;
   resume?: boolean;
-  /** Model, effort or a lower access the resumed turn runs with instead of the task's. */
-  overrides?: { model?: string; effort?: string; access?: Access };
+  /** The model or a lower access the resumed turn runs with instead of the task's. */
+  overrides?: { model?: string; access?: Access };
   startedId?: string;
 }
 
@@ -1014,8 +1015,8 @@ export async function runLocalTask(
       ctx.local?.engineChecks && ctx.local.engineChecks.expiresAt > Date.now()
         ? ctx.local.engineChecks.availability
         : undefined,
-    ...(task.engineChain ? { onEngine: (engine: string) => machineSignedIn(ctx, engine) } : {}),
-    post: task.flow === 'default' ? false : task.source === task.event?.integration,
+    onModel: machineAttempts(ctx),
+    post: false,
     ...(token ? { postToken: token } : {}),
     source: task.source,
     onStart: control => {
@@ -1228,6 +1229,8 @@ export async function localTaskAction(
   const body =
     req.method === 'POST' ? ((await req.json().catch(() => ({}))) as Record<string, unknown>) : {};
   const refuse = (error: string, status = 409) => Response.json({ error }, { status });
+  const unknown = unknownOption(body, ['engine', 'effort']);
+  if (unknown) return refuse(unknown, 400);
 
   if (req.method === 'DELETE' && !action) {
     if (active) await stopTask(cwd, task);
@@ -1268,7 +1271,7 @@ export async function localTaskAction(
     // A live task takes the follow-up now; a finished one resumes on the same id with these.
     const outputSchema = active ? undefined : body.outputSchema;
     const overrides = Object.fromEntries(
-      (['model', 'effort', 'access'] as const).flatMap(key =>
+      (['model', 'access'] as const).flatMap(key =>
         typeof body[key] === 'string' && body[key] ? [[key, body[key] as string]] : [],
       ),
     );
@@ -1302,7 +1305,9 @@ export async function localTaskAction(
   if (action === 'ask') {
     const question = String(body.question ?? body.text ?? '');
     if (!question.trim()) return refuse('question is required', 400);
-    const result = await askTask(cwd, task, question);
+    const result = await askTask(cwd, task, question, {
+      ...(typeof body.model === 'string' && body.model ? { model: body.model } : {}),
+    });
     const answer = result.finalMessage ?? result.error?.message ?? '';
     const file = path.join(resolveTaskDir(cwd, id), 'answers.json');
     writeJsonFileAtomic(file, [...(readJsonFile<unknown[]>(file) ?? []), answer]);
@@ -1606,25 +1611,27 @@ export async function engineStatus(ctx?: ServerContext): Promise<EngineStatus> {
   return work;
 }
 
-/** This machine's own logins; an agent without an engine falls back along the chain. */
+/** A local server runs each model of a turn's attempts once, on this machine's own logins. */
+function machineAttempts(ctx: ServerContext) {
+  let last: string | undefined;
+
+  return async (attempt: { model: string }) => {
+    if (attempt.model === last) return false;
+    last = attempt.model;
+
+    return machineSignedIn(ctx, splitEngineSpec(attempt.model) as { engine: string });
+  };
+}
+
+/** Whether this machine's own logins run a model. */
 export async function machineSignedIn(
   ctx: ServerContext,
-  engine?: string,
-  model?: string,
+  option: { engine: string; model?: string | null },
 ): Promise<boolean> {
   if (!ctx.local) return false;
-  const engines = engine ? [engine] : loadConfig(ctx.local.cwd).chain;
-  const status = await engineStatus(ctx);
+  if (option.engine !== 'custom')
+    return (await engineStatus(ctx))[option.engine as 'claude' | 'codex']?.signedIn === true;
+  const entry = option.model ? loadConfig(ctx.local.cwd).models?.[option.model] : undefined;
 
-  return engines.some(name => {
-    if (name !== 'custom') return status[name as 'claude' | 'codex']?.signedIn === true;
-    const config = loadConfig(ctx.local!.cwd);
-    try {
-      const selected = resolveTaskOptions({ engine: 'custom', model }, config).model;
-      const entry = selected && config.models?.[selected];
-      return Boolean(entry && 'baseUrl' in entry && process.env[entry.envKey ?? 'OPENAI_API_KEY']);
-    } catch {
-      return false;
-    }
-  });
+  return Boolean(entry && isEndpointModel(entry) && process.env[entry.envKey ?? 'OPENAI_API_KEY']);
 }

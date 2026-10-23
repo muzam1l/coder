@@ -35,7 +35,7 @@ export const commandModelAdd = command({
   name: 'add',
   description: 'connect a model',
   usage:
-    'Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,\nvLLM, OpenRouter, ...). It currently runs on the codex engine pointed at your\nURL and is usable anywhere a model is: --model <name> or --model custom:<name>, or as an\nagent default in config. Alias: `coder model setup`.',
+    'Connect a custom model behind an OpenAI-compatible endpoint (Ollama, LM Studio,\nvLLM, OpenRouter, ...). It currently runs on the codex engine pointed at your\nURL and is usable anywhere a model is: --model <name> or --model custom/<name>, or as an\nagent default in config. Alias: `coder model setup`.',
   access: 'write',
   approvalPolicy: {
     handoff: {

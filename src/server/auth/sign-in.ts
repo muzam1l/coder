@@ -3,7 +3,7 @@
 import { createECDH, hkdfSync } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 
-import { and, eq, inArray, sql } from 'drizzle-orm';
+import { and, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import {
   EncryptJWT,
   calculateJwkThumbprint,
@@ -574,7 +574,13 @@ export function platformLinks(
   db: Db,
 ): Pick<
   AuthApi,
-  'link' | 'linkedAccounts' | 'unlink' | 'refreshLinkedToken' | 'refuseLinkedToken' | 'linkedUser'
+  | 'link'
+  | 'linkedAccounts'
+  | 'organizationAccounts'
+  | 'unlink'
+  | 'refreshLinkedToken'
+  | 'refuseLinkedToken'
+  | 'linkedUser'
 > {
   const accountDb = (store?: Store) => (store instanceof DrizzleStore ? store.db : db);
   // A link and its token row change together, in the caller's transaction when it has one.
@@ -586,6 +592,24 @@ export function platformLinks(
     store instanceof DrizzleStore
       ? store.transaction(key, s => work(s.db))
       : db.transaction(tx => work(tx as unknown as Db));
+  const accounts = async (store: Store | undefined, where: SQL) =>
+    (
+      await accountDb(store)
+        .select({ row: platformLink, token: secret.value })
+        .from(platformLink)
+        .leftJoin(secret, eq(secret.id, platformLink.tokenSecretId))
+        .where(where)
+    ).map(({ row, token }) => ({
+      userId: row.userId,
+      platform: row.platform,
+      platformUserId: row.platformUserId,
+      name: row.name,
+      email: row.email,
+      ...(row.organizations ? { organizations: row.organizations } : {}),
+      ...(row.login ? { login: row.login } : {}),
+      ...(token ? { token } : {}),
+      ...(row.refusedAt ? { refusedAt: row.refusedAt.getTime() } : {}),
+    }));
 
   return {
     link(user, platform, platformUserId, extra = {}, store) {
@@ -621,24 +645,12 @@ export function platformLinks(
         return 'linked';
       });
     },
-    async linkedAccounts(userId, store) {
-      const rows = await accountDb(store)
-        .select({ row: platformLink, token: secret.value })
-        .from(platformLink)
-        .leftJoin(secret, eq(secret.id, platformLink.tokenSecretId))
-        .where(eq(platformLink.userId, userId));
-
-      return rows.map(({ row, token }) => ({
-        platform: row.platform,
-        platformUserId: row.platformUserId,
-        name: row.name,
-        email: row.email,
-        ...(row.organizations ? { organizations: row.organizations } : {}),
-        ...(row.login ? { login: row.login } : {}),
-        ...(token ? { token } : {}),
-        ...(row.refusedAt ? { refusedAt: row.refusedAt.getTime() } : {}),
-      }));
-    },
+    linkedAccounts: (userId, store) => accounts(store, eq(platformLink.userId, userId)),
+    organizationAccounts: (organizationId, store) =>
+      accounts(
+        store,
+        sql`${platformLink.organizations} @> ${JSON.stringify([organizationId])}::jsonb`,
+      ),
     unlink(userId, platform, platformUserId, store) {
       return linkTransaction(store, `link:${platform}:${platformUserId}`, async db => {
         const gone = await db

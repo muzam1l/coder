@@ -10,6 +10,15 @@ export function isLoopbackServer(server: string): boolean {
   }
 }
 
+/** A cloud task's server socket, served by its runner; none outside a cloud task. */
+export function taskSocket(): string | undefined {
+  const server = process.env.CODER_SERVER;
+
+  return process.env.CODER_MCP_MODE === 'cloud' && server?.startsWith('unix:')
+    ? server.slice('unix:'.length)
+    : undefined;
+}
+
 export function validateUrl(raw: string): string {
   let url: URL;
   try {

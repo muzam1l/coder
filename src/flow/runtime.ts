@@ -11,13 +11,21 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   CoderError,
   dispatchTask,
+  modelList,
+  resolveTaskOptions,
   selectMcpServers,
-  turnFallbackEngine,
+  turnMayFallBack,
   waitTask,
 } from '../core/dispatch';
 import { formatEngineSpec, loadTask } from '../core/state';
 import { steerTask } from '../core/task/actions';
-import type { Access, TokenUsage, TurnResult, McpServerSpec } from '../core/types';
+import type {
+  Access,
+  TokenUsage,
+  TurnResult,
+  McpServerSpec,
+  ResolvedTaskOptions,
+} from '../core/types';
 import { addTokens } from '../core/task/view';
 import { loadConfig, strictestAccess } from '../core/config';
 import { jsonReplyPrompt, jsonRetryPrompt } from '../core/task/context/turn';
@@ -133,6 +141,8 @@ export interface FlowHooks {
   /** Fired once the run is armed, with a stop handle for a SIGINT handler. */
   onStart?: (h: { runId: string; requestStop: () => void; runningIds: () => string[] }) => void;
   onEvent?: (event: FlowEvent) => void;
+  /** A cloud runner's credentials for one model, best first; none skips the model. Unset runs on the process's own logins. */
+  onModel?: (model: ResolvedTaskOptions) => Promise<NodeJS.ProcessEnv[]>;
 }
 
 export interface RunContext {
@@ -154,6 +164,8 @@ export interface RunContext {
   integrationToken?: string;
   connections?: { mcp: Record<string, McpServerSpec>; env: Record<string, string>; ids: string[] };
   access?: Access;
+  /** The credential each of its tasks runs on, by task id, so a steer resumes on it. */
+  credentialEnv?: Map<string, NodeJS.ProcessEnv>;
 }
 
 export function emitFlowEvent(ctx: RunContext | undefined, event: FlowEvent): void {
@@ -303,7 +315,6 @@ function dispatchOptsFrom(opts: FlowTaskOptions, cwd: string, ctx?: RunContext) 
   return {
     cwd,
     model: opts.model,
-    effort: opts.effort,
     mcp: opts.mcp,
     access: strictestAccess(opts.access, ctx?.access),
     name: opts.name,
@@ -340,7 +351,7 @@ async function waitTurn(cwd: string, taskId: string, ctx?: RunContext): Promise<
       status: done.status,
       result: done.result,
       model: done.task.model ?? null,
-      next: turnFallbackEngine(cwd, done) ?? null,
+      fallback: turnMayFallBack(cwd, done),
     };
   } finally {
     ctx?.running.delete(taskId);
@@ -370,8 +381,8 @@ async function steerOnce(
         }
       : {}),
     model: opts.model,
-    effort: opts.effort,
     access: opts.access,
+    credentialEnv: ctx?.credentialEnv?.get(taskId),
   });
   return turnOutcome(taskId, await waitTurn(cwd, taskId, ctx));
 }
@@ -387,68 +398,78 @@ async function runOneTask(
     opts.returns && !outputSchema
       ? [opts.appendSystem, jsonReplyPrompt(null)].filter(Boolean).join('\n\n')
       : opts.appendSystem;
-  // Chain engine override for mid-turn fallback attempts; mirrors dispatch's
-  // own startup fallback (next engine runs on its config defaults).
-  let chainEngine: string | undefined;
-  for (;;) {
-    const request = {
+  const config = loadConfig(cwd);
+  const request = {
+    prompt,
+    ...dispatchOptsFrom(opts, cwd, ctx),
+    appendSystem,
+    ...(outputSchema ? { outputSchema } : {}),
+    ...(opts.returns ? { structured: true } : {}),
+  };
+  const models = modelList(config, resolveTaskOptions(request, config));
+  const selected = ctx?.connections
+    ? selectMcpServers(request.mcp, config.mcp, {}, ctx.connections.mcp)
+    : undefined;
+  const started = (taskId: string) => {
+    const task = loadTask(cwd, taskId);
+    const engine = task ? formatEngineSpec(task) : undefined;
+    emitFlowEvent(ctx, {
+      kind: 'task-start',
+      taskId: taskId,
+      name: opts.name,
       prompt,
-      ...dispatchOptsFrom(opts, cwd, ctx),
-      appendSystem,
-      ...(outputSchema ? { outputSchema } : {}),
-      ...(opts.returns ? { structured: true } : {}),
-      ...(chainEngine ? { engine: chainEngine, model: undefined, effort: undefined } : {}),
-    };
-    const selected = ctx?.connections
-      ? selectMcpServers(request.mcp, loadConfig(cwd).mcp, {}, ctx.connections.mcp)
-      : undefined;
-    const started = (taskId: string) => {
-      const task = loadTask(cwd, taskId);
-      const engine = task ? formatEngineSpec(task) : undefined;
-      emitFlowEvent(ctx, {
-        kind: 'task-start',
-        taskId: taskId,
-        name: opts.name,
-        prompt,
-        engine,
-        depth: currentDepth(),
-      });
-    };
-    const dispatch = await dispatchTask({
-      ...request,
-      onWorker: started,
-      ...(ctx?.connections
-        ? {
-            ...selected,
-            mcpWarnings: selected?.warnings,
-            connectionEnv: ctx.connections.env,
-            connections: ctx.connections.ids,
-            connectionSource: 'server' as const,
-          }
-        : {}),
-      // Surface the gate's silent chain walk. Otherwise the user stares at
-      // nothing for the failed engine's whole startup window.
-      onFallback: f =>
-        log(
-          `${f.engine} failed to start. Falling back to ${f.next}. ${f.detail.replace(/\s+/g, ' ').slice(0, 140)}`,
-        ),
+      engine,
+      depth: currentDepth(),
     });
-    const waited = await waitTurn(cwd, dispatch.taskId, ctx);
-
-    if (waited.next) {
-      const next = waited.next;
-      emitFlowEvent(ctx, {
-        kind: 'task-end',
-        taskId: dispatch.taskId,
-        status: 'failed',
-        tokens: null,
-      });
-      chainEngine = next;
-      continue;
+  };
+  // Each model with each of its credentials, until a turn works or fails having done work.
+  let failure: unknown;
+  let outcome: TurnOutcome | undefined;
+  for (const model of models) {
+    const credentials = ctx?.hooks.onModel ? await ctx.hooks.onModel(model) : [undefined];
+    if (!credentials.length) log(`${formatEngineSpec(model)} skipped: no credential runs it.`);
+    for (const credentialEnv of credentials) {
+      if (outcome) {
+        emitFlowEvent(ctx, { kind: 'task-end', taskId: outcome.taskId, status: 'failed', tokens: null });
+        log(`${outcome.model ?? 'The model'} failed. Trying ${formatEngineSpec(model)}.`);
+      }
+      let dispatch: Awaited<ReturnType<typeof dispatchTask>>;
+      try {
+        dispatch = await dispatchTask(
+          {
+            ...request,
+            onWorker: started,
+            ...(credentialEnv ? { credentialEnv } : {}),
+            ...(ctx?.connections
+              ? {
+                  ...selected,
+                  mcpWarnings: selected?.warnings,
+                  connectionEnv: ctx.connections.env,
+                  connections: ctx.connections.ids,
+                  connectionSource: 'server' as const,
+                }
+              : {}),
+          },
+          { config, models: [model] },
+        );
+      } catch (error) {
+        if (!(error instanceof CoderError) || error.code !== 'chain-exhausted') throw error;
+        log(
+          `${formatEngineSpec(model)} failed to start. ${error.message.replace(/\s+/g, ' ').slice(0, 140)}`,
+        );
+        failure = error;
+        outcome = undefined;
+        continue;
+      }
+      if (credentialEnv) (ctx!.credentialEnv ??= new Map()).set(dispatch.taskId, credentialEnv);
+      const waited = await waitTurn(cwd, dispatch.taskId, ctx);
+      outcome = turnOutcome(dispatch.taskId, waited);
+      failure = undefined;
+      if (!waited.fallback) return outcome;
     }
-
-    return turnOutcome(dispatch.taskId, waited);
   }
+  if (outcome) return outcome;
+  throw failure ?? new CoderError('chain-exhausted', 'No credential runs any listed model.');
 }
 
 /** A task's turn as a flow waits for it. */
@@ -456,7 +477,8 @@ interface WorkerWait {
   status: string;
   result: TurnResult | null;
   model: string | null;
-  next: string | null;
+  /** The turn did no work and may run on the next credential or model. */
+  fallback: boolean;
 }
 
 async function executeTask(

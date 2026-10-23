@@ -6,7 +6,7 @@ import path from 'node:path';
 import { CoderError } from '../../core/errors';
 import { coderHome } from '../../core/state';
 import { withFileLock } from '../../utils/fsx';
-import { validateUrl } from '../http';
+import { taskSocket, validateUrl } from '../http';
 
 export interface Session {
   /** Wular Auth access token for this server. */
@@ -61,7 +61,9 @@ export const resolveServer = (option?: string | true) =>
   );
 
 export function validateServer(option?: string | true): string {
-  return validateUrl(resolveServer(option));
+  const server = resolveServer(option);
+
+  return taskSocket() && server === process.env.CODER_SERVER ? server : validateUrl(server);
 }
 
 /** The hosted service and a cloud task's own server are trusted by construction; any other origin is confirmed on first use. */

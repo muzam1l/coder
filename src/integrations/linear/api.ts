@@ -138,12 +138,24 @@ export const LINEAR_PRESETS: Record<Access, string[]> = {
   auto: ['read', 'write'],
 };
 
-export function linearToolServer(tools: string[], _event: unknown, token: string): ToolServer {
+/** What a user's own Linear connection reaches. */
+export const LINEAR_USER_DESCRIPTION = "On the user's token; what the user can see.";
+
+export function linearToolServer(
+  tools: string[],
+  _event: unknown,
+  token: string,
+  owner?: string,
+): ToolServer {
   return {
     name: 'linear',
     url: `https://mcp.linear.app/mcp${tools.includes('write') ? '' : '/readonly'}`,
     headers: { Authorization: `Bearer ${token}` },
     credentialFields: { header: 'Authorization' },
+    description: owner
+      ? LINEAR_USER_DESCRIPTION
+      : "On the app's token; the workspace the app is installed in.",
+    instructions: 'get_issue reads an issue by id or identifier such as ENG-123.',
   };
 }
 
@@ -173,10 +185,10 @@ export async function postLinearMessage(
     .join('\n\n');
   const sent = buttons?.length
     ? await adapter.postElicitation(
-        thread.id,
-        markdown,
-        buttons.map(button => ({ label: button.label, value: button.value })),
-      )
+      thread.id,
+      markdown,
+      buttons.map(button => ({ label: button.label, value: button.value })),
+    )
     : ((await adapter.postProgress(thread.id, markdown)) as { id?: string });
 
   return sent.id;

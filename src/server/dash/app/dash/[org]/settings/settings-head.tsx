@@ -6,8 +6,8 @@ export const SETTINGS = [
   { tab: 'connections', label: 'Connections' },
   { tab: 'credentials', label: 'Credentials' },
   { tab: 'models', label: 'Models' },
-  { tab: 'engines', label: 'Engines' },
   { tab: 'runners', label: 'Runners' },
+  { tab: 'advanced', label: 'Advanced' },
 ] as const;
 
 /** Settings' head; members are managed in Wular. */

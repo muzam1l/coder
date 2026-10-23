@@ -2,6 +2,7 @@ import type { AgentTask, Connection } from '../../agent/types';
 import { agentAccess } from '../../agent/definition';
 import { strictestAccess } from '../../core/config';
 import {
+  connectionDescription,
   connectionMcp,
   connectionWarning,
   connectionEnvConflicts,
@@ -19,6 +20,7 @@ import {
   type ConnectionContext,
 } from './records';
 import { sharedApps } from '../agents/apps';
+import { sharedConversation } from '../tasks/access';
 import { connectionToolServer } from '../../agent/mcp';
 import { IntegrationError } from '../../integrations/types';
 import { OAuthRevoked, oauthAccessToken, type OAuthSecret } from './oauth';
@@ -54,10 +56,11 @@ async function envKey(ctx: ConnectionContext, connection: Connection): Promise<s
   return key;
 }
 
-/** Who asked for the turn: its asker, else the task's requester. */
-export const taskAsker = (task: AgentTask) => task.context?.asker ?? task.requestedBy;
+/** Who asked for the turn: its asker, else outside a shared conversation the task's requester. */
+export const taskAsker = (task: AgentTask) =>
+  task.context?.asker ?? (sharedConversation(task) ? undefined : task.requestedBy);
 
-/** A turn's connections: the task's grants and, on a conversation turn, the Just me ones of the member who asked it. */
+/** A turn's connections: the task's grants and, on a conversation turn, the personal ones of the member who asked it. */
 export async function turnConnections(ctx: ConnectionContext, task: AgentTask): Promise<string[]> {
   const asker = taskAsker(task);
   const own = task.event && asker ? await personalGrants(ctx, asker, task.usage?.connections) : [];
@@ -65,7 +68,7 @@ export async function turnConnections(ctx: ConnectionContext, task: AgentTask): 
   return [...new Set([...(task.connections ?? []), ...own])];
 }
 
-/** `actAs` refuses a Just me connection until its owner approved acting as them for the task, else answers nothing. */
+/** `actAs` refuses a personal connection until its owner approved acting as them for the task, else answers nothing. */
 export async function resolveConnections(
   ctx: ConnectionContext,
   task: AgentTask,
@@ -128,7 +131,7 @@ export async function resolveConnections(
           ('local' in ctx && ctx.local && process.env[connection.keyIn.env] !== undefined))
       )
         throw new Error('Invalid environment connection');
-      // A Just me key in the spawn environment waits for its owner's approval, from the turn that asks for it.
+      // A personal key in the spawn environment waits for its owner's approval, from the turn that asks for it.
       if (connection.owner && connection.provider === 'env') {
         const refusal = actAs ? await actAs(connection) : 'Its owner has not approved it';
         if (refusal) {
@@ -140,7 +143,7 @@ export async function resolveConnections(
         connection.auth === 'oauth' ||
         (connection.owner && connection.provider === 'mcp' && connection.auth === 'key')
       ) {
-        // OAuth tokens and Just me keys load on first use, through the task's server.
+        // OAuth tokens and personal keys load on first use, through the task's server.
         const access = accessOf(connection);
         if (connection.provider === 'mcp')
           mcp[id] = {
@@ -148,7 +151,7 @@ export async function resolveConnections(
             connection: id,
             credentialOnUse: credentialField(connection),
             connectionCreatedAt: connection.createdAt,
-            description: connection.name,
+            description: connectionDescription(connection),
             access,
             ...(connection.owner
               ? { owner: connection.owner, account: connection.login ?? connection.account }
@@ -185,7 +188,7 @@ export async function resolveConnections(
         mcp[id] = {
           ...connectionMcp({ ...connection, access }, token),
           connection: id,
-          description: connection.name,
+          description: connectionDescription(connection),
           access,
         };
       }
@@ -197,10 +200,10 @@ export async function resolveConnections(
   return { mcp, env, tokens, warnings, secrets };
 }
 
-/** Where an attempt keeps its resolved connections, by its grants and asker. */
-const resolvedId = (status: TaskStatus) =>
+/** Where an attempt keeps its resolved connections, by the turn's connection ids and asker, so one connected mid-run resolves again. */
+const resolvedId = (status: TaskStatus, ids: string[]) =>
   `connections:${status.task.id}:${status.generation ?? 0}:${status.attempts}:${createHash('sha256')
-    .update(JSON.stringify([status.task.connections, taskAsker(status.task)]))
+    .update(JSON.stringify([ids, taskAsker(status.task)]))
     .digest('hex')
     .slice(0, 12)}`;
 
@@ -273,7 +276,7 @@ function mcpToken(
   });
 }
 
-/** A Just me platform connection's token, from its member's link; a refresh and the save of its rotated token happen under the lock the token was read in. A token bound to no client refreshes with the event's app. */
+/** A personal platform connection's token, from its member's link; a refresh and the save of its rotated token happen under the lock the token was read in. A token bound to no client refreshes with the event's app. */
 async function nativeToken(
   ctx: ConnectionContext,
   connection: Connection,
@@ -378,7 +381,7 @@ async function nativeToken(
   });
 }
 
-/** A Just me MCP key, only for the endpoint the task resolved; none once its server refused it. */
+/** A personal MCP key, only for the endpoint the task resolved; none once its server refused it. */
 function keyToken(
   ctx: ConnectionContext,
   connection: Connection,
@@ -396,7 +399,7 @@ function keyToken(
   return key && tokenFingerprint(key) !== refused ? key : undefined;
 }
 
-/** A task's OAuth connection token or Just me key on first use, refreshed then; `refused` names, by its fingerprint, a token its server refused, which refreshes only while it is still the current one. No token when it needs reconnecting: the refusal is marked on the connection or link. */
+/** A task's OAuth connection token or personal key on first use, refreshed then; `refused` names, by its fingerprint, a token its server refused, which refreshes only while it is still the current one. No token when it needs reconnecting: the refusal is marked on the connection or link. */
 export async function connectionToken(
   ctx: ConnectionContext,
   task: AgentTask,
@@ -428,7 +431,7 @@ export async function resolvedTaskConnections(
 ) {
   if (!status.task.connections?.length && !(status.task.event && taskAsker(status.task)))
     return { mcp: {}, env: {}, tokens: handles, warnings: [], secrets: [], saved: false };
-  const id = resolvedId(status);
+  const id = resolvedId(status, await turnConnections(ctx, status.task));
 
   const known = await ctx.store.get('snapshot', id);
   if (known && 'resolvedConnections' in known) {

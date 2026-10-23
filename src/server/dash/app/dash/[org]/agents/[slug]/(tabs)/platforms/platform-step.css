@@ -1,0 +1,6 @@
+/* a platform's state, then its next step, on one line */
+.plat-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}

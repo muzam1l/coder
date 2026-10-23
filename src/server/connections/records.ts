@@ -2,10 +2,12 @@ import { createHash, randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import * as z from 'zod/mini';
 import type { AgentApp, Connection } from '../../agent/types';
+import { handleKey, serverName } from '../../agent/mcp';
 import type { ConnectionRow } from '../../client/types';
 import { ACCESS, mcpEntrySchema } from '../../core/config';
 import { mcpSecretValue } from '../../core/mcp';
 import {
+  connectionServerName,
   connectionToolName,
   connectionUrlAllowed,
   connectionMcp,
@@ -13,7 +15,8 @@ import {
   mcpClient,
 } from '../../core/connections';
 import { connectionEnvName } from '../../core/connection-env';
-import type { ServerContext } from '../context';
+import type { LinkedAccount, ServerContext } from '../context';
+import type { TaskStatus } from '../store/types';
 import type { Params } from '../routes/match';
 import { json } from '../routes/http';
 import { requireWorkspaceAdmin } from '../routes/guards';
@@ -48,7 +51,7 @@ const inputSchema = z.strictObject({
   name: z.string().check(z.minLength(1)),
   id: z.optional(slug),
   provider: z.optional(slug),
-  owner: z.optional(z.literal('me')),
+  scope: z.optional(z.enum(['personal', 'workspace'])),
   access: z.optional(z.enum(ACCESS)),
   endpoint: z.optional(mcpEntrySchema),
   auth: z.optional(z.enum(['none', 'key', 'oauth'])),
@@ -97,6 +100,7 @@ export function connectionRow(
   connection: Connection,
   viewer?: string,
   config?: ConnectionContext['config'],
+  ownerName?: string,
 ): ConnectionRow {
   let authorized = !!connection.secret;
   if (connection.auth === 'oauth' && connection.provider === 'mcp' && connection.secret && config) {
@@ -111,12 +115,13 @@ export function connectionRow(
     id: connection.id,
     name: connection.name,
     provider: connection.provider,
+    scope: connection.owner ? 'personal' : 'workspace',
     auth: connection.auth,
     ...(connection.access ? { access: connection.access } : {}),
     ...(connection.owner
       ? {
-          owner: connection.owner,
-          ...(viewer === connection.owner ? { mine: true as const } : {}),
+          owner: { id: connection.owner, ...(ownerName ? { name: ownerName } : {}) },
+          ...(viewer === connection.owner ? { asker: true as const } : {}),
         }
       : {}),
     ...(connection.endpoint?.url ? { url: connection.endpoint.url } : {}),
@@ -125,11 +130,10 @@ export function connectionRow(
       ? { env: connection.keyIn.env }
       : {}),
     ...(connection.account ? { account: connection.login ?? connection.account } : {}),
-    status: connection.broken
-      ? 'reconnect'
-      : connection.auth === 'oauth' && !authorized
-        ? 'authorize'
-        : 'ok',
+    status:
+      connection.broken || (connection.auth === 'oauth' && !authorized)
+        ? 'needs-auth'
+        : 'connected',
     createdAt: connection.createdAt,
   };
 }
@@ -149,8 +153,14 @@ export async function nativeConnections(
   owner?: string,
 ): Promise<Connection[]> {
   if (!owner || !ctx.auth?.linkedAccounts) return [];
-  const accounts = await ctx.auth.linkedAccounts(owner, ctx.store);
+  return linkedConnections(ctx, owner, await ctx.auth.linkedAccounts(owner, ctx.store));
+}
 
+function linkedConnections(
+  ctx: ConnectionContext,
+  owner: string,
+  accounts: LinkedAccount[],
+): Connection[] {
   return accounts
     .filter(
       account =>
@@ -175,6 +185,23 @@ export async function nativeConnections(
     }));
 }
 
+/** Every member's linked accounts in one read where the sign-in layer lists them, else those of `owners`. */
+async function memberAccounts(
+  ctx: ConnectionContext,
+  owners: string[],
+): Promise<Array<LinkedAccount & { userId: string }>> {
+  if (ctx.auth?.organizationAccounts)
+    return ctx.auth.organizationAccounts(ctx.organizationId, ctx.store);
+  if (!ctx.auth?.linkedAccounts) return [];
+  const linked = await Promise.all(
+    owners.map(async userId =>
+      (await ctx.auth!.linkedAccounts!(userId, ctx.store)).map(account => ({ ...account, userId })),
+    ),
+  );
+
+  return linked.flat();
+}
+
 async function visibleConnections(
   ctx: ConnectionContext,
   owner?: string,
@@ -183,23 +210,30 @@ async function visibleConnections(
   const native = await nativeConnections(ctx, owner);
   const records = (await ctx.store.list('connection', { visibleTo: owner, secrets }))
     .map(row => row.value)
-    .filter(connection => !connection.owner || connection.owner === owner)
-    .map(record => {
-      if (!record.owner || record.provider === 'mcp' || record.auth !== 'oauth') return record;
-      const linked = native.find(
-        connection =>
-          connection.provider === record.provider &&
-          (!record.account || record.account === connection.account),
-      );
+    .filter(connection => !connection.owner || connection.owner === owner);
 
-      return {
-        ...record,
-        secret: linked?.secret,
-        account: linked?.account ?? record.account,
-        ...(linked?.login ? { login: linked.login } : {}),
-        ...(linked?.broken && !record.broken ? { broken: linked.broken } : {}),
-      };
-    });
+  return withLinks(records, native);
+}
+
+/** Members' platform records with their linked accounts' tokens, then the linked accounts no record holds. */
+function withLinks(stored: Connection[], native: Connection[]): Connection[] {
+  const records = stored.map(record => {
+    if (!record.owner || record.provider === 'mcp' || record.auth !== 'oauth') return record;
+    const linked = native.find(
+      connection =>
+        connection.owner === record.owner &&
+        connection.provider === record.provider &&
+        (!record.account || record.account === connection.account),
+    );
+
+    return {
+      ...record,
+      secret: linked?.secret,
+      account: linked?.account ?? record.account,
+      ...(linked?.login ? { login: linked.login } : {}),
+      ...(linked?.broken && !record.broken ? { broken: linked.broken } : {}),
+    };
+  });
 
   return [
     ...records,
@@ -208,7 +242,7 @@ async function visibleConnections(
         !records.some(
           record =>
             record.id === connection.id ||
-            (record.owner === owner &&
+            (record.owner === connection.owner &&
               record.provider === connection.provider &&
               record.account === connection.account),
         ),
@@ -238,7 +272,10 @@ export async function connectionAllowed(
       .clone()
       .json()
       .catch(() => undefined);
-    if (input?.owner === 'me')
+    if (
+      input?.scope === 'personal' ||
+      (input?.provider && !['mcp', 'env'].includes(input.provider))
+    )
       return ctx.auth && ctx.session && !ctx.local
         ? ctx
         : json({ error: 'Personal connections need a signed-in member' }, 400);
@@ -332,19 +369,46 @@ async function readBody(req: Request): Promise<unknown> {
   return req.json().catch(() => undefined);
 }
 
-/** The connections the viewer sees, as rows. */
+/** Every workspace connection and every member's own, as rows; a task's mark those it is not granted `disabled` and name the server of those it has. */
 export async function connectionRows(
   ctx: ServerContext,
   authorization?: string,
 ): Promise<ConnectionRow[]> {
-  const owner = ctx.session?.user.id;
-  const records = await visibleConnections(ctx, owner, 'oauth');
+  // In a task, `asker` marks the rows of the member who asked this turn, in any conversation.
+  const viewer = ctx.session?.user.id ?? ctx.taskPrincipal?.asker;
+  const taskRead = ctx.taskPrincipal
+    ? ctx.store.get('task', ctx.taskPrincipal.task).then(status => status?.task)
+    : Promise.resolve(undefined);
+  const apps = appRows(ctx, taskRead).catch(error => {
+    console.error('coder server: could not list app installations', error);
+    return [];
+  });
+  const stored = (await ctx.store.list('connection', { secrets: 'oauth' })).map(row => row.value);
+  const accounts = await memberAccounts(ctx, [
+    ...new Set([
+      ...stored.flatMap(connection => connection.owner ?? []),
+      ...(viewer ? [viewer] : []),
+    ]),
+  ]);
+  const names = new Map(accounts.map(account => [account.userId, account.name]));
+  if (ctx.session?.user.name) names.set(ctx.session.user.id, ctx.session.user.name);
+  const records = withLinks(
+    stored,
+    accounts.flatMap(account => linkedConnections(ctx, account.userId, [account])),
+  );
   const receipt = authorization
     ? await ctx.store.get('delivery', `connection-authorized:${authorization}`)
     : undefined;
+  const task = await taskRead;
+  const granted = task && new Set(await (await import('./resolve')).turnConnections(ctx, task));
 
-  return records.map(connection => {
-    const row = connectionRow(connection, owner, ctx.config);
+  const rows = records.map(connection => {
+    const row = connectionRow(
+      connection,
+      viewer,
+      ctx.config,
+      connection.owner && names.get(connection.owner),
+    );
     if (
       authorization &&
       connection.auth === 'oauth' &&
@@ -352,9 +416,72 @@ export async function connectionRows(
         !('target' in receipt) ||
         receipt.target !== `${connection.id}:${connection.createdAt}`)
     )
-      row.status = 'authorize';
+      row.status = 'needs-auth';
+    if (granted && !granted.has(connection.id)) row.status = 'disabled';
+    else if (granted && connection.provider !== 'env')
+      row.server = connectionServerName(connection);
 
     return row;
+  });
+
+  return [...rows, ...(await apps)];
+}
+
+/** One workspace row per live installation of an agent's app; a task has the tool servers of its own agent's. */
+async function appRows(
+  ctx: ServerContext,
+  taskRead: Promise<TaskStatus['task'] | undefined>,
+): Promise<ConnectionRow[]> {
+  const own = ctx.store.list('app');
+  const [installations, stored, shared, task] = await Promise.all([
+    ctx.store.list('installation', { active: true }),
+    own,
+    sharedApps(ctx, own),
+    taskRead,
+  ]);
+  const apps = new Map([...stored.map(row => row.value), ...shared].map(app => [app.id, app]));
+  const slugs = [...new Set(installations.flatMap(row => apps.get(row.value.app)?.agent ?? []))];
+  const agents = new Map(
+    (slugs.length ? await ctx.store.listAgentsWithVersions(slugs) : []).map(entry => [
+      entry.record.id,
+      entry,
+    ]),
+  );
+  const event = task?.event && `${task.event.appId}:${task.event.installationId}`;
+
+  return installations.flatMap(({ id, value }) => {
+    const app = apps.get(value.app);
+    const integration = ctx.integrations[value.integration];
+    if (!app || !integration) return [];
+    const agent = agents.get(app.agent);
+    const readOnly =
+      agent?.version?.definition.access === 'read-only' ||
+      agent?.record.settings?.access === 'read-only';
+    const row: ConnectionRow = {
+      id,
+      name: integration.name,
+      provider: value.integration,
+      scope: 'workspace',
+      agent: app.agent,
+      ...(readOnly ? { access: 'read-only' as const } : {}),
+      auth: 'none',
+      account: `${agent?.record.name ?? app.name}'s app in ${value.account.login}`,
+      status: 'connected',
+      createdAt: value.createdAt,
+    };
+    if (!task) return [row];
+    if (
+      app.agent !== task.agent ||
+      !(value.integration in task.tools) ||
+      (!task.event && !task.parent)
+    )
+      row.status = 'disabled';
+    else
+      row.server = serverName(
+        handleKey(value.integration, id === event ? undefined : value.account.login),
+      );
+
+    return [row];
   });
 }
 
@@ -419,15 +546,18 @@ export async function addConnection(
       .replace(/[^a-z0-9_-]+/g, '-')
       .replace(/^-+|-+$/g, '');
   if (!slug.safeParse(id).success) throw refuse(400, 'Invalid connection id');
+  // `connectionServerName` gives a member's own `<name>-user`.
+  if (id.endsWith('-user'))
+    throw refuse(400, "Names ending in -user are kept for members' own connections");
   const provider = input.provider ?? 'mcp';
-  const owner = input.owner === 'me' ? ctx.session!.user.id : undefined;
+  const personal = provider !== 'mcp' && provider !== 'env';
+  if (personal && input.scope !== undefined)
+    throw refuse(400, 'Platform connections are personal and take no scope.');
+  const owner = personal || input.scope === 'personal' ? ctx.session?.user.id : undefined;
+  if ((personal || input.scope === 'personal') && (!owner || !ctx.auth || ctx.local))
+    throw refuse(400, 'Personal connections need a signed-in member');
   if (provider !== 'mcp' && provider !== 'env' && !ctx.integrations[provider]?.auth.user)
     throw refuse(400, 'This integration does not support user OAuth');
-  if (provider !== 'mcp' && provider !== 'env' && !owner)
-    throw refuse(
-      400,
-      `The app is the workspace's identity on ${ctx.integrations[provider]!.name ?? provider}, and members connect their own account as Just me.`,
-    );
   if (provider === 'env' && input.auth && input.auth !== 'key')
     throw refuse(400, 'Environment connections require a key');
   if (provider !== 'env' && input.credential)
@@ -509,7 +639,7 @@ export async function addConnection(
       connection.auth === 'oauth' ? await authorization(ctx, connection, discovered) : undefined;
 
     return {
-      ...connectionRow(connection, owner, ctx.config),
+      ...connectionRow(connection, owner, ctx.config, ctx.session?.user.name),
       ...(authorize ? { authorize } : {}),
     };
   } catch (error) {
@@ -552,7 +682,7 @@ export async function changeConnection(
       next.credential = await rotateEnvCredential({ ...ctx, store }, current, key);
     await store.put('connection', next.id, next);
 
-    return connectionRow(next, ctx.session?.user.id, ctx.config);
+    return connectionRow(next, ctx.session?.user.id, ctx.config, ctx.session?.user.name);
   });
 }
 
@@ -600,7 +730,7 @@ export async function listConnections(req: Request, ctx: ServerContext): Promise
     for (;;) {
       const rows = await connectionRows(ctx, authorization);
       const row = rows.find(row => row.id === waiting);
-      if (!row || row.status === 'ok' || Date.now() >= deadline || req.signal.aborted)
+      if (!row || row.status === 'connected' || Date.now() >= deadline || req.signal.aborted)
         return json(rows);
       await changes.wait(Math.min(10000, deadline - Date.now()), req.signal);
     }

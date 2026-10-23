@@ -17,10 +17,12 @@ import {
   type EncryptedCredential,
 } from '../store/secrets';
 import { dashPath, organizationSlug } from '../auth/members';
-import { resolveTaskOptions } from '../../core/dispatch';
-import { isEndpointModel, type CoderConfig } from '../../core/config';
+import { modelList, resolveTaskOptions } from '../../core/dispatch';
+import { isEndpointModel, modelName, type CoderConfig } from '../../core/config';
+import { formatEngineSpec } from '../../core/state';
 import { effectiveConfig, shownConfig } from './config';
-import { DEFAULT_ENGINE } from '../../core/types';
+import type { ResolvedTaskOptions } from '../../core/types';
+import type { ModelAttempt } from '../../agent/types';
 import { type LoginEngine } from './logins';
 
 /** Engine credentials for a workspace or a member, one per variable or subscription in each scope; every row change goes through `store.withCredential`. */
@@ -135,163 +137,193 @@ export async function checkCredential(
   if (!response.ok) throw new CredentialCheckError(response.status, response.statusText);
 }
 
-/** The names an engine reads, best first: its subscription, then its API key; a custom model reads the variable it names. */
-function credentialNames(
-  engine: string,
-  config: CoderConfig,
-  settings: { engine?: string; model?: string },
+/** The names a model reads, best first: its engine's subscription, then its API key; a custom model reads the variable it names. */
+export function credentialNames(
+  option: { engine: string; model?: string | null },
+  config: Pick<CoderConfig, 'models'>,
 ): string[] {
-  if (engine === 'claude' || engine === 'codex') return [engine, ENGINE_KEYS[engine]];
-  let model: string | null = null;
-  try {
-    model = resolveTaskOptions({ ...settings, engine }, config).model;
-  } catch {
-    return [];
-  }
-  const entry = model ? config.models?.[model] : undefined;
+  if (option.engine === 'claude' || option.engine === 'codex')
+    return [option.engine, ENGINE_KEYS[option.engine]];
+  const entry = option.model ? config.models?.[option.model] : undefined;
 
   return [(entry && isEndpointModel(entry) && entry.envKey) || ENGINE_KEYS.codex];
 }
 
-/** The own ones of the member who asked, then the workspace's, by name order; tasks no member asked for use the workspace's only. */
-function pickCredential(
-  rows: CredentialRow[],
+/** The rows that serve `names`: the asker's own, then the workspace's, each in name order; turns no member pays for use the workspace's only. */
+export function pickCredentials<T extends { id: string }>(
+  rows: T[],
   names: string[],
-  requestedBy?: string,
-): CredentialRow | undefined {
-  for (const owner of requestedBy ? [requestedBy, undefined] : [undefined])
-    for (const name of names) {
-      const row = rows.find(row => row.id === credentialId(owner, name));
-      if (row) return row;
-    }
-}
-
-export async function resolveCredential(
-  ctx: ServerContext,
-  engine: string,
-  requestedBy?: string,
-  settings: { model?: string } = {},
-): Promise<CredentialRow | undefined> {
-  const [shown, rows] = await Promise.all([
-    shownConfig(ctx),
-    ctx.store.listCredentials({ owner: requestedBy }),
-  ]);
-
-  return pickCredential(
-    rows,
-    credentialNames(engine, effectiveConfig(ctx, shown), settings),
-    requestedBy,
+  asker?: string,
+): T[] {
+  return (asker ? [asker, undefined] : [undefined]).flatMap(owner =>
+    names.flatMap(name => rows.filter(row => row.id === credentialId(owner, name))),
   );
 }
 
-/** Pinned settings use one engine; Default uses the first usable engine in the workspace chain. */
-export async function resolveEngine(
-  ctx: ServerContext,
-  settings: { engine?: string; model?: string },
-  requestedBy?: string,
-): Promise<{
-  engine: string;
-  credential?: string;
-  usable: boolean;
-  chain: string[];
-  credentials: Record<string, string>;
-}> {
-  const [shown, rows] = await Promise.all([
-    shownConfig(ctx),
-    ctx.store.listCredentials({ owner: requestedBy }),
-  ]);
-
-  return chooseEngine(ctx, effectiveConfig(ctx, shown), rows, settings, requestedBy);
+/** One model of a task's list as it runs for one member: its credentials best first, or this machine's own logins. */
+export interface ModelRun {
+  /** `engine/model/effort`. */
+  model: string;
+  option: ResolvedTaskOptions;
+  credentials: string[];
+  machine?: boolean;
 }
 
-async function chooseEngine(
+/** What runs a turn and on whose account: the task pick, else the agent's model, else the chain's first, then the rest of the chain, each model on the asker's credentials before the workspace's. One read of config and credentials. */
+export async function resolveModels(
+  ctx: ServerContext,
+  settings: { engine?: string; model?: string; effort?: string },
+  asker?: string,
+): Promise<{ models: ModelRun[]; attempts: ModelAttempt[]; first: ResolvedTaskOptions }> {
+  const [shown, rows] = await Promise.all([
+    shownConfig(ctx),
+    ctx.store.listCredentials({ owner: asker }),
+  ]);
+  const config = effectiveConfig(ctx, shown);
+  const list = modelList(config, resolveTaskOptions(settings, config));
+  const models = await modelRuns(ctx, config, rows, list, asker);
+
+  return { models, attempts: modelAttempts(models), first: list[0]! };
+}
+
+async function modelRuns(
   ctx: ServerContext,
   config: CoderConfig,
   rows: CredentialRow[],
-  settings: { engine?: string; model?: string },
-  requestedBy?: string,
-) {
-  const pinned =
-    settings.engine ?? (settings.model ? resolveTaskOptions(settings, config).engine : undefined);
-  const chain = pinned ? [pinned] : config.chain;
-  const credentials = Object.fromEntries(
-    chain.flatMap(engine => {
-      const names = credentialNames(engine, config, engine === pinned ? settings : {});
-      const row = pickCredential(rows, names, requestedBy);
-      return row ? [[engine, row.id]] : [];
+  list: ResolvedTaskOptions[],
+  asker?: string,
+): Promise<ModelRun[]> {
+  return Promise.all(
+    list.map(async (option): Promise<ModelRun> => {
+      const credentials = pickCredentials(rows, credentialNames(option, config), asker).map(
+        row => row.id,
+      );
+
+      return {
+        model: formatEngineSpec(option),
+        option,
+        credentials,
+        ...(!credentials.length && (await machineSignedIn(ctx, option)) ? { machine: true } : {}),
+      };
     }),
   );
-  for (const engine of chain) {
-    const credential = credentials[engine];
-    if (credential) return { engine, credential, usable: true, chain, credentials };
-    if (await machineSignedIn(ctx, engine, engine === pinned ? settings.model : undefined))
-      return { engine, usable: true, chain, credentials };
-  }
+}
 
-  const custom =
-    Object.values(config.models ?? {}).some(isEndpointModel) ||
-    rows.some(
-      row =>
-        ![
-          ...Object.keys(ENGINE_KEYS),
-          ...Object.values(ENGINE_KEYS),
-          ...Object.values(SUBSCRIPTION_KEYS),
-        ].includes(parseCredentialId(row.id).name),
-    );
+/** An agent's model list for `viewer`, and the engines, and custom models as `custom/<name>`, no workspace credential runs; one read of config and credentials. */
+export async function agentModels(
+  ctx: ServerContext,
+  settings: { engine?: string; model?: string; effort?: string },
+  viewer?: string,
+) {
+  const [shown, rows] = await Promise.all([
+    shownConfig(ctx),
+    ctx.store.listCredentials({ owner: viewer }),
+  ]);
+  const config = effectiveConfig(ctx, shown);
+  const choices = [
+    'claude',
+    'codex',
+    ...Object.entries(config.models ?? {}).flatMap(([model, entry]) =>
+      isEndpointModel(entry) ? [`custom/${model}`] : [],
+    ),
+  ];
+  const [models, checked] = await Promise.all([
+    modelRuns(ctx, config, rows, modelList(config, resolveTaskOptions(settings, config)), viewer),
+    modelRuns(
+      ctx,
+      config,
+      rows,
+      choices.map(choice => resolveTaskOptions({ model: choice }, config)),
+    ),
+  ]);
 
   return {
-    engine: custom ? 'custom' : (chain[0] ?? DEFAULT_ENGINE),
-    usable: false,
-    chain,
-    credentials,
+    models,
+    unrunnable: choices.filter(
+      (_, index) => !checked[index]!.credentials.length && !checked[index]!.machine,
+    ),
   };
+}
+
+/** A task's attempts in order: each model on each of its credentials; a model with none runs once on the machine's logins when `machine` allows it, else it is skipped. */
+export function modelAttempts(models: ModelRun[], machine = false): ModelAttempt[] {
+  return models.flatMap(run =>
+    run.credentials.length
+      ? run.credentials.map(credential => ({ model: run.model, credential }))
+      : run.machine || machine
+        ? [{ model: run.model }]
+        : [],
+  );
 }
 
 const ENGINE_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', custom: 'Custom' };
 
-/** Why pinned settings can't run in a shared thread, where only workspace credentials and a local server's own logins count; `link` makes the fix a link. */
+/** Where one model runs for `viewer`, such as "sol on the personal Codex subscription, then the workspace's Codex key". */
+export function runsOn(run: ModelRun, viewer?: string): string {
+  const name = modelName(run.option);
+  const engine = ENGINE_NAMES[run.option.engine] ?? run.option.engine;
+  if (run.machine) return `${name} on this machine's ${engine} sign-in`;
+  if (!run.credentials.length) return `${name}: no credential, skipped`;
+  const accounts = run.credentials.map(id => {
+    const { owner, name: label } = parseCredentialId(id);
+    const whose = !owner ? "the workspace's" : owner === viewer ? 'the personal' : "the starter's";
+    if (Object.hasOwn(SUBSCRIPTION_KEYS, label)) return `${whose} ${engine} subscription`;
+
+    return `${whose} ${Object.values(ENGINE_KEYS).includes(label as never) ? `${engine} key` : label}`;
+  });
+
+  return `${name} on ${accounts.join(', then ')}`;
+}
+
+/** Where each spec runs for `viewer`, by the spec as written; one the config can't resolve says why. */
+export async function runsOnEach(
+  ctx: ServerContext,
+  specs: string[],
+  viewer?: string,
+): Promise<Record<string, string>> {
+  const [shown, rows] = await Promise.all([
+    shownConfig(ctx),
+    ctx.store.listCredentials({ owner: viewer }),
+  ]);
+  const config = effectiveConfig(ctx, shown);
+  const lines = await Promise.all(
+    specs.map(async (spec): Promise<[string, string]> => {
+      try {
+        const option = resolveTaskOptions({ model: spec }, config);
+        const [run] = await modelRuns(ctx, config, rows, [option], viewer);
+        return [spec, runsOn(run!, viewer)];
+      } catch (error) {
+        return [spec, `${spec}: ${(error as Error).message}`];
+      }
+    }),
+  );
+
+  return Object.fromEntries(lines);
+}
+
+/** Where a whole list runs for `viewer`: each model a credential or this machine runs, in order. */
+export function listRunsOn(models: ModelRun[], viewer?: string): string {
+  const runnable = models.filter(run => run.credentials.length || run.machine);
+
+  return runnable.length
+    ? runnable.map(run => runsOn(run, viewer)).join(', then ')
+    : 'No credential runs any listed model';
+}
+
+/** Why an agent's own model can't run in a shared thread, where only workspace credentials and a local server's own logins count; `link` makes the fix a link. */
 export async function modelProblem(
   ctx: ServerContext,
   settings: { engine?: string; model?: string },
   link = false,
 ): Promise<string | undefined> {
   if (!settings.engine && !settings.model) return undefined;
-  const { usable, chain } = await resolveEngine(ctx, settings);
-  if (usable) return undefined;
-  const engine = chain[0]!;
+  const [first] = (await resolveModels(ctx, settings)).models;
+  if (first!.credentials.length || first!.machine) return undefined;
+  const engine = first!.option.engine;
   const name = ENGINE_NAMES[engine] ?? engine;
   const add = `Add one in Settings → ${engine === 'custom' ? 'Models' : 'Credentials'}`;
 
   return `No workspace credential runs ${settings.model ? `${settings.model} (${name})` : name}. ${link ? `[${add}](${await credentialFix(ctx, engine)})` : add}, or pick another model.`;
-}
-
-/** What runs an agent's settings for `requestedBy`, and the engines, and custom models as `custom:<name>`, that no workspace credential runs; one read of config and credentials. */
-export async function agentEngines(
-  ctx: ServerContext,
-  settings: { engine?: string; model?: string },
-  requestedBy?: string,
-) {
-  const [shown, rows] = await Promise.all([
-    shownConfig(ctx),
-    ctx.store.listCredentials({ owner: requestedBy }),
-  ]);
-  const config = effectiveConfig(ctx, shown);
-  const choices: Array<{ engine: string; model?: string }> = [
-    { engine: 'claude' },
-    { engine: 'codex' },
-    ...Object.entries(config.models ?? {}).flatMap(([model, entry]) =>
-      isEndpointModel(entry) ? [{ engine: 'custom', model }] : [],
-    ),
-  ];
-  const [resolved, ...checked] = await Promise.all([
-    chooseEngine(ctx, config, rows, settings, requestedBy),
-    ...choices.map(choice => chooseEngine(ctx, config, rows, choice)),
-  ]);
-  const unrunnable = choices.flatMap(({ engine, model }, index) =>
-    checked[index]!.usable ? [] : [model ? `${engine}:${model}` : engine],
-  );
-
-  return { resolved: resolved!, unrunnable };
 }
 
 /** Workspace credentials plus the caller's own; nobody sees another member's. */
@@ -308,7 +340,7 @@ export async function visibleCredentials(
 /** The caller's saved value for an env variable, then the workspace's; the local server falls back to its environment. */
 export async function credentialEnv(ctx: ServerContext, name: string): Promise<string | undefined> {
   const user = ctx.session?.user.id;
-  const row = pickCredential(await visibleCredentials(ctx.store, user), [name], user);
+  const [row] = pickCredentials(await visibleCredentials(ctx.store, user), [name], user);
 
   return (
     (row ? decryptCredential(ctx.config, row.value).env[name] : undefined) ??

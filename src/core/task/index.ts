@@ -28,7 +28,6 @@ export interface TaskRunOptions {
   agent?: string;
   outputSchema?: object;
   model?: string;
-  effort?: string;
   access?: Access;
   name?: string;
   appendSystem?: string;
@@ -38,12 +37,12 @@ export interface TaskRunOptions {
   mcp?: string;
   /** Connection ids the task may use, within the agent's. */
   connections?: string[];
-  /** Block until the task finishes, walking the engine chain when a turn fails to start. */
+  /** Block until the task finishes, falling back to the next model when a turn fails to start. */
   wait?: boolean;
   /** Server tasks: the repository and runner to use. */
   repo?: string;
   runner?: string;
-  onFallback?: (fallback: { engine: string; detail: string; next: string }) => void;
+  onFallback?: (fallback: { model: string; detail: string; next: string }) => void;
   onNote?: (note: string) => void;
   /** Each time a wait starts on a task id. */
   onWaiting?: (taskId: string) => void;

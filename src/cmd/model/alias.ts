@@ -8,14 +8,14 @@ import { workspaceFlag } from './add';
 
 export const commandModelAlias = command({
   name: 'alias',
-  description: 'name a spec, e.g. fast codex:luna',
+  description: 'name a spec, e.g. fast codex/luna',
   usage:
-    'Save an alias for an engine spec, e.g. fast -> codex:luna. An alias may reuse a\nbuilt-in name to override it.',
+    'Save an alias for an engine spec, e.g. fast -> codex/luna. An alias may reuse a\nbuilt-in name to override it; an engine name sets what that bare engine runs.',
   access: 'write',
   approvalPolicy: 'ask',
   args: {
     name: str('the alias'),
-    spec: str('the engine spec, such as codex:luna'),
+    spec: str('the engine spec, such as codex/luna'),
     workspace: workspaceFlag,
   },
   cli: { positional: ['name', 'spec'] },
@@ -26,16 +26,9 @@ export const commandModelAlias = command({
   print: result => 'alias' in result && printModelAlias(result),
 });
 
-function printModelAlias(result: {
-  alias: string;
-  provider: string;
-  model: string;
-  effort?: string;
-  file: string;
-}): void {
+function printModelAlias(result: { alias: string; model: string; file: string }): void {
   const s = outStyle;
-  const desc = `${result.provider} ${result.model}${result.effort ? ` (${result.effort})` : ''}`;
   process.stdout.write(
-    `aliased ${s.cyan(result.alias)} -> ${result.provider}:${result.model}${result.effort ? `:${result.effort}` : ''} ${s.dim(`= ${desc}`)}  ${s.dim(`(${result.file})`)}\n`,
+    `aliased ${s.cyan(result.alias)} -> ${result.model}  ${s.dim(`(${result.file})`)}\n`,
   );
 }

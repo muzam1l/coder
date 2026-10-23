@@ -1,8 +1,7 @@
 import { ServerClient, ClientError } from '@coder/client';
 import { CoderError } from '@coder/core/errors';
 import type { AgentRow, AppRow, StoredRow } from '@coder/client/types';
-import { DEFAULT_ENGINE } from '@coder/core/types';
-import { NO_MODELS, modelsByEngine } from '@/app/dash/[org]/settings/model-options';
+import { NO_MODELS } from '@/app/dash/[org]/settings/model-options';
 
 export function encodeDefinition(definition: unknown): string {
   return Buffer.from(JSON.stringify(definition), 'utf8').toString('base64url');
@@ -81,7 +80,7 @@ export function loadAgent(request: Request, slug: string) {
   return load(request).agents.get(slug, { versions: false, content, handles: true });
 }
 
-/** Each engine's models, and what an agent runs with when it sets nothing. */
+/** The workspace's models, and the chain an agent runs when it sets no model. */
 export function loadRunDefaults(request: Request) {
   return Promise.all([
     load(request)
@@ -91,11 +90,7 @@ export function loadRunDefaults(request: Request) {
       .config.get()
       .catch(() => undefined),
   ]).then(([shape, shown]) => ({
-    models: modelsByEngine(shape),
-    defaults: {
-      engine: shown?.effective.chain?.[0] ?? DEFAULT_ENGINE,
-      engines: shown?.effective.engines ?? {},
-      builtin: shape.builtin,
-    },
+    shape,
+    defaults: { chain: shown?.effective.chain ?? [] },
   }));
 }

@@ -105,8 +105,12 @@ export const conversationCommands = [
   }),
   defineCommand({
     name: 'history',
-    description:
-      "Search or read your own earlier turns in this task, including anything compacted out of your context, oldest first. With query, the messages containing that exact text; without, the messages from `from` on. The platform's tools read the thread itself.",
+    description: [
+      'Search or read your own earlier turns in this task, including anything compacted out of your context, oldest first.',
+      'With query, the messages containing that exact text; without, the messages from `from` on.',
+      "An event's message.index counts from 0; when your history starts later, read earlier messages with the platform's tools when they matter.",
+      "Messages from bots never arrive as turns; the platform's tools read the thread itself, theirs included.",
+    ].join(' '),
     args: {
       query: str(
         'Exact text to find, case-insensitive, 1 to 500 characters: a word or phrase from the message, not a question.',

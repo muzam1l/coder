@@ -65,15 +65,6 @@ export function listApprovals(taskDir: string): Approval[] {
     .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
 }
 
-/** Every action the user approved for this task, oldest first; each later turn tells the reviewer. */
-export const approvedActions = (taskDir: string) => [
-  ...new Set(
-    listApprovals(taskDir).flatMap(approval =>
-      approval.response?.decision === 'accept' ? approval.actions : [],
-    ),
-  ),
-];
-
 /** The accepted escalation with this exact command among its actions, read at call time. */
 export const approvalFor = (taskDir: string, command: string) =>
   listApprovals(taskDir).find(

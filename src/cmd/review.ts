@@ -1,10 +1,10 @@
 /** `coder review`: runs the built-in review flow and prints its result. */
 import process from 'node:process';
 
+import { CoderError } from '../core/errors';
 import * as z from 'zod/mini';
 
-import { CoderError } from '../core/errors';
-import { arg, flag, str, strList } from '../utils/args';
+import { arg, flag, modelOption, str, strList } from '../utils/args';
 import { command } from '../cli';
 
 export const commandReview = command({
@@ -26,17 +26,10 @@ export const commandReview = command({
     exclude: strList('leave this path out, relative to cwd (repeatable)', '<p>'),
     post: flag('post deduplicated inline comments and sticky PR summary'),
     md: flag('markdown output (the default)'),
-    model: str(
-      'model alias, custom name or engine:model for the review task',
-      '<model|engine:model>',
-    ),
-    effort: arg(
-      z.optional(
-        z.enum(['low', 'medium', 'high'], {
-          error: 'expected "low", "medium", or "high"',
-        }),
-      ),
-      'reasoning effort and review depth (default: medium depth)',
+    model: modelOption('for the review task (default: reviewModel)'),
+    depth: arg(
+      z.optional(z.enum(['low', 'medium', 'high'])),
+      'what to report: low only critical and major, high nits too (default: medium)',
       '<low|medium|high>',
     ),
   },
@@ -46,6 +39,7 @@ export const commandReview = command({
       'coder review --base main  # review everything since main locally',
       'coder review --path src --exclude src/gen  # review src without generated code',
       'coder review --pr 42 --post  # review and post to pull request 42',
+      'coder review --depth high  # report nits too',
     ],
   },
   async run({ options, cwd }) {

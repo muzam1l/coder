@@ -21,7 +21,9 @@ export async function meRoute(
 ): Promise<Response> {
   const reconnect =
     (!ctx.auth || ctx.session?.organizationId) &&
-    (await connectionRows(ctx).catch(() => [])).some(row => row.status === 'reconnect');
+    (await connectionRows(ctx).catch(() => [])).some(
+      row => row.status === 'needs-auth' && (!row.owner || row.asker),
+    );
   if (!ctx.auth) {
     return json({
       mode: serverMode(ctx),

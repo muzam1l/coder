@@ -1,99 +1,68 @@
+---
+description: Built-in Claude and Codex models, custom endpoints, aliases, the chain, and turning models off.
+---
+
 # Models
 
-Manage every model Coder can dispatch to. That means the built-in Codex and Claude aliases, and your own - any OpenAI-compatible URL, like Ollama or llama.cpp on your laptop, a vLLM GPU box, OpenRouter, etc. Custom models work like any built-in: no login, and permissions, steering, and fallback just work.
+Every model a task can run: the built-in Codex and Claude models, aliases, and custom models at any OpenAI-compatible URL, such as Ollama or llama.cpp on a laptop, a vLLM box or OpenRouter. A custom model works like a built-in one: no login, and permissions, steering and fallback all apply.
+
+## Pick a model
+
+`--model`, an agent's `model`, `chain` and `reviewModel` each take one spec:
+- `<name>`: a built-in, an alias, a custom model, or an engine (`codex`, `claude`) for its model.
+- `<name>/<effort>`: `sol/low`, `fast/high`.
+- `<engine>/<model>`, `<engine>/<model>/<effort>`: `claude/opus`, `codex/gpt-6.1-sol/high`.
+
+Effort is `low`, `medium` or `high`; without one, `medium`, unless the alias sets its own. On a custom chat endpoint it's sent as OpenRouter's `reasoning.effort`.
+
+## The chain
+
+`chain` lists models in order, default `["codex/sol", "claude/opus"]`. A task runs its own model (from `--model` or its agent) else the first entry. When a model can't start (missing CLI, sign-in, quota, rate limit), the next one runs; a turn that already did work fails with the reason instead. Within one model, the asker's own subscription and key come before the workspace's. **# Settings → (Models)** shows the chain and what each entry runs on for the viewer.
+
+```bash
+coder config set chain '["codex/sol", "claude/opus", "qwen"]'
+```
+
+## Built-ins and aliases
+
+| Name | Runs | Needs |
+|---|---|---|
+| `luna` | `codex/gpt-6-luna` | codex 0.156.1 |
+| `sol` | `codex/gpt-6.1-sol` | codex 0.159.1 |
+| `astra` | `codex/gpt-6-astra`, the review default | codex 0.154.0 |
+| `sonnet` | `claude/sonnet` | claude 2.1.197 |
+| `opus` | `claude/opus` | claude 2.1.280 |
+| `fable` | `claude/fable` | claude 2.1.257 |
+| `codex`, `claude` | `codex/sol`, `claude/opus` | |
+
+A task on an older CLI still runs, with a warning to update it. Claude names pass to the claude CLI, which resolves them (`opus` is Claude Opus 5.5 today); any full model id also works.
+
+An alias names a spec, and one with a built-in's name overrides it:
+
+```bash
+coder model alias fast codex/luna/low
+coder model alias claude claude/sonnet/high   # --model claude now runs sonnet at high
+coder model unalias claude                    # back to the built-in
+coder model disable astra                     # can't be picked or fallen back to
+```
 
 ## Connect a model
 
-Add one under **# Settings → (Models)** or with `coder model add`:
+Under **# Settings → (Models)** or with `coder model add`:
 
 ```bash
-# local Ollama model, no key
 coder model add qwen --base-url http://localhost:11434/v1 --model qwen2.5-coder:32b
-
-# third-party provider via OpenRouter, key read from the environment
 coder model add kimi --base-url https://openrouter.ai/api/v1 --env-key OPENROUTER_API_KEY --model moonshotai/kimi-k2
 ```
 
-`model add` saves the entry, probes the endpoint, and reports anything missing (unreachable URL, unset key env var, no codex). Change one later with `coder model update <name>`, drop it with `coder model remove <name>`. Flags:
+`model add` saves the entry, checks the endpoint, and reports what's missing (unreachable URL, unset key variable, no codex). `coder model update <name>` changes one, `coder model remove <name>` drops it, `coder model list` lists every name and checks endpoints.
 
-| Flag               | Meaning                                                       |
-| ------------------ | ------------------------------------------------------------- |
-| `--base-url <url>` | OpenAI-compatible API base (e.g. `http://localhost:11434/v1`) |
-| `--model <id>`     | the provider's model id (e.g. `qwen2.5-coder:32b`)            |
-| `--env-key <VAR>`  | env var holding the API key; omit for keyless local endpoints |
-| `--context-window <tokens>` | the model's context window, filled when the provider reports it; Codex compacts at 90% of it |
-| `--workspace`      | write to `<repo>/.coder/config.json` instead of the user file |
+| Flag | Meaning |
+|---|---|
+| `--base-url <url>` | OpenAI-compatible API base |
+| `--model <id>` | The provider's model id |
+| `--env-key <VAR>` | The variable holding the API key; omit for keyless local endpoints |
+| `--context-window <tokens>` | Filled in when the provider reports it; Codex compacts at 90% |
+| `--workspace` | Write the repo's `.coder/config.json` instead of the user file |
 
-## Use it
-
-Anywhere a model name goes; together they form the `custom` engine:
-
-```bash
-coder run --model qwen "explain this repo"        # per task
-coder config set engines.custom.model qwen         # default model of the custom engine
-coder model list                                  # list models + probe their endpoints
-```
-
-Add `custom` to the fallback chain to make your models a fallback tier, e.g. a local model that takes over when the hosted engines are out of quota:
-
-```bash
-coder config set chain '["codex", "claude", "custom"]'
-```
-
-## Built-ins, aliases, disabling
-
-Built-ins are just pre-seeded aliases tied to an engine, so `coder model list`
-shows them and your own aliases together, grouped per engine. Disable
-any model name - a built-in, a custom model, an alias, or a raw engine slug
-like `gpt-6-astra` - without removing its configuration, then re-enable it
-when needed; requests for a disabled model fail at dispatch:
-
-```bash
-coder model disable astra
-coder model enable astra
-```
-
-Create an alias for an engine spec with `coder model alias fast codex:luna`
-(effort can ride along: `coder model alias big claude:opus:high`); remove it
-with `coder model unalias fast`. Aliases may reuse a built-in name, so
-`coder model alias luna codex:gpt-x` intentionally overrides the built-in
-`luna`, and `model list` shows the override in its place.
-
-The built-ins:
-
-| Alias    | Model                 | Use it for                       | Needs          |
-| -------- | --------------------- | -------------------------------- | -------------- |
-| `luna`   | `gpt-6-luna` (codex)  | mechanical work                  | codex 0.156.1  |
-| `sol`    | `gpt-6.1-sol` (codex) | the default                      | codex 0.159.1  |
-| `astra`  | `gpt-6-astra` (codex) | the hardest work; costs the most | codex 0.154.0  |
-| `sonnet` | `sonnet` (claude)     | mechanical work                  | claude 2.1.197 |
-| `opus`   | `opus` (claude)       | the default                      | claude 2.1.280 |
-| `fable`  | `fable` (claude)      | the hardest work; costs the most | claude 2.1.257 |
-
-A task on an older CLI still runs, with a warning to run `codex update` or
-`claude update`.
-
-Claude aliases pass through to the claude CLI, which resolves them to its
-current model (`opus` is Claude Opus 5.5 today). Any full model id, such as
-`gpt-5.6-sol` or `claude-sonnet-5`, also works as a pass-through.
-
-## Config shape
-
-Every model command writes the one `models` section of the
-[config](config.md); the entry's shape says what it is (endpoint,
-engine alias, or a bare disable toggle for any model name):
-
-```json
-{
-  "models": {
-    "qwen": {
-      "baseUrl": "http://localhost:11434/v1",
-      "model": "qwen2.5-coder:32b",
-      "envKey": "MY_KEY"
-    },
-    "fast": { "provider": "codex", "model": "gpt-6-luna" },
-    "big": { "provider": "claude", "model": "opus", "effort": "high" },
-    "astra": { "disabled": true }
-  }
-}
-```
+Entries live in the `models` section of the [config](config.md#models).

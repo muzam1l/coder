@@ -960,6 +960,25 @@ export function buildCodexMcpOverrides(
   return Object.keys(configured).length ? { mcp_servers: configured } : {};
 }
 
+/** The thread's developer instructions, then each `alwaysLoad` server's instructions, which Codex shows only after a call. */
+export function codexDeveloperInstructions({
+  developerInstructions,
+  mcpServers = [],
+}: Pick<RunTurnOptions, 'developerInstructions' | 'mcpServers'>): string | undefined {
+  return (
+    [
+      developerInstructions,
+      ...mcpServers.flatMap(({ alwaysLoad, instructions, name }) =>
+        alwaysLoad && instructions
+          ? [`<mcp-instructions server="${name}">\n${instructions}\n</mcp-instructions>`]
+          : [],
+      ),
+    ]
+      .filter(Boolean)
+      .join('\n\n') || undefined
+  );
+}
+
 function cleanCodexStderr(stderr: string) {
   return stderr
     .split(/\r?\n/)
@@ -1023,9 +1042,8 @@ export async function threadTurn(
     'features.shell_snapshot': false,
   };
 
-  const developer = options.developerInstructions
-    ? { developerInstructions: options.developerInstructions }
-    : {};
+  const developerInstructions = codexDeveloperInstructions(options);
+  const developer = developerInstructions ? { developerInstructions } : {};
   let resumed: { thread: { id: string } } | undefined;
   if (options.resumeThreadId) {
     emitProgress(options.onProgress, `Resuming thread ${options.resumeThreadId}.`, 'starting', {

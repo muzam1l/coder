@@ -11,6 +11,7 @@ import { decryptSecret, encryptSecret } from '../store/secrets';
 import { InstallationBoundError, type Store } from '../store/types';
 import { checkBinding } from '../store/memory';
 import { type AgentApp, type Installation } from '../../agent/types';
+import { effectiveSettings } from '../../agent/definition';
 import { type Integration, IntegrationError } from '../../integrations/types';
 import { consumeNonce, inspectNonce, issueNonce, nonceOrganization } from '../auth/nonce';
 import { memberOf } from '../auth/members';
@@ -18,7 +19,7 @@ import { linkedOrganizations } from '../context';
 import { encodeJson } from '../../utils/crypto';
 import { agentWithVersion } from './records';
 import { welcomePage } from './pages';
-import { credentialFix, resolveEngine } from '../settings/credentials';
+import { credentialFix, modelAttempts, resolveModels } from '../settings/credentials';
 import { decodeParam, redirect } from '../routes/http';
 
 /** Write an installation under its lock from its current value; the same app's own installations of accounts it now covers are retired. */
@@ -309,20 +310,18 @@ async function greet(
       import('../chat'),
       agentWithVersion(ctx.store, app.agent),
     ]);
-    const { engine, usable } = await resolveEngine(
+    const { models, first } = await resolveModels(
       ctx,
-      {
-        engine: record?.settings?.engine ?? version?.definition.engine,
-        model: record?.settings?.model ?? version?.definition.model,
-      },
+      effectiveSettings({ definition: version?.definition, usage: record?.settings }),
       ctx.session?.user.id,
     );
+    const usable = modelAttempts(models).length > 0;
     const target = { id: installationId };
     const adapter = adapterContext(ctx, integration, app, credentials, target);
     const open = `${ctx.config.publicUrl!.replace(/\/$/, '')}${platformsPath(ctx, app.agent)}`;
     const page = welcomePage(integration, app.name, await agentSummary(ctx, app, target), {
       open,
-      ...(usable ? {} : { setup: await credentialFix(ctx, engine) }),
+      ...(usable ? {} : { setup: await credentialFix(ctx, first.engine) }),
     });
     await integration.messages!.direct!(adapter, installer, page);
   } catch (error) {

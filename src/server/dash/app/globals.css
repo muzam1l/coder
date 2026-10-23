@@ -25,6 +25,8 @@
   --bg: light-dark(#ffffff, #0b0c10);
   --panel: light-dark(#f8f7f8, #13141a);
   --tile: light-dark(#f4f4f5, #16171c);
+  /* a filled card's surface: no border, so it stands further off the page */
+  --surface: light-dark(#f2f2f2, #1b1c1f);
   --fg: light-dark(#000000, #ffffff);
   --muted: light-dark(#4f5664, #a9b0bd);
   --dim: light-dark(#7a808b, #7c828e);
@@ -189,14 +191,13 @@ th,
   gap: 12px;
   min-height: 40px;
   padding: 6px 14px;
-  border-bottom: 1px solid var(--line);
 }
 .bar h2 {
   flex: 1;
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 10.5px;
+  font-size: 12px;
   font-weight: 500;
 }
 .n {
@@ -208,6 +209,11 @@ th,
 }
 .body {
   padding: 16px;
+}
+/* a card's first line of text sits right under its title */
+.bar + .body,
+.bar + * > .body:first-child {
+  padding-top: 0;
 }
 .body:not(dl) > * + * {
   margin-top: 12px;
@@ -248,6 +254,9 @@ main {
   display: flex;
   flex-direction: column;
   gap: 20px;
+}
+.settings-body {
+  gap: 36px;
 }
 .page {
   width: 100%;
@@ -593,4 +602,39 @@ pnext-hole {
 }
 .add-grid > .field:has(> .select) {
   flex: 0 0 auto;
+}
+
+/* an on/off checkbox */
+input.switch {
+  appearance: none;
+  position: relative;
+  flex: none;
+  width: 30px;
+  height: 18px;
+  margin: 0;
+  border: 1px solid var(--line2);
+  background: var(--wash2);
+  cursor: pointer;
+}
+input.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background: var(--muted);
+  transition: transform 0.15s;
+}
+input.switch:checked {
+  border-color: var(--deep);
+  background: var(--deep);
+}
+input.switch:checked::after {
+  transform: translateX(12px);
+  background: #fff;
+}
+input.switch:focus-visible {
+  outline: 2px solid var(--acc);
+  outline-offset: 2px;
 }

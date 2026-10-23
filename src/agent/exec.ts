@@ -7,14 +7,15 @@ import type { Message, Thread } from 'chat';
 
 import { resolveFlow } from '../flow/discover';
 import { runFlowByName } from '../flow/executor';
-import { loadConfig, type Access } from '../core/config';
+import { loadConfig, splitEngineSpec, type Access } from '../core/config';
 import {
   CoderError,
   dispatchTask,
+  modelList,
   selectMcpServers,
   resolveTaskOptions,
   waitTask,
-  turnFallbackEngine,
+  turnMayFallBack,
   type DispatchOptions,
   type TaskResult,
 } from '../core/dispatch';
@@ -27,9 +28,10 @@ import {
   resolveTaskDir,
   generateTaskId,
   writeTask,
+  formatEngineSpec,
   type TurnResultEntry,
 } from '../core/state';
-import type { McpServerSpec, Task } from '../core/types';
+import type { McpServerSpec, ResolvedTaskOptions, Task } from '../core/types';
 import type { Integration } from '../integrations/types';
 import type { Replies } from '../server/tasks/events';
 import {
@@ -40,12 +42,13 @@ import {
 } from './definition';
 import { loadAgents } from './load';
 import { INTEGRATIONS } from '../integrations';
-import { nativeToolEnvironment, taskPlatforms, tokenEnvName, type ReplyEndpoint } from './mcp';
+import { nativeToolEnvironment, tokenEnvName, type ReplyEndpoint } from './mcp';
 import { replyRequired } from './event-json';
 import {
   type Agent,
   type AgentEvent,
   type AgentTask,
+  type ModelAttempt,
   type TaskContext,
   type TaskSource,
 } from './types';
@@ -54,17 +57,20 @@ import type { AgentPromptParts, DeveloperParts } from '../core/task/context/syst
 import { connectionEnvironment, localConnections, narrowConnections } from '../core/connections';
 import { readJsonFile, writeJsonFileAtomic } from '../utils/fsx';
 
+/** A model spec's name as people read it, such as `sol` for `codex/sol/medium`. */
+const modelName = (spec: string) => splitEngineSpec(spec).model ?? spec;
+
 /** Names the local engine task an agent task runs on, so listings can tell them apart. */
 export const AGENT_TASK_PREFIX = 'agent:';
 
 /** A task for a local `--event` run: the event integration's tools only. */
-export function taskFromEvent(agent: Agent, flow: string, event: AgentEvent): AgentTask {
+export function taskFromEvent(agent: Agent, event: AgentEvent): AgentTask {
   const integration = INTEGRATIONS[event.integration];
   return {
     id: `local-${event.deliveryId}-${agent.id}`,
     source: event.integration as TaskSource,
     agent: agent.id,
-    flow,
+    flow: 'default',
     runner: 'local',
     event,
     definition: agent.definition,
@@ -334,8 +340,11 @@ export async function execAgent(options: {
   onTask?: (taskId: string, turn?: number) => void | Promise<void>;
   onWorker?: DispatchOptions['onWorker'];
   availability?: DispatchOptions['availability'];
-  onEngine?: (engine: string) => Promise<boolean | void>;
+  /** Before each attempt of the turn: false skips it, as a runner without its credential does. */
+  onModel?: (attempt: ModelAttempt) => Promise<boolean | void>;
   onStart?: import('../flow/runtime').FlowHooks['onStart'];
+  /** A flow's credentials for each model its steps try, as a runner gives them. */
+  onFlowModel?: import('../flow/runtime').FlowHooks['onModel'];
   /** Secrets passed only to task-core MCP children, never inherited by the engine. */
   toolEnvironment?: { tokens: Record<string, string> };
   /** Where the conversation tools post, when the caller posts replies for the task. */
@@ -388,13 +397,6 @@ export async function execAgent(options: {
       : undefined;
     void prepared?.catch(() => {});
     const defaults = defaultTask(agent, task);
-    const resumedEngine = options.resumeTaskId && loadTaskRecord(cwd, options.resumeTaskId)?.engine;
-    let resolved = resolveTaskOptions(
-      resumedEngine && resumedEngine !== effectiveSettings(agent).engine
-        ? { engine: resumedEngine }
-        : effectiveSettings(agent),
-      config,
-    );
     const selectedMcp = selectMcpServers(
       task.mcp?.join(','),
       config.mcp,
@@ -407,28 +409,34 @@ export async function execAgent(options: {
       (options.resumeTaskId ? readTurnResults(cwd, options.resumeTaskId).length : 0);
     let worker: ChildProcess | undefined;
     const engineTaskId = options.resumeTaskId ?? options.taskId ?? generateTaskId();
-    const chain = task.engineChain ?? [resolved.engine];
-    let index = Math.max(0, chain.indexOf(resolved.engine));
+    // A server task brings its attempts; a local one runs its model list on this machine's logins.
+    const attempts: ModelAttempt[] =
+      task.models ??
+      modelList(config, resolveTaskOptions(effectiveSettings(agent), config)).map(option => ({
+        model: formatEngineSpec(option),
+      }));
+    const resumed = options.resumeTaskId ? loadTaskRecord(cwd, options.resumeTaskId) : undefined;
+    let index = Math.max(
+      0,
+      attempts.findIndex(attempt => resumed && formatEngineSpec(resumed) === attempt.model),
+    );
+    const fallbacks: NonNullable<Task['fallbacks']> = [...(resumed?.fallbacks ?? [])];
     let retry = false;
-    for (const engine of chain.slice(0, index))
-      appendTaskLog(cwd, engineTaskId, {
-        kind: 'warning',
-        message: `${engine} skipped because no applicable credential is connected`,
-      });
     let dispatched!: { taskId: string };
     let completed!: TaskResult;
     for (;;) {
-      const engine = chain[index]!;
-      resolved = resolveTaskOptions(
-        retry ? { engine } : { ...effectiveSettings(agent), engine },
-        config,
-      );
+      const attempt = attempts[index]!;
+      let resolved: ResolvedTaskOptions | undefined;
       let startupFailure = false;
       try {
-        if ((await options.onEngine?.(engine)) === false)
+        resolved = resolveTaskOptions(
+          { model: attempt.model, access: agentAccess(agent, task.access) },
+          config,
+        );
+        if ((await options.onModel?.(attempt)) === false)
           throw new CoderError(
             'chain-exhausted',
-            `No applicable credential is connected for ${engine}`,
+            `No applicable credential is connected for ${attempt.model}`,
           );
         if (retry)
           writeTask(cwd, engineTaskId, {
@@ -468,19 +476,14 @@ export async function execAgent(options: {
                   : { name: `${AGENT_TASK_PREFIX}${task.id}`, source: task.source }),
                 appendSystem: task.appendSystem,
                 addDirs: task.addDirs,
-                engine: resolved.engine,
-                model: resolved.model ?? undefined,
-                effort: resolved.effort ?? undefined,
-                access: agentAccess(agent, task.access),
+                access: resolved.access,
                 agentPrompt: defaults.agentPrompt,
                 prompt: defaults.prompt,
                 outputSchema: task.context?.outputSchema,
                 ...(task.context?.approvals ? { approvals: task.context.approvals } : {}),
                 wait: true,
               },
-              task.engineChain
-                ? { config: { ...config, chain: [resolved.engine] }, waitForStartup: false }
-                : {},
+              { config, models: [resolved], waitForStartup: false },
             );
         await options.onTask?.(dispatched.taskId, first);
         completed = await waitForAgentTask(
@@ -490,13 +493,16 @@ export async function execAgent(options: {
           (cwd, id, opts) => waitTask(cwd, id, { ...opts, turn: first, worker }),
         );
       } catch (error) {
-        if (!task.engineChain || !(error instanceof CoderError) || error.code !== 'chain-exhausted')
+        if (resolved && !(error instanceof CoderError && error.code === 'chain-exhausted'))
           throw error;
         startupFailure = true;
-        const detail = error.payload?.error ?? error.message;
+        const detail =
+          error instanceof CoderError
+            ? (error.payload?.error ?? error.message)
+            : String((error as Error).message ?? error);
         const record = writeTask(cwd, engineTaskId, {
           status: 'failed',
-          engine: resolved.engine,
+          engine: resolved?.engine,
           prompt: defaults.prompt,
           error: detail,
           pid: null,
@@ -518,17 +524,20 @@ export async function execAgent(options: {
           steps: [],
         };
       }
-      const next = startupFailure
-        ? (chain[index + 1] ?? null)
-        : task.engineChain
-          ? turnFallbackEngine(cwd, completed, { ...config, chain: chain as typeof config.chain })
-          : undefined;
-      if (next !== undefined)
+      const next = startupFailure || turnMayFallBack(cwd, completed) ? attempts[index + 1] : undefined;
+      if (startupFailure || next) {
+        const detail = completed.result?.error?.message ?? 'the engine could not start';
+        const name = modelName(attempt.model);
         appendTaskLog(cwd, engineTaskId, {
           kind: 'warning',
-          message: `${resolved.engine} skipped because ${completed.result?.error?.message ?? 'the engine could not start'}`,
+          message: `${name} skipped because ${detail}`,
         });
-      if (next === undefined || next === null) break;
+        if (next) {
+          fallbacks.push({ model: attempt.model, detail, next: next.model });
+          writeTask(cwd, engineTaskId, { fallbacks });
+        }
+      }
+      if (!next) break;
       first = readTurnResults(cwd, dispatched.taskId).length;
       if (worker)
         await new Promise<void>(resolve => {
@@ -583,7 +592,7 @@ export async function execAgent(options: {
   const args =
     resolved.scope === 'builtin'
       ? {
-          ...(await builtinTaskArgs(task, agent, options.post !== false)),
+          ...(await builtinTaskArgs(task, agent)),
           cwd,
           ...task.args,
         }
@@ -611,6 +620,7 @@ export async function execAgent(options: {
           }
         : {}),
       ...(options.onStart ? { onStart: options.onStart } : {}),
+      ...(options.onFlowModel ? { onModel: options.onFlowModel } : {}),
     },
   );
   return {
@@ -656,11 +666,10 @@ export async function waitForAgentTask(
 export async function builtinTaskArgs(
   task: AgentTask,
   agent: Agent,
-  post = true,
 ): Promise<Record<string, unknown>> {
   if (!task.event) throw new Error('built-in flows need a GitHub pull request event');
   return {
-    ...(await builtinArgs(task.event, agent, task.context, task.author, post)),
+    ...builtinArgs(task.event, task.author),
     ...effectiveSettings(agent),
     ...(task.access ? { access: task.access } : {}),
   };
@@ -683,22 +692,15 @@ async function loadTask(
   const event = JSON.parse(
     await fs.readFile(path.resolve(cwd, options.eventFile), 'utf8'),
   ) as AgentEvent;
-  return taskFromEvent(agent, flow, event);
+  return taskFromEvent(agent, event);
 }
 
-/** Built-in flow args from an agent event: the pull request its integration names becomes `{ pr, post }`. */
-export function builtinArgs(
-  event: AgentEvent,
-  agent: Agent,
-  context?: TaskContext,
-  author?: string,
-  post = true,
-): Record<string, unknown> {
+/** Built-in flow args from a task's repository event: the pull request its integration names becomes `{ pr }`. */
+export function builtinArgs(event: AgentEvent, author?: string): Record<string, unknown> {
   const pr = INTEGRATIONS[event.integration]?.repos?.pullRequest(event);
   if (!pr) throw new Error('built-in flows need a pull request event');
   return {
     pr,
-    post,
     ...(author ? { author } : {}),
   };
 }
@@ -758,9 +760,7 @@ export async function agentTaskOptions(
   const mcp = selectMcpServers(mcpFlag, loadConfig(cwd).mcp, own, connections ?? connected?.mcp);
 
   return {
-    engine: usage?.engine ?? definition.engine,
-    model: usage?.model ?? definition.model,
-    effort: usage?.effort ?? definition.effort,
+    ...effectiveSettings({ definition, usage }),
     access,
     developer: agentDeveloperInstructions(agent),
     ...mcp,
@@ -831,7 +831,6 @@ export function defaultTask(
   const conversation = isConversation(task);
   const user = task.prompt === undefined ? context?.user : undefined;
   const integration = event && INTEGRATIONS[event.integration];
-  const platforms = taskPlatforms(task);
   const turn =
     task.prompt === undefined
       ? event
@@ -852,7 +851,6 @@ export function defaultTask(
           }
         : {}),
       access: agentAccess(agent, task.access),
-      ...(platforms.length ? { platforms } : {}),
     },
     prompt: historyPrompt(context?.messages ?? [], decisionsPrompt(context, turn)),
   };

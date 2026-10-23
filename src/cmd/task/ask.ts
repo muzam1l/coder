@@ -2,7 +2,7 @@
 import process from 'node:process';
 
 import { outStyle } from '../../tui/output';
-import { serverOptions, str, strList } from '../../utils/args';
+import { modelOption, serverOptions, str, strList } from '../../utils/args';
 import { command } from '../../cli';
 import { idAndText } from './steer';
 
@@ -15,8 +15,7 @@ export const commandAsk = command({
   args: {
     'task-id': str('the task to ask about'),
     question: strList('the question'),
-    model: str("sidecar model (default: the task's own)", '<alias|slug>'),
-    effort: str('sidecar reasoning effort', '<low|medium|high>'),
+    model: modelOption("for the sidecar (default: the task's own)"),
     ...serverOptions,
   },
   cli: {

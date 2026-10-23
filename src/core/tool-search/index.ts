@@ -1,10 +1,8 @@
 /** Tool search: a turn's MCP servers behind find_tools and call_tool, each connected at start or on first use; a connection's token loads with its first use. */
 import process from 'node:process';
 
-import { defineApp, defineCommand } from 'contextjsx';
-import * as z from 'zod/mini';
+import { instructions as served } from 'contextjsx/emit';
 
-import { arg, str } from '../utils/args';
 import {
   ConnectionRefused,
   connectionRevoked,
@@ -13,16 +11,15 @@ import {
   type McpClient,
   type McpServerInfo,
   type McpToolInfo,
-} from './connections';
-import { redactConnectionSecrets } from './connection-env';
-import type { McpServerSpec } from './types';
-import { tokenFingerprint } from './oauth';
+} from '../connections';
+import { redactConnectionSecrets } from '../connection-env';
+import type { McpServerSpec } from '../types';
+import { tokenFingerprint } from '../oauth';
+import { serverScope, toolSearchApp, type CallArgs, type FindArgs } from './context';
 
-/** The system prompt's line on how to reach the listed servers. */
-export const TOOL_SEARCH_PROMPT =
-  'Find their tools with find_tools and call them with call_tool; name the server. find_tools with only a server returns its instructions and tool names.';
+export { searchInstructions, type ListedServer } from './context';
 
-/** The turn's resolved servers and reconnect link as JSON, in the search server's own spawn env. */
+/** The turn's resolved servers, instructions and reconnect link as JSON, in the search server's own spawn env. */
 const TOOL_SEARCH_ENV = 'CODER_TOOL_SEARCH';
 
 /** Matches past this many get names only, so one answer stays small. */
@@ -61,7 +58,13 @@ export async function connect(spec: McpServerSpec, startupMs = 60_000): Promise<
         (!spec.readOnly || tool.annotations?.readOnlyHint === true),
     );
 
-    return { spec, client, instructions: instructions || spec.instructions, serverInfo, tools };
+    return {
+      spec,
+      client,
+      instructions: [spec.instructions, instructions].filter(Boolean).join('\n\n') || undefined,
+      serverInfo,
+      tools,
+    };
   } catch (error) {
     await client.close().catch(() => {});
     throw late(error);
@@ -86,10 +89,13 @@ export function searchApp(
   servers: McpServerSpec[],
   {
     open = connect,
+    instructions,
     reconnect,
     credential,
   }: {
     open?: (spec: McpServerSpec) => Promise<Connected>;
+    /** The turn's servers by level, rendered by the worker (`searchInstructions`). */
+    instructions?: string;
     /** Where a server that needs auth is reconnected. */
     reconnect?: string;
     credential?: CredentialSource;
@@ -130,7 +136,10 @@ export function searchApp(
     const spec = specs.get(name);
     if (!spec)
       throw new Error(
-        `Unknown server "${name}". Servers: ${[...specs.keys()].join(', ') || 'none'}`,
+        [
+          `Unknown server "${name}". Servers: ${[...specs.keys()].join(', ') || 'none'}.`,
+          'Tools that are not on these servers are called directly by their own name.',
+        ].join(' '),
       );
     let connected = connections.get(spec.name);
     if (!connected) {
@@ -158,8 +167,9 @@ export function searchApp(
   /** A server's status and, once connected, its instructions and every tool name. */
   const status = (name: string) =>
     server(name).then(
-      ({ instructions, tools, refused }) => ({
+      ({ spec, instructions, tools, refused }) => ({
         ...(refused ? needsAuth(name) : { server: name, status: 'connected' as const }),
+        ...(serverScope(spec) ? { scope: serverScope(spec) } : {}),
         ...(instructions ? { instructions } : {}),
         names: toolNames(tools),
       }),
@@ -176,85 +186,54 @@ export function searchApp(
       },
     );
   for (const spec of servers) if (spec.connect === 'start') server(spec.name).catch(() => {});
-  const serverArg = arg(z.string(), 'A server name from the prompt.');
+  const find = (args: FindArgs) =>
+    redacted(async () => {
+      const header = await status(args.server);
+      if (!('names' in header)) return header;
+      const first = !introduced.has(args.server);
+      introduced.add(args.server);
+      if (!args.query?.trim()) return header;
+      const { tools } = await server(args.server);
+      const found = matching(tools, args.query);
+      if (!found.length && !first)
+        return `No tool on ${args.server} matches. Its tools: ${toolNames(tools)}`;
+      const rest = found.slice(SCHEMA_LIMIT);
 
-  return defineApp({
-    name: 'tools',
-    description: "The turn's MCP servers, searched on demand.",
-    commands: [
-      defineCommand({
-        name: 'find_tools',
-        description:
-          'Find tools on a server listed in your prompt. With only the server: its instructions, every tool name and its status. With a query: up to 5 tools whose name or description contains every word, each with its name, one line and input schema, then the names of the rest. An exact tool name returns its schema. The first call on a server also returns its instructions, tool names and status. A needs-auth status comes with a reconnect link: give it to the person in your reply and carry on with what you can.',
-        args: {
-          server: serverArg,
-          query: str(
-            'Words in the tool name or description, such as "issue list". Leave it out to get the server\'s instructions, tool names and status.',
-          ),
-        },
-        access: 'read',
-        run: args =>
-          redacted(async () => {
-            const header = await status(args.server);
-            if (!('names' in header)) return header;
-            const first = !introduced.has(args.server);
-            introduced.add(args.server);
-            if (!args.query?.trim()) return header;
-            const { tools } = await server(args.server);
-            const found = matching(tools, args.query);
-            if (!found.length && !first)
-              return `No tool on ${args.server} matches. Its tools: ${toolNames(tools)}`;
-            const rest = found.slice(SCHEMA_LIMIT);
+      return {
+        ...(first ? header : {}),
+        tools: found.slice(0, SCHEMA_LIMIT).map(tool => ({
+          name: tool.name,
+          description: (tool.description ?? '').split('\n')[0]!.trim(),
+          inputSchema: tool.inputSchema ?? { type: 'object' },
+        })),
+        ...(rest.length ? { more: toolNames(rest) } : {}),
+      };
+    });
+  const call = (args: CallArgs) =>
+    redacted(async () => {
+      const header = await status(args.server);
+      if (!('names' in header)) throw new Error(JSON.stringify(header));
+      const { spec, client, tools } = await server(args.server);
+      if (!tools.some(tool => tool.name === args.tool))
+        throw new Error(
+          spec.readOnly
+            ? `This task is read-only; "${args.tool}" is not a read-only tool on ${spec.name}.`
+            : `No tool "${args.tool}" on ${spec.name}; find it with find_tools first`,
+        );
 
-            return {
-              ...(first ? header : {}),
-              tools: found.slice(0, SCHEMA_LIMIT).map(tool => ({
-                name: tool.name,
-                description: (tool.description ?? '').split('\n')[0]!.trim(),
-                inputSchema: tool.inputSchema ?? { type: 'object' },
-              })),
-              ...(rest.length ? { more: toolNames(rest) } : {}),
-            };
-          }),
-      }),
-      defineCommand({
-        name: 'call_tool',
-        description: "Call a tool found with find_tools. Returns the server's result as is.",
-        args: {
-          server: serverArg,
-          tool: arg(z.string(), 'A tool name find_tools returned.'),
-          args: arg(
-            z.optional(z.record(z.string(), z.unknown())),
-            "The tool's arguments, matching its input schema.",
-          ),
-        },
-        access: 'write',
-        run: args =>
-          redacted(async () => {
-            const header = await status(args.server);
-            if (!('names' in header)) throw new Error(JSON.stringify(header));
-            const { spec, client, tools } = await server(args.server);
-            if (!tools.some(tool => tool.name === args.tool))
-              throw new Error(
-                spec.readOnly
-                  ? `This task is read-only; "${args.tool}" is not a read-only tool on ${spec.name}.`
-                  : `No tool "${args.tool}" on ${spec.name}; find it with find_tools first`,
-              );
+      try {
+        return (await client.call(args.tool, args.args ?? {})) ?? null;
+      } catch (error) {
+        if (!connectionRevoked(error)) throw error;
+        // A token refused mid-turn: the next call connects again and reports its status.
+        await report(args.server, error);
+        connections.delete(args.server);
+        await client.close().catch(() => {});
+        throw new Error(JSON.stringify(needsAuth(args.server)));
+      }
+    });
 
-            try {
-              return (await client.call(args.tool, args.args ?? {})) ?? null;
-            } catch (error) {
-              if (!connectionRevoked(error)) throw error;
-              // A token refused mid-turn: the next call connects again and reports its status.
-              await report(args.server, error);
-              connections.delete(args.server);
-              await client.close().catch(() => {});
-              throw new Error(JSON.stringify(needsAuth(args.server)));
-            }
-          }),
-      }),
-    ],
-  });
+  return toolSearchApp({ find, call }, instructions);
 }
 
 /** The task's callback endpoint and attempt token, which the search reports refused credentials to. */
@@ -263,9 +242,10 @@ export interface SearchEndpoint {
   token: string;
 }
 
-/** The turn's servers, reconnect link and callback endpoint from the search server's env. */
+/** The turn's servers, instructions, reconnect link and callback endpoint from the search server's env. */
 export function searchServers(value: string | undefined): {
   servers: McpServerSpec[];
+  instructions?: string;
   reconnect?: string;
   endpoint?: SearchEndpoint;
 } {
@@ -274,20 +254,25 @@ export function searchServers(value: string | undefined): {
   return JSON.parse(value);
 }
 
-/** The search's launch: how to start it, with the servers it fronts, the reconnect link and the callback endpoint in its env. */
+/** The search's launch: how to start it, with the servers it fronts, its instructions, the reconnect link and the callback endpoint in its env; the spec carries the instructions it serves. */
 export function toolSearchServer(
   launch: Pick<McpServerSpec, 'command' | 'args' | 'env'>,
   servers: McpServerSpec[],
   reconnect: string | undefined,
   endpoint?: SearchEndpoint,
+  instructions?: string,
 ): McpServerSpec {
-  const app = searchApp([]);
+  const app = searchApp([], { instructions });
 
   return {
     name: app.name,
     ...launch,
-    env: { ...launch.env, [TOOL_SEARCH_ENV]: JSON.stringify({ servers, reconnect, endpoint }) },
+    env: {
+      ...launch.env,
+      [TOOL_SEARCH_ENV]: JSON.stringify({ servers, instructions, reconnect, endpoint }),
+    },
     tools: app.commands.filter(command => command.mcp !== false).map(command => command.name),
+    instructions: served(app),
   };
 }
 
@@ -299,13 +284,16 @@ export async function serveToolSearch(
   } = {},
 ): Promise<void> {
   const { serve } = await import('contextjsx/serve');
-  const { servers, reconnect, endpoint } = searchServers(process.env[TOOL_SEARCH_ENV]);
+  const { servers, instructions, reconnect, endpoint } = searchServers(
+    process.env[TOOL_SEARCH_ENV],
+  );
   // The servers it spawns get only their own secrets.
   delete process.env[TOOL_SEARCH_ENV];
 
   await (
     await serve(
       searchApp(servers, {
+        instructions,
         reconnect,
         ...(endpoint && options.credential
           ? { credential: options.credential(endpoint) }

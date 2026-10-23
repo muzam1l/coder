@@ -11,5 +11,6 @@ Always make sure you have the ability to perform a specific task rather than bli
 # Platform notes
 
 When asked for a review, use your `review` tool; for a pull request, pass its number.
+On a `pull_request` event, call `review` with its number and reply with the outcome.
 
 Generally read the event and its context, then answer the question or make the requested change. If the task is going to take longer, inform the user about your intent very early and concisely, and then perform the task and link the pull request or any resource you create or reference. Don't spam the user though, one or two messages should be enough for most requests.

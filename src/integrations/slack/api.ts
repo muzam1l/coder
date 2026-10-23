@@ -241,6 +241,9 @@ export const SLACK_PRESETS: Record<Access, string[]> = {
 export const SLACK_MCP_SERVER_INSTALL =
   'set -eu; arch=$(uname -m); case "$arch" in x86_64) arch=amd64; checksum=d1525962e9b9dbfdd2eaf48d0a81ca1eca7d8f1862b8d34931b812c850b3e568;; aarch64|arm64) arch=arm64; checksum=a307a48d16c2261346bdc257274cdcdb8b2027c867dc971b41d52cef36472c88;; *) exit 1;; esac; file=$(mktemp); trap \'rm -f "$file"\' EXIT; curl -fsSL "https://github.com/korotovsky/slack-mcp-server/releases/download/v1.3.0/slack-mcp-server-linux-$arch" -o "$file"; echo "$checksum  $file" | sha256sum -c -; install -m 755 "$file" /usr/local/bin/slack-mcp-server';
 
+/** What a user's own Slack connection reaches. */
+export const SLACK_USER_DESCRIPTION = "On the user's token; searches and reads everything the user can see.";
+
 export function slackToolServer(
   tools: string[],
   _event: PlatformEvent | undefined,
@@ -256,6 +259,7 @@ export function slackToolServer(
       headers: { Authorization: `Bearer ${token}` },
       credentialFields: { header: 'Authorization' },
       readOnly,
+      description: SLACK_USER_DESCRIPTION,
     };
   const cache = `/tmp/coder-slack-${randomUUID()}`;
 
@@ -263,8 +267,14 @@ export function slackToolServer(
     name: 'slack',
     command: 'slack-mcp-server',
     readOnly,
-    instructions:
-      "Read: channels_list lists channels; conversations_history reads a channel's messages, conversations_replies a thread's by its thread_ts; conversations_search_messages searches messages. A channel_id is an id such as C0123, #channel-name, or @user for a DM. Write, when allowed: conversations_add_message posts to a channel or thread; the reaction tools add or remove an emoji reaction.",
+    description: 'On the bot token; reads the channels the bot is in and has no search.',
+    instructions: [
+      'Read: channels_list lists channels;',
+      "conversations_history reads a channel's or DM's messages, including messages older than the conversation history the task's history tool returns;",
+      "conversations_replies reads a thread's by its thread_ts.",
+      'A channel_id is an id such as C0123, #channel-name, or @user for a DM.',
+      'Write, when allowed: conversations_add_message posts to a channel or thread; the reaction tools add or remove an emoji reaction.',
+    ].join(' '),
     args: ['--transport', 'stdio'],
     env: {
       SLACK_MCP_XOXB_TOKEN: token,

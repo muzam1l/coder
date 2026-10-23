@@ -39,12 +39,9 @@ export const slack: Integration = {
   sample: 'slack:C0000000000:1700000000.000100',
   prompt: [
     'A conversation is a Slack thread, or a whole 1:1 DM. A group DM works like a channel.',
-    'conversations_replies reads a thread; conversations_history reads a channel or DM, including messages older than your history.',
-    'As the app, Slack tools read the channels the agent is in and post as the bot, without search. As the person, their own Slack connection searches messages and reads what they can see, once they approve.',
     'Replies render as Slack Markdown: headings, lists, tables, code blocks, quotes. Mention a person as <@USER_ID>.',
     'Link pull requests and issues by full URL; a bare number like #123 renders only on GitHub.',
   ].join('\n'),
-  reach: account => `Slack workspace ${account}`,
   // `markdown_text` holds at most 12,000 characters (chat.postMessage).
   replyLimit: 12_000,
   events: {

@@ -11,7 +11,7 @@ import { Button, IconButton } from '@/comps/ui/button';
 import { Select } from '@/comps/ui/select';
 import { Row } from './list';
 import type { ConnectionRow } from '@coder/client/types';
-import { CONNECTION_SCOPES } from '@/app/dash/[org]/settings/model-options';
+import { SCOPES } from '@/app/dash/[org]/settings/model-options';
 
 /** Secrets tasks read as environment variables; Enter adds one, and a broken one takes a new value in place. */
 export function TaskSecrets({
@@ -25,12 +25,13 @@ export function TaskSecrets({
 }) {
   const [rows, setRows] = useState(first);
   const [adding, setAdding] = useState(false);
-  const [scope, setScope] = useState(admin || local ? '' : 'me');
+  const [scope, setScope] = useState(admin || local ? 'workspace' : 'personal');
   const [renewing, setRenewing] = useState('');
   const action = useAction();
   const busy = Boolean(action.pending);
 
   const open = adding || !rows.length;
+  const manages = (row: ConnectionRow) => (row.owner ? row.asker : admin);
   const put = (row: ConnectionRow) =>
     setRows(now =>
       now.some(each => each.id === row.id)
@@ -39,7 +40,7 @@ export function TaskSecrets({
     );
 
   return (
-    <Card
+    <Card look="filled"
       title="Task secrets"
       count={rows.length || undefined}
       actions={
@@ -61,12 +62,20 @@ export function TaskSecrets({
                   title={row.env ?? row.name}
                   badges={
                     <>
-                      <Badge>{row.owner ? (row.mine ? 'personal' : 'member') : 'workspace'}</Badge>
-                      {row.status === 'ok' ? null : <Badge tone="warn">needs a new value</Badge>}
+                      <Badge>
+                        {row.owner
+                          ? row.asker
+                            ? 'personal'
+                            : (row.owner.name ?? 'member')
+                          : 'workspace'}
+                      </Badge>
+                      {row.status === 'connected' ? null : (
+                        <Badge tone="warn">needs a new value</Badge>
+                      )}
                     </>
                   }
                   actions={
-                    renewing === row.id ? (
+                    !manages(row) ? null : renewing === row.id ? (
                       <form
                         class="cred-add"
                         method="post"
@@ -95,21 +104,25 @@ export function TaskSecrets({
                       </form>
                     ) : (
                       <Button variant="ghost" size="sm" onClick={() => setRenewing(row.id)}>
-                        {row.status === 'ok' ? 'Replace' : 'Reconnect'}
+                        {row.status === 'connected' ? 'Replace' : 'Reconnect'}
                       </Button>
                     )
                   }
-                  remove={{
-                    title: `Remove ${row.env ?? row.name}?`,
-                    body: 'Tasks stop getting it, and its value is deleted.',
-                    onRemove: () =>
-                      client.connections
-                        .remove(row.id)
-                        .then(
-                          () => setRows(now => now.filter(each => each.id !== row.id)),
-                          toastFailure,
-                        ),
-                  }}
+                  remove={
+                    manages(row)
+                      ? {
+                          title: `Remove ${row.env ?? row.name}?`,
+                          body: 'Tasks stop getting it, and its value is deleted.',
+                          onRemove: () =>
+                            client.connections
+                              .remove(row.id)
+                              .then(
+                                () => setRows(now => now.filter(each => each.id !== row.id)),
+                                toastFailure,
+                              ),
+                        }
+                      : undefined
+                  }
                 />
               ))}
             </tbody>
@@ -136,7 +149,7 @@ export function TaskSecrets({
                         provider: 'env',
                         key,
                         keyIn: { env },
-                        ...(scope ? { owner: 'me' as const } : {}),
+                        ...(scope === 'personal' ? { scope: 'personal' as const } : {}),
                       }),
                     );
                     box.reset();
@@ -168,7 +181,7 @@ export function TaskSecrets({
               {admin && !local ? (
                 <Select
                   label="Who can use this secret"
-                  options={CONNECTION_SCOPES}
+                  options={SCOPES}
                   value={scope}
                   onChange={setScope}
                 />

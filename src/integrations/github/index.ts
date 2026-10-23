@@ -46,12 +46,10 @@ export const github: Integration = {
   publicApps: true,
   prompt: [
     'A conversation is an issue or pull request with its comments, or one inline review thread.',
-    'issue_read reads an issue with its comments. pull_request_read reads a pull request: get, get_diff, get_files, get_comments, get_reviews, get_review_comments.',
     "The repository is checked out on its default branch. Push to a pull request's branch only when it lives in this repository and changes were asked for; fork pull requests get reads and comments only.",
     'Replies are GitHub Markdown; cite file paths; link a pull request after changing it.',
     'The review tool posts findings as inline review comments marked coder-review:fp.',
   ].join('\n'),
-  reach: account => `GitHub, repositories under ${account}`,
   sample: 'github:owner/repo:1',
   author: name => `${name}[bot]`,
   events: {

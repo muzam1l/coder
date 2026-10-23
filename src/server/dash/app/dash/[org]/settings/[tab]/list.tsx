@@ -13,7 +13,7 @@ import { mergePatch } from '@coder/core/types';
 
 import { iDots, iPlus } from '@/comps/ui/icons';
 import { Button } from '@/comps/ui/button';
-import { Card } from '@/comps/ui/card';
+import { Card, type CardLook } from '@/comps/ui/card';
 import { Icon } from '@/comps/ui/icon';
 import { Menu } from '@/comps/ui/menu';
 import { MenuItem } from '@/comps/ui/menu-items';
@@ -85,6 +85,8 @@ type Removal = {
   title: string;
   body?: string;
   label?: string;
+  /** Its menu item's icon, for a menu whose other items have icons too. */
+  icon?: string;
   /** What a chat's delete link names in `?delete=`, which opens this dialog. */
   link?: string;
   onRemove: () => Promise<unknown>;
@@ -96,7 +98,7 @@ export function useRemove(removal?: Removal) {
   const [open, setOpen] = useState(Boolean(removal?.link && removal.link === asked));
   const [busy, setBusy] = useState(false);
   if (!removal) return {};
-  const { title, body, label = 'Remove', onRemove } = removal;
+  const { title, body, label = 'Remove', icon, onRemove } = removal;
   // A dialog a delete link opened leaves the address without it once it closes.
   const close = () => {
     setOpen(false);
@@ -107,7 +109,7 @@ export function useRemove(removal?: Removal) {
     }
   };
   return {
-    item: <MenuItem title={label} danger onClick={() => setOpen(true)} />,
+    item: <MenuItem icon={icon} title={label} danger onClick={() => setOpen(true)} />,
     dialog: open ? (
       <ConfirmDialog
         open
@@ -129,7 +131,7 @@ export function useRemove(removal?: Removal) {
 }
 
 /** A list's add dialog and the + Add button that opens it; a chat's `?add=` link opens it filled in, and closing it drops the link's params. */
-export function useAddDialog(params: string[]) {
+export function useAddDialog(label: string, params: string[]) {
   const [open, setOpen] = useState(useSearchParams().has('add'));
   const close = () => {
     setOpen(false);
@@ -139,17 +141,18 @@ export function useAddDialog(params: string[]) {
   };
   return {
     open,
+    show: () => setOpen(true),
     close,
     button: (
-      <Button variant="outline" size="sm" leftIcon={iPlus} onClick={() => setOpen(true)}>
-        Add
+      <Button size="sm" leftIcon={iPlus} onClick={() => setOpen(true)}>
+        {label}
       </Button>
     ),
   };
 }
 
 export const replaceTitle = (name: string, scope: string) =>
-  scope === 'workspace' ? `Replace ${name} for the workspace?` : `Replace your ${name}?`;
+  scope === 'workspace' ? `Replace ${name} for the workspace?` : `Replace the personal ${name}?`;
 
 /** The dialog that asks before a save replaces the key saved for a variable in that scope. */
 export function useReplace() {
@@ -223,17 +226,23 @@ export function List({
   title,
   count,
   actions,
+  help,
   children,
   add,
+  look,
 }: {
   title: string;
   count: number;
   actions?: ComponentChildren;
+  /** One line on what the list does, above it. */
+  help?: ComponentChildren;
   children: ComponentChildren;
   add?: ComponentChildren;
+  look?: CardLook;
 }) {
   return (
-    <Card title={title} count={count} actions={actions}>
+    <Card title={title} count={count} actions={actions} look={look}>
+      {help ? <p class="body muted">{help}</p> : null}
       <div class="table-scroll">
         <table class="rows settings">
           <tbody>{children}</tbody>

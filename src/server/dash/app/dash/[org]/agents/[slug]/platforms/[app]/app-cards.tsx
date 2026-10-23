@@ -89,6 +89,7 @@ export function AppCards({
                         <UninstallButton
                           install={{ id: entry.id, app: app.name, account: entry.account.login }}
                           name={name}
+                          url={entry.installationUrl}
                         />
                       ) : null
                     }

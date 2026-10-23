@@ -286,3 +286,22 @@
   align-items: center;
   gap: 8px;
 }
+
+/* a setting as a row: its name and what the current choice does, then the choice */
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.setting-row b {
+  font-weight: 500;
+}
+.setting-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.setting-row > .select {
+  flex: none;
+  min-width: 170px;
+}

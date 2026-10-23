@@ -22,7 +22,7 @@ function secret(ctx: ServerContext): string {
   return value;
 }
 
-function sign(ctx: ServerContext, payload: string): string {
+export function sign(ctx: ServerContext, payload: string): string {
   return createHmac('sha256', secret(ctx)).update(payload).digest('base64url');
 }
 

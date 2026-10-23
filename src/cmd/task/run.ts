@@ -3,7 +3,7 @@ import process from 'node:process';
 
 import type { Access, TokenUsage } from '../../core/types';
 import { formatTokens, outStyle } from '../../tui/output';
-import { flag, optStr, serverSuffix, str, strList } from '../../utils/args';
+import { flag, modelOption, optStr, serverSuffix, str, strList } from '../../utils/args';
 import { command, MODEL_HINT } from '../../cli';
 import { finalMessageLine, finishedNext, waitingNext } from './result';
 
@@ -87,11 +87,7 @@ export const commandTask = command({
       '<text>',
     ),
     wait: flag('follow the task until the answer is ready'),
-    model: str(
-      'model alias, custom name or engine:model (codex:gpt-6.1-sol, claude:opus)',
-      '<model|engine:model>',
-    ),
-    effort: str('reasoning effort', '<low|medium|high>'),
+    model: modelOption(),
     access: str(
       'read-only also restricts platforms and connections; auto lets the engine review what leaves the sandbox (default: auto)',
       '<read-only|auto>',
@@ -153,7 +149,6 @@ export const commandTask = command({
       agent: options.agent,
       outputSchema: options['output-schema'] ? JSON.parse(options['output-schema']) : undefined,
       model: options.model,
-      effort: options.effort,
       access: options.access as Access | undefined,
       name: options.name,
       appendSystem: options['append-system'],
@@ -169,10 +164,8 @@ export const commandTask = command({
       server: options.server,
       yes: options.yes,
       organization: options.workspace,
-      onFallback: ({ engine, detail, next }) =>
-        process.stderr.write(
-          `[coder] ${engine} failed to start (${detail}); falling back to ${next}.\n`,
-        ),
+      onFallback: ({ model, detail, next }) =>
+        process.stderr.write(`[coder] ${model} failed (${detail}); falling back to ${next}.\n`),
       onNote: note => process.stderr.write(`[coder] ${note}\n`),
       onWaiting: taskId => {
         waiting = taskId;

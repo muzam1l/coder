@@ -116,6 +116,8 @@ function toChatRequest(body: any): Record<string, unknown> {
     ...(typeof body.parallel_tool_calls === 'boolean'
       ? { parallel_tool_calls: body.parallel_tool_calls }
       : {}),
+    // OpenRouter's shape, which other chat endpoints ignore or take as is.
+    ...(body.reasoning?.effort ? { reasoning: { effort: body.reasoning.effort } } : {}),
     ...(schema?.type === 'json_schema'
       ? {
           response_format: {

@@ -38,7 +38,6 @@ export const commandAgentRun = command({
     workspace: str('with --server: the workspace to act in (default: the saved one)', '<slug>'),
     yes: flag('with --server: connect to a server used for the first time without asking'),
     wait: flag('with --server: follow the task log here until it finishes, then print the reply'),
-    flow: str('override the matched flow', '<name>'),
     task: str("a runner's form: run that server task here", '<id>'),
   },
   cli: {

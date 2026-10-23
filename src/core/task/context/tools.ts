@@ -16,17 +16,22 @@ interface ReviewInput {
   base?: string;
   path?: string[];
   exclude?: string[];
+  depth?: 'low' | 'medium' | 'high';
 }
 
 const review: AsyncTool<ReviewInput> = {
   name: 'review',
   flow: 'review',
   limit: 5,
-  args: (input, cwd) => ({
+  platform: 'github',
+  args: (input, cwd, author) => ({
     // A pull request's review compares its own base and posts on it.
-    ...(input.pr !== undefined ? { pr: input.pr, post: true } : { base: input.base ?? 'HEAD' }),
+    ...(input.pr !== undefined
+      ? { pr: input.pr, post: true, ...(author ? { author } : {}) }
+      : { base: input.base ?? 'HEAD' }),
     ...(input.path?.length ? { path: input.path } : {}),
     ...(input.exclude?.length ? { exclude: input.exclude } : {}),
+    ...(input.depth ? { depth: input.depth } : {}),
     cwd,
   }),
   render: async (result, runId) => {
@@ -39,7 +44,7 @@ const review: AsyncTool<ReviewInput> = {
 export const asyncTools: AsyncTool[] = [review];
 
 /** Every tool whose answer arrives later as a message. */
-export const ASYNC_TOOL_NAMES = [...asyncTools.map(tool => tool.name), 'escalate'];
+const ASYNC_TOOL_NAMES = [...asyncTools.map(tool => tool.name), 'escalate'];
 
 /** The task's record, which the tools act for. */
 function taskDir(): string {
@@ -55,8 +60,13 @@ export const taskApp = defineApp({
   commands: [
     defineCommand({
       name: 'escalate',
-      description:
-        "Ask a human to approve actions your environment refused, all in one request, collect all actions needed at once so you don't spam the user.",
+      description: [
+        'Ask a human to approve actions your environment refused.',
+        'Actions outside the sandbox are reviewed and may be refused; then take another way.',
+        'If the task truly needs refused actions, escalate them all in one call with the exact commands, then continue or end your turn.',
+        'The decision arrives as a message, in this turn while it runs, else in a new one.',
+        'Approved actions stay approved for the rest of the task; run them outside the sandbox directly.',
+      ].join(' '),
       args: {
         reason: str('One short sentence: what the actions are for.'),
         actions: strList(
@@ -78,12 +88,16 @@ export const taskApp = defineApp({
     }),
     defineCommand({
       name: 'review',
-      description: `Review your changes with a separate read-only reviewer that checks each finding against the repository. One review at a time, ${review.limit} per task.`,
+      description: `Review your changes with a separate read-only reviewer that checks each finding against the repository. One review at a time, ${review.limit} per turn.`,
       args: {
         pr: arg(z.optional(z.number()), 'A pull request to review and post the review on.'),
         base: str('The ref to compare with; default HEAD, so only uncommitted changes.'),
         path: strList('Review only these paths, relative to the task directory.'),
         exclude: strList('Leave these paths out.'),
+        depth: arg(
+          z.optional(z.enum(['low', 'medium', 'high'])),
+          'What to report: low only critical and major defects, high nits too; medium by default.',
+        ),
         timeout: arg(z.optional(z.number()), 'Stop the review after this many seconds.'),
       },
       access: 'read',
@@ -95,3 +109,21 @@ export const taskApp = defineApp({
     ...conversationCommands,
   ],
 });
+
+/** The task app serving only `tools`, its instructions naming the ones whose result arrives later. */
+export function taskTools(tools: string[]) {
+  const async = tools.filter(name => ASYNC_TOOL_NAMES.includes(name));
+
+  return {
+    ...taskApp,
+    ...(async.length
+      ? {
+          instructions: [
+            `${async.join(' and ')} ${async.length > 1 ? 'return' : 'returns'} at once;`,
+            'the result arrives later as a message, in a new turn if yours has ended.',
+          ].join(' '),
+        }
+      : {}),
+    commands: taskApp.commands.filter(command => tools.includes(command.name)),
+  };
+}

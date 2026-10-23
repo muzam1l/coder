@@ -790,7 +790,7 @@ export function readTaskLog(cwd: string, taskId: string, maxLines = 40): TaskLog
   }
 }
 
-// "engine/model/effort", dropping unset parts (e.g. "claude/opus/medium", "codex", "claude/opus").
+// "engine/model/effort", the spec `--model` takes, dropping unset parts (e.g. "claude/opus/medium", "codex", "claude/opus").
 export function formatEngineSpec(task: {
   engine?: string | null;
   model?: string | null;

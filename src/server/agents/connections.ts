@@ -311,10 +311,18 @@ export async function listInstallations(
   return json(
     rows.map(({ id, value }) => {
       const { token: _token, ...safe } = value;
-      const url =
-        value.account.url ?? ctx.integrations[value.integration]?.app.accountUrl?.(value.account);
+      const app = ctx.integrations[value.integration]?.app;
+      const url = value.account.url ?? app?.accountUrl?.(value.account);
+      const installationUrl = app?.installationUrl?.(value);
 
-      return { id, value: { ...safe, account: { ...safe.account, ...(url ? { url } : {}) } } };
+      return {
+        id,
+        value: {
+          ...safe,
+          account: { ...safe.account, ...(url ? { url } : {}) },
+          ...(installationUrl ? { installationUrl } : {}),
+        },
+      };
     }),
   );
 }

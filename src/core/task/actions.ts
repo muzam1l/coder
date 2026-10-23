@@ -34,6 +34,7 @@ import {
   findTask,
   lastActivityAt,
   readTaskLog,
+  formatEngineSpec,
 } from '../state';
 import { steerTurn, runTurn, interruptTurn } from '../engines/codex';
 import { steerClaudeTurn, runClaudeTurn, type ClaudeTurnOptions } from '../engines/claude';
@@ -57,9 +58,11 @@ import {
   buildFallbackPayload,
   dispatchTask,
   ignoredAddDirs,
+  resolveTaskOptions,
   WORKER_ENV,
   isSandboxFailure,
-  turnFallbackEngine,
+  modelList,
+  turnFallbackModel,
   readTask,
   waitTask,
   type DispatchOptions,
@@ -70,6 +73,7 @@ import {
   isEndpointModel,
   loadConfig,
   resolveCodexModel,
+  splitEngineSpec,
   strictestAccess,
   type Access,
 } from '../config';
@@ -138,6 +142,31 @@ export function heldConnections(
   });
 }
 
+/** A next turn's servers: the task's own, each connection-bound one taking its value from `connections`, plus the turn's new connections. */
+export function turnServers(task: Task, connections: Record<string, McpServerSpec>) {
+  const servers =
+    task.mcp?.map(server => {
+      const connection =
+        server.connection ??
+        (server.resolved && task.connections?.includes(server.name) ? server.name : undefined);
+      return connection ? { ...server, connection, resolved: false } : server;
+    }) ?? [];
+  const bindings =
+    task.mcpBindings ??
+    servers
+      .filter(server => server.connection)
+      .map(({ name, connection, tools }) => ({ name, connection, ...(tools ? { tools } : {}) }));
+  const declared = new Set(bindings.map(server => server.connection));
+  const selected = selectMcpServers(
+    [...bindings, ...servers.filter(server => !declared.has(server.connection))],
+    {},
+    {},
+    connections,
+  );
+
+  return { selected, bindings };
+}
+
 /** How a steer was applied to a task. */
 export type SteerOutcome = 'live' | 'queued' | 'resumed';
 
@@ -197,12 +226,12 @@ export async function steerTask(
   text: string,
   opts: {
     model?: string;
-    effort?: string;
     access?: Access;
     outputSchema?: object;
     command?: MailboxKey;
     onWorker?: (worker: ChildProcess) => void;
     resolveConnections?: ConnectionResolver;
+    credentialEnv?: NodeJS.ProcessEnv;
   } = {},
   adapters: {
     codex?: typeof steerTurn;
@@ -289,6 +318,7 @@ async function resumeInPlace(
 ): Promise<'resumed' | 'queued'> {
   if (task.connectionSource === 'server' && !opts.resolveConnections)
     throw new Error('Server connection resolver is required to resume this task');
+  const { model, effort } = turnModel(cwd, task, opts.model);
   // One resume per finished turn: a steer racing it, or reaching it before it runs, waits for the next turn.
   const admission = await withTaskAdmission(cwd, task.id, () => {
     const stored = loadTask(cwd, task.id) ?? task;
@@ -340,25 +370,7 @@ async function resumeInPlace(
           undefined,
           strictestAccess(agent?.access, access),
         );
-    const servers =
-      task.mcp?.map(server => {
-        const connection =
-          server.connection ??
-          (server.resolved && task.connections?.includes(server.name) ? server.name : undefined);
-        return connection ? { ...server, connection, resolved: false } : server;
-      }) ?? [];
-    const bindings =
-      task.mcpBindings ??
-      servers
-        .filter(server => server.connection)
-        .map(({ name, connection, tools }) => ({ name, connection, ...(tools ? { tools } : {}) }));
-    const declared = new Set(bindings.map(server => server.connection));
-    const selected = selectMcpServers(
-      [...bindings, ...servers.filter(server => !declared.has(server.connection))],
-      {},
-      {},
-      connected.mcp,
-    );
+    const { selected, bindings } = turnServers(task, connected.mcp);
     if (task.archived) unarchiveTask(cwd, task);
     await withTaskAdmission(cwd, task.id, () => {
       const current = loadTask(cwd, task.id);
@@ -388,8 +400,8 @@ async function resumeInPlace(
         ...(opts.outputSchema ? { outputSchema: opts.outputSchema } : {}),
         resumeThreadId: task.threadId,
         steerEndpoint: null,
-        model: (opts.model ?? task.model ?? null) as Task['model'],
-        effort: (opts.effort ?? task.effort ?? null) as Task['effort'],
+        model,
+        effort,
         access,
         error: undefined,
       });
@@ -399,7 +411,15 @@ async function resumeInPlace(
       });
       for (const warning of [...connected.warnings, ...(selected.warnings ?? [])])
         appendTaskLog(cwd, task.id, { kind: 'status', message: warning });
-      const worker = spawnWorker(task.cwd ?? cwd, task.id, connected.env);
+      const worker = spawnWorker(task.cwd ?? cwd, task.id, {
+        ...Object.fromEntries(
+          Object.keys(process.env)
+            .filter(name => name.startsWith('CODER_CONNECTION_'))
+            .map(name => [name, undefined]),
+        ),
+        ...connected.env,
+        ...opts.credentialEnv,
+      });
       opts.onWorker?.(worker);
     });
   } catch (error) {
@@ -424,6 +444,28 @@ async function resumeInPlace(
   }
 
   return 'resumed';
+}
+
+/** A follow-up's model spec, resolved on the task's own engine; none keeps the task's model and effort. */
+function turnModel(
+  cwd: string,
+  task: Task,
+  spec?: string,
+): { model: string | null; effort: Effort | null } {
+  if (!spec) return { model: task.model ?? null, effort: task.effort ?? null };
+  // A model that names no engine takes the task's, not the default model's.
+  const parts = splitEngineSpec(spec);
+  const { engine, model, effort } = resolveTaskOptions(
+    { ...(parts.model ? {} : { engine: task.engine }), model: spec },
+    loadConfig(cwd),
+  );
+  if (engine !== task.engine)
+    throw new CoderError(
+      'invalid-option',
+      `Task ${task.id} runs on ${task.engine}, so its follow-ups take a ${task.engine} model.`,
+    );
+
+  return { model, effort };
 }
 
 const CLAUDE_SIDECAR_INSPECTION_TOOLS = ['Read', 'Glob', 'Grep'];
@@ -453,8 +495,9 @@ export async function askTask(
   cwd: string,
   task: Task,
   question: string,
-  opts: { model?: string; effort?: string; command?: MailboxKey } = {},
+  opts: { model?: string; command?: MailboxKey } = {},
 ): Promise<TurnResult> {
+  const { model: name, effort } = turnModel(cwd, task, opts.model);
   const taskDir = resolveTaskDir(cwd, task.id);
   const prompt = askPrompt(
     task,
@@ -479,16 +522,14 @@ export async function askTask(
         );
       }
     : undefined;
-  const effort = (opts.effort ?? task.effort ?? null) as Effort | null;
   if (task.engine === 'claude') {
     return runClaudeTurn(task.cwd ?? cwd, {
-      ...claudeAskOptions(task, taskDir, prompt, { model: opts.model, effort }),
+      ...claudeAskOptions(task, taskDir, prompt, { model: name ?? undefined, effort }),
       command: opts.command,
       onResult,
     });
   }
   const config = loadConfig(cwd);
-  const name = opts.model ?? task.model;
   const entry = name ? config.models?.[name] : undefined;
   return runTurn(task.cwd ?? cwd, {
     prompt,
@@ -864,7 +905,6 @@ export async function run(
       ...(opts.repo ? { repo: opts.repo } : {}),
       ...(opts.agent ? { agent: opts.agent } : {}),
       ...(opts.model ? { model: opts.model } : {}),
-      ...(opts.effort ? { effort: opts.effort } : {}),
       ...(opts.access ? { access: opts.access } : {}),
       ...(opts.runner ? { runner: opts.runner } : {}),
       ...(opts.mcp ? { mcp: opts.mcp.split(',').map(name => name.trim()) } : {}),
@@ -907,7 +947,7 @@ export async function run(
     cwd,
     engine: opts.model ? undefined : agent?.engine,
     model: opts.model ?? agent?.model,
-    effort: opts.effort ?? agent?.effort,
+    effort: opts.model ? undefined : agent?.effort,
     access: agent?.access ?? opts.access,
     name: opts.name,
     appendSystem: opts.appendSystem,
@@ -924,7 +964,8 @@ export async function run(
     ...(opts.onFallback ? { onFallback: opts.onFallback } : {}),
     ...(opts.onNote ? { onNote: opts.onNote } : {}),
   };
-  let dispatch = await dispatchTask(dispatchOpts, { config });
+  const models = modelList(config, resolveTaskOptions(dispatchOpts, config));
+  let dispatch = await dispatchTask(dispatchOpts, { config, models });
 
   if (!opts.wait) {
     const taskId = dispatch.taskId;
@@ -936,7 +977,7 @@ export async function run(
     };
   }
 
-  // A turn that ends with a startup-ish error (usage, auth, quota) walks the chain like a failed start.
+  // A turn that ends with a startup-ish error (usage, auth, quota) falls back like a failed start.
   for (;;) {
     const taskId = dispatch.taskId;
     opts.onWaiting?.(taskId);
@@ -945,7 +986,7 @@ export async function run(
     const turnError = result?.error?.message ?? '';
     if (final.status === 'failed' && isSandboxFailure(final.access ?? 'auto', turnError))
       throw new CoderError('read-only-unavailable', turnError);
-    const next = turnFallbackEngine(cwd, waited, config);
+    const next = turnFallbackModel(cwd, waited, models);
     if (next !== undefined) {
       if (next === null)
         throw new CoderError('chain-exhausted', turnError, {
@@ -957,16 +998,14 @@ export async function run(
             prompt,
           ),
         });
-      opts.onFallback?.({ engine: dispatch.engine, detail: turnError, next });
+      opts.onFallback?.({
+        model: formatEngineSpec(final),
+        detail: turnError,
+        next: formatEngineSpec(next),
+      });
       dispatch = await dispatchTask(
-        {
-          ...dispatchOpts,
-          engine: next,
-          model: undefined,
-          effort: undefined,
-          name: undefined,
-        },
-        { config },
+        { ...dispatchOpts, name: undefined },
+        { config, models: models.slice(models.indexOf(next)) },
       );
       continue;
     }
@@ -1215,7 +1254,6 @@ export async function steer(
   text: string,
   opts: TaskOptions & {
     model?: string;
-    effort?: string;
     access?: Access;
     wait?: boolean;
   } = {},
@@ -1224,7 +1262,6 @@ export async function steer(
   if (api) {
     const answer = (await api.tasks.steer(id, text, {
       ...(opts.model ? { model: opts.model } : {}),
-      ...(opts.effort ? { effort: opts.effort } : {}),
       ...(opts.access ? { access: opts.access } : {}),
     })) as { steered?: SteerOutcome; task?: unknown };
     // A finished task resumes as a new turn; a live one takes the follow-up in its inbox.
@@ -1241,7 +1278,6 @@ export async function steer(
   }
   const outcome = await steerTask(cwd, localTask(cwd, id), text, {
     model: opts.model,
-    effort: opts.effort,
     access: opts.access,
   });
   if (!opts.wait || outcome.steered === 'queued') return outcome;
@@ -1251,12 +1287,19 @@ export async function steer(
   return { ...outcome, status: final?.status ?? null, finalMessage: done?.finalMessage ?? null };
 }
 /** A server task's sidecar answer: a local server's comes with the request, a runner's lands in the task's answers. */
-async function askServer(api: RemoteClient, id: string, question: string): Promise<AskResult> {
+async function askServer(
+  api: RemoteClient,
+  id: string,
+  question: string,
+  model?: string,
+): Promise<AskResult> {
   const before = (await api.tasks.get(id)).answer?.length ?? 0;
   const abort = new AbortController();
   let response = await api.tasks.events([id], undefined, abort.signal);
   try {
-    let answer = ((await api.tasks.ask(id, question)) as { answer?: unknown }).answer;
+    let answer = (
+      (await api.tasks.ask(id, question, model ? { model } : {})) as { answer?: unknown }
+    ).answer;
     let ended = false;
     let last: string | undefined;
     while (answer === undefined && !ended) {
@@ -1296,16 +1339,16 @@ async function askServer(api: RemoteClient, id: string, question: string): Promi
 export async function ask(
   id: string,
   question: string,
-  opts: TaskOptions & { model?: string; effort?: string; onAsking?: (taskId: string) => void } = {},
+  opts: TaskOptions & { model?: string; onAsking?: (taskId: string) => void } = {},
 ): Promise<AskResult> {
   const { cwd, api } = target(opts);
   if (api) {
     opts.onAsking?.(id);
-    return askServer(api, id, question);
+    return askServer(api, id, question, opts.model);
   }
   const task = localTask(cwd, id);
   opts.onAsking?.(task.id);
-  const result = await askTask(cwd, task, question, { model: opts.model, effort: opts.effort });
+  const result = await askTask(cwd, task, question, { model: opts.model });
   return {
     taskId: task.id,
     answer: result.finalMessage || null,

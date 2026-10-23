@@ -150,7 +150,11 @@ export function handoffLink(
   const query = new URLSearchParams();
   query.set(action, path === page ? String(given[first!] ?? '') : '1');
   for (const name of rest)
-    if (given[name] !== undefined && given[name] !== false) query.set(name, String(given[name]));
+    if (given[name] !== undefined && given[name] !== false) {
+      if (page === '/settings/connections' && action === 'add' && name === 'personal') {
+        query.set('scope', 'personal');
+      } else query.set(name, String(given[name]));
+    }
 
   return `${dashboard}${path}?${query}`;
 }
@@ -180,7 +184,7 @@ function linkCommand(command: Command, at: string[], handoff: Handoff): Command 
         const url = (result.value as { link: string }).link;
         return button
           ? `Give the person this link; they check it and click ${button} there. [${label}](${url})`
-          : `Give the person this link; they finish there and any key goes straight to Coder, never through you. [${label}](${url})`;
+          : `Give the person this link; they finish there and any key goes straight to Coder, outside the conversation. [${label}](${url})`;
       },
     },
   };

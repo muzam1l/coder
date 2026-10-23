@@ -17,7 +17,6 @@ import { Link } from '@wular/pnext/link';
 import type {
   AgentDefinition,
   AgentRow,
-  Config,
   IntegrationInfo,
   ModelsShape,
 } from '@coder/client/types';
@@ -32,26 +31,20 @@ import { showToast, toastError } from '@/comps/frame/task-toasts';
 import { Badge, Chip, Chips } from '@/comps/ui/badge';
 import { Button, LinkButton } from '@/comps/ui/button';
 import { Icon } from '@/comps/ui/icon';
-import { Select } from '@/comps/ui/select';
 import { Segmented } from '@/comps/ui/segmented';
 import { Search } from '@/comps/ui/toolbar';
 import { ImportPicker } from './import-picker';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
-import {
-  ACCESS,
-  EFFORTS,
-  ENGINE_NAMES,
-  defaultLabel,
-  modelHeadings,
-  modelOptions,
-  modelValue,
-  splitModel,
-} from '@/app/dash/[org]/settings/model-options';
+import { ACCESS, NO_MODELS, chainChoice, specName } from '@/app/dash/[org]/settings/model-options';
+import { ModelPick } from '@/app/dash/[org]/settings/model-pick';
+import { ChainHint } from '@/app/dash/[org]/settings/chain-hint';
+import { InfoTip } from '@/comps/ui/menu';
+import { Select } from '@/comps/ui/select';
 import { suggestName } from './names';
 
 const ACCESS_HINTS: Record<string, string> = {
-  auto: 'changes things too, like opening pull requests; the engine reviews what leaves the sandbox',
-  'read-only': 'reads files, platforms and connections; replies and reacts in the conversation',
+  auto: 'Changes things too, like opening pull requests; the engine reviews what leaves the sandbox.',
+  'read-only': 'Reads files, platforms and connections; replies and reacts in the conversation.',
 };
 /** The form section of the field a definition problem names first. */
 const PROBLEM_FIELDS: Record<string, string> = {
@@ -97,9 +90,8 @@ interface Draft {
   match: Record<string, Record<string, string>>;
   access: string;
   systemPrompt: string;
-  engine: string;
+  /** Its model spec; empty runs the workspace's chain. */
   model: string;
-  effort: string;
 }
 
 function draftOf(
@@ -119,9 +111,7 @@ function draftOf(
     match: {},
     access: permissions === 'read-only' ? 'read-only' : (definition?.access ?? 'auto'),
     systemPrompt: agent?.systemPrompt ?? '',
-    engine: definition?.engine ?? '',
     model: definition?.model ?? '',
-    effort: definition?.effort ?? '',
   };
   // A platform this server does not offer is left out, so publishing drops it.
   for (const [id, entry] of Object.entries(definition?.integrations ?? {})) {
@@ -229,11 +219,9 @@ function eventsFor(
   return Object.values(built).every(value => value === true) ? names : built;
 }
 
-/** The workspace's run settings for whatever the agent leaves unset. */
+/** The workspace's chain, which an agent without a model runs. */
 interface RunDefaults {
-  engine: string;
-  engines: NonNullable<Config['engines']>;
-  builtin: ModelsShape['builtin'];
+  chain: string[];
 }
 
 /** Make a dashboard agent on one page, from a template or a repository, or edit one. Saving publishes a version. */
@@ -242,8 +230,8 @@ export function AgentEditor({
   agent,
   suggested = '',
   section,
-  models,
-  defaults = { engine: '', engines: {}, builtin: {} },
+  shape = NO_MODELS,
+  defaults = { chain: [] },
   template: first,
   connected = false,
   connectLabel = 'Connect',
@@ -255,8 +243,8 @@ export function AgentEditor({
   agent?: AgentRow;
   suggested?: string;
   section?: string;
-  /** Model names per engine, for the model picker. */
-  models: Record<string, string[]>;
+  /** The workspace's models, for the model picker. */
+  shape?: ModelsShape;
   defaults?: RunDefaults;
   template?: Template;
   /** A platform that reaches repositories is installed here. */
@@ -293,29 +281,8 @@ export function AgentEditor({
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) =>
     setDraft(current => ({ ...current, [key]: value }));
 
-  const aliasOf = (engine: string, model?: string) =>
-    Object.entries(defaults.builtin[engine] ?? {}).find(([, target]) => target === model)?.[0] ??
-    model;
-  const engine = draft.engine || defaults.engine;
-  const base = defaults.engines[engine] ?? {};
-  const fallback = [
-    ENGINE_NAMES[defaults.engine] ?? defaults.engine,
-    aliasOf(defaults.engine, defaults.engines[defaults.engine]?.model),
-  ]
-    .filter(Boolean)
-    .join(' · ');
-  const run = creating
-    ? 'you can change these later in its settings'
-    : (draft.engine || draft.model || draft.effort
-        ? [
-            ENGINE_NAMES[engine] ?? engine,
-            draft.model || aliasOf(engine, base.model),
-            draft.effort || base.effort,
-          ]
-        : ['Default models']
-      )
-        .filter(Boolean)
-        .join(' · ');
+  const fallback = specName(defaults.chain[0] ?? '', shape.builtin);
+  const run = creating ? 'changeable later in its settings' : draft.model || `Default, ${fallback}`;
 
   useEffect(() => {
     if (!section) return;
@@ -396,11 +363,14 @@ export function AgentEditor({
       integrations,
       access: draft.access as AgentDefinition['access'],
     };
-    for (const key of ['name', 'description', 'engine', 'model', 'effort'] as const) {
+    for (const key of ['name', 'description'] as const) {
       const value = draft[key].trim();
-      if (value) (definition as Record<string, unknown>)[key] = value;
-      else delete (definition as Record<string, unknown>)[key];
+      if (value) definition[key] = value;
+      else delete definition[key];
     }
+    const spec = draft.model.trim();
+    if (spec) definition.model = spec;
+    else delete definition.model;
     const id = creating ? draft.id : agent.id;
     const name = draft.name.trim();
     await action.run('publish', async () => {
@@ -578,9 +548,22 @@ export function AgentEditor({
       <div class="agent-form">
         <div class="agent-main">
           <section id="agent-name" class="form-part">
-            <h2>Name and description</h2>
+            <div class="part-head">
+              <h2>Name and description</h2>
+              <InfoTip label="About these fields">
+                <p>
+                  <b>Name</b>: its handle on every platform.
+                </p>
+                <p>
+                  <b>Id</b>: the folder and command name, fixed once created.
+                </p>
+                <p>
+                  <b>Description</b>: optional; shown in lists and added to the prompt.
+                </p>
+              </InfoTip>
+            </div>
             <div class="fields">
-              <Field label="Name" hint="its handle on every platform">
+              <Field label="Name">
                 <span class="with-btn">
                   <input
                     name="name"
@@ -601,7 +584,7 @@ export function AgentEditor({
                 </span>
               </Field>
               {creating ? (
-                <Field label="Id" hint="the folder and command name">
+                <Field label="Id">
                   <input
                     class="mono"
                     name="id"
@@ -617,14 +600,12 @@ export function AgentEditor({
                 </Field>
               ) : (
                 <div class="field">
-                  <span>
-                    Id <small>fixed once created</small>
-                  </span>
+                  <span>Id</span>
                   <p class="fixed mono">{agent.id}</p>
                 </div>
               )}
             </div>
-            <Field label="Description" hint="optional, shown in lists and added to the prompt">
+            <Field label="Description">
               <input
                 name="description"
                 maxLength={240}
@@ -761,14 +742,25 @@ export function AgentEditor({
               })}
               {shown.length ? null : <li class="listen-none muted">No platform matches.</li>}
             </ul>
-            <Field label="Access" hint={ACCESS_HINTS[draft.access]} group>
-              <Segmented
+            <div class="setting-row">
+              <div class="grow setting-name">
+                <b>Access</b>
+                <InfoTip label="About access">
+                  <p>
+                    <b>Auto</b>: {ACCESS_HINTS.auto}
+                  </p>
+                  <p>
+                    <b>Read-only</b>: {ACCESS_HINTS['read-only']}
+                  </p>
+                </InfoTip>
+              </div>
+              <Select
                 label="Access"
                 options={ACCESS}
                 value={draft.access}
                 onChange={value => set('access', value)}
               />
-            </Field>
+            </div>
           </section>
 
           <details id="agent-run" class="form-part run" open={section === 'run'}>
@@ -779,27 +771,13 @@ export function AgentEditor({
             </summary>
             <div class="run-body">
               <div class="fields">
-                <Field label="Engine and model" hint="what runs each task" group>
-                  <Select
-                    label="Model"
-                    value={modelValue(draft.engine, draft.model)}
-                    options={modelOptions(models, defaultLabel(fallback))}
-                    headings={modelHeadings(models)}
-                    action={{
-                      label: 'Add models',
-                      icon: iPlus,
-                      onPick: () =>
-                        nav.push('/dash/[org]/settings/[tab]', { params: { org, tab: 'models' } }),
-                    }}
-                    onChange={value => setDraft(current => ({ ...current, ...splitModel(value) }))}
-                  />
-                </Field>
-                <Field label="Effort" hint="how hard the model thinks" group>
-                  <Segmented
-                    label="Effort"
-                    options={[['', defaultLabel(base.effort)], ...EFFORTS]}
-                    value={draft.effort}
-                    onChange={value => set('effort', value)}
+                <Field label="Model" hint={<ChainHint org={org} />} group>
+                  <ModelPick
+                    shape={shape}
+                    name="model"
+                    empty={chainChoice(defaults.chain, shape)}
+                    value={draft.model}
+                    onChange={value => set('model', value)}
                   />
                 </Field>
               </div>

@@ -19,7 +19,7 @@ export const commandModelList = command({
   next: () =>
     nextSteps([
       'Add a custom model: coder model add <name> --base-url <url> --model <id> [--env-key VAR]',
-      'Alias a model, e.g. fast codex:luna: coder model alias <name> <spec>',
+      'Alias a model, e.g. fast codex/luna: coder model alias <name> <spec>',
       'Run with a model: coder run --model <name> "<task>"',
     ]),
   print: printModelList,

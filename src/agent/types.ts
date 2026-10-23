@@ -10,17 +10,15 @@ import type {
 
 export type { RunnerKind } from '../client/types';
 
-/** Per-integration wiring in a definition. `events` list = default behavior, map = event -> flow. */
-/** Event value in a definition map: a flow name, or options. */
+/** Event value in a definition map: `true`, or options. */
 export interface AgentEventOptions {
-  /** Flow to run; omit for the default agent. */
-  flow?: string;
   /** Regex the event text must match (e.g. keywords on Slack `message`). */
   match?: string;
 }
 
+/** Per-integration wiring in a definition: a list of event names, or a map of each to its value. */
 export interface AgentDefinitionIntegration {
-  events?: string[] | Record<string, string | true | AgentEventOptions>;
+  events?: string[] | Record<string, true | AgentEventOptions>;
 }
 
 /** What an agent IS: `.coder/agents/<id>/agent.json` beside its system.md. */
@@ -28,10 +26,9 @@ export interface AgentDefinition {
   /** Display name used in replies; defaults to the id. */
   name?: string;
   description?: string;
-  engine?: string;
   runner?: string;
+  /** Its model spec: `<name>[/<effort>]` or `<engine>/<model>[/<effort>]`. */
   model?: string;
-  effort?: Effort;
   /** Read-only or auto for every task, handle and connection it uses; defaults to `auto`. */
   access?: Access;
   /** MCP servers every task of this agent attaches, in the `.mcp.json` entry shape. */
@@ -44,7 +41,7 @@ export interface AgentUsageIntegration {
   allowedEvents?: string[];
 }
 
-/** How a repo RUNS an agent: one entry under `agents` in .coder/config.json. */
+/** How a repo RUNS an agent: one entry under `agents` in .coder/config.json, its `model` spec split. */
 export interface AgentUsage {
   engine?: string;
   model?: string;
@@ -58,11 +55,17 @@ export interface AgentUsage {
   disabled?: boolean;
 }
 
-/** A task's usage, plus the model its latest turn started with, its pick else its engine's default. */
+/** A task's usage, plus the model its latest turn ran. */
 export interface TaskUsage extends AgentUsage {
-  /** The engine, model and effort chosen for this task, by its starter or a later turn; without one each turn follows its agent's settings. */
+  /** The engine, model and effort chosen for this task, by its starter or a later turn; it runs first, before its agent's model and the chain. */
   pick?: Pick<AgentUsage, 'engine' | 'model' | 'effort'>;
   resolvedModel?: string;
+}
+
+/** One attempt of a task's turn: a model as `engine/model/effort`, on one credential, or without one on its runner's own logins. */
+export interface ModelAttempt {
+  model: string;
+  credential?: string;
 }
 
 export interface Agent {
@@ -182,13 +185,9 @@ export interface AgentTask {
   /** Handle the task posts as (GitHub `slug[bot]`, Slack bot user), so flows can trust only their own comments. */
   author?: string;
   definition: AgentDefinition;
-  /** Frozen id of the credential selected for this task. */
-  credential?: string;
-  /** The engine order for this task; a pinned engine has one entry. */
-  engineChain?: string[];
-  /** Applicable credentials frozen with the engine order, without their values. */
-  engineCredentials?: Record<string, string>;
-  /** Wular user who asked, when known; their personal credential comes first. */
+  /** What its turn runs, in order: each model on one frozen credential id, as the resolver answered for the turn's asker. */
+  models?: ModelAttempt[];
+  /** The linked member who started it, when known; their own turns run on their credentials first. */
   requestedBy?: string;
   /** The task that started this one through its Coder server; a parent sees only its children. */
   parent?: string;

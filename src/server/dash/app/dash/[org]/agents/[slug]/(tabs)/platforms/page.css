@@ -51,9 +51,6 @@
   white-space: nowrap;
   vertical-align: top;
 }
-.plat .acts > .badge {
-  margin-right: 10px;
-}
 .plat .acts .btn {
   min-width: 92px;
   justify-content: center;
@@ -118,16 +115,19 @@
   display: inline-flex;
   vertical-align: top;
 }
-.plat .acts .split > .menu {
+.split > .menu {
   display: flex;
   margin-left: 0;
 }
-.plat .acts .split-more {
+.split-more {
   min-width: 0;
   padding: 0 7px;
 }
 .split > .btn + .menu .split-more {
   border-left-color: rgba(255, 255, 255, 0.3);
+}
+.split > .btn.outline + .menu .split-more {
+  margin-left: -1px;
 }
 @media (max-width: 1180px) {
   .stacked.early thead {

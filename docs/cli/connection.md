@@ -2,72 +2,73 @@
 
 # connection
 
-platform accounts, API keys and MCP servers tasks use
+platform accounts and MCP servers tasks use
 
-Connections give tasks access to a service without a handle: a platform account, an API key tasks read from the environment, or an MCP server. They live in ~/.coder, or on your Coder server with --server, and every task of yours may use them unless its agent or `coder task run --connections` narrows the set.
+Connections give tasks access to a service through a platform account or an MCP server. They live in ~/.coder, or on the Coder server with --server, and tasks may use them unless an agent or `coder task run --connections` narrows the set.
 
-## `connection add <name> [--command <command>] [--env <env>] [--url <url>] [--header <header>] [--key] [--auth <auth>] [--access <access>] [--tools <tools>] [--credential <credential>] [--me] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
+## `connection add <name> [--command <command>] [--env <env>] [--url <url>] [--header <header>] [--key] [--auth <auth>] [--access <access>] [--tools <tools>] [--credential <credential>] [--personal] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
-connect a platform account, an API key or an MCP server
+connect a platform account or an MCP server
 
-Connect a platform account by its name (OAuth in the browser), an API key that tasks read from --env, or an MCP server at --url or started by the command after `--`. An API key is kept as a credential. A credential already holding the variable is used, else the value comes from that variable here, or from stdin or a prompt. A remote MCP server is checked for OAuth, open access or a key; a needed key is read from stdin or a prompt. With --key, the key goes in --header (default Authorization) or --env. Signing in needs --server.
+Connect a platform account by its name (OAuth in the browser), or an MCP server at --url or started by the command after `--`. Platform accounts are personal and take no scope flag; MCP servers default to workspace scope, with --personal for personal scope. A remote MCP server is checked for OAuth, open access or a key; a needed key is read from stdin or a prompt. With --key, the key goes in --header (default Authorization) or --env. Signing in needs --server.
 
 - `<name>` the connection name; a platform name connects that account
 - `--command <command>` a stdio MCP server to start; on the command line, the words after `--`
-- `--env <env>` the API key variable, or where a stdio server reads its key
+- `--env <env>` the task-secret variable, or where a stdio server reads its key
 - `--url <url>` a remote MCP server (streamable HTTP by default)
 - `--header <header>` the header a remote server reads its key from (default: Authorization)
 - `--key` read a key from stdin or a prompt, never from a flag value
 - `--auth <auth>` override MCP authentication (default: detected for --url, none for a command)
 - `--access <access>` read-only keeps only read-only tools (default: auto, which follows the task)
 - `--tools <tools>` tool allowlist; a read-only stdio server needs one
-- `--credential <credential>` the credential an API key connection reads
-- `--me` your own connection instead of the workspace's
-- `--server <server>` act on your Coder server
+- `--credential <credential>` the credential a task secret reads
+- `--personal` a personal connection instead of the workspace's
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
 - `--cwd <cwd>` workspace directory; default current
 
 ```sh
-GROQ_API_KEY=gsk_... coder connection add groq --env GROQ_API_KEY  # an API key from this shell
 pbpaste | coder connection add docs --key --env DOCS_TOKEN -- npx -y docs-mcp  # a stdio server with its key from stdin
-coder connection add github --me --server  # your GitHub account on your Coder server
+coder connection add github --server  # a member's GitHub account on the Coder server
 ```
 
 ## `connection list [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
 list connections and the MCP servers this repository declares
 
-Your connections, and the MCP servers this repository and its agents declare with whether each is approved on this machine.
+Every workspace connection and every member's own, with its status. In a task, one it is not granted is disabled, and one it has names its tool search server. On this machine, also the MCP servers this repository and its agents declare, with whether each is approved here.
 
-- `--server <server>` act on your Coder server
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
 - `--cwd <cwd>` workspace directory; default current
 
-## `connection rm <name> [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
+## `connection rm <name> [--personal] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
 remove a connection
 
-Remove a connection. The credential an API key connection reads stays.
+Remove a connection. The credential a task secret reads stays. With --personal, the asking member's own connection of that name.
 
 - `<name>` the connection
-- `--server <server>` act on your Coder server
+- `--personal` the asking member's own connection instead of the workspace's
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output
 - `--cwd <cwd>` workspace directory; default current
 
-## `connection reconnect <name> [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
+## `connection reconnect <name> [--personal] [--server <server>] [--workspace <workspace>] [--yes] [--json] [--cwd <cwd>]`
 
 give a connection a new key, or sign in again
 
-Give a key connection its new key, read from stdin or a prompt, or sign in to an OAuth connection again in the browser. The credential an API key connection reads gets the new value, so every connection reading it rotates.
+Give a key connection its new key, read from stdin or a prompt, or sign in to an OAuth connection again in the browser. The credential a task secret reads gets the new value, so every connection reading it rotates. With --personal, the asking member's own connection of that name.
 
 - `<name>` the connection
-- `--server <server>` act on your Coder server
+- `--personal` the asking member's own connection instead of the workspace's
+- `--server <server>` act on the Coder server
 - `--workspace <workspace>` with --server: the workspace to act in (default: the saved one)
 - `--yes` with --server: connect to a server used for the first time without asking
 - `--json` JSON output

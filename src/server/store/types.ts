@@ -13,7 +13,7 @@ import type {
   Connection,
   Installation,
 } from '../../agent/types';
-import type { AppSync, AuditRow, TaskTurn } from '../../client/types';
+import type { AgentRow, AppSync, AuditRow, TaskTurn } from '../../client/types';
 import type { Approval } from '../../core/types';
 import { type EngineLogin } from '../settings/logins';
 import type { StoredCredential } from '../settings/credentials';
@@ -445,7 +445,7 @@ export type ServerAgent = AgentRecord & {
 
 export type AgentDetail = AgentRecord & {
   versions: Array<Omit<AgentVersionRecord, 'systemPrompt' | 'files'>>;
-};
+} & Pick<AgentRow, 'installations'>;
 
 export type PushResult = {
   id: string;

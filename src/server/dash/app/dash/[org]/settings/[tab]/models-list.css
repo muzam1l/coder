@@ -1,0 +1,81 @@
+/* the chain: models in order as chips, each a model and an effort */
+.chain {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 10px;
+  padding: 0 16px 16px;
+}
+/* an alert between the description and the chain: the same 16px above and below it */
+.card > .body + .notice.slim {
+  margin-top: 0;
+}
+.card > .notice.slim + .chain {
+  padding-top: 16px;
+}
+.chain-item {
+  cursor: grab;
+}
+/* one chip per chain model: its model and effort, then its ⋯ behind a thin divider */
+.chain-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: stretch;
+  background: var(--wash2);
+}
+.chain-chip .model-pick.compact .model-pick-btn {
+  background: none;
+}
+.chain-chip .chain-more {
+  display: inline-flex;
+}
+.chain-chip .chain-more > .icon-btn {
+  width: 30px;
+  height: auto;
+  border-left: 1px solid var(--line2);
+}
+.chain-chip:hover .model-pick-btn,
+.chain-chip .chain-more > .icon-btn:hover {
+  background: var(--line);
+}
+/* a model that can't run: a dot on its chip's top right corner */
+.chain-dot {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 9px;
+  height: 9px;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--warn);
+  pointer-events: none;
+}
+.chain-arrow {
+  color: var(--dim);
+}
+.chain-n {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  background: var(--wash2);
+  font-size: 11px;
+}
+.chain-add-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px dashed var(--line2);
+  background: none;
+  color: var(--muted);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.chain-add-btn:hover {
+  border-color: var(--acc);
+  color: var(--fg);
+}

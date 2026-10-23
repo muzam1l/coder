@@ -10,6 +10,7 @@ import path from 'node:path';
 import * as z from 'zod';
 import { CoderError, task } from '@wular/coder/flow';
 
+import { loadConfig } from '../../../core/config';
 import { currentIntegrationToken } from '../../runtime';
 import { reviewPrompt, reviewSystemPrompt } from './prompts';
 
@@ -29,9 +30,10 @@ export const args = z.object({
   /** Git pathspecs relative to `cwd`; submodule contents included. */
   path: z.array(z.string()).optional(),
   exclude: z.array(z.string()).optional(),
+  /** A model spec, the workspace's review model by default. */
   model: z.string().optional(),
-  /** Reasoning effort, and review depth in the prompt. */
-  effort: z.enum(['low', 'medium', 'high']).optional(),
+  /** What the review reports: confirmed critical and major defects, any a maintainer would act on, or nits too. */
+  depth: z.enum(['low', 'medium', 'high']).optional(),
   cwd: z.string().optional(),
 });
 export type ReviewArgs = z.infer<typeof args>;
@@ -429,13 +431,11 @@ export default async function review(
       },
     };
 
-  const effort = a.effort ?? 'medium';
   const common = {
-    model: a.model,
-    effort: a.effort,
+    model: a.model ?? loadConfig(cwd).reviewModel,
     access: 'read-only' as const,
     cwd,
-    appendSystem: reviewSystemPrompt(effort, repositoryRules(exec, baseSha)),
+    appendSystem: reviewSystemPrompt(a.depth ?? 'medium', repositoryRules(exec, baseSha)),
   };
 
   const files = [...ranges]
@@ -600,9 +600,6 @@ export interface ReviewAuth {
   token?: string;
   exec?: ReviewExec;
 }
-
-/** The platform reviews post to; its tool server holds the token. */
-export const REVIEW_PLATFORM = 'github';
 
 const REVIEW_FP_RE = /<!-- coder-review:fp=([a-f0-9]{40}) -->/g;
 

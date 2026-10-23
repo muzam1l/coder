@@ -9,8 +9,12 @@ const isCloudContext = () => process.env.CODER_MCP_MODE === 'cloud';
 export const commandMcp = command({
   name: 'mcp',
   description: "serve Coder's commands as MCP tools over stdio",
-  usage:
-    "Serve Coder's commands as MCP tools over stdio, so a harness can run them.\n\nCommands return their JSON payloads and next steps. Load guides with load_skill;\nblocking commands keep their CLI flags and behavior, subject to the client's tool timeout.",
+  usage: [
+    "Serve Coder's commands as MCP tools over stdio, so a harness can run them.",
+    '',
+    'Commands return their JSON payloads and next steps. Load docs with load_skill;',
+    "blocking commands keep their CLI flags and behavior, subject to the client's tool timeout.",
+  ].join('\n'),
   access: 'write',
   approvalPolicy: 'deny',
   globalFlags: { json: false, cwd: false },

@@ -108,3 +108,8 @@ dialog.modal.add-modal {
   font-size: 12px;
   color: var(--dim);
 }
+/* a key's scope sits at the row's right end, as on Connections */
+.add-modal .add-grid > div.field:has([aria-label='Scope']) {
+  flex: none;
+  margin-left: auto;
+}

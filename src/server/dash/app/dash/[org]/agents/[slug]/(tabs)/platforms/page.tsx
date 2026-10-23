@@ -3,6 +3,7 @@ import { dynamic } from '@wular/pnext/dynamic';
 import { Link } from '@wular/pnext/link';
 
 import { createUrl, load, orgOf, unwrap } from '@/api/load';
+import { stepOf } from './platform-state';
 import type {
   AppRow,
   AgentRow,
@@ -12,11 +13,11 @@ import type {
   SetupOutcome,
 } from '@coder/client/types';
 import { Card, Empty } from '@/comps/ui/card';
-import { Badge, Chips } from '@/comps/ui/badge';
+import { Chips } from '@/comps/ui/badge';
 import { Button, LinkButton } from '@/comps/ui/button';
 import { Icon } from '@/comps/ui/icon';
 import { iAlert } from '@/comps/ui/icons';
-import { InfoTip, MoreList } from '@/comps/ui/menu';
+import { MoreList } from '@/comps/ui/menu';
 import { Settle } from '@/comps/frame/stream';
 import { loadAgent } from '@/api/load';
 import { needsTunnel } from '@/api/types';
@@ -35,7 +36,7 @@ import { Notice } from '@/comps/ui/notice';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
 import { CredentialsLink } from '@/comps/nav/back';
 
-const PlatformActions = dynamic(() => import('./platform-actions').then(m => m.PlatformActions));
+const PlatformStep = dynamic(() => import('./platform-step').then(m => m.PlatformStep));
 const InstallButton = dynamic(() => import('./platform-actions').then(m => m.InstallButton));
 const DriftQueue = dynamic(() => import('./platform-actions').then(m => m.DriftQueue));
 const OutcomeDialog = dynamic(() =>
@@ -44,12 +45,6 @@ const OutcomeDialog = dynamic(() =>
 
 /** Outcomes the person fixes by installing again. */
 const RETRY = new Set(['cancelled', 'install-expired', 'platform-error', 'missing-code', 'failed']);
-
-const REACH_BADGE: Record<Reach, { tone?: 'ok' | 'warn'; label: string }> = {
-  installed: { tone: 'ok', label: 'installed' },
-  created: { tone: 'warn', label: 'app created' },
-  none: { label: 'not set up' },
-};
 
 /** One row per platform: what wakes it, its access, the app, where it is installed, and the next step. */
 function Platforms({
@@ -130,8 +125,6 @@ function Platforms({
               const installs = installations.filter(entry => own.some(app => app.id === entry.app));
               const live = installs.filter(entry => !entry.uninstalled);
               const state: Reach = !own.length ? 'none' : live.length ? 'installed' : 'created';
-              // Every install was removed on the platform; Reinstall puts the first back.
-              const gone = live.length ? undefined : installs[0];
               const narrowed = agent.settings?.integrations?.[id];
               const events = narrowed?.allowedEvents ?? eventNames(declared[id]?.events);
               const place = (entry: InstallationRow) => (
@@ -196,84 +189,31 @@ function Platforms({
                     ) : null}
                   </td>
                   <td class="acts">
-                    {!info ? (
-                      <>
-                        <Badge>not offered</Badge>
-                        <InfoTip label={`Why ${id} is not offered`}>
-                          <p>
-                            This server does not offer {id}. Remove it from the agent's platforms,
-                            or ask whoever runs this server to add it.
-                          </p>
-                        </InfoTip>
-                      </>
-                    ) : builtin && !own.length && info.builtinApp !== 'own' ? (
-                      <>
-                        <Badge>{REACH_BADGE.none.label}</Badge>
-                        {operator ? (
-                          <LinkButton
-                            variant="outline"
-                            size="sm"
-                            href="/dash/[org]/operator"
-                            params={{ org }}
-                          >
-                            Set up shared app
-                          </LinkButton>
-                        ) : (
-                          <InfoTip label={`Why ${info?.name ?? id} is not set up`}>
-                            <p>
-                              This server has no shared {info?.name ?? id} app yet. Ask whoever runs
-                              this server to add one.
-                            </p>
-                          </InfoTip>
-                        )}
-                      </>
-                    ) : (
-                      <>
-                        {gone ? (
-                          <Badge tone="warn">uninstalled</Badge>
-                        ) : state === 'created' && builtin && info.builtinApp !== 'own' ? null : (
-                          // A shared app is never created by this workspace, only installed.
-                          <Badge tone={REACH_BADGE[state].tone}>{REACH_BADGE[state].label}</Badge>
-                        )}
-                        <PlatformActions
-                          integration={id}
-                          name={info?.name ?? id}
-                          apps={own.map(app => ({ id: app.id, name: app.name }))}
-                          installed={live.length > 0}
-                          installs={
-                            admin
-                              ? live.map(entry => ({
-                                  id: entry.id,
-                                  app: own.find(app => app.id === entry.app)!.name,
-                                  account: entry.account.login,
-                                }))
-                              : []
-                          }
-                          reinstall={gone?.app}
-                          createUrl={createUrl(agent, apps, id)}
-                          create={info?.create}
-                          unreachable={catalog.some(entry => entry.unreachable)}
-                          publicApps={info?.publicApps}
-                          organizationApps={info?.organizationApps}
-                          shared={builtin && info.builtinApp !== 'own'}
-                          failed={
-                            failed?.platform === id
-                              ? {
-                                  name: info?.name ?? id,
-                                  app: failed.appId,
-                                  issues,
-                                  ...(failed.status === 'failed'
-                                    ? {}
-                                    : {
-                                        title: outcomeTitle(failed, info?.name ?? id),
-                                        text: outcomeText(failed, info?.name ?? id),
-                                      }),
-                                }
-                              : undefined
-                          }
-                        />
-                      </>
-                    )}
+                    <PlatformStep
+                      step={stepOf(id, apps, installations, createUrl(agent, apps, id))}
+                      info={info}
+                      org={org}
+                      agent={agent.id}
+                      builtin={builtin}
+                      operator={operator}
+                      admin={admin}
+                      unreachable={catalog.some(entry => entry.unreachable)}
+                      failed={
+                        failed?.platform === id
+                          ? {
+                              name: info?.name ?? id,
+                              app: failed.appId,
+                              issues,
+                              ...(failed.status === 'failed'
+                                ? {}
+                                : {
+                                    title: outcomeTitle(failed, info?.name ?? id),
+                                    text: outcomeText(failed, info?.name ?? id),
+                                  }),
+                            }
+                          : undefined
+                      }
+                    />
                   </td>
                 </tr>
               );

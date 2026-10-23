@@ -98,11 +98,14 @@ export function taskTitle(task: TaskRow) {
   );
 }
 
-/** The engine, model and effort a task runs on, as `claude/opus/high`. */
+/** The engine, model and effort a task runs on, as `claude/opus/high`; else its agent's model spec. */
 export function taskModel(task: TaskRow) {
-  const { engine, model, effort } = { ...task.task.definition, ...task.task.usage };
+  const { usage, definition } = task.task;
+  const own = usage?.engine || usage?.model ? usage : undefined;
 
-  return [engine, task.model ?? model, effort].filter(Boolean).join('/');
+  return [own?.engine, task.model ?? own?.model ?? definition?.model, own?.effort]
+    .filter(Boolean)
+    .join('/');
 }
 
 /** A folder path's last segment. */

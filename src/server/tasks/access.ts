@@ -89,7 +89,7 @@ export async function taskPrincipal(
     task: task.id,
     agent: task.agent,
     attempt: claims.attempt!,
-    ...(task.requestedBy ? { requestedBy: task.requestedBy } : {}),
+    ...(task.requestedBy && !sharedConversation(task) ? { requestedBy: task.requestedBy } : {}),
     ...(task.context?.asker ? { asker: task.context.asker } : {}),
     ...(task.context?.user ? { user: task.context.user } : {}),
     dm: task.event?.chat?.thread.isDM === true,
@@ -176,6 +176,19 @@ export function taskAudience(
   if (event.chat?.thread.isDM) return { audience: `dm:${task.requestedBy ?? ''}`, space };
 
   return { audience: event.space?.private === false ? '' : spaceAudience(event), space };
+}
+
+/** A platform task outside a 1:1 DM, where anyone may write: it acts as the workspace, whoever started it. */
+export const sharedConversation = (task: Pick<AgentTask, 'source' | 'event'>) =>
+  Boolean(task.event && task.source === task.event.integration && !task.event.chat?.thread.isDM);
+
+/** The member whose credentials and runner a turn uses: its starter, when the turn is theirs; none runs on the workspace's. */
+export function turnStarter(
+  task: Pick<AgentTask, 'source' | 'event' | 'requestedBy' | 'context'>,
+): string | undefined {
+  const asker = task.context?.asker ?? (sharedConversation(task) ? undefined : task.requestedBy);
+
+  return asker && asker === task.requestedBy ? asker : undefined;
 }
 
 /** Whether a viewer sees a task or hears its delete: no viewer is an admin or a task, which see every one; a member sees public tasks, their own, and those of the private spaces they are listed in. An unknown audience shows only to the member who asked. */

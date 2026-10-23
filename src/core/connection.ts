@@ -11,8 +11,12 @@ import { CoderError } from './errors';
 import { mcpApprove, mcpApproved } from './mcp';
 import { connect, serverFor, type ServerOptions } from './remote';
 
-/** Where a connection call runs: this machine's store, or the server named by `server`. */
-export type ConnectionOptions = { cwd?: string; workspace?: string } & ServerOptions;
+/** Where a connection call runs: this machine's store, or the server named by `server`; `personal` names the asking member's own instead of the workspace's. */
+export type ConnectionOptions = {
+  cwd?: string;
+  workspace?: string;
+  personal?: boolean;
+} & ServerOptions;
 
 export interface ConnectionAddOptions extends ConnectionOptions {
   /** An API key's environment variable, or where a stdio MCP server reads its key. */
@@ -30,10 +34,8 @@ export interface ConnectionAddOptions extends ConnectionOptions {
   key?: string;
   /** Asked when a key is needed and none was given. */
   askKey?: () => Promise<string>;
-  /** The credential id an API key connection reads. */
+  /** The credential id a task secret reads. */
   credential?: string;
-  /** Your own connection instead of the workspace's. */
-  me?: boolean;
   /** Called with the sign-in page of an OAuth connection; the call then waits until it is connected. */
   onAuthorize?: (url: string) => void;
 }
@@ -98,6 +100,13 @@ async function local(cwd: string) {
   };
 }
 
+/** A row by the name the CLI takes: a member's own without its owner prefix, picked with `personal`. */
+const named = (row: ConnectionRow): ConnectionRow =>
+  row.owner ? { ...row, id: row.id.slice(row.owner.id.length + 1) } : row;
+
+/** The arguments `reconnect` takes for `row`. */
+const retryOf = (row: ConnectionRow) => `${named(row).id}${row.owner ? ' --personal' : ''}`;
+
 async function rows(opts: ConnectionOptions): Promise<ConnectionRow[]> {
   return remote(opts) ? client(opts).list() : (await local(cwdOf(opts))).list();
 }
@@ -106,7 +115,7 @@ async function rows(opts: ConnectionOptions): Promise<ConnectionRow[]> {
 async function credentialHolds(opts: ConnectionAddOptions, name: string): Promise<boolean> {
   if (remote(opts))
     return (await api(opts).credentials.list()).some(
-      row => row.name === name && (opts.me || row.scope === 'workspace'),
+      row => row.name === name && (opts.personal || row.scope === 'workspace'),
     );
   const { parseCredentialId } = await import('../server/settings/credentials');
   const { ctx } = await local(cwdOf(opts));
@@ -122,7 +131,7 @@ async function keyOf(opts: ConnectionAddOptions, what: string): Promise<string> 
 }
 
 /** Wait until a connection's OAuth sign-in has finished. */
-async function signedIn(opts: ConnectionAddOptions, id: string, url: string) {
+async function signedIn(opts: ConnectionAddOptions, id: string, url: string, retry: string) {
   const authorize = new URL(url, serverFor(opts));
   const attempt = authorize.searchParams.get('state') ?? authorize.searchParams.get('attempt');
   if (!attempt) throw invalid('Sign-in did not start.');
@@ -132,16 +141,16 @@ async function signedIn(opts: ConnectionAddOptions, id: string, url: string) {
   while (Date.now() < deadline) {
     const row = (await client(opts).list(authorization, id)).find(row => row.id === id);
     if (!row) throw invalid('The connection was removed before sign-in finished.');
-    if (row.status === 'ok') return row;
+    if (row.status === 'connected') return named(row);
   }
-  throw invalid('Sign-in did not finish.', `Try again: coder connection reconnect ${id}`);
+  throw invalid('Sign-in did not finish.', `Try again: coder connection reconnect ${retry}`);
 }
 
 /** The body `add` posts for a name and its flags. */
 async function input(name: string, opts: ConnectionAddOptions): Promise<ConnectionInput> {
   const [command, ...args] = opts.command ?? [];
   const access = opts.access && { access: opts.access };
-  const owner = opts.me ? { owner: 'me' as const } : {};
+  const scope = opts.personal ? { scope: 'personal' as const } : {};
   if (command && opts.url) throw invalid('Use either --url or a command, not both.');
   if (opts.access && !ACCESS.includes(opts.access))
     throw invalid('Invalid --access value.', 'Use read-only or auto');
@@ -158,7 +167,7 @@ async function input(name: string, opts: ConnectionAddOptions): Promise<Connecti
     return {
       name,
       provider: 'mcp',
-      ...owner,
+      ...scope,
       ...access,
       ...(auth ? { auth } : {}),
       endpoint: opts.url
@@ -182,7 +191,7 @@ async function input(name: string, opts: ConnectionAddOptions): Promise<Connecti
     return {
       name,
       provider: 'env',
-      ...owner,
+      ...scope,
       keyIn: { env: opts.env },
       ...(key ? { key } : {}),
       ...(opts.credential ? { credential: opts.credential } : {}),
@@ -196,16 +205,24 @@ async function input(name: string, opts: ConnectionAddOptions): Promise<Connecti
     );
   if (!remote(opts)) throw needsServer();
 
-  return { name, provider: name, ...owner };
+  if (opts.personal) throw invalid('--personal applies to MCP servers and task secrets.');
+
+  return { name, provider: name };
 }
 
-/** The connection `name` means: its id, or your own connection's slug. */
+/** The workspace connection `name`, or with `personal` the asking member's own. */
 async function find(name: string | undefined, opts: ConnectionOptions): Promise<ConnectionRow> {
   if (!name) throw invalid('Name the connection.', 'See them: coder connection list');
-  const all = await rows(opts);
-  const row =
-    all.find(row => row.id === name) ?? all.find(row => row.mine && row.id.endsWith(`:${name}`));
-  if (!row) throw invalid(`No connection "${name}".`, 'See them: coder connection list');
+  const row = (await rows(opts)).find(
+    row =>
+      !row.agent &&
+      (opts.personal ? row.asker && named(row).id === name : !row.owner && row.id === name),
+  );
+  if (!row)
+    throw invalid(
+      `No ${opts.personal ? 'personal ' : ''}connection "${name}".`,
+      'See them: coder connection list',
+    );
 
   return row;
 }
@@ -236,7 +253,7 @@ async function declared(cwd: string): Promise<DeclaredServer[]> {
 }
 
 export const connection = {
-  /** Connect a platform account, an API key or an MCP server; an OAuth one waits for sign-in when `onAuthorize` is given. */
+  /** Connect a platform account or an MCP server; an OAuth one waits for sign-in when `onAuthorize` is given. */
   async add(name: string | undefined, opts: ConnectionAddOptions = {}) {
     if (!name) throw invalid('Name the connection.', 'Usage: coder connection add <name> ...');
     const body = await input(name, opts);
@@ -262,12 +279,19 @@ export const connection = {
       });
     }
 
-    return added.authorize && opts.onAuthorize ? signedIn(opts, added.id, added.authorize) : added;
+    return added.authorize && opts.onAuthorize
+      ? signedIn(opts, added.id, added.authorize, retryOf(added))
+      : named(added);
   },
 
-  /** Your connections, plus the MCP servers this repository declares and whether each is approved here. */
-  async list(opts: ConnectionOptions = {}) {
-    return { connections: await rows(opts), declared: await declared(cwdOf(opts)) };
+  /** Every connection, plus, on this machine, the MCP servers this repository declares and whether each is approved here. */
+  async list(opts: ConnectionOptions = {}): Promise<{
+    connections: ConnectionRow[];
+    declared?: DeclaredServer[];
+  }> {
+    const connections = (await rows(opts)).map(named);
+
+    return remote(opts) ? { connections } : { connections, declared: await declared(cwdOf(opts)) };
   },
 
   /** Remove a connection; an API key's credential stays. */
@@ -276,7 +300,7 @@ export const connection = {
     if (remote(opts)) await client(opts).remove(row.id);
     else await (await local(cwdOf(opts))).remove(row.id);
 
-    return row;
+    return named(row);
   },
 
   /** Give a connection a new key, or sign in again. */
@@ -286,14 +310,18 @@ export const connection = {
       if (!remote(opts)) throw needsServer();
       const { url } = await client(opts).authorize(row.id);
 
-      return opts.onAuthorize ? signedIn(opts, row.id, url) : { ...row, authorize: url };
+      return opts.onAuthorize
+        ? signedIn(opts, row.id, url, retryOf(row))
+        : { ...named(row), authorize: url };
     }
     if (row.auth !== 'key') throw invalid(`${row.name} uses no key or sign-in.`);
     const key = await keyOf(opts, row.name);
 
-    return remote(opts)
-      ? client(opts).update(row.id, { key })
-      : (await local(cwdOf(opts))).update(row.id, { key });
+    return named(
+      remote(opts)
+        ? await client(opts).update(row.id, { key })
+        : await (await local(cwdOf(opts))).update(row.id, { key }),
+    );
   },
 
   /** Approve a repository MCP server on this machine; `agent` picks one agent's definition. */

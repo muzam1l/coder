@@ -1,6 +1,6 @@
 import { type Params } from '../routes/match';
 import { builtinDefinitions, defaultAgent } from '../../agent/load';
-import { staleKeys } from '../../agent/definition';
+import { effectiveSettings, staleKeys } from '../../agent/definition';
 import { type AgentApp } from '../../agent/types';
 import {
   agentOrderKey,
@@ -21,7 +21,8 @@ import { syncLocalAgents } from '../store/local';
 import { agentApps } from './connections';
 import { failedDeliveries } from '../tasks/events';
 import { decodeCursor, json, notFound, page, pageLimit, paged } from '../routes/http';
-import { agentEngines } from '../settings/credentials';
+import { agentModels, listRunsOn, modelAttempts } from '../settings/credentials';
+import { modelName } from '../../core/config';
 
 async function sourceUrl(
   ctx: ServerContext,
@@ -198,8 +199,9 @@ export async function readAgent(
   const withVersions = url.searchParams.get('versions') !== '0';
   const withContent = url.searchParams.get('content') !== '0';
   const withHandles = url.searchParams.get('handles') === '1';
+  const withInstallations = url.searchParams.get('installations') === '1';
   const requestedBy = ctx.session?.user.id;
-  const [{ record, version: current }, rows, apps, deliveries] = await Promise.all([
+  const [{ record, version: current }, rows, apps, deliveries, installs] = await Promise.all([
     !withContent && !local
       ? ctx.store
           .listAgentSummaries({ slug })
@@ -210,18 +212,16 @@ export async function readAgent(
         ? local.flatMap(({ version }) => (version ? [{ value: version }] : []))
         : ctx.store.listVersions(slug)
       : [],
-    withHandles ? agentApps(ctx, slug) : [],
+    withHandles || withInstallations ? agentApps(ctx, slug) : [],
     withHandles ? failedDeliveries(ctx.store, slug) : undefined,
+    withInstallations ? ctx.store.list('installation', { agent: slug, active: true }) : [],
   ]);
   if (!record) return json({ error: `No agent named "${slug}"` }, 404);
 
-  const { resolved, unrunnable } = withHandles
-    ? await agentEngines(
+  const { models, unrunnable } = withHandles
+    ? await agentModels(
         ctx,
-        {
-          engine: record.settings?.engine ?? current?.definition.engine,
-          model: record.settings?.model ?? current?.definition.model,
-        },
+        effectiveSettings({ definition: current?.definition, usage: record.settings }),
         requestedBy,
       )
     : {};
@@ -238,7 +238,7 @@ export async function readAgent(
   const ids = Object.keys(ctx.integrations);
   const byPlatform = (a: { value: AgentApp }, b: { value: AgentApp }) =>
     ids.indexOf(a.value.integration) - ids.indexOf(b.value.integration);
-  for (const { value } of [...apps].sort(byPlatform))
+  for (const { value } of withHandles ? [...apps].sort(byPlatform) : [])
     if (
       mentions(value.integration) &&
       !handles.some(
@@ -252,6 +252,15 @@ export async function readAgent(
         integration: value.integration,
         platform: ctx.integrations[value.integration]?.name ?? value.integration,
       });
+
+  // Where its apps are installed, as the dashboard's Platforms tab lists them.
+  const installations = installs.flatMap(({ value }) => {
+    const app = apps.find(({ id }) => id === value.app);
+
+    return app && !value.uninstalled
+      ? [{ integration: value.integration, account: value.account.login, app: app.value.name }]
+      : [];
+  });
 
   const versions = rows.map(({ value }) => {
     const { systemPrompt, files, ...metadata } = value as AgentVersionRecord;
@@ -280,6 +289,7 @@ export async function readAgent(
     ...(source ? { sourceUrl: source } : {}),
     ...(withVersions ? { versions } : {}),
     ...(handles.length ? { handles } : {}),
+    ...(withInstallations ? { installations } : {}),
     ...(deliveries?.failed
       ? {
           deliveries: {
@@ -294,7 +304,13 @@ export async function readAgent(
           },
         }
       : {}),
-    ...(resolved ? { ...(!resolved.usable ? { needsModel: true } : {}) } : {}),
+    ...(models
+      ? {
+          model: modelName(models[0]!.option),
+          runsOn: listRunsOn(models, requestedBy),
+          ...(!modelAttempts(models).length ? { needsModel: true } : {}),
+        }
+      : {}),
     ...(unrunnable?.length ? { unrunnable } : {}),
   });
 }

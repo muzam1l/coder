@@ -21,7 +21,7 @@ If `coder` is not on PATH, install it yourself without asking: `npm install -g @
 
 ## Use Coder over MCP
 
-Each coder command is also an MCP tool with the same arguments, such as `task/run` or `flow/run`; `load_skill` loads a guide.
+Each coder command is also an MCP tool with the same arguments, such as `task/run` or `flow/run`; `load_skill` loads a doc.
 
 Setup: `coder setup-host` adds the server. By hand:
 
@@ -35,7 +35,7 @@ Restart running sessions after adding it.
 ## Using the CLI
 
 - The CLI is the reference. `coder --help` and every subcommand's `--help` list the flags and exit codes, and each command prints the recommended next step when it returns. Follow it.
-- `coder docs` lists the deeper guides; `coder docs <topic>` prints one.
+- `coder docs` lists the docs; `coder docs <topic>` prints one.
 - Wait on each task with `coder task result <task-id> --wait` in its own background shell, one per task, never several tasks in one call, so each approval and answer reaches you.
 - If Cursor asks before running `coder` commands, approve or allowlist `coder`; the runtime is a supervisor with its own sandbox and approval policy.
 

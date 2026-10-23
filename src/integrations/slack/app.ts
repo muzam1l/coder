@@ -448,7 +448,9 @@ export const slackApp: IntegrationApp = {
       request,
     );
   },
-  installationUrl: () => 'https://slack.com/help/articles/360003125231',
+  // The workspace's own Manage apps page, where its owners remove or reconfigure the app.
+  installationUrl: ({ account }) =>
+    new URL('/apps/manage', account.url ?? 'https://my.slack.com').href,
   // Slack's authorize page needs the scopes on the URL; an app created before they were saved asks for the write set.
   installUrl(_app, credentials, { publicUrl, state }) {
     const current = credentials as SlackAppCredentials;
@@ -489,7 +491,7 @@ export const slackApp: IntegrationApp = {
   },
 };
 
-/** The Slack MCP server's tool scopes a member's Just me connection asks for: search, reads, and sending messages as them. */
+/** The Slack MCP server's tool scopes a member's personal connection asks for: search, reads, and sending messages as them. */
 const USER_SCOPES = [
   'search:read.public',
   'search:read.private',

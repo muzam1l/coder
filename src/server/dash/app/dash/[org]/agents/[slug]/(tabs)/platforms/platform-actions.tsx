@@ -238,15 +238,39 @@ function UninstallDialog({
 }
 
 /** Uninstall from one account, asked in its dialog first. */
-export function UninstallButton({ install, name }: { install: InstallChoice; name: string }) {
+export function UninstallButton({
+  install,
+  name,
+  url,
+}: {
+  install: InstallChoice;
+  name: string;
+  /** Where the install is managed on the platform; Manage there leads, with Uninstall behind its caret. */
+  url?: string;
+}) {
   // By id: after the refresh this button may stand for the next install.
   const [asked, setAsked] = useState<string>();
 
   return (
     <>
-      <Button variant="outline" size="sm" onClick={() => setAsked(install.id)}>
-        Uninstall
-      </Button>
+      {url ? (
+        <span class="split">
+          <Button variant="outline" size="sm" href={url} external>
+            Manage on {name}
+          </Button>
+          <Menu
+            button={{ variant: 'outline', size: 'sm', class: 'split-more' }}
+            label={`More for ${install.account}`}
+            summary={<Icon d={iDown} />}
+          >
+            <MenuItem icon={iX} title="Uninstall" danger onClick={() => setAsked(install.id)} />
+          </Menu>
+        </span>
+      ) : (
+        <Button variant="outline" size="sm" onClick={() => setAsked(install.id)}>
+          Uninstall
+        </Button>
+      )}
       {asked === install.id ? (
         <UninstallDialog install={install} name={name} onClose={() => setAsked(undefined)} />
       ) : null}
@@ -855,8 +879,11 @@ export function PlatformActions({
   reinstall,
   shared = false,
   failed,
+  agent,
   ...options
 }: CreateOptions & {
+  /** The agent whose apps these are; the page's own agent by default. */
+  agent?: string;
   apps: AppChoice[];
   installed: boolean;
   /** Live installs the viewer may uninstall. */
@@ -868,7 +895,9 @@ export function PlatformActions({
   /** The platform's last setup failed, on `app` when it was an install; `title` and `text` say how, else it was unexpected. */
   failed?: { name: string; app?: string; issues?: string; title?: string; text?: string };
 }) {
-  const { org, slug } = useParams<'/dash/[org]/agents/[slug]/platforms'>();
+  const params = useParams<'/dash/[org]/agents/[slug]/platforms'>();
+  const { org } = params;
+  const slug = agent ?? params.slug;
   const { busy, install } = useInstall();
   const { leaving, start, dialogs } = useCreate(options);
   const [uninstalling, setUninstalling] = useState<InstallChoice>();

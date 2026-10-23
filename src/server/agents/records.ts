@@ -4,7 +4,7 @@ import path from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 
 import { builtinDefinitions, agentsFromSources } from '../../agent/load';
-import { definitionProblems, parseAgentDefinition } from '../../agent/definition';
+import { definitionProblems, parseAgentDefinition, usageEntry } from '../../agent/definition';
 import { INTEGRATIONS } from '../../integrations';
 import type { Integration } from '../../integrations/types';
 import { strictestAccess } from '../../core/config';
@@ -204,8 +204,13 @@ function mergedUsage(
       return [id, allowedEvents ? { allowedEvents } : {}];
     }),
   );
+  // A model choice replaces the one before it whole.
+  const choice =
+    second.engine || second.model ? { engine: undefined, model: undefined, effort: undefined } : {};
+
   return {
     ...first,
+    ...choice,
     ...second,
     ...(first.access || second.access
       ? { access: strictestAccess(first.access, second.access) }
@@ -238,7 +243,7 @@ export function agentProblems(
         definitions: {
           [record.id]: { json: version.definition, builtin: record.source === 'builtin' },
         },
-        usage: record.settings ? { [record.id]: record.settings } : undefined,
+        usage: record.settings ? { [record.id]: usageEntry(record.settings) } : undefined,
         includeDisabled: true,
       },
       integrations,
@@ -265,7 +270,7 @@ export function toAgent(
           builtin: record.source === 'builtin',
         },
       },
-      usage: effective ? { [record.id]: effective } : undefined,
+      usage: effective ? { [record.id]: usageEntry(effective) } : undefined,
     },
     integrations,
   );

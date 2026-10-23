@@ -93,6 +93,17 @@ export interface LinkExtra {
   login?: string;
 }
 
+/** A platform account linked to a member, with its sealed token. */
+export type LinkedAccount = {
+  platform: string;
+  platformUserId: string;
+  name: string;
+  email: string;
+} & LinkExtra & {
+    /** When the platform refused the token's refresh. */
+    refusedAt?: number;
+  };
+
 /** The workspaces and roles a link remembers. */
 export const linkedOrganizations = (organizations: OrganizationInfo[]) => ({
   organizations: organizations.map(org => org.id),
@@ -127,17 +138,12 @@ export interface AuthApi {
     extra?: LinkExtra,
     store?: Store,
   ): Promise<'linked' | 'taken'>;
-  linkedAccounts?(
-    userId: string,
+  linkedAccounts?(userId: string, store?: Store): Promise<LinkedAccount[]>;
+  /** Every member's linked accounts in the organization. */
+  organizationAccounts?(
+    organizationId: string,
     store?: Store,
-  ): Promise<
-    Array<
-      { platform: string; platformUserId: string; name: string; email: string } & LinkExtra & {
-          /** When the platform refused the token's refresh. */
-          refusedAt?: number;
-        }
-    >
-  >;
+  ): Promise<Array<LinkedAccount & { userId: string }>>;
   unlink?(userId: string, platform: string, platformUserId: string, store?: Store): Promise<void>;
   refreshLinkedToken?(
     userId: string,
@@ -252,6 +258,7 @@ export interface ServerSettings {
   runnerInstances?: Map<string, { signature: string; runner: Runner }>;
   configUpdate?: Promise<unknown>;
   registry?: import('../settings/mcp').RegistryIndex;
+  mcpIcons?: import('../settings/models').MemoryCache<import('../settings/mcp').IconFile | null>;
   probes?: import('../settings/models').MemoryCache<import('../../client/types').ProbeResult>;
 }
 

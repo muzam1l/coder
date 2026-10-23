@@ -43,7 +43,7 @@ export const TOP_HELP: Omit<TopHelpSpec, 'globals'> = {
       blurb: '"claude" for Claude Code, "agents" for any ~/.agents host (Codex, Pi, ...)',
     },
     {
-      usage: 'coder run --model <model|engine:model> "<task>"',
+      usage: 'coder run --model <name[/effort]|engine/model[/effort]> "<task>"',
       blurb: "run a task with that model",
     },
     {

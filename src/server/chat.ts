@@ -167,7 +167,7 @@ export function later(
   if (ctx.waitUntil) ctx.waitUntil(logged);
 }
 
-/** One event into the workspace its installation is bound to, answered in its thread; a queued task is kicked once it lands, after `accepted`. */
+/** One event into the workspace its installation is bound to, answered in its thread; a queued task is kicked once it lands. */
 export async function deliver(
   ctx: ServerContext,
   integration: Integration,
@@ -175,7 +175,6 @@ export async function deliver(
   credentials: unknown,
   event: AgentEvent,
   replies: Replies,
-  accepted?: () => Promise<void>,
 ): Promise<string | undefined> {
   if (app.builtin && !integration.app.shareable) {
     dropped(event, `the built-in app does not serve ${integration.name}`, 'error');
@@ -209,7 +208,6 @@ export async function deliver(
   await dispatched.work;
   if (!dispatched.taskId) return;
 
-  await accepted?.();
   await kick(tenant, true, false, true);
   return dispatched.taskId;
 }

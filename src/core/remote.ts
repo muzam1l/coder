@@ -1,10 +1,12 @@
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import path from 'node:path';
 import process from 'node:process';
+import { Readable } from 'node:stream';
 import { folderFiles, loadAgents } from '../agent/load';
 import { CoderError } from './errors';
 import { ServerClient } from '../client';
-import { isLoopbackServer } from '../client/http';
+import { isLoopbackServer, taskSocket } from '../client/http';
 import {
   isKnownServer,
   rememberServer,
@@ -100,6 +102,14 @@ export function coderClient(
   }: { token?: string; missingHint?: string; organization?: string } = {},
 ): RemoteClient {
   const target = validateServer(server);
+  const socket = taskSocket();
+  // The runner's socket adds the task's token itself.
+  if (socket && target === `unix:${socket}`)
+    return new ServerClient<RemoteTypes>(
+      'http://localhost',
+      {},
+      { fetch: socketFetch(socket), organization },
+    );
   const saved = savedSession(target);
   const login = saved?.token;
   const admin = process.env.ADMIN_TOKEN;
@@ -120,6 +130,42 @@ export function coderClient(
       renewal: saved && bearer === login ? renewal(target, saved) : undefined,
     },
   );
+}
+
+/** `fetch` over a unix socket; Node's `fetch` has no socket option. */
+function socketFetch(socketPath: string) {
+  return async (input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> => {
+    const url = new URL(String(input));
+    const body = init.body ? Buffer.from(await new Response(init.body).arrayBuffer()) : undefined;
+
+    return new Promise((resolve, reject) => {
+      const request = http.request(
+        {
+          socketPath,
+          path: `${url.pathname}${url.search}`,
+          method: init.method ?? 'GET',
+          headers: Object.fromEntries(new Headers(init.headers)),
+          signal: init.signal ?? undefined,
+        },
+        response => {
+          const headers = new Headers();
+          for (let at = 0; at < response.rawHeaders.length; at += 2)
+            headers.append(response.rawHeaders[at]!, response.rawHeaders[at + 1]!);
+          const status = response.statusCode ?? 502;
+          const empty = status === 204 || status === 304 || init.method === 'HEAD';
+          if (empty) response.resume();
+          resolve(
+            new Response(empty ? null : (Readable.toWeb(response) as unknown as ReadableStream), {
+              status,
+              headers,
+            }),
+          );
+        },
+      );
+      request.on('error', reject);
+      request.end(body);
+    });
+  };
 }
 
 export async function pushAgents(

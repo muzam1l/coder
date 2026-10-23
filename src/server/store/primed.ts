@@ -18,7 +18,7 @@ export interface Loaded {
   app?: AgentApp;
   installation?: Installation;
   credential?: StoredCredential;
-  /** The credentials the task's engine may fall back to, when it names none. */
+  /** The credentials the task's turn may switch to. */
   credentials?: Array<{ id: string; value: StoredCredential }>;
   config?: StoredConfig;
   runner?: RunnerRecord;
@@ -65,7 +65,7 @@ export function loadedStore(store: Store, status: TaskStatus, loaded: Loaded): S
             has('installation') &&
             id === `${event?.appId}:${event?.installationId}`
           ? loaded.installation
-          : kind === 'credential' && has('credential') && id === task.credential
+          : kind === 'credential' && has('credential') && id === task.models?.[0]?.credential
             ? loaded.credential
             : kind === 'config' && has('config') && id === 'workspace'
               ? loaded.config

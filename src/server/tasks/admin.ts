@@ -6,11 +6,13 @@ import {
   createTask,
   taskCwd,
   taskTurns,
+  unknownOption,
   type NewTask,
 } from './create';
 import { parseCredentialId } from '../settings/credentials';
 import { type Params } from '../routes/match';
 import { type ServerContext } from '../context';
+import { firstModel } from './context';
 import { taskRunner } from '../runners/select';
 import {
   answerLocalApproval,
@@ -53,6 +55,7 @@ import { start } from './flows';
 import { ConfigError, effectiveConfig, shownConfig } from '../settings/config';
 import { type ComposerOptions } from '../../client/types';
 import { defaultAgent } from '../../agent/load';
+import { effectiveSettings } from '../../agent/definition';
 import { builtinFlowsDir, flowsIn } from '../../flow/discover';
 import { agentRecords, prepareAgent } from '../agents/catalog';
 import { localFolders } from '../settings/folders';
@@ -85,17 +88,20 @@ export function taskError(error: unknown): Response {
   throw error;
 }
 
-/** The model a task runs with, as its turn recorded when it started, else its own pick; tasks from before the record show only their pick. */
+/** The model a task runs with, as its turn recorded it, else the first of its list. */
 function runModel(status: TaskStatus) {
   const model =
-    status.task.usage?.resolvedModel ?? status.task.usage?.model ?? status.task.definition?.model;
+    status.task.usage?.resolvedModel ??
+    firstModel(status.task) ??
+    status.task.usage?.model ??
+    status.task.definition?.model;
 
   return model ? { model } : {};
 }
 
 function summarizeTask(status: TaskStatus) {
   const { id, name, source, agent, flow, event, cwd, access, context, requestedBy } = status.task;
-  const { engine, model, effort } = { ...status.task.definition, ...status.task.usage };
+  const { engine, model, effort } = effectiveSettings(status.task);
   // The first turn's prompt titles the task; a follow-up or a decision is a later turn.
   const prompt = status.task.context?.turns?.[0]?.prompt ?? status.task.prompt;
   return {
@@ -151,8 +157,8 @@ export function redactTask(
     ...(status.status === 'queued' ? { statusReason: 'Waiting for a task slot' } : {}),
     ...(status.task.context?.approvals ? { approvals: status.task.context.approvals } : {}),
     turns: withDecisions(taskTurns(status), status.approvals ?? status.task.context?.approvals),
-    ...(status.task.credential
-      ? { credential: parseCredentialId(status.task.credential).name }
+    ...(status.task.models?.[0]?.credential
+      ? { credential: parseCredentialId(status.task.models[0].credential).name }
       : {}),
   };
 }
@@ -311,9 +317,11 @@ export async function steerTask(
     return json({ error: 'steer is available only for default-flow tasks' }, 409);
 
   const body = await req.json().catch(() => undefined);
+  const unknown = unknownOption(body, ['engine', 'effort']);
+  if (unknown) return json({ error: unknown }, 400);
   // A finished task resumes on the same id; a live one takes the follow-up in its inbox.
   if (DONE.has(status.status)) {
-    const { text, outputSchema, model, effort, access } = (body ?? {}) as Record<string, any>;
+    const { text, outputSchema, model, access } = (body ?? {}) as Record<string, any>;
     // The member continuing it asks this turn.
     const context = { ...status.task.context, asker: ctx.session?.user.id };
     try {
@@ -324,7 +332,6 @@ export async function steerTask(
         outputSchema,
         {
           model,
-          effort,
           access,
         },
       );
@@ -359,6 +366,8 @@ function inboxAction(kind: 'ask' | 'approve') {
     if (!ACTIVE_STATES.includes(status.status))
       return json({ error: `Task "${id}" is not active` }, 409);
     const value = (await req.json().catch(() => undefined)) as Record<string, unknown> | undefined;
+    const unknown = unknownOption(value, ['engine', 'effort']);
+    if (unknown) return json({ error: unknown }, 400);
     const entry = await addInbox(ctx, status, kind, value);
 
     return entry ? json(entry) : json({ error: `Task "${id}" is no longer active` }, 409);
@@ -846,8 +855,7 @@ export async function composerOptions(req: Request, ctx: ServerContext): Promise
 
   return json({
     agents,
-    ...(effective.chain?.[0] ? { engine: effective.chain[0] } : {}),
-    engines: effective.engines ?? {},
+    chain: effective.chain,
     models: modelList(config),
     runners: runnerItems(ctx, runners, now).map(({ id, name, default: chosen }) => ({
       id,
