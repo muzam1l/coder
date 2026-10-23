@@ -40,7 +40,7 @@ type Issue = {
   description?: string | null;
   teamId?: string;
   team?: { id?: string; name?: string };
-  state?: { id?: string; name?: string; type?: string };
+  state?: { name?: string; type?: string };
   labels?: Array<{ id?: string; name?: string }>;
   priorityLabel?: string;
   assignee?: { id?: string; name?: string } | null;
@@ -51,7 +51,7 @@ type Comment = {
   body?: string;
   parentId?: string | null;
   issue?: Issue | null;
-  user?: { id?: string; name?: string } | null;
+  user?: unknown;
   botActor?: unknown;
   externalUserId?: string | null;
 };
@@ -86,7 +86,7 @@ function webhookTeam(body: Webhook): string {
 
 export function linearTarget(req: Request, raw: string): WebhookTarget | undefined {
   const app = new URL(req.url).searchParams.get('app');
-  let body: Webhook & { organizationId?: unknown };
+  let body: Webhook;
   try {
     body = JSON.parse(raw);
   } catch {
@@ -107,7 +107,7 @@ export function linearTarget(req: Request, raw: string): WebhookTarget | undefin
 }
 
 /** An issue's Chat SDK thread, or a comment thread under its root, in the Linear adapter's id format. */
-export function linearThread(issue: string, comment?: string): SerializedThread {
+function linearThread(issue: string, comment?: string): SerializedThread {
   return {
     _type: 'chat:Thread',
     adapterName: 'linear',
@@ -230,14 +230,7 @@ function slaEvent(req: Request, body: Webhook, app: PlatformApp): PlatformEvent 
   const about = [issue.title, issue.description].filter(Boolean).join('\n\n');
   const state = body.action === 'breached' ? 'SLA breached' : 'SLA at high risk';
 
-  return issueEvent(
-    req,
-    app,
-    { ...body, actor: { ...owner, type: 'user' } },
-    'issue',
-    issue,
-    `${state}\n\n${about}`,
-  );
+  return issueEvent(req, app, { ...body, actor: owner }, 'issue', issue, `${state}\n\n${about}`);
 }
 
 /** Every signed webhook but agent sessions, which the Chat SDK adapter verifies and handles. */
