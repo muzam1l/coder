@@ -497,7 +497,7 @@ async function claimed(
       const key = `setup:${app.id}:${event.chat?.thread.id ?? event.deliveryId}`;
       const owner = event.deliveryId;
       const first =
-        integration.answersEveryPrompt ||
+        integration.answersEveryPrompt?.(event) ||
         (await ctx.store.create(
           'delivery',
           key,
@@ -509,7 +509,8 @@ async function claimed(
       try {
         await replies.problem(await setupText(ctx, engine, await slug()));
       } catch (error) {
-        if (!integration.answersEveryPrompt) await ctx.store.updateDelivery(key, owner, undefined);
+        if (!integration.answersEveryPrompt?.(event))
+          await ctx.store.updateDelivery(key, owner, undefined);
         throw error;
       }
     });
