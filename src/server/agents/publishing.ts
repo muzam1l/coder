@@ -7,9 +7,9 @@ import { getAgent, getVersion, publishAgent, setAgentSettings, toAgent } from '.
 import { syncApps } from './repo';
 import { deleteLocalAgent, syncLocalAgents, writeLocalAgent } from '../store/local';
 import { effectiveConfig, shownConfig, updateConfig } from '../settings/config';
-import { splitEngineSpec } from '../../core/config';
+import { modelName, splitEngineSpec } from '../../core/config';
 import { resolveTaskOptions } from '../../core/dispatch';
-import { modelProblem } from '../settings/credentials';
+import { modelProblem, personalOnly, resolveModels } from '../settings/credentials';
 import { json } from '../routes/http';
 import { prepareAgent } from './catalog';
 import { CoderError } from '../../core/errors';
@@ -109,9 +109,25 @@ export async function updateSettings(
 ): Promise<Response> {
   const body = await req.json().catch(() => undefined);
 
-  return saveAgentSettings(ctx, params.slug!, body).then(json, (error: Error) =>
-    json({ error: error.message }, error instanceof CoderError ? (error.status ?? 400) : 400),
+  return saveAgentSettings(ctx, params.slug!, body).then(
+    async record => json({ ...record, ...(await personalWarning(ctx, record)) }),
+    (error: Error) =>
+      json({ error: error.message }, error instanceof CoderError ? (error.status ?? 400) : 400),
   );
+}
+
+/** A saved model only the saver's own credential runs, as a warning for the save toast. */
+async function personalWarning(ctx: ServerContext, record: AgentRecord) {
+  const settings = record.settings ?? {};
+  const viewer = ctx.session?.user.id;
+  if (!viewer || (!settings.engine && !settings.model)) return {};
+  const { models } = await resolveModels(ctx, settings, viewer);
+
+  return personalOnly(models)
+    ? {
+        warning: `Only your personal credential runs ${modelName(models[0]!.option)}. Add a workspace credential so ${record.name} works for everybody.`,
+      }
+    : {};
 }
 
 export async function deleteAgent(

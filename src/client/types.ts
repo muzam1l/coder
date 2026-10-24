@@ -128,8 +128,6 @@ export interface AgentRow {
   runsOn?: string;
   /** Nothing can run any of its models for the caller: no credential of theirs or the workspace's, no sign-in on this machine. */
   needsModel?: true;
-  /** Only the caller's own credential runs its first model, so it answers only their turns until a workspace credential is added. */
-  personalOnly?: true;
   /** Engines, and custom models as `custom/<name>`, that no workspace credential runs, so an agent on them answers only members whose own credential does. */
   unrunnable?: string[];
   /** Why its definition is invalid; it answers no events until fixed. */

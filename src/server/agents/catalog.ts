@@ -21,7 +21,7 @@ import { syncLocalAgents } from '../store/local';
 import { agentApps, appRow, installationRow } from './connections';
 import { failedDeliveries } from '../tasks/events';
 import { decodeCursor, json, notFound, page, pageLimit, paged } from '../routes/http';
-import { agentModels, listRunsOn, modelAttempts, personalOnly } from '../settings/credentials';
+import { agentModels, listRunsOn, modelAttempts } from '../settings/credentials';
 import { modelName } from '../../core/config';
 
 async function sourceUrl(
@@ -309,7 +309,6 @@ export async function readAgent(
           model: modelName(models[0]!.option),
           runsOn: listRunsOn(models, requestedBy),
           ...(!modelAttempts(models).length ? { needsModel: true } : {}),
-          ...(personalOnly(models) ? { personalOnly: true } : {}),
         }
       : {}),
     ...(unrunnable?.length ? { unrunnable } : {}),

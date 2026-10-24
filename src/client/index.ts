@@ -257,7 +257,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     settings: (
       slug: string,
       settings: Omit<AgentSettings, 'engine' | 'effort'>,
-    ): Promise<D['record']> =>
+    ): Promise<D['record'] & { warning?: string }> =>
       this.request(`/admin/agents/${encodeURIComponent(slug)}/settings`, {
         method: 'PATCH',
         body: JSON.stringify(settings),
