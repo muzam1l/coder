@@ -125,7 +125,7 @@ async function personalWarning(ctx: ServerContext, record: AgentRecord) {
 
   return personalOnly(models)
     ? {
-        warning: `Only your personal credential runs ${modelName(models[0]!.option)}. Add a workspace credential so ${record.name} works for everybody.`,
+        warning: `Only your personal credential runs ${modelName(models[0]!.option)}. Others fall back to the chain until a workspace credential runs it.`,
       }
     : {};
 }

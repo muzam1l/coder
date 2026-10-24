@@ -38,7 +38,9 @@ const review: AsyncTool<ReviewInput> = {
     const { renderReviewMarkdown } = await import('../../../flow/builtin/review');
     const reviewed = result as ReviewResult;
     const text = renderReviewMarkdown({ ...reviewed, runId });
-    if (!reviewed.pr || reviewed.summary.url) return text;
+    if (reviewed.summary.url)
+      return `${text}\nThe review is on the pull request, so a reply repeating it adds nothing.\n`;
+    if (!reviewed.pr) return text;
 
     return `${text}\nNot posted. To post it on the pull request as the user, escalate \`coder review --post --run ${runId}\`.\n`;
   },
@@ -125,11 +127,11 @@ export function taskTools(tools: string[]) {
     ...taskApp,
     ...(async.length
       ? {
-        instructions: [
-          `${async.join(' and ')} ${async.length > 1 ? 'return' : 'returns'} at once;`,
-          'the result arrives later as a message, in a new turn if yours has ended.',
-        ].join(' '),
-      }
+          instructions: [
+            `${async.join(' and ')} ${async.length > 1 ? 'return' : 'returns'} at once;`,
+            'the result arrives later as a message, in a new turn if yours has ended.',
+          ].join(' '),
+        }
       : {}),
     commands: taskApp.commands.filter(command => tools.includes(command.name)),
   };
