@@ -99,11 +99,8 @@ export function ownEffort(name: string, shape: ModelsShape): string {
   return isEffort(last) ? last : 'medium';
 }
 
-/** The no-model choice, which runs the workspace chain, with its models in order under it. */
-export const chainChoice = (chain: string[], shape: ModelsShape) => ({
-  label: 'Default chain',
-  sub: chain.map(spec => specName(spec, shape.builtin)).join(', then ') || 'none set',
-});
+/** The no-model choice, which runs the workspace chain; the default chain link shows its models. */
+export const chainChoice = () => ({ label: 'Default chain' });
 
 /** A model picker's options: Codex, Claude and custom names under their headings, each with what it runs. */
 export function modelChoices(shape: ModelsShape, keep = '') {

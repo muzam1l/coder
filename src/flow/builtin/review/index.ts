@@ -67,13 +67,17 @@ const Category = z.enum([
   'documentation',
 ]);
 const Finding = z.strictObject({
-  file: z.string(),
-  line: z.number().meta({ type: 'integer' }),
-  start_line: z.number().meta({ type: 'integer' }).nullable(),
+  file: z.string().describe('A changed file.'),
+  line: z.number().meta({ type: 'integer' }).describe('The changed new-side line it anchors on.'),
+  start_line: z
+    .number()
+    .meta({ type: 'integer' })
+    .nullable()
+    .describe('First line when the defect spans consecutive changed lines in one hunk, else null.'),
   severity: Severity,
   category: Category,
   summary: z.string().describe('A title of at most 10 words.'),
-  failure_scenario: z.string(),
+  failure_scenario: z.string().describe('The concrete failure.'),
 });
 type Severity = z.infer<typeof Severity>;
 export type Finding = Omit<z.infer<typeof Finding>, 'start_line'> & {
@@ -224,7 +228,7 @@ const reviews = (): PullRequestReviews => INTEGRATIONS[REVIEW_PLATFORM]!.repos!.
 /** The pull request's head moved after the review read it. */
 class HeadMovedError extends Error {
   constructor(readonly head: string) {
-    super(`The pull request moved to ${head.slice(0, 7)} since this review; review again.`);
+    super(`The pull request moved to ${head.slice(0, 7)} since this review. Review again.`);
   }
 }
 
@@ -241,6 +245,8 @@ export async function postReviewHere(
   token ??= platform.localToken(cwd);
   const head = await platform.head(result.pr, token, request);
   if (head !== result.pr.headSha) throw new HeadMovedError(head);
+  const stopped = () => ctxALS.getStore()?.stopping === true;
+  if (stopped()) throw new Error('The review was stopped before posting.');
   const posted = await postReview(
     platform,
     {
@@ -252,6 +258,7 @@ export async function postReviewHere(
     },
     token,
     request,
+    stopped,
   );
 
   return {
@@ -569,14 +576,26 @@ export default async function review(
       if (check.url) result.summary.checkUrl = check.url;
       const count = result.findings.length;
       const worst = result.findings[0]?.severity;
+      const unresolved = target.prior?.filter(p => p.state !== 'resolved').length ?? 0;
       await reviews().finishCheck(
         target,
         check.id,
         {
-          conclusion: count ? 'neutral' : 'success',
-          title: `Reviewed ${target.headSha.slice(0, 7)}: ${count ? `${count} issue${count === 1 ? '' : 's'}, worst ${worst}` : 'no issues'}`,
-          summary: reviewCheckSummary(result.note, result.findings, result.summary.url!),
-          detailsUrl: result.summary.url,
+          conclusion: count || unresolved ? 'neutral' : 'success',
+          title: `Reviewed ${target.headSha.slice(0, 7)}: ${
+            count
+              ? `${count} issue${count === 1 ? '' : 's'}, worst ${worst}`
+              : unresolved
+                ? `no new issues, ${unresolved} unresolved`
+                : 'no issues'
+          }`,
+          summary: reviewCheckSummary(
+            result.note,
+            result.findings,
+            result.summary.url!,
+            currentReviewLinks()?.task,
+          ),
+          detailsUrl: currentReviewLinks()?.task ?? result.summary.url,
         },
         token,
         services.request,
@@ -597,7 +616,7 @@ export default async function review(
               summary: 'Reviewing the new head.',
             }
           : {
-              conclusion: 'failure',
+              conclusion: 'neutral',
               title: 'Review failed',
               summary: 'The review did not finish.',
             },
@@ -745,11 +764,11 @@ async function reviewChange(
           });
       }),
     ),
-    note: z.string(),
+    note: z.string().describe('One line on the change as a whole, under 200 characters, or empty.'),
     body: z
       .string()
       .describe(
-        'Markdown shown above the findings when something matters beyond them; empty when nothing does.',
+        'Markdown for what is not tied to one changed line, such as a pattern across files or a step before merging. Empty when nothing matters beyond the findings.',
       ),
   });
   const from = since ?? baseSha;

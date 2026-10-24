@@ -103,10 +103,15 @@ const codeSpan = (text: string) => {
   return `${fence}${pad}${flat}${pad}${fence}`;
 };
 
-export function reviewCheckSummary(note: string, findings: ReviewFinding[], url: string): string {
+export function reviewCheckSummary(
+  note: string,
+  findings: ReviewFinding[],
+  url: string,
+  task?: string,
+): string {
   const heading = title(note);
   const lines = [heading.length > 200 ? `${heading.slice(0, 199)}…` : heading];
-  const link = `[View the review](${url})`;
+  const link = `[View the review](${url})${task ? ` · [View task](${task})` : ''}`;
   let length = lines[0]!.length + 1 + link.length;
   for (const [index, finding] of findings.entries()) {
     const line = `- ${capital(finding.severity)} ${title(finding.summary)} ${codeSpan(`${finding.file}:${finding.start_line ? `${finding.start_line}-` : ''}${finding.line}`)}`;
@@ -206,9 +211,12 @@ export async function postReview(
   review: ReviewPost,
   token: string,
   request?: typeof fetch,
+  stopped: () => boolean = () => false,
 ): Promise<{ url: string; posted: number }> {
   const { target } = review;
   const threads = await platform.threads(target, token, request);
+  // A run stopped while reading the threads posts nothing.
+  if (stopped()) throw new Error('The review was stopped before posting.');
   const fresh = review.findings.filter(
     finding => finding.inline !== false && !threads.has(finding.fingerprint),
   );

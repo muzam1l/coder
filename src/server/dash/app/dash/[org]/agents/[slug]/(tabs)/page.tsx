@@ -146,6 +146,11 @@ export default async function AgentPage({
           <>
             {row.needsModel ? (
               <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
+            ) : row.personalOnly ? (
+              <NeedsCredential
+                reason={`Only your personal credential runs ${row.model}. Add a workspace credential so ${row.name} works for everybody.`}
+                label={row.name}
+              />
             ) : null}
             <OverviewBody
               agent={row}

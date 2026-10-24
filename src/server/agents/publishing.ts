@@ -69,7 +69,7 @@ export async function agentSettings(ctx: ServerContext, slug: string, body: unkn
     parsed.model = typed.model;
     parsed.effort = typed.effort ?? parsed.effort;
   }
-  const problem = await modelProblem(ctx, parsed, Boolean(ctx.taskPrincipal));
+  const problem = await modelProblem(ctx, parsed, Boolean(ctx.taskPrincipal), ctx.session?.user.id);
   if (problem) throw new Error(problem);
 
   return parsed;

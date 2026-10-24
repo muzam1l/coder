@@ -159,7 +159,7 @@ async function target(
           method: 'POST',
           body: {
             query:
-              'query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ reviewThreads(first:100){ nodes{ isResolved comments(first:1){ nodes{ databaseId } } } } } } }',
+              'query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ reviewThreads(last:100){ nodes{ isResolved comments(first:1){ nodes{ databaseId } } } } } } }',
             variables: { owner, name, number: pr.number },
           },
         });

@@ -775,7 +775,7 @@ export function AgentEditor({
                   <ModelPick
                     shape={shape}
                     name="model"
-                    empty={chainChoice(defaults.chain, shape)}
+                    empty={chainChoice()}
                     value={draft.model}
                     onChange={value => set('model', value)}
                   />

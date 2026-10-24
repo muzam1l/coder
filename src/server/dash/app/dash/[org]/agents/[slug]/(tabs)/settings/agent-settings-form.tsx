@@ -35,7 +35,6 @@ export function AgentSettingsForm({
   agent,
   catalog,
   shape,
-  chain,
   runners,
   connections,
 }: {
@@ -43,8 +42,6 @@ export function AgentSettingsForm({
   catalog: IntegrationInfo[];
   /** The workspace's models, for the model picker. */
   shape: ModelsShape;
-  /** The workspace chain, which runs when no model is set. */
-  chain: string[];
   runners: Option[];
   /** The workspace's connections, to narrow. */
   connections: ConnectionRow[];
@@ -171,7 +168,7 @@ export function AgentSettingsForm({
                 empty={
                   agent.definition?.model
                     ? { label: `Its own, ${specName(agent.definition.model, shape.builtin)}`, sub: 'from agent.json' }
-                    : chainChoice(chain, shape)
+                    : chainChoice()
                 }
                 value={model}
                 onChange={setModel}

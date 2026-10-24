@@ -92,9 +92,12 @@ export const taskApp = defineApp({
     }),
     defineCommand({
       name: 'review',
-      description: `Review changes with a read-only reviewer. Passing pr posts the review on that pull request, with a check people can follow. One at a time, ${review.limit} per turn.`,
+      description: `Review changes with a read-only reviewer. One at a time, ${review.limit} per turn.`,
       args: {
-        pr: arg(z.optional(z.number()), 'A pull request to review. Passing it posts the review.'),
+        pr: arg(
+          z.optional(z.number()),
+          'A pull request to review. Posts the review (summary + findings) and a check, so do not announce or repeat them.',
+        ),
         base: str('The ref to compare with; default HEAD, so only uncommitted changes.'),
         path: strList('Review only these paths, relative to the task directory.'),
         exclude: strList('Leave these paths out.'),
@@ -122,11 +125,11 @@ export function taskTools(tools: string[]) {
     ...taskApp,
     ...(async.length
       ? {
-          instructions: [
-            `${async.join(' and ')} ${async.length > 1 ? 'return' : 'returns'} at once;`,
-            'the result arrives later as a message, in a new turn if yours has ended.',
-          ].join(' '),
-        }
+        instructions: [
+          `${async.join(' and ')} ${async.length > 1 ? 'return' : 'returns'} at once;`,
+          'the result arrives later as a message, in a new turn if yours has ended.',
+        ].join(' '),
+      }
       : {}),
     commands: taskApp.commands.filter(command => tools.includes(command.name)),
   };

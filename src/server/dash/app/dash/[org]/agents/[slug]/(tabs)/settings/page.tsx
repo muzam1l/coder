@@ -37,16 +37,20 @@ export default async function AgentSettingsPage({
     <Settle
       load={() =>
         Promise.all([agent, run, runners, catalog, connections]).then(
-          ([row, { shape, defaults }, rows, integrations, workspace]) => (
+          ([row, { shape }, rows, integrations, workspace]) => (
             <>
               {row.needsModel ? (
                 <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
+              ) : row.personalOnly ? (
+                <NeedsCredential
+                  reason={`Only your personal credential runs ${row.model}. Add a workspace credential so ${row.name} works for everybody.`}
+                  label={row.name}
+                />
               ) : null}
               <AgentSettingsForm
                 agent={row}
                 catalog={integrations}
                 shape={shape}
-                chain={defaults.chain}
                 runners={runnerOptions(rows)}
                 connections={workspace}
               />
