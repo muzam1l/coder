@@ -92,7 +92,7 @@ export const taskApp = defineApp({
     }),
     defineCommand({
       name: 'review',
-      description: `Review changes with a read-only reviewer. Passing pr posts the review on that pull request. One at a time, ${review.limit} per turn.`,
+      description: `Review changes with a read-only reviewer. Passing pr posts the review on that pull request, with a check people can follow. One at a time, ${review.limit} per turn.`,
       args: {
         pr: arg(z.optional(z.number()), 'A pull request to review. Passing it posts the review.'),
         base: str('The ref to compare with; default HEAD, so only uncommitted changes.'),
