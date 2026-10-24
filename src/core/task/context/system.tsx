@@ -73,7 +73,7 @@ const Replies = () => (
       'Never send the same reply twice.',
       'Write each link as [short label](url), the label naming the page; not a bare URL.',
       'When mustReply is true, reply at least once.',
-      'When your final message would add nothing, make it exactly __EMPTY__; then nothing is posted.',
+      'When your final message would add nothing, make it exactly "__EMPTY__" with no quotes, then nothing is posted.',
     ]
       .filter(Boolean)
       .join('\n')}
