@@ -11,6 +11,7 @@ import { readJsonFile, withFileLock, writeJsonFileAtomic } from '../../utils/fsx
 import { drivePreparedRun, pidAlive, prepareRun, stopFlowTasks } from '../../flow/executor';
 import { detachRun, readFlowRecord, readRawRecord } from '../../flow/runs';
 import type { FlowHooks } from '../../flow/runtime';
+import type { ReviewLinks } from './review';
 
 /** A tool that runs a flow and answers later: one call at a time, `limit` per turn. */
 export interface AsyncTool<I = any> {
@@ -98,7 +99,10 @@ export async function startAsyncTool<I>(
 
     const record = prepareRun(tool.flow, {
       cwd,
-      args: tool.args(input, cwd, posts ? task.author : undefined),
+      args: {
+        ...tool.args(input, cwd, posts ? task.author : undefined),
+        ...(task.pullRequest !== undefined ? { eventPr: task.pullRequest } : {}),
+      },
     });
     calls.push({ tool: tool.name, runId: record.runId, turn, ...(timeout ? { timeout } : {}) });
     // A cloud task's runner drives its calls, with the credential each model runs on.
@@ -139,7 +143,12 @@ export async function driveAsyncTool(
   cwd: string,
   taskId: string,
   timeout?: number,
-  runner?: { integrationToken?: string; onModel: FlowHooks['onModel']; stop: AbortSignal },
+  runner?: {
+    integrationToken?: string;
+    links?: ReviewLinks;
+    onModel: FlowHooks['onModel'];
+    stop: AbortSignal;
+  },
 ): Promise<void> {
   const taskDir = resolveTaskDir(cwd, taskId);
   const mark = (patch: Partial<AsyncCall>) =>
@@ -179,6 +188,8 @@ export async function driveAsyncTool(
         cwd,
         { onStart: started => (run = started), ...(runner ? { onModel: runner.onModel } : {}) },
         integrationToken,
+        runner?.links,
+        loadTask(cwd, taskId)?.access,
       ),
       ended,
     ]);

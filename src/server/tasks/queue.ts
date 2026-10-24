@@ -21,7 +21,6 @@ import { awaitsApproval, byId, byListKey, listRank, type ListKey } from '../../c
 import { archiveDue } from '../../core/state';
 import { STOPPED_BY_USER, type Approval } from '../../core/types';
 import { ApprovalRefusedError, mergeApprovals, refusedAnswer } from '../../core/approvals';
-import { INTEGRATIONS } from '../../integrations';
 import type { Batch, Conversation } from './conversation';
 
 export interface ClaimedTask {
@@ -298,21 +297,6 @@ function sameSession(task: AgentTask, incoming: AgentTask): boolean {
     Boolean(task.event?.chat) &&
     sessionKey(task) === sessionKey(incoming)
   );
-}
-
-export function reviewKey(task: Pick<AgentTask, 'flow' | 'event'>): string | undefined {
-  const event = task.event;
-  if (task.flow !== 'review' || !event) return undefined;
-  const pr = INTEGRATIONS[event.integration]?.repos?.pullRequest(event);
-  if (pr === undefined) return undefined;
-
-  return JSON.stringify([
-    event.appId,
-    event.installationId,
-    event.repo?.owner,
-    event.repo?.name,
-    pr,
-  ]);
 }
 
 export interface TaskQueue {
@@ -779,18 +763,8 @@ export class StoreQueue implements TaskQueue {
       )
         return undefined;
 
-      const runningReviews = new Set(
-        rows
-          .filter(row => ['running', 'waiting'].includes(row.status))
-          .map(row => reviewKey(row.task))
-          .filter(key => key !== undefined),
-      );
       const queued = rows
-        .filter(status => {
-          const key = reviewKey(status.task);
-
-          return status.status === 'queued' && (key === undefined || !runningReviews.has(key));
-        })
+        .filter(status => status.status === 'queued')
         .sort((a, b) => a.createdAt - b.createdAt);
       const next = queued[0];
       if (!next) return undefined;
@@ -807,16 +781,13 @@ export class StoreQueue implements TaskQueue {
       };
 
       await this.store.put('task', status.task.id, status);
-      const reviewing = reviewKey(next.task);
 
       return {
         organizationId: 'default',
         status,
         token: token.token,
         more:
-          queued.some(
-            row => row !== next && (reviewing === undefined || reviewKey(row.task) !== reviewing),
-          ) &&
+          queued.some(row => row !== next) &&
           (maxTasks === undefined ||
             rows.filter(row => ['running', 'waiting'].includes(row.status)).length + 1 < maxTasks),
       };

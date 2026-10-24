@@ -19,6 +19,7 @@ import {
 } from '../core/dispatch';
 import { formatEngineSpec, loadTask } from '../core/state';
 import { steerTask } from '../core/task/actions';
+import type { ReviewLinks } from '../core/task/review';
 import type {
   Access,
   TokenUsage,
@@ -162,6 +163,7 @@ export interface RunContext {
   hooks: FlowHooks;
   /** Caller-owned platform credential; in memory only, never written to flow.json. */
   integrationToken?: string;
+  links?: ReviewLinks;
   connections?: { mcp: Record<string, McpServerSpec>; env: Record<string, string>; ids: string[] };
   access?: Access;
   /** The credential each of its tasks runs on, by task id, so a steer resumes on it. */
@@ -198,6 +200,10 @@ export function currentScopeArgs(): unknown {
 /** Transient platform credential supplied by an agent task. */
 export function currentIntegrationToken(): string | undefined {
   return ctxALS.getStore()?.integrationToken;
+}
+
+export function currentReviewLinks(): ReviewLinks | undefined {
+  return ctxALS.getStore()?.links;
 }
 
 // Nesting level of the currently executing flow scope (0 = top-level).

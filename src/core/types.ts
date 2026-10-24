@@ -154,6 +154,8 @@ export interface Task {
   author?: string;
   // Repository the agent task's event came from; the worker's platform actions stay inside it.
   repo?: string;
+  // The event's pull request, which a read-only task may review as the app.
+  pullRequest?: number;
   // Extra MCP servers (and their allowed tools) the worker attaches to the turn.
   mcp?: McpServerSpec[];
   mcpBindings?: Pick<McpServerSpec, 'name' | 'connection' | 'tools'>[];

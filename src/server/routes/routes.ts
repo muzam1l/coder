@@ -74,7 +74,7 @@ import {
 import { completeInstall, installPage } from '../agents/install';
 import { completeOAuth, meRoute, startOAuth } from '../auth/members';
 import { MCP_CLIENT_PATH, oauthCallback, oauthClientDocument } from '../connections/oauth';
-import { hook, listFlows, listPulls, review, runFlow } from '../tasks/flows';
+import { hook, listFlows, listPulls, runFlow } from '../tasks/flows';
 import { type ServerContext } from '../context';
 import { readUsage, readUsageTotals } from '../tasks/usage';
 import { checkFolder, cloneFolder, localFolders, pickFolder } from '../settings/folders';
@@ -147,9 +147,11 @@ import {
 } from '../auth/metadata';
 
 import { runnerPackage } from '../runners/package';
+import { reviewImage } from '../../flow/builtin/review/kit';
 
 const pagesRoutes = [
   route('GET', '/runner/:file', runnerPackage),
+  route('GET', '/assets/review/:file', reviewAsset),
   route('GET', MCP_CLIENT_PATH, oauthClientDocument),
   route('GET', WEB_CLIENT_PATH, webDocument, { guard: metadataAllowed }),
   route('GET', CLI_CLIENT_PATH, cliDocument, { guard: metadataAllowed }),
@@ -402,7 +404,6 @@ const flowsRoutes = [
   route('GET', '/flows', listFlows),
   route('GET', '/pulls', listPulls),
   route('POST', '/flows/:name/run', runFlow),
-  route('POST', '/review', review),
 ];
 
 /** The admin table before its guard; tests dispatch through it with their own contexts. */
@@ -436,3 +437,20 @@ export const routes = [
   ...platformRoutes,
   ...pagesRoutes,
 ];
+
+async function reviewAsset(
+  _req: Request,
+  _ctx: ServerContext,
+  params: { file?: string },
+): Promise<Response> {
+  const svg = reviewImage(params.file ?? '');
+  if (!svg) return new Response('Not found', { status: 404 });
+
+  return new Response(svg, {
+    headers: {
+      'content-type': 'image/svg+xml',
+      'cache-control': 'public, max-age=86400',
+      'content-security-policy': "default-src 'none'",
+    },
+  });
+}

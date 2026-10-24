@@ -484,6 +484,7 @@ export interface DispatchOptions {
   author?: string;
   /** Repository an agent task's event came from. */
   repo?: string;
+  pullRequest?: number;
   /** Extra MCP servers the task's engine may call, with their tool allowlists. */
   mcp?: string | McpServerSpec[];
   mcpWarnings?: string[];
@@ -661,6 +662,7 @@ async function attemptOnce(
     ...(opts.source ? { source: opts.source } : {}),
     ...(opts.author ? { author: opts.author } : {}),
     ...(opts.repo ? { repo: opts.repo } : {}),
+    ...(opts.pullRequest !== undefined ? { pullRequest: opts.pullRequest } : {}),
     ...(opts.mcp?.length ? { mcp: opts.mcp } : {}),
     ...(opts.mcpBindings ? { mcpBindings: opts.mcpBindings } : {}),
     ...(opts.connections ? { connections: opts.connections } : {}),

@@ -8,7 +8,6 @@ import { useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hook
 import type { LocalFolder, LocalFolders } from '@coder/client/types';
 import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
-import { formatDate } from '@/utils/format';
 import { iAlert, iPlus, iRight, iSliders, iSteer, iX } from '@/comps/ui/icons';
 import { useRouter, useSearchParams } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
@@ -62,14 +61,13 @@ export interface Defaults {
 export const withEffort = (spec: string, effort: string) =>
   [...spec.split('/').filter(part => !EFFORTS.some(([key]) => key === part)), effort].join('/');
 
-type Pull = { number: number; title: string; author?: string; createdAt?: string };
 export type Lists = {
   agents: [string, string][];
   /** The agent tasks run when they name none, when enabled here. */
   defaultAgent?: string;
   /** Every agent in this workspace is disabled. */
   agentsOff?: true;
-  /** Read once the Repository field or a review needs it. */
+  /** Read once the Repository field needs it. */
   repos?: string[];
   models: Record<string, string[]>;
   runners: Option[];
@@ -84,8 +82,8 @@ const REFRESH = '+refresh';
 const OTHER = '+other';
 const PICK = '+pick';
 const CLONE = '+clone';
-/** `/review 40` or `/flow release pr=12`: the command, its first word, and the rest. */
-const COMMAND = /^\/(review|flow)(?:\s+(\S+))?\s*([\s\S]*)$/;
+/** `/flow release pr=12`: the command, its first word, and the rest. */
+const COMMAND = /^\/(flow)(?:\s+(\S+))?\s*([\s\S]*)$/;
 
 /** A select's options: its unset value, then the picked value, then the rest, so it shows its label before the list loads. */
 const optionsOf = (fallback: string, value: string, values: string[]): Option[] => [
@@ -255,14 +253,13 @@ export function NeedsCredential({ reason, label }: { reason?: string; label?: st
   );
 }
 
-/** The dashboard's one box: type and press Enter to start a task, or `/` for reviews and flows. */
+/** The dashboard's one box: type and press Enter to start a task, or `/` for flows. */
 function Composer({
   initial,
   data,
   defaults,
   missing,
   connectLabel,
-  tz,
 }: {
   initial: Partial<Choice>;
   data: Lists;
@@ -271,13 +268,12 @@ function Composer({
   missing?: boolean;
   /** The repository chip's last item, from the platform that reaches repositories. */
   connectLabel: string;
-  tz: string;
 }) {
   const nav = useRouter();
   const org = useOrg();
   const [choice, setChoice] = useState(() => usableAgent({ ...CHOICE, ...initial }, data));
   const [lists, setLists] = useState(data);
-  const [pulls, setPulls] = useState<{ repo: string; items?: Pull[] }>();
+  const flowsRepo = useRef<string>();
   const [busy, setBusy] = useState(false);
   // Why no credential can run it, once a start says so.
   const [needs, setNeeds] = useState<string>();
@@ -307,18 +303,10 @@ function Composer({
     setDismissed(true);
   }, []);
 
-  // Once a command is typed: the repository's open pull requests and its own flows, or the repositories to pick.
+  // Once a command is typed, read the repository's own flows.
   const prefetch = (value: string, repo = choice.repo) => {
-    if (!repo && /^\/review\s/.test(value)) readRepos();
-    if (!value.startsWith('/') || !repo || pulls?.repo === repo) return;
-    setPulls({ repo });
-    void client.pulls
-      .list(repo)
-      .then(items => setPulls({ repo, items }))
-      .catch(reason => {
-        setPulls({ repo, items: [] });
-        toastFailure(reason);
-      });
+    if (!value.startsWith('/') || !repo || flowsRepo.current === repo) return;
+    flowsRepo.current = repo;
     void client.flows
       .list(repo)
       .then(flows => setLists(current => ({ ...current, flows: flows.map(flow => flow.name) })))
@@ -415,14 +403,11 @@ function Composer({
     field.setSelectionRange(value.length, value.length);
   };
 
-  const start = async (pr?: number) => {
+  const start = async () => {
     const text = box.current?.value.trim() ?? '';
-    if (busy || cloning || lists.agentsOff || !(text || pr)) return;
+    if (busy || cloning || lists.agentsOff || !text) return;
     const [, command, name = '', args = ''] = COMMAND.exec(text) ?? [];
-    if (!pr && command && !(command === 'flow' ? name : /^#?\d+$/.test(name)))
-      return void setDismissed(false);
-    const review = pr ?? (command === 'review' ? Number(name.replace('#', '')) : undefined);
-    if (review && !choice.repo) return toastFailure('Pick a repository first.');
+    if (command && !name) return void setDismissed(false);
     const { agent, model, effort, access, runner } = choice;
     const [repo, cwd] = lists.folders ? ['', choice.cwd] : [choice.repo, ''];
     // An effort on the Default row goes on the chain's first model; the rest still follow.
@@ -438,13 +423,12 @@ function Composer({
     );
     setBusy(true);
     try {
-      const created = review
-        ? await client.review({ ...fields, repo: choice.repo, pr: review })
-        : command === 'flow'
+      const created =
+        command === 'flow'
           ? await client.flows.run(name, { ...fields, agent, args: argsOf(args) })
           : await client.tasks.create({ ...fields, agent, prompt: text });
-      if (!pr || command) localStorage.removeItem(DRAFT);
-      watchTask(created.task.id, 'queued', text || `Review of #${review}`);
+      localStorage.removeItem(DRAFT);
+      watchTask(created.task.id, 'queued', text);
       nav.push('/dash/[org]/tasks/[id]', { params: { org, id: created.task.id } });
     } catch (reason) {
       setBusy(false);
@@ -453,19 +437,13 @@ function Composer({
     }
   };
 
-  // The slash menu for what is typed so far: commands, then a flow, a repository or a pull request.
+  // The slash menu for what is typed so far: commands, then a flow.
   const menu = ((): { label: string; entries: Entry[]; note?: string } | undefined => {
     const word = /^\/(\S*)$/.exec(text)?.[1]?.toLowerCase();
     if (word !== undefined)
       return {
         label: 'Commands',
         entries: [
-          {
-            key: 'review',
-            label: '/review',
-            hint: 'Review a pull request',
-            pick: () => draft('/review '),
-          },
           ...lists.flows.map(flow => ({
             key: `flow ${flow}`,
             label: `/flow ${flow}`,
@@ -489,52 +467,6 @@ function Composer({
           })),
         note: 'No flow matches.',
       };
-    const number = /^\/review\s+#?(\S*)$/.exec(text)?.[1];
-    if (number === undefined) return undefined;
-    if (!choice.repo)
-      return {
-        label: 'Pick a repository',
-        entries: [
-          ...(lists.repos ?? [])
-            .filter(repo => repo.includes(number))
-            .map(repo => ({ key: repo, label: repo, pick: () => pick('repo', repo) })),
-          { key: CONNECT, label: connectLabel, pick: () => pick('repo', CONNECT) },
-        ],
-      };
-    if (!pulls?.items)
-      return { label: `Pull requests in ${choice.repo}`, entries: [], note: 'loading' };
-    return {
-      label: `Pull requests in ${choice.repo}`,
-      entries: [
-        ...pulls.items
-          .filter(
-            pull =>
-              String(pull.number).startsWith(number) ||
-              pull.title.toLowerCase().includes(number.toLowerCase()),
-          )
-          // The exact number first, so `/review 39` picks #39 over #390.
-          .sort((a, b) => Number(String(b.number) === number) - Number(String(a.number) === number))
-          .map(pull => ({
-            key: `#${pull.number}`,
-            label: `#${pull.number} ${pull.title}`,
-            hint: [pull.author, pull.createdAt ? formatDate(Date.parse(pull.createdAt), tz) : '']
-              .filter(Boolean)
-              .join(' · '),
-            pick: () => void start(pull.number),
-          })),
-        ...(number
-          ? []
-          : [
-              {
-                key: '',
-                label: choice.repo,
-                hint: 'Pick another repository',
-                pick: () => apply({ repo: '' }),
-              },
-            ]),
-      ],
-      note: pulls.items.length ? 'No open pull request matches.' : 'No open pull requests.',
-    };
   })();
   const open = Boolean(menu && !dismissed);
   const active = menu ? Math.min(at, Math.max(0, menu.entries.length - 1)) : 0;
@@ -860,7 +792,6 @@ export function NewTaskButton({ agent }: { agent?: string }) {
           <Composer
             {...setup}
             initial={{ ...savedChoice(document.cookie), ...(agent ? { agent } : {}) }}
-            tz={Intl.DateTimeFormat().resolvedOptions().timeZone}
           />
         ) : error ? (
           <p class="flash err" role="alert">
