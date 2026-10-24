@@ -50,7 +50,6 @@ import {
   type BatchAdmission,
   type CallbackState,
   sessionKey,
-  reviewKey,
   type Delivery,
   type ClaimedTask,
   type TaskCounts,
@@ -314,10 +313,10 @@ export class DrizzleQueue implements TaskQueue {
       ),`
           : sql``
       } inserted as (
-        insert into ${task} (organization_id, public_id, source, status, agent, flow, review_key, runner_kind, access,
+        insert into ${task} (organization_id, public_id, source, status, agent, flow, runner_kind, access,
           installation_id, event, audience, space, parent, connections, models, name, cwd, prompt, args, mcp, append_system, add_dirs, author, definition, requested_by,
           runner_id, engine_settings, tools, context, files, failure_reply, notice, task_url, settings_url, attempts, created_at, updated_at)
-        select ${organizationId}, ${agentTask.id}, ${agentTask.source}, 'queued', ${agentTask.agent}, ${agentTask.flow}, ${reviewKey(agentTask) ?? null}, ${agentTask.runner}, ${agentTask.access ?? null},
+        select ${organizationId}, ${agentTask.id}, ${agentTask.source}, 'queued', ${agentTask.agent}, ${agentTask.flow}, ${agentTask.runner}, ${agentTask.access ?? null},
           ${event ? sql`coalesce((select id from ${install} where key = ${`${event.appId}:${event.installationId}`} and organization_id = ${organizationId}), 0)` : sql`null`},
           ${json(event)}, ${audience}, ${space ?? null}, ${agentTask.parent ?? null}, ${json(agentTask.connections)}, ${json(agentTask.models)},
           ${agentTask.name ?? null}, ${agentTask.cwd ?? null}, ${agentTask.prompt ?? null}, ${json(agentTask.args)}, ${json(agentTask.mcp)},
@@ -376,9 +375,6 @@ export class DrizzleQueue implements TaskQueue {
   }
 
   async claim(_now: number, maxTasks?: number, knownWork = false, concurrentTasks?: number) {
-    const unblocked = sql`not exists (select 1 from ${task} reviewing
-      where reviewing.organization_id = ${task.organizationId} and reviewing.status in ('running', 'waiting')
-        and reviewing.review_key = ${task.reviewKey})`;
     const available =
       concurrentTasks === undefined
         ? sql`true`
@@ -387,7 +383,7 @@ export class DrizzleQueue implements TaskQueue {
       const [ready] = await readQuery(this.db, () =>
         rows<{ ready: boolean }>(
           this.db,
-          sql`select exists (select 1 from ${task} where status = 'queued' and ${available} and ${unblocked})
+          sql`select exists (select 1 from ${task} where status = 'queued' and ${available})
         and ${maxTasks === undefined ? sql`true` : sql`(select count(*) from ${task} where status in ('running', 'waiting')) < ${maxTasks}`} as ready`,
         ),
       );
@@ -398,7 +394,7 @@ export class DrizzleQueue implements TaskQueue {
       to_json(public_id), to_json(organization_id), attempts + 1), 'UTF8'), 'base64'), E'\\n', ''), '='), '+/', '-_') || '.' || ${nonce}`;
     const statement = sql`with stamp as materialized (select date_trunc('milliseconds', clock_timestamp()) as at), picked as materialized (
       select id, ${bearer} as bearer from ${task} where status = 'queued'
-        and ${available} and ${unblocked}
+        and ${available}
         ${maxTasks === undefined ? sql`` : sql`and (select count(*) from ${task} where status in ('running', 'waiting')) < ${maxTasks}`}
         order by created_at, id limit 1 for update
       ), claimed as (
@@ -407,7 +403,6 @@ export class DrizzleQueue implements TaskQueue {
           token_hash = translate(rtrim(encode(sha256(convert_to(picked.bearer, 'UTF8')), 'base64'), '='), '+/', '-_')
         from picked where ${task.id} = picked.id returning ${task}.*
       ) select to_jsonb(claimed) as record, exists (select 1 from ${task} where status = 'queued' and id <> claimed.id
-        and ${unblocked} and (${task.organizationId} <> claimed.organization_id or ${task.reviewKey} is null or ${task.reviewKey} is distinct from claimed.review_key)
         and ${concurrentTasks === undefined ? sql`true` : sql`(select count(*) from ${task} active where active.organization_id = ${task.organizationId} and active.status in ('running', 'waiting')) + case when ${task.organizationId} = claimed.organization_id then 1 else 0 end < ${concurrentTasks}`})
         and ${maxTasks === undefined ? sql`true` : sql`(select count(*) from ${task} where status in ('running', 'waiting')) + 1 < ${maxTasks}`} as more,
         ${credentialOf(sql`claimed`)} as credential, ${configOf(sql`claimed.organization_id`)} as config, ${runnerOf(sql`claimed`)} as runner

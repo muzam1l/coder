@@ -47,6 +47,7 @@ export interface RunOptions {
   cwd?: string;
   /** Platform credential for built-in integrations; never persisted with the run. */
   integrationToken?: string;
+  links?: RunContext['links'];
   connections?: RunContext['connections'];
   /** The agent's access, which caps every task this run starts. */
   access?: Access;
@@ -355,6 +356,7 @@ function beginRun(
     stopping: false,
     hooks,
     ...(opts.integrationToken ? { integrationToken: opts.integrationToken } : {}),
+    ...(opts.links ? { links: opts.links } : {}),
     ...(opts.connections ? { connections: opts.connections } : {}),
     ...(opts.access ? { access: opts.access } : {}),
   };
@@ -455,6 +457,8 @@ export function drivePreparedRun(
   cwd: string,
   hooks: FlowHooks,
   integrationToken?: string,
+  links?: RunContext['links'],
+  access?: Access,
 ): Promise<RunSummary> {
   return execute(
     '',
@@ -463,6 +467,8 @@ export function drivePreparedRun(
       concurrency: record.concurrencySet ? record.concurrency : undefined,
       maxTasks: record.maxTasks,
       ...(integrationToken ? { integrationToken } : {}),
+      ...(links ? { links } : {}),
+      ...(access ? { access } : {}),
     },
     hooks,
     record.runId,

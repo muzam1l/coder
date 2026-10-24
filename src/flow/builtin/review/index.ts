@@ -10,8 +10,13 @@ import path from 'node:path';
 import * as z from 'zod';
 import { CoderError, task } from '@wular/coder/flow';
 
+import { INTEGRATIONS } from '../../../integrations';
+import type { PullRequestReviews, ReviewTarget } from '../../../integrations/types';
+import { DEFAULT_SERVER } from '../../../client/auth/session';
+import { postReview, type ReviewLinks } from '../../../core/task/review';
 import { loadConfig } from '../../../core/config';
-import { currentIntegrationToken } from '../../runtime';
+import { readFlowRecord } from '../../runs';
+import { ctxALS, currentIntegrationToken, currentReviewLinks } from '../../runtime';
 import { reviewPrompt, reviewSystemPrompt } from './prompts';
 
 export const description = 'Review a code change.';
@@ -19,12 +24,16 @@ export const description = 'Review a code change.';
 export const args = z.object({
   /** PR number in the checkout's origin, or a GitHub PR URL. */
   pr: z.union([z.number(), z.string()]).optional(),
+  /** `owner/name` of the PR's repository; defaults to the checkout's origin. */
+  repo: z.string().optional(),
   base: z.string().optional(),
   head: z.string().optional(),
   /** Only review lines newer than this commit; with `pr` defaults to the last reviewed head. */
   since: z.string().optional(),
-  /** Post inline comments and a sticky summary on the PR. */
+  /** Post one review on the PR. */
   post: z.boolean().optional(),
+  /** The task event's PR, the only one a read-only run may post on. */
+  eventPr: z.number().optional(),
   /** GitHub login whose comments carry trusted review markers; defaults to the `gh` user. */
   author: z.string().optional(),
   /** Git pathspecs relative to `cwd`; submodule contents included. */
@@ -53,14 +62,22 @@ const Category = z.enum([
 ]);
 const Finding = z.strictObject({
   file: z.string(),
-  line: z.number().int().positive(),
+  line: z.number().meta({ type: 'integer' }),
+  start_line: z.number().meta({ type: 'integer' }).nullable(),
   severity: Severity,
   category: Category,
-  summary: z.string(),
+  summary: z.string().describe('A title of at most 10 words.'),
   failure_scenario: z.string(),
 });
 type Severity = z.infer<typeof Severity>;
-export type Finding = z.infer<typeof Finding> & { fingerprint: string };
+export type Finding = Omit<z.infer<typeof Finding>, 'start_line'> & {
+  start_line?: number;
+  fingerprint: string;
+  inline?: boolean;
+};
+
+/** The platform pull requests are reviewed on. */
+export const REVIEW_PLATFORM = 'github';
 
 export interface ReviewSummary {
   baseSha: string;
@@ -70,14 +87,22 @@ export interface ReviewSummary {
   files: number;
   model: string | null;
   elapsedMs: number;
+  /** New inline comments, once a caller posted the review. */
   posted?: number;
+  /** The posted review. */
+  url?: string;
   /** Parts left out of the review, such as uninitialized submodules. */
   warnings?: string[];
 }
 
 export interface ReviewResult {
+  note: string;
   findings: Finding[];
+  /** The reviewer's own markdown beyond the findings; may be empty. */
+  body: string;
   summary: ReviewSummary;
+  /** The reviewed pull request, for a caller that posts the review. */
+  pr?: ReviewTarget;
 }
 
 /** A review's findings as the CLI prints them and a task receives them. */
@@ -86,24 +111,26 @@ export function renderReviewMarkdown(result: ReviewResult & { runId: string }): 
   const range = `\`${summary.baseSha}\`${summary.worktree ? ' through the working tree' : `..\`${summary.headSha}\``}`;
   const warnings = (summary.warnings ?? []).flatMap(w => [w, '']);
   if (summary.worktree && !summary.files)
-    return `${['# Coder review', '', `Nothing to review from ${range}.`, '', ...warnings, `Flow run: \`${result.runId}\``].join('\n')}\n`;
+    return `${[...(result.note?.trim() ? [result.note.trim(), ''] : []), '# Coder review', '', `Nothing to review from ${range}.`, '', ...warnings, `Flow run: \`${result.runId}\``].join('\n')}\n`;
   const lines = [
+    ...(result.note?.trim() ? [result.note.trim(), ''] : []),
     '# Coder review',
     '',
-    `Reviewed ${range}${summary.model ? ` with ${summary.model}` : ''} in ${(summary.elapsedMs / 1000).toFixed(1)}s.`,
+    `Reviewed ${result.pr ? `pull request #${result.pr.number}, ` : ''}${range}${summary.model ? ` with ${summary.model}` : ''} in ${(summary.elapsedMs / 1000).toFixed(1)}s.`,
     '',
     ...warnings,
+    ...(result.body?.trim() ? [result.body.trim(), ''] : []),
     ...(result.findings.length
       ? result.findings.flatMap(f => [
-          `- **${f.severity.toUpperCase()}** [\`${f.file}:${f.line}\`]. ${f.summary}`,
+          `- **${f.severity.toUpperCase()}** [\`${f.file}:${f.start_line ? `${f.start_line}-` : ''}${f.line}\`]. ${f.summary}`,
           `  ${f.failure_scenario}`,
         ])
       : ['No findings after checking against the repository.']),
   ];
-  if (summary.posted !== undefined)
+  if (summary.url)
     lines.push(
       '',
-      `Posted ${summary.posted} new inline comment${summary.posted === 1 ? '' : 's'}.`,
+      `Posted [the review](${summary.url}) with ${summary.posted ?? 0} new inline comment${summary.posted === 1 ? '' : 's'}.`,
     );
   lines.push('', `Flow run: \`${result.runId}\``);
   return `${lines.join('\n')}\n`;
@@ -182,15 +209,153 @@ export interface ReviewServices {
   reviewTask?: typeof task;
   /** Test-only override for the transient task credential. */
   integrationToken?: string;
+  request?: typeof fetch;
 }
 
-/** Resolve local refs directly and delegate pull requests to their integration. */
+const reviews = (): PullRequestReviews => INTEGRATIONS[REVIEW_PLATFORM]!.repos!.reviews!;
+
+/** Posts a pull request review with the driver's token and links, else the local user's, once its head has not moved. */
+export async function postReviewHere(
+  result: ReviewResult,
+  cwd: string,
+  request: typeof fetch = fetch,
+  token = currentIntegrationToken(),
+): Promise<ReviewResult> {
+  if (!result.pr)
+    throw new CoderError('invalid-option', 'Only a pull request review can be posted.');
+  const platform = reviews();
+  token ??= platform.localToken(cwd);
+  const head = await platform.head(result.pr, token, request);
+  if (head !== result.pr.headSha)
+    throw new Error(
+      `The pull request moved to ${head.slice(0, 7)} since this review; review again.`,
+    );
+  const posted = await postReview(
+    platform,
+    {
+      target: result.pr,
+      findings: result.findings,
+      note: result.note ?? '',
+      body: result.body,
+      links: currentReviewLinks() ?? localReviewLinks(),
+    },
+    token,
+    request,
+  );
+
+  return {
+    ...result,
+    note: result.note ?? '',
+    summary: { ...result.summary, posted: posted.posted, url: posted.url },
+  };
+}
+
+function localReviewLinks(): ReviewLinks {
+  return {
+    from: 'cli',
+    coder: `${DEFAULT_SERVER}/docs/review`,
+    images: `${DEFAULT_SERVER}/assets/review`,
+  };
+}
+
+/** Posts a finished review run from this machine, as the person signed in to the platform there. */
+export async function postReviewRun(
+  runId: string,
+  cwd: string,
+): Promise<ReviewResult & { runId: string }> {
+  const record = readFlowRecord(runId);
+  if (record?.status !== 'completed')
+    throw new CoderError('invalid-option', `Review run "${runId}" has not finished.`);
+
+  return { ...(await postReviewHere(record.result as ReviewResult, cwd)), runId };
+}
+
+/** Git config in the environment that sends `token` to the platform's clone host, kept out of the command line. */
+export function fetchEnvironment(token: string): Record<string, string> {
+  const repos = INTEGRATIONS[REVIEW_PLATFORM]!.repos!;
+  const count = Number(process.env.GIT_CONFIG_COUNT ?? 0);
+  const basic = Buffer.from(`${repos.credentialUsername}:${token}`).toString('base64');
+
+  return {
+    GIT_CONFIG_COUNT: String(count + 1),
+    [`GIT_CONFIG_KEY_${count}`]: `http.https://${repos.cloneHosts[0]}/.extraheader`,
+    [`GIT_CONFIG_VALUE_${count}`]: `AUTHORIZATION: basic ${basic}`,
+  };
+}
+
+/** A pull request's range and fetched commits, read with the driver's token or local user token. */
+async function pullRequestTarget(
+  a: ReviewArgs,
+  cwd: string,
+  exec: ReviewExec,
+  services: ReviewServices,
+): Promise<ReviewTarget> {
+  const platform = reviews();
+  const ref = platform.parse(a.pr!);
+  if (!ref)
+    throw new CoderError(
+      'invalid-option',
+      `pr must be a PR number or GitHub PR URL, got "${a.pr}".`,
+      {
+        hint: 'Use base/head for a local review on any host.',
+      },
+    );
+  if (ref.repo && a.repo && ref.repo.toLowerCase() !== a.repo.toLowerCase())
+    throw new CoderError('invalid-option', `pull request is in ${ref.repo}, not in ${a.repo}`);
+  const repo = ref.repo ?? a.repo ?? platform.repository(cwd);
+  if (!repo)
+    throw new CoderError(
+      'invalid-option',
+      'This checkout has no GitHub origin; pass the pull request URL.',
+    );
+  const appToken = services.integrationToken ?? currentIntegrationToken();
+  if (appToken && !a.author) throw new Error('GitHub review task is missing its author');
+  const token = appToken ?? platform.localToken(cwd);
+  const target = await platform.target(
+    { repo, number: ref.number, ...(a.author ? { author: a.author } : {}) },
+    token,
+    services.request,
+  );
+  const { since: previous, ...range } = target;
+  // A force-push can leave the last reviewed head unfetchable; the whole pull request is reviewed then.
+  let last = previous;
+  if (![range.baseSha, range.headSha, ...(last ? [last] : [])].every(sha => hasCommit(exec, sha))) {
+    const url = `${INTEGRATIONS[REVIEW_PLATFORM]!.repos!.url(repo)}.git`;
+    const fetching = services.exec ?? reviewCli(cwd, fetchEnvironment(token));
+    const refs = ['fetch', '-q', url, range.baseSha, range.headSha];
+    try {
+      fetching('git', [...refs, ...(last ? [last] : [])]);
+    } catch (error) {
+      if (!last) throw error;
+      fetching('git', refs);
+      last = undefined;
+    }
+  }
+  const since = a.since ? commitOf(exec, a.since) : last;
+  let forcePushed = false;
+  if (since && hasCommit(exec, since))
+    try {
+      exec('git', ['merge-base', '--is-ancestor', since, range.headSha]);
+    } catch {
+      forcePushed = true;
+    }
+
+  // The pull request's own changes start where it left its base, as its diff on the platform does.
+  return {
+    ...range,
+    ...(forcePushed ? { forcePushed: true } : {}),
+    baseSha: mergeBase(exec, range.baseSha, range.headSha) ?? range.baseSha,
+    ...(since && hasCommit(exec, since) ? { since } : {}),
+  };
+}
+
+/** Resolve local refs directly and pull requests through their platform. */
 async function resolveTarget(
   exec: ReviewExec,
   a: ReviewArgs,
   cwd: string,
-  auth: ReviewAuth,
-): Promise<ReviewTarget> {
+  services: ReviewServices,
+): Promise<{ baseSha: string; headSha: string; since?: string; pr?: ReviewTarget }> {
   if (a.pr === undefined) {
     const headSha = exec('git', ['rev-parse', a.head ?? 'HEAD']).trim();
     const baseSha = a.base ? exec('git', ['rev-parse', a.base]).trim() : defaultBase(exec);
@@ -200,13 +365,14 @@ async function resolveTarget(
       ...(a.since ? { since: a.since } : {}),
     };
   }
-  const input = {
-    pr: a.pr,
-    cwd,
-    ...(a.since ? { since: a.since } : {}),
-    ...(a.author ? { author: a.author } : {}),
+  const pr = await pullRequestTarget(a, cwd, exec, services);
+
+  return {
+    baseSha: pr.baseSha,
+    headSha: pr.headSha,
+    ...(pr.since ? { since: pr.since } : {}),
+    pr,
   };
-  return resolveReviewTarget(input, auth);
 }
 
 type Ranges = Map<string, Array<[number, number]>>;
@@ -339,16 +505,16 @@ export default async function review(
   if (a.pr !== undefined && (a.base || a.head))
     throw new CoderError('invalid-option', 'pr cannot be combined with base or head.');
   if (a.post && a.pr === undefined) throw new CoderError('invalid-option', 'post requires pr.');
+  if (a.post && ctxALS.getStore()?.access === 'read-only') {
+    const number = reviews().parse(a.pr!)?.number;
+    if (a.eventPr === undefined || number !== a.eventPr)
+      throw new Error('A read-only task cannot post reviews.');
+  }
 
   const started = Date.now();
   const cwd = path.resolve(a.cwd ?? process.cwd());
   const exec = services.exec ?? reviewCli(cwd);
-  const integrationToken = services.integrationToken ?? currentIntegrationToken();
-  const integrationAuth: ReviewAuth = {
-    ...(integrationToken ? { token: integrationToken } : {}),
-    ...(services.exec ? { exec: services.exec } : {}),
-  };
-  const { pr, baseSha, headSha, since } = await resolveTarget(exec, a, cwd, integrationAuth);
+  const { pr, baseSha, headSha, since } = await resolveTarget(exec, a, cwd, services);
 
   // Without `head`, a local review covers uncommitted and untracked files too.
   const worktree = a.pr === undefined && !a.head;
@@ -370,6 +536,10 @@ export default async function review(
   const checkout = scope('');
   if (!checkout) throw new CoderError('invalid-option', 'exclude leaves nothing to review.');
   const warnings: string[] = [];
+  if (pr?.forcePushed && since)
+    warnings.push(
+      `The branch no longer contains ${since.slice(0, 7)} after a force-push; reviewed lines changed since it.`,
+    );
   const parent: Repo = {
     prefix: '',
     base: baseSha,
@@ -420,6 +590,8 @@ export default async function review(
   if (worktree && !ranges.size)
     return {
       findings: [],
+      note: '',
+      body: '',
       summary: {
         baseSha,
         headSha,
@@ -450,14 +622,32 @@ export default async function review(
   const Findings = z.strictObject({
     findings: z.array(
       Finding.superRefine((f, ctx) => {
-        if (!onChangedLine(f))
+        if (!Number.isSafeInteger(f.line) || f.line <= 0 || !onChangedLine(f))
           ctx.addIssue({
             code: 'custom',
             path: ['line'],
             message: `${f.file}:${f.line} is not a changed line; use a line from the changed files list`,
           });
+        if (
+          f.start_line !== null &&
+          (!Number.isSafeInteger(f.start_line) ||
+            f.start_line <= 0 ||
+            f.start_line > f.line ||
+            !(full.get(f.file) ?? []).some(([s, e]) => f.start_line! >= s && f.line <= e))
+        )
+          ctx.addIssue({
+            code: 'custom',
+            path: ['start_line'],
+            message: `${f.file}:${f.start_line}-${f.line} does not lie in one changed hunk; use line alone or shrink the range to one hunk`,
+          });
       }),
     ),
+    note: z.string(),
+    body: z
+      .string()
+      .describe(
+        'Markdown shown above the findings when something matters beyond them; empty when nothing does.',
+      ),
   });
   const from = since ?? baseSha;
   const command = (r: Repo) => {
@@ -482,6 +672,7 @@ export default async function review(
       command: command(parent),
       submodules: nested,
       files,
+      prior: pr?.prior,
     }),
     { ...common, name: 'Review', returns: Findings },
   );
@@ -518,9 +709,11 @@ export default async function review(
     return [above, all[line - 1] ?? '', below].join('\n');
   };
   const findings: Finding[] = reviewed.data.findings
-    .map(f => ({
+    .map(({ start_line, ...f }) => ({
       ...f,
+      ...(start_line != null && start_line !== f.line ? { start_line } : {}),
       fingerprint: fingerprint(f.file, lineText(f.file, f.line), f.category),
+      ...(pr && repos.some(r => r.prefix && f.file.startsWith(r.prefix)) ? { inline: false } : {}),
     }))
     .sort((x, y) => RANK[x.severity] - RANK[y.severity]);
 
@@ -532,106 +725,28 @@ export default async function review(
     model: reviewed.model,
     elapsedMs: Date.now() - started,
   };
+  if (warnings.length) summary.warnings = warnings;
+
   const result: ReviewResult = {
     findings,
+    note: reviewed.data.note.trim(),
+    body: reviewed.data.body.trim(),
     summary,
+    ...(pr ? { pr } : {}),
   };
-  if (a.post && pr) {
-    // A pull request diff has no lines inside submodules to comment on.
-    const inSubmodule = (f: Finding) => repos.some(r => r.prefix && f.file.startsWith(r.prefix));
-    const skipped = findings.filter(inSubmodule).length;
-    if (skipped)
-      warnings.push(
-        `Did not post ${skipped} submodule finding${skipped === 1 ? '' : 's'} because the pull request diff has no lines for them.`,
-      );
-    const postSummary: ReviewPostSummary = {
-      ...summary,
-      author: pr.author,
-    };
-    const input = {
-      repo: pr.repo,
-      pr: pr.number,
-      cwd,
-      findings: findings.filter(f => !inSubmodule(f)),
-      summary: postSummary,
-      ...(since ? { since } : {}),
-    };
-    summary.posted = postReview(input, integrationAuth);
-  }
-  if (warnings.length) summary.warnings = warnings;
-  return result;
+
+  return a.post && pr
+    ? postReviewHere(result, cwd, services.request, services.integrationToken)
+    : result;
 }
 
 export type ReviewExec = (command: string, args: string[], input?: string) => string;
 
-export type ReviewPostFinding = Finding;
-export type ReviewPostSummary = Pick<
-  ReviewSummary,
-  'baseSha' | 'headSha' | 'model' | 'elapsedMs'
-> & { author: string };
-
-export interface ReviewPostInput {
-  repo: string;
-  pr: number;
-  cwd?: string;
-  findings: ReviewPostFinding[];
-  summary: ReviewPostSummary;
-  since?: string;
-}
-
-export interface ReviewTargetInput {
-  pr: number | string;
-  /** The only repository the target may be in. */
-  repo?: string;
-  cwd?: string;
-  since?: string;
-  author?: string;
-}
-
-export interface ReviewTarget {
-  pr?: { number: number; repo: string; author: string };
-  baseSha: string;
-  headSha: string;
-  since?: string;
-}
-
-export interface ReviewAuth {
-  /** Installation token from the task context. Omit to use local gh auth. */
-  token?: string;
-  exec?: ReviewExec;
-}
-
-const REVIEW_FP_RE = /<!-- coder-review:fp=([a-f0-9]{40}) -->/g;
-
-const REVIEW_SUMMARY_RE = /<!-- coder-review:summary head=([^\s>]+) -->/;
-
-interface ReviewComment {
-  id: number;
-  body?: string | null;
-  user?: { login?: string } | null;
-}
-
-export function reviewCli(cwd = process.cwd(), token?: string): ReviewExec {
-  const count = Number(process.env.GIT_CONFIG_COUNT) || 0;
-  // git's fetch asks this helper, which reads the token from its environment, never from disk.
-  const env = token
-    ? {
-        ...process.env,
-        GH_TOKEN: token,
-        GIT_TERMINAL_PROMPT: '0',
-        GIT_CONFIG_COUNT: String(count + 2),
-        [`GIT_CONFIG_KEY_${count}`]: 'credential.helper',
-        [`GIT_CONFIG_VALUE_${count}`]: '',
-        [`GIT_CONFIG_KEY_${count + 1}`]: 'credential.helper',
-        [`GIT_CONFIG_VALUE_${count + 1}`]:
-          '!f() { if [ "$1" = get ]; then printf "username=x-access-token\\npassword=%s\\n" "$GH_TOKEN"; fi; }; f',
-      }
-    : process.env;
-
+export function reviewCli(cwd = process.cwd(), env: Record<string, string> = {}): ReviewExec {
   return (command, args, input) =>
     execFileSync(command, args, {
       cwd,
-      env,
+      env: { ...process.env, ...env },
       input,
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
@@ -639,148 +754,28 @@ export function reviewCli(cwd = process.cwd(), token?: string): ReviewExec {
     });
 }
 
-function reviewGh<T>(exec: ReviewExec, args: string[], input?: unknown): T {
-  const output = exec('gh', args, input === undefined ? undefined : `${JSON.stringify(input)}\n`);
-  return output.trim() ? (JSON.parse(output) as T) : (undefined as T);
-}
-
-const reviewPages = <T>(exec: ReviewExec, endpoint: string) =>
-  reviewGh<T[][]>(exec, ['api', endpoint, '--paginate', '--slurp']).flat();
-
-export function parseGithubPr(value: number | string): {
-  number: number;
-  repo?: string;
-} {
-  if (typeof value === 'number') return { number: value };
-  if (/^\d+$/.test(value)) return { number: Number(value) };
-  const match = value.match(/^https:\/\/github\.com\/([^/]+)\/([^/]+)\/pull\/(\d+)/);
-  if (!match)
-    throw new CoderError(
-      'invalid-option',
-      `pr must be a PR number or GitHub PR URL, got "${value}".`,
-      { hint: 'Use base/head for a local review on any host.' },
-    );
-  return { number: Number(match[3]), repo: `${match[1]}/${match[2]}` };
-}
-
-export function reviewFingerprints(comments: Array<{ body?: string | null }>): Set<string> {
-  return new Set(
-    comments.flatMap(comment =>
-      [...(comment.body?.matchAll(REVIEW_FP_RE) ?? [])].map(match => match[1]!),
-    ),
-  );
-}
-
-export function lastReviewSummary(
-  comments: Array<{ id: number; body?: string | null }>,
-): { id: number; head: string } | undefined {
-  for (const comment of [...comments].reverse()) {
-    const match = comment.body?.match(REVIEW_SUMMARY_RE);
-    if (match) return { id: comment.id, head: match[1]! };
+function mergeBase(exec: ReviewExec, base: string, head: string): string | undefined {
+  try {
+    return exec('git', ['merge-base', base, head]).trim() || undefined;
+  } catch {
+    return undefined;
   }
-  return undefined;
 }
 
-export function ownReviewComments(comments: ReviewComment[], author: string): ReviewComment[] {
-  return comments.filter(comment => comment.user?.login === author);
-}
-
-function ownReviewPages(exec: ReviewExec, endpoint: string, author: string): ReviewComment[] {
-  return ownReviewComments(reviewPages<ReviewComment>(exec, endpoint), author);
-}
-
-function previousReview(
-  exec: ReviewExec,
-  repo: string,
-  pr: number,
-  author: string,
-): { id: number; head: string } | undefined {
-  return lastReviewSummary(ownReviewPages(exec, `repos/${repo}/issues/${pr}/comments`, author));
+/** The full commit a ref names, or undefined when there is none here. */
+function commitOf(exec: ReviewExec, ref: string): string | undefined {
+  try {
+    return exec('git', ['rev-parse', '--verify', `${ref}^{commit}`]).trim() || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function hasCommit(exec: ReviewExec, sha: string): boolean {
   try {
-    exec('git', ['cat-file', '-e', sha]);
+    exec('git', ['cat-file', '-e', `${sha}^{commit}`]);
     return true;
   } catch {
     return false;
   }
-}
-
-/** Resolve and fetch a GitHub pull request for the integration-generic review flow. */
-export function resolveReviewTarget(input: ReviewTargetInput, auth: ReviewAuth = {}): ReviewTarget {
-  if (!input.author && auth.token) throw new Error('GitHub review task is missing its author');
-  const ref = parseGithubPr(input.pr);
-  if (input.repo && ref.repo && ref.repo.toLowerCase() !== input.repo.toLowerCase())
-    throw new CoderError(
-      'invalid-option',
-      `pull request is in ${ref.repo}, not in this task's repository ${input.repo}`,
-    );
-
-  const exec = auth.exec ?? reviewCli(input.cwd, auth.token);
-  const bound = input.repo ?? ref.repo;
-  const repoArgs = bound ? ['-R', bound] : [];
-  const view = reviewGh<{
-    baseRefOid: string;
-    headRefOid: string;
-    url: string;
-  }>(exec, ['pr', 'view', String(ref.number), ...repoArgs, '--json', 'baseRefOid,headRefOid,url']);
-  const repo = bound ?? new URL(view.url).pathname.split('/').slice(1, 3).join('/');
-  exec('git', ['fetch', '-q', `https://github.com/${repo}.git`, view.baseRefOid, view.headRefOid]);
-
-  const author = input.author ?? reviewGh<{ login: string }>(exec, ['api', 'user']).login;
-  const since = input.since ?? previousReview(exec, repo, ref.number, author)?.head;
-
-  return {
-    pr: { number: ref.number, repo, author },
-    baseSha: view.baseRefOid,
-    headSha: view.headRefOid,
-    ...(since && hasCommit(exec, since) ? { since } : {}),
-  };
-}
-
-/** Post unseen findings and upsert the sticky summary through GitHub's integration. */
-export function postReview(input: ReviewPostInput, auth: ReviewAuth = {}): number {
-  const exec = auth.exec ?? reviewCli(input.cwd, auth.token);
-  const { repo, pr, findings, summary, since } = input;
-  const seen = reviewFingerprints(
-    ownReviewPages(exec, `repos/${repo}/pulls/${pr}/comments`, summary.author),
-  );
-  const fresh = findings.filter(finding => !seen.has(finding.fingerprint));
-  if (fresh.length)
-    reviewGh(
-      exec,
-      ['api', `repos/${repo}/pulls/${pr}/reviews`, '--method', 'POST', '--input', '-'],
-      {
-        commit_id: summary.headSha,
-        event: 'COMMENT',
-        body: `Coder review: ${fresh.length} finding${fresh.length === 1 ? '' : 's'}.`,
-        comments: fresh.map(finding => ({
-          path: finding.file,
-          line: finding.line,
-          side: 'RIGHT',
-          body: `**[${finding.severity.toUpperCase()}]** ${finding.summary}\n\n${finding.failure_scenario}\n\n<!-- coder-review:fp=${finding.fingerprint} -->`,
-        })),
-      },
-    );
-
-  const count = (severity: ReviewPostFinding['severity']) =>
-    findings.filter(finding => finding.severity === severity).length;
-  const range = since
-    ? `Reviewed changes after \`${since}\` through \`${summary.headSha}\`.`
-    : `Reviewed through \`${summary.headSha}\`.`;
-  const body = `<!-- coder-review:summary head=${summary.headSha} -->
-## Coder review
-
-Findings in this run. Critical ${count('critical')} · Major ${count('major')} · Minor ${count('minor')} · Nit ${count('nit')}${summary.model ? ` · Model ${summary.model}` : ''} · Elapsed ${(summary.elapsedMs / 1000).toFixed(1)}s
-
-${fresh.length ? `Posted ${fresh.length} new inline comment${fresh.length === 1 ? '' : 's'}.` : 'No new inline comments; every finding above was already posted.'} ${range}`;
-  const current = previousReview(exec, repo, pr, summary.author);
-  const endpoint = current
-    ? `repos/${repo}/issues/comments/${current.id}`
-    : `repos/${repo}/issues/${pr}/comments`;
-  reviewGh(exec, ['api', endpoint, '--method', current ? 'PATCH' : 'POST', '--input', '-'], {
-    body,
-  });
-  return fresh.length;
 }

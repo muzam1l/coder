@@ -208,9 +208,10 @@ export async function gitToolEnvironment(
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'coder-git-'));
   const helper = path.join(root, 'credential.cjs');
   try {
-    await fs.writeFile(path.join(root, 'tokens.json'), JSON.stringify({ credentials, endpoint }), {
-      mode: 0o600,
-    });
+    // The server callback goes in only for a connection credential, the one reader that needs it.
+    const connected = credentials.some(entry => entry.connection);
+    const tokens = { credentials, ...(connected ? { endpoint } : {}) };
+    await fs.writeFile(path.join(root, 'tokens.json'), JSON.stringify(tokens), { mode: 0o600 });
     // The installation covering the owner, else the personal accounts (the owner's own first), else any installation.
     await fs.writeFile(
       helper,

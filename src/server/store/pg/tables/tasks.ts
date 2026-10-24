@@ -4,7 +4,6 @@ import { and, asc, eq, gt, gte, isNotNull, lte, sql } from 'drizzle-orm';
 import type { TaskHistory, TaskLogLine, TaskStatus, UsageRecord } from '../../types';
 import { task, taskHistory, taskInbox, taskLog } from '../schema';
 import type { DrizzleStore } from '../store';
-import { reviewKey } from '../../../tasks/queue';
 import { taskAudience } from '../../../tasks/access';
 import { countTokens } from '../../../tasks/usage';
 import { date, defined, install, ms, splitKey, taskRecord, usageRecord, type Kind } from './shared';
@@ -34,7 +33,6 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
         status: value.status,
         agent: j.agent,
         flow: j.flow,
-        reviewKey: reviewKey(j) ?? null,
         runnerKind: j.runner,
         access: j.access ?? null,
         installationId: j.event

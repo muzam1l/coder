@@ -8,7 +8,7 @@ The built-in agent. On the hosted service it has an install link per platform; s
 
 ## On GitHub
 
-- A pull request opening, updating, or becoming ready gets a read-only [review](../review.md), posted as inline comments with a sticky summary. Reruns update the summary and never repeat a finding, and a new push replaces a review that has not started yet.
+- A pull request opening, updating, or becoming ready gets a read-only [review](../review.md) through the agent's `review` tool, posted as one GitHub review with inline comments. Reruns never repeat a finding.
 - A review request for the agent does the same.
 - A mention (`@<app>` from a repository owner or member), in the conversation or in a finding's thread, answers from the diff and the repository, or makes the requested change on a branch and links the pull request.
 - An issue opening or edit reads the issue and the repository, then answers, makes the change and links the pull request, or asks one clarifying question.

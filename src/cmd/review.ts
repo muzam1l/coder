@@ -11,7 +11,7 @@ export const commandReview = command({
   name: 'review',
   description: 'review changed code with a built-in flow',
   usage:
-    'Review changed code with a read-only agent. Every reported finding is checked\nagainst the repository. Runs the built-in `review` flow. A local review covers\neverything since the merge-base with the origin default branch, including\nuncommitted and untracked files. Changed submodules are reviewed file by file.\nPR reviews can post deduplicated inline comments.\n\nRelated: `coder flow watch`, `coder docs review`.',
+    'Review changed code with a read-only agent. Every reported finding is checked\nagainst the repository. Runs the built-in `review` flow. A local review covers\neverything since the merge-base with the origin default branch, including\nuncommitted and untracked files. Changed submodules are reviewed file by file.\nPR reviews can post one review with inline comments, never repeating a finding.\n\nRelated: `coder flow watch`, `coder docs review`.',
   access: 'write',
   approvalPolicy: 'deny',
   args: {
@@ -24,7 +24,8 @@ export const commandReview = command({
     since: str('keep only PR files and hunks changed since this commit', '<sha>'),
     path: strList('review only this path, relative to cwd (repeatable)', '<p>'),
     exclude: strList('leave this path out, relative to cwd (repeatable)', '<p>'),
-    post: flag('post deduplicated inline comments and sticky PR summary'),
+    post: flag('post the review on the pull request, as the signed-in gh user'),
+    run: str('with --post, post this finished review run instead of reviewing again', '<id>'),
     md: flag('markdown output (the default)'),
     model: modelOption('for the review task (default: reviewModel)'),
     depth: arg(
@@ -40,6 +41,7 @@ export const commandReview = command({
       'coder review --path src --exclude src/gen  # review src without generated code',
       'coder review --pr 42 --post  # review and post to pull request 42',
       'coder review --depth high  # report nits too',
+      'coder review --post --run <id>  # post a finished review run',
     ],
   },
   async run({ options, cwd }) {
@@ -47,7 +49,12 @@ export const commandReview = command({
 
     if (options.json && options.md)
       throw new CoderError('invalid-option', '--json and --md are mutually exclusive.');
-    return review.run({ ...options, cwd });
+    const { run, md: _md, json: _json, ...args } = options;
+    if (run === undefined) return review.run({ ...args, cwd });
+    if (!args.post) throw new CoderError('invalid-option', '--run needs --post.');
+    const { postReviewRun } = await import('../flow/builtin/review');
+
+    return postReviewRun(run, cwd);
   },
   print: async result => {
     const { renderReviewMarkdown } = await import('../flow/builtin/review');

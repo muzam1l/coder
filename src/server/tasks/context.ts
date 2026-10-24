@@ -234,16 +234,13 @@ export async function eventTokens(
     if (!found || found.deletedAt) throw new Error('Installation is gone');
     installation = found;
 
-    // A review that posts needs the comment scope and nothing more.
-    const posts = task.flow === 'review' && task.args?.post === true;
     tokens[event.integration] = await installationToken(
       ctx,
       integration,
       installation,
       decryptSecret(ctx.config, app.credentials),
       {
-        tools:
-          task.tools[event.integration] ?? (posts ? integration.tools.presets['read-only'] : []),
+        tools: task.tools[event.integration] ?? [],
       },
       ctx.config.taskTimeoutMs,
     );

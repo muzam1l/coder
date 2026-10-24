@@ -471,6 +471,9 @@ export async function execAgent(options: {
                 // Platform conversations roll over; dashboard and CLI tasks keep the engine's own compaction.
                 ...(isConversation(task) ? { conversation: true } : {}),
                 ...(task.author ? { author: task.author } : {}),
+                ...(event && integration?.repos
+                  ? { pullRequest: integration.repos.pullRequest(event) }
+                  : {}),
                 ...(event?.repo ? { repo: `${event.repo.owner}/${event.repo.name}` } : {}),
                 ...(options.source
                   ? { name: task.name, source: options.source }

@@ -64,6 +64,7 @@ import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mai
 import type { Task, McpServerSpec, ResolvedTaskOptions } from '../core/types';
 import type { FlowHooks } from '../flow/runtime';
 import { asyncTools } from '../core/task/context/tools';
+import { reviewLinks } from '../core/task/review';
 import {
   readJsonFile,
   writeJsonFileAtomic,
@@ -75,6 +76,7 @@ import { CLAUDE_PROJECT, taskHistory } from './history';
 import { claimCalls, driveAsyncTool, pendingCall } from '../core/task/async';
 
 const exec = promisify(execFile);
+
 type RemoteTask = {
   task: AgentTask;
   generation: number;
@@ -982,6 +984,7 @@ async function runCheckedOutTask(
           if (!tool) continue;
           const work = driveAsyncTool(tool, call.runId, cwd, started, call.timeout, {
             integrationToken: tool.platform ? remote.tokens[tool.platform] : undefined,
+            links: reviewLinks(auth.server, remote.dashboard, remote.task.taskUrl),
             onModel: onFlowModel,
             stop: timeout,
           })

@@ -63,7 +63,7 @@ So a crash resumes where it stopped, and an edit to step 3 re-runs from step 3. 
 2. `~/.coder/flows/`, in every workspace.
 3. Built-in flows, which a repo flow of the same name overrides.
 
-A path runs that file directly. `coder flow discover` lists what's runnable here. The built-in `review` is the `coder review` code review. It takes `pr`, `post`, `base`, `head`, `since`, `model` and `depth` and returns `{ findings, summary }`.
+A path runs that file directly. `coder flow discover` lists what's runnable here. The built-in `review` is the `coder review` code review. It takes `pr`, `post`, `base`, `head`, `since`, `model` and `depth` and returns `{ note, body, findings, summary, pr? }`. Posting happens inside the flow; server tasks use the `review` tool instead of running this flow by name.
 
 ## Running
 
