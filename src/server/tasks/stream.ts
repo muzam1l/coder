@@ -14,11 +14,9 @@ import {
   taskTimes,
   type AudienceCount,
   type LogTail,
-  type TaskQueue,
   type Tombstone,
 } from './queue';
 import { runnerItems } from '../settings/runners';
-import { workspaceAdmin } from '../routes/guards';
 import { canView, taskAudience, viewer, type Viewer } from './access';
 
 export async function taskStream(
@@ -117,16 +115,10 @@ function resultPending(cwd: string, status: TaskStatus, missing = false) {
   );
 }
 
-const STREAM_MS = 50_000;
-
-const STREAM_POLL_MS = 1000;
-
 const STREAM_LINES = 500;
 
-/** Under Vercel's 300 s function limit; the browser reconnects with its last event id. */
+/** How far back a poll's last event id resumes; older ids reload the page. */
 const EVENTS_MS = 290_000;
-
-const EVENTS_HEARTBEAT_MS = 20_000;
 
 /** Task ids one events stream may ask about. */
 const EVENTS_TASKS = 100;
@@ -143,7 +135,7 @@ const RUNNER_SCAN_MS = 15_000;
 // The CLI's archive changes rarely and costs more to read, so it is scanned this often.
 const ARCHIVE_SCAN_MS = 15_000;
 
-/** `GET /admin/events?tasks=a,b`: the asked tasks' state and every list change in the caller's workspace. */
+/** `GET /admin/events?tasks=a,b`: the asked tasks' state and every list change in the caller's workspace since its last event id, from the next read; then the body ends. */
 export function taskEvents(req: Request, ctx: ServerContext, params: Params, url: URL): Response {
   const ids = [...new Set((url.searchParams.get('tasks') ?? '').split(',').filter(Boolean))].slice(
     0,
@@ -154,7 +146,7 @@ export function taskEvents(req: Request, ctx: ServerContext, params: Params, url
   const tag = watcher.tag(ctx);
   const [time, scope] = (req.headers.get('last-event-id') ?? '').split('-');
   const last = Number(time);
-  // A resume looks back one stream's life at most, in the workspace and server generation that sent its id; else the page reloads its data.
+  // A resume looks back `EVENTS_MS` at most, in the workspace and server generation that sent its id; else the page reloads its data.
   const known = last > 0 && `-${scope}` === tag;
   const from = known ? Math.min(Math.max(last, now - EVENTS_MS), now) : now;
   const reset = last > 0 && (!known || last < from) ? 'event: reset\ndata: {}\n\n' : '';
@@ -162,7 +154,7 @@ export function taskEvents(req: Request, ctx: ServerContext, params: Params, url
   let stop = () => {};
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      controller.enqueue(encoder.encode(`retry: ${STREAM_POLL_MS}\nid: ${from}${tag}\n\n${reset}`));
+      controller.enqueue(encoder.encode(`id: ${from}${tag}\n\n${reset}`));
       stop = watcher.watch(
         ctx,
         ids,
@@ -170,7 +162,7 @@ export function taskEvents(req: Request, ctx: ServerContext, params: Params, url
         text => controller.enqueue(encoder.encode(text)),
         () => controller.close(),
       );
-      // A client that left gets no more reads, and its body ends.
+      // A client that left is left out of the read, and its body ends.
       const leave = () => {
         stop();
         try {
@@ -221,36 +213,23 @@ function eventState(status: TaskStatus, asked: boolean) {
 type Watch = {
   ctx: ServerContext;
   ids: Set<string>;
-  /** Each task's last sent event, so a change goes out once. */
-  sent: Map<string, string>;
-  /** Tasks this stream has been told were archived or deleted. */
-  gone: Set<string>;
-  /** Rows updated after this are news to the stream: its last event id, then its last read. */
+  /** Rows updated after this are news to the request: its last event id. */
   from: number;
-  fresh: boolean;
-  active?: number;
-  /** The runners this stream last sent. */
-  runners: string;
   /** This server's generation in each event id, when its delete history is in memory. */
   tag: string;
-  beat: number;
-  /** When the stream last had an event id. */
-  marked: number;
-  until: number;
   send: (text: string) => void;
   close: () => void;
 };
 
-/** One workspace's streams in a read: the tasks they ask about, and those some stream has not had yet. */
-type Scope = { ctx: ServerContext; ids: Set<string>; fresh: Set<string> };
+/** One workspace's requests in a read and the tasks they ask about. */
+type Scope = { ctx: ServerContext; ids: Set<string> };
 
 /** A workspace's active counts by audience; a task's stream counts its children alone. */
 const countsKey = (organizationId: string, parent?: string) => `${organizationId}:${parent ?? ''}`;
 
-/** One read a second for every open events stream of this server, fanned out to each. */
+/** One read for every events request waiting on this server, answered to each; a request that arrives during a read waits for the next. */
 export class TaskWatcher {
   private watches = new Set<Watch>();
-  private timer?: ReturnType<typeof setInterval>;
   private counts = new Map<string, { groups: AudienceCount[]; fingerprint: string; at: number }>();
   /** Each member's view of the private spaces, by workspace, member and task principal. */
   private views = new Map<
@@ -263,7 +242,6 @@ export class TaskWatcher {
   >();
   private reading = false;
   private closed = false;
-  private last = Date.now();
   private scans = new Map<
     string,
     { at: number; rows: TaskStatus[]; archived: TaskStatus[]; archivedAt: number }
@@ -278,9 +256,6 @@ export class TaskWatcher {
 
   constructor(
     private readonly options: {
-      pollMs?: number;
-      heartbeatMs?: number;
-      lifeMs?: number;
       localScanMs?: number;
       archiveScanMs?: number;
     } = {},
@@ -297,31 +272,11 @@ export class TaskWatcher {
       queueMicrotask(close);
       return () => {};
     }
-    const now = Date.now();
-    if (!this.watches.size) this.last = now;
-    const watch: Watch = {
-      ctx,
-      ids: new Set(ids),
-      sent: new Map(),
-      gone: new Set(),
-      from,
-      fresh: true,
-      runners: '',
-      tag: this.tag(ctx),
-      beat: now,
-      marked: now,
-      until: now + (this.options.lifeMs ?? EVENTS_MS),
-      send,
-      close,
-    };
+    const watch: Watch = { ctx, ids: new Set(ids), from, tag: this.tag(ctx), send, close };
     this.watches.add(watch);
-    if (!this.timer) {
-      this.timer = setInterval(() => this.tick(), this.options.pollMs ?? STREAM_POLL_MS);
-      this.timer.unref?.();
-    }
-    this.tick();
+    this.poll();
 
-    return () => this.drop(watch);
+    return () => this.watches.delete(watch);
   }
 
   /** What every event id carries: its workspace, and with a store queue, whose deletes a restart loses, this server's generation. */
@@ -335,89 +290,57 @@ export class TaskWatcher {
     this.runners.delete(organizationId);
   }
 
-  /** Ends every stream and refuses new ones, so a stopping server need not wait out their life. */
+  /** Ends every request and refuses new ones. */
   close() {
     this.closed = true;
-    for (const watch of [...this.watches]) {
-      this.drop(watch);
-      try {
-        watch.close();
-      } catch {}
-    }
+    for (const watch of [...this.watches]) this.end(watch);
   }
 
-  private drop(watch: Watch) {
-    if (!this.watches.delete(watch)) return;
-    if (![...this.watches].some(live => live.ctx.organizationId === watch.ctx.organizationId)) {
-      for (const cache of [this.counts, this.views])
-        for (const key of cache.keys())
-          if (key.startsWith(`${watch.ctx.organizationId}:`)) cache.delete(key);
-      this.runners.delete(watch.ctx.organizationId);
-    }
-    if (!this.watches.size) {
-      clearInterval(this.timer);
-      this.timer = undefined;
-      this.counts.clear();
-      this.views.clear();
-      this.runners.clear();
-    }
+  private end(watch: Watch) {
+    this.watches.delete(watch);
+    try {
+      watch.close();
+    } catch {}
   }
 
-  /** Every poll: each stream's time limit and heartbeat, then a read unless one is still out. */
-  private tick() {
-    const at = Date.now();
-    for (const watch of [...this.watches]) {
-      if (at >= watch.until) {
-        this.drop(watch);
-        try {
-          watch.close();
-        } catch {}
-      } else if (at - watch.beat >= (this.options.heartbeatMs ?? EVENTS_HEARTBEAT_MS)) {
-        watch.beat = at;
-        this.send(watch, ': ping\n\n');
-      }
-    }
+  /** Reads for every waiting request unless a read is out; each request it took ends after it, failed or not. */
+  private poll() {
     if (this.reading || !this.watches.size) return;
     this.reading = true;
-    void this.read(at).finally(() => (this.reading = false));
-  }
-
-  private send(watch: Watch, text: string) {
-    try {
-      watch.send(text);
-    } catch {
-      this.drop(watch);
-    }
-  }
-
-  private async read(at: number) {
     const watches = [...this.watches];
+    void this.read(watches, Date.now())
+      .catch(error => console.error('coder server: task events failed', error))
+      .finally(() => {
+        for (const watch of watches) this.end(watch);
+        this.reading = false;
+        this.poll();
+      });
+  }
+
+  private async read(watches: Watch[], at: number) {
+    // Caches outlive requests; an entry older than its use is read again.
+    for (const [key, { at: when }] of this.counts)
+      if (at - when >= EVENTS_LAG_MS) this.counts.delete(key);
+    for (const [key, { at: when }] of this.views)
+      if (at - when >= STREAM_SEEN_MS) this.views.delete(key);
+    for (const [key, { at: when }] of this.runners)
+      if (at - when >= RUNNER_SCAN_MS) this.runners.delete(key);
     const scopes = new Map<string, Scope>();
     for (const watch of watches) {
-      const scope = scopes.get(watch.ctx.organizationId) ?? {
-        ctx: watch.ctx,
-        ids: new Set(),
-        fresh: new Set(),
-      };
-      for (const id of watch.ids) {
-        scope.ids.add(id);
-        // An asked task is read whatever its age only until its stream has it; after that only its changes come.
-        if (watch.fresh) scope.fresh.add(id);
-      }
+      const scope = scopes.get(watch.ctx.organizationId) ?? { ctx: watch.ctx, ids: new Set() };
+      for (const id of watch.ids) scope.ids.add(id);
       scopes.set(watch.ctx.organizationId, scope);
     }
-    const since = Math.min(
-      this.last,
-      ...watches.flatMap(watch => (watch.fresh ? [watch.from] : [])),
-    );
     this.reads++;
-    // A slow read holds the next one back, so reads never pile up; heartbeats and time limits go on meanwhile.
-    const rows = await this.changes(scopes, since - EVENTS_LAG_MS, at).catch(error => {
+    const rows = await this.changes(
+      scopes,
+      Math.min(...watches.map(watch => watch.from)) - EVENTS_LAG_MS,
+      at,
+    ).catch(error => {
       console.error('coder server: task events failed', error);
       return undefined;
     });
     if (!rows) return;
-    this.last = at;
     // One count read per workspace, grouped by audience, so every stream's own count is a sum; a task's stream counts its children alone.
     const groups = new Map<string, AudienceCount[]>();
     try {
@@ -429,14 +352,10 @@ export class TaskWatcher {
           [...(rows.deleted.get(organizationId)?.keys() ?? [])].sort(),
         ]);
         const own = watches.filter(watch => watch.ctx.organizationId === organizationId);
-        const members = own.some(watch => !workspaceAdmin(watch.ctx) && !watch.ctx.taskPrincipal);
         for (const parent of new Set(own.map(watch => watch.ctx.taskPrincipal?.task))) {
           const key = countsKey(organizationId, parent);
           const cached = this.counts.get(key);
-          // A member's count also follows member lists that changed or expired without a task change.
-          const changed =
-            cached?.fingerprint !== fingerprint ||
-            (members && !parent && at - cached.at >= STREAM_SEEN_MS);
+          const changed = cached?.fingerprint !== fingerprint;
           const counted = ctx.local
             ? [...(rows.rows.get(organizationId)?.values() ?? [])]
                 .filter(
@@ -467,8 +386,7 @@ export class TaskWatcher {
                   ]
                 : await ctx.queue.activeCounts(organizationId);
           groups.set(key, counted);
-          if (own.some(watch => this.watches.has(watch)))
-            this.counts.set(key, { groups: counted, fingerprint, at: changed ? at : cached!.at });
+          this.counts.set(key, { groups: counted, fingerprint, at: changed ? at : cached!.at });
         }
       }
     } catch (error) {
@@ -494,7 +412,6 @@ export class TaskWatcher {
           const cached = this.views.get(key);
           if (
             !cached ||
-            at - cached.at >= STREAM_SEEN_MS ||
             [...audiences].some(audience => !cached.audiences.has(audience)) ||
             changed.some(row => row.updatedAt > cached.at && audiences.has(row.task.audience!))
           ) {
@@ -510,22 +427,15 @@ export class TaskWatcher {
     );
     await Promise.all(
       [...scopes]
-        .filter(
-          ([organizationId]) =>
-            at - (this.runners.get(organizationId)?.at ?? -Infinity) >= RUNNER_SCAN_MS,
-        )
+        .filter(([organizationId]) => !this.runners.has(organizationId))
         .map(async ([organizationId, { ctx }]) => {
-          const previous = this.runners.get(organizationId);
-          const scan = { at, records: previous?.records ?? [] };
-          this.runners.set(organizationId, scan);
+          this.runners.set(organizationId, { at, records: [] });
+          const scan = this.runners.get(organizationId)!;
           try {
             const records = await ctx.store.list('runner');
             if (this.runners.get(organizationId) === scan) scan.records = records;
           } catch (error) {
-            if (this.runners.get(organizationId) === scan) {
-              if (previous) this.runners.set(organizationId, previous);
-              else this.runners.delete(organizationId);
-            }
+            if (this.runners.get(organizationId) === scan) this.runners.delete(organizationId);
             console.error('coder server: runner events failed', error);
           }
         }),
@@ -543,36 +453,20 @@ export class TaskWatcher {
         const active = counted
           ?.filter(group => canView(view, group))
           .reduce((sum, group) => sum + group.active, 0);
-        if (active !== undefined && active !== watch.active) {
-          watch.active = active;
+        if (active !== undefined)
           out.push(`id: ${at}${watch.tag}\nevent: counts\ndata: ${JSON.stringify({ active })}\n\n`);
-        }
-        out.push(...this.runnerNews(watch, at));
+        const scan = this.runners.get(watch.ctx.organizationId);
+        if (scan)
+          out.push(
+            `id: ${at}${watch.tag}\nevent: runners\ndata: ${JSON.stringify({ items: runnerItems(watch.ctx, scan.records, at) })}\n\n`,
+          );
       } catch {}
-      // A quiet stream still moves its resume point.
-      if (!out.length && at - watch.marked >= (this.options.heartbeatMs ?? EVENTS_HEARTBEAT_MS))
-        out.push(`id: ${at}${watch.tag}\n\n`);
-      if (!out.length) continue;
-      watch.marked = at;
-      this.send(watch, out.join(''));
+      // A quiet answer still moves the resume point.
+      if (!out.length) out.push(`id: ${at}${watch.tag}\n\n`);
+      try {
+        watch.send(out.join(''));
+      } catch {}
     }
-  }
-
-  /** The runners event when what the stream's requester sees changed, online dots included. */
-  private runnerNews(watch: Watch, at: number): string[] {
-    const scan = this.runners.get(watch.ctx.organizationId);
-    if (!scan) return [];
-    const items = runnerItems(watch.ctx, scan.records, at);
-    // An online runner's heartbeat moves its lastSeen every minute without changing what the list shows.
-    const seen = JSON.stringify(
-      items.map(({ lastSeen, ...row }) => (row.online ? row : { ...row, lastSeen })),
-    );
-    const known = watch.runners;
-    watch.runners = seen;
-
-    return known === seen
-      ? []
-      : [`id: ${at}${watch.tag}\nevent: runners\ndata: ${JSON.stringify({ items })}\n\n`];
   }
 
   /** Each workspace's rows and deletes from one queue read, with a local server's CLI tasks merged in. */
@@ -581,7 +475,7 @@ export class TaskWatcher {
       [...scopes].map(([organizationId, scope]) => ({
         organizationId,
         ids: [...scope.ids],
-        fresh: [...scope.fresh],
+        fresh: [...scope.ids],
       })),
       since,
     );
@@ -642,7 +536,7 @@ export class TaskWatcher {
     return { rows, deleted };
   }
 
-  /** The events one stream has not had yet. */
+  /** The events of one request: its asked tasks, and the list changes since its last event id. */
   private news(
     watch: Watch,
     { rows, deleted: removed }: Awaited<ReturnType<TaskWatcher['changes']>>,
@@ -652,14 +546,16 @@ export class TaskWatcher {
     const { ctx } = watch;
     const parent = ctx.taskPrincipal?.task;
     const found = rows.get(ctx.organizationId) ?? new Map<string, TaskStatus>();
-    // A task's stream keeps only the asked ids its first read finds as its children.
-    if (parent && watch.fresh)
+    // A task's request keeps only the asked ids the read finds as its children.
+    if (parent)
       for (const id of watch.ids) if (found.get(id)?.task.parent !== parent) watch.ids.delete(id);
     const out: string[] = [];
+    // Each task's event in this answer, so it goes out once.
+    const sent = new Map<string, string>();
     const emit = (id: string, data: object) => {
       const text = JSON.stringify(data);
-      if (watch.sent.get(id) === text) return;
-      watch.sent.set(id, text);
+      if (sent.get(id) === text) return;
+      sent.set(id, text);
       out.push(`id: ${at}${watch.tag}\nevent: task\ndata: ${text}\n\n`);
     };
     const deleted = (id: string) => ({ id, deleted: true });
@@ -667,7 +563,6 @@ export class TaskWatcher {
       // An asked task keeps its result, archived or not.
       const local = ctx.local && !parent && localTask(ctx.local.cwd, id, watch.ids.has(id));
       emit(id, local ? eventState(local, watch.ids.has(id)) : deleted(id));
-      watch.gone.add(id);
       if (local && ctx.local) {
         const archived = this.archived.get(ctx.local.cwd) ?? new Set<string>();
         this.archived.set(ctx.local.cwd, archived.add(id));
@@ -676,13 +571,8 @@ export class TaskWatcher {
 
     for (const [id, status] of found) {
       if (parent && status.task.parent !== parent) continue;
-      // A task whose audience no longer holds this viewer leaves their list.
-      if (!canView(viewer, status.task)) {
-        if (watch.sent.has(id)) emit(id, deleted(id));
-        continue;
-      }
+      if (!canView(viewer, status.task)) continue;
       const asked = watch.ids.has(id);
-      watch.gone.delete(id);
       // A finished asked task's result lives in its CLI folder.
       const row =
         asked && ctx.local && status.local && DONE.has(status.status)
@@ -693,44 +583,33 @@ export class TaskWatcher {
       if (
         ctx.local &&
         status.local &&
-        watch.sent.get(id) !== JSON.stringify(data) &&
         at - (status.finishedAt ?? 0) < EVENTS_LAG_MS &&
         resultPending(ctx.local.cwd, status)
       ) {
         // Known, so an archive or delete before its result still goes out.
-        if (!watch.sent.has(id)) watch.sent.set(id, '');
+        sent.set(id, '');
         continue;
       }
-      // A local read holds every task, so after the first one any difference is news.
-      if (asked || (ctx.local && !watch.fresh) || status.updatedAt > watch.from - EVENTS_LAG_MS)
-        emit(id, data);
-      else if (watch.fresh) watch.sent.set(id, JSON.stringify(data));
+      if (asked || status.updatedAt > watch.from - EVENTS_LAG_MS) emit(id, data);
     }
-    // Past its first read a stream hears an unchanged asked task no more; a store queue's read still holds every task.
-    if (watch.fresh || ctx.queue instanceof StoreQueue)
-      for (const id of watch.ids) if (!found.has(id)) gone(id);
-    // A task's stream hears only the deletes of children it asked about, as a tombstone names no parent.
+    for (const id of watch.ids) if (!found.has(id)) gone(id);
+    // A task's request hears only the deletes of its children.
     for (const [id, { at: when, ...tombstone }] of removed.get(ctx.organizationId) ?? [])
       if (
         when > watch.from - EVENTS_LAG_MS &&
         canView(viewer, tombstone) &&
-        (!parent || watch.ids.has(id))
+        (!parent || tombstone.parent === parent)
       )
         emit(id, deleted(id));
-    // A local read holds every task, so one missing was archived or deleted, maybe while this stream was away.
-    if (ctx.local) {
-      for (const id of watch.sent.keys())
-        if (!found.has(id) && !watch.ids.has(id) && !watch.gone.has(id)) gone(id);
+    // A local read holds every task, so one that left its folders since the last event id was archived or deleted.
+    if (ctx.local)
       for (const [id, when] of this.left.get(ctx.local.cwd) ?? [])
         if (
           when > watch.from - EVENTS_LAG_MS &&
           !found.has(id) &&
-          watch.sent.get(id) !== JSON.stringify(deleted(id))
+          sent.get(id) !== JSON.stringify(deleted(id))
         )
           gone(id);
-    }
-    watch.fresh = false;
-    watch.from = at;
 
     return out;
   }
@@ -744,21 +623,16 @@ type LogRead = (cursor: number) => Promise<
   | undefined
 >;
 
-/** Where a feed's lines come from: a stored task, read with every other stored feed in one query a poll, or a read of its own. */
+/** Where a feed's lines come from: a stored task, or a read of its own. */
 type LogSource = LogRead | { ctx: ServerContext; id: string };
 
 type LogWatch = {
-  /** The last line this stream has. */
+  /** The last line this request has. */
   cursor: number;
-  /** A read has reached the log's end for this stream, which says so once with `caught-up`. */
-  caught?: boolean;
-  /** The pending approval this stream announced with `approval`. */
-  approval?: string;
   feed: LogFeed;
-  timers: Array<ReturnType<typeof setTimeout>>;
   send: (text: string) => void;
   close: () => void;
-  /** Whether this stream's viewer still sees the task, from the row each read brings. */
+  /** Whether this request's viewer still sees the task, from the row each read brings. */
   sees?: (status: LogTail['status']) => Promise<boolean>;
 };
 
@@ -766,41 +640,21 @@ type LogFeed = {
   key: string;
   source: LogSource;
   watches: Set<LogWatch>;
-  /** The last line the feed has read up to. */
-  head: number;
   /** When the read in flight started. */
   reading?: number;
 };
 
-/** One feed's part of a read: the streams it serves, from the earliest of their cursors. */
-type FeedRead = { feed: LogFeed; readers: LogWatch[]; from: number };
-
-/** A log read out this long is stalled: its database statements are cancelled, and a new stream retires its feed. */
+/** A log read out this long is stalled: its database statements are cancelled, and a new request retires its feed. */
 const LOG_READ_MS = 10_000;
 
-/** The shared log poll's longest wait while no lines arrive. */
-const STREAM_IDLE_MS = 5000;
-
-/** One poll for every task with open log streams on this server: stored tasks in one query, each stream from its own cursor; it backs off while no lines arrive. */
+/** One read at a time for each task's log requests on this server, from the earliest of their cursors; a request ends after a read that brings less than a full page. */
 export class LogWatcher {
   private feeds = new Map<string, LogFeed>();
-  private timer?: ReturnType<typeof setTimeout>;
-  private interval: number;
   private closed = false;
   /** Feed reads so far, for tests and metrics. */
   reads = 0;
 
-  constructor(
-    private readonly options: {
-      pollMs?: number;
-      idleMs?: number;
-      lifeMs?: number;
-      heartbeatMs?: number;
-      stallMs?: number;
-    } = {},
-  ) {
-    this.interval = options.pollMs ?? STREAM_POLL_MS;
-  }
+  constructor(private readonly options: { stallMs?: number } = {}) {}
 
   watch(
     key: string,
@@ -818,34 +672,24 @@ export class LogWatcher {
     const stalled =
       feed?.reading !== undefined &&
       Date.now() - feed.reading >= (this.options.stallMs ?? LOG_READ_MS);
-    // A stalled feed is retired: its streams move to a fresh one, and its read's answer is dropped when it settles.
+    // A stalled feed is retired: its requests move to a fresh one, and its read's answer is dropped when it settles.
     if (!feed || stalled) {
-      const fresh: LogFeed = { key, source, watches: new Set(), head: Infinity };
+      const fresh: LogFeed = { key, source, watches: new Set() };
       if (feed) {
         for (const watch of feed.watches) fresh.watches.add(Object.assign(watch, { feed: fresh }));
         feed.watches.clear();
       }
       this.feeds.set(key, (feed = fresh));
     }
-    const watch: LogWatch = { cursor: after, feed, timers: [], send, close, sees };
-    // Each stream's time limit and heartbeat run on their own, whatever its feed's read is doing.
-    watch.timers = [
-      setTimeout(() => this.end(watch), this.options.lifeMs ?? STREAM_MS),
-      setInterval(
-        () => this.send(watch, ': ping\n\n'),
-        this.options.heartbeatMs ?? EVENTS_HEARTBEAT_MS,
-      ),
-    ];
-    for (const timer of watch.timers) timer.unref?.();
+    const watch: LogWatch = { cursor: after, feed, send, close, sees };
     feed.watches.add(watch);
-    // A stream behind what the feed has read gets its lines now, not at the next poll.
-    if (feed.reading === undefined && after < feed.head) void this.read([feed]);
-    this.schedule();
+    // A read out takes up this request when it settles.
+    if (feed.reading === undefined) void this.read(feed);
 
     return () => this.drop(watch);
   }
 
-  /** Ends every stream and refuses new ones. */
+  /** Ends every request and refuses new ones. */
   close() {
     this.closed = true;
     for (const feed of [...this.feeds.values()])
@@ -854,13 +698,8 @@ export class LogWatcher {
 
   private drop(watch: LogWatch) {
     const { feed } = watch;
-    for (const timer of watch.timers) clearTimeout(timer);
     if (!feed.watches.delete(watch) || feed.watches.size) return;
     if (this.feeds.get(feed.key) === feed) this.feeds.delete(feed.key);
-    if (this.feeds.size) return;
-    clearTimeout(this.timer);
-    this.timer = undefined;
-    this.interval = this.options.pollMs ?? STREAM_POLL_MS;
   }
 
   private end(watch: LogWatch, text = '') {
@@ -879,87 +718,37 @@ export class LogWatcher {
     }
   }
 
-  private schedule() {
-    if (this.timer || this.closed || !this.feeds.size) return;
-    this.timer = setTimeout(() => this.tick(), this.interval);
-    this.timer.unref?.();
-  }
-
-  /** Every poll reads each feed without a read out; lines speed the poll up to `pollMs`, none slow it to `idleMs`. */
-  private tick() {
-    this.timer = undefined;
-    const due = [...this.feeds.values()].filter(feed => feed.reading === undefined);
-    this.schedule();
-    void this.read(due).then(flowing => {
-      const next = flowing
-        ? (this.options.pollMs ?? STREAM_POLL_MS)
-        : Math.min(this.interval * 2, this.options.idleMs ?? STREAM_IDLE_MS);
-      if (next === this.interval) return;
-      this.interval = next;
-      clearTimeout(this.timer);
-      this.timer = undefined;
-      this.schedule();
-    });
-  }
-
-  /** Reads these feeds, the stored ones in one query per queue; true when one got lines past what it had read. */
-  private async read(feeds: LogFeed[]): Promise<boolean> {
-    // A stream that joins during a read, maybe after a continue, waits for a read of its own.
-    const reads: FeedRead[] = feeds
-      .filter(feed => this.feeds.get(feed.key) === feed && feed.watches.size)
-      .map(feed => {
-        const readers = [...feed.watches];
-        return { feed, readers, from: Math.min(...readers.map(watch => watch.cursor)) };
-      });
-    if (!reads.length) return false;
-    const started = Date.now();
-    for (const { feed } of reads) feed.reading = started;
-    this.reads += reads.length;
-    const stored = new Map<TaskQueue, Array<FeedRead & { ctx: ServerContext; id: string }>>();
-    const own: Array<FeedRead & { read: LogRead }> = [];
-    for (const read of reads) {
-      const { source } = read.feed;
-      if (typeof source === 'function') own.push({ ...read, read: source });
-      else
-        stored.set(source.ctx.queue, [
-          ...(stored.get(source.ctx.queue) ?? []),
-          { ...read, ...source },
-        ]);
-    }
+  /** Reads a feed's lines past the earliest cursor of its requests and answers them; the guard holds until the read settles, so a feed never has two reads out. */
+  private async read(feed: LogFeed) {
+    // A request that joins during the read waits for a read of its own.
+    const readers = [...feed.watches];
+    const from = Math.min(...readers.map(watch => watch.cursor));
+    feed.reading = Date.now();
+    this.reads++;
     const failed = (error: unknown) => {
       console.error('coder server: task log read failed', error);
       return null;
     };
-    // The guard holds until the read settles, so a feed never has two reads out.
-    const flowing = await Promise.all([
-      ...[...stored].map(async ([queue, group]) => {
-        const { statementTimeout } = group[0]!.ctx;
-        const tails = () =>
-          queue.logTails(
-            group.map(({ ctx, id, from }) => ({
-              organizationId: ctx.organizationId,
-              id,
-              after: from,
-            })),
-            STREAM_LINES,
-          );
-        const found = await (
-          statementTimeout ? statementTimeout(LOG_READ_MS, tails) : tails()
-        ).catch(failed);
-
-        return Promise.all(group.map((read, index) => this.settle(read, found && found[index])));
-      }),
-      ...own.map(async read => [await this.settle(read, await read.read(read.from).catch(failed))]),
-    ]);
-
-    return flowing.flat().includes(true);
+    const { source } = feed;
+    let found: Awaited<ReturnType<LogRead>> | null;
+    if (typeof source === 'function') found = await source(from).catch(failed);
+    else {
+      const { ctx, id } = source;
+      const tails = () =>
+        ctx.queue.logTails([{ organizationId: ctx.organizationId, id, after: from }], STREAM_LINES);
+      found = await (ctx.statementTimeout ? ctx.statementTimeout(LOG_READ_MS, tails) : tails())
+        .then(([tail]) => tail)
+        .catch(failed);
+    }
+    await this.settle(feed, readers, found);
   }
 
-  /** Sends one feed's read to its streams; true when it brought lines past what the feed had read. */
+  /** Answers one feed's read to the requests it served. */
   private async settle(
-    { feed, readers, from }: FeedRead,
+    feed: LogFeed,
+    readers: LogWatch[],
     found: Awaited<ReturnType<LogRead>> | null,
-  ): Promise<boolean> {
+  ) {
     const lost = found
       ? await Promise.all(
           readers.map(
@@ -968,15 +757,14 @@ export class LogWatcher {
         )
       : [];
     feed.reading = undefined;
-    if (this.feeds.get(feed.key) !== feed) return false;
-    // A stream whose viewer no longer sees the task ends.
+    if (this.feeds.get(feed.key) !== feed) return;
+    // A request whose viewer no longer sees the task ends.
     readers.forEach((watch, index) => lost[index] && this.end(watch));
     const current = readers.filter(watch => feed.watches.has(watch));
     let again = current.length < feed.watches.size;
-    let flowing = false;
-    // A deleted task closes its streams.
-    if (found === undefined) for (const watch of current) this.end(watch);
-    else if (found) {
+    // A failed read or a deleted task ends its requests.
+    if (!found) for (const watch of current) this.end(watch);
+    else {
       const { status, lines, pendingLogs, pendingResult } = found;
       const full = lines.length === STREAM_LINES;
       const done = DONE.has(status.status) && !full && !pendingLogs && !pendingResult;
@@ -984,35 +772,25 @@ export class LogWatcher {
         line =>
           [line.seq, `id: ${line.seq}\nevent: log\ndata: ${JSON.stringify(line)}\n\n`] as const,
       );
-      const last = lines.at(-1)?.seq ?? from;
-      flowing = feed.head !== Infinity && last > feed.head;
-      feed.head = Math.max(from, last);
       if (full) again = true;
       const approval =
         status.status === 'waiting' ? (status.approval as { id?: string } | undefined) : undefined;
       for (const watch of current) {
         let text = events.flatMap(([seq, text]) => (seq > watch.cursor ? [text] : [])).join('');
-        if (!full && !done && !watch.caught) {
-          watch.caught = true;
-          text += 'event: caught-up\ndata: {}\n\n';
-        }
-        if (!full && approval?.id && watch.approval !== approval.id) {
-          watch.approval = approval.id;
-          text += `event: approval\ndata: ${JSON.stringify(approval)}\n\n`;
-        }
+        if (!full && !done) text += 'event: caught-up\ndata: {}\n\n';
+        if (!full && approval?.id) text += `event: approval\ndata: ${JSON.stringify(approval)}\n\n`;
         watch.cursor = Math.max(watch.cursor, lines.at(-1)?.seq ?? -1);
         if (done) this.end(watch, `${text}event: end\ndata: {}\n\n`);
-        else if (text) this.send(watch, text);
+        else if (full) this.send(watch, text);
+        else this.end(watch, text);
       }
     }
-    // A full page, or a stream that joined during the read, reads again now.
-    if (again && this.feeds.get(feed.key) === feed) void this.read([feed]);
-
-    return flowing;
+    // A full page, or a request that joined during the read, reads again now.
+    if (again && this.feeds.get(feed.key) === feed) void this.read(feed);
   }
 }
 
-/** `log` events past `after`, `approval` when the task waits on one, then `end` once the task is done and its logs and result are in. */
+/** `log` events past `after` from the next read, `approval` when the task waits on one, and `end` once the task is done and its logs and result are in; then the body ends. */
 function streamTask(
   req: Request,
   ctx: ServerContext,
@@ -1026,7 +804,6 @@ function streamTask(
   let stop = () => {};
   const body = new ReadableStream<Uint8Array>({
     start(controller) {
-      controller.enqueue(encoder.encode(`retry: ${STREAM_POLL_MS}\n\n`));
       stop = watcher.watch(
         `${ctx.organizationId}:${key}`,
         after,

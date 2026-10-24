@@ -118,11 +118,12 @@ export interface TaskMetrics {
 
 export const ACTIVE_STATES: TaskStatus['status'][] = ['queued', 'running', 'waiting'];
 
-/** What a delete leaves for events streams: the task's audience and the member who asked, so only who saw it hears the delete. */
+/** What a delete leaves for events streams: the task's audience, the member who asked and its parent, so only who saw it hears the delete. */
 export interface Tombstone {
   at: number;
   audience?: string;
   requestedBy?: string;
+  parent?: string;
 }
 
 /** What a log stream reads of its task each poll: its state, who sees it, and its new lines. */
@@ -931,7 +932,12 @@ export class StoreQueue implements TaskQueue {
       const current = await this.read(id);
       if (!current || !this.allowed(current, fence)) return false;
       await this.store.delete('task', id);
-      this.tombstone(id, taskAudience(current.task).audience, current.task.requestedBy);
+      this.tombstone(
+        id,
+        taskAudience(current.task).audience,
+        current.task.requestedBy,
+        current.task.parent,
+      );
       await deleteTaskConnections(this.store, id);
 
       return true;
@@ -1116,11 +1122,12 @@ export class StoreQueue implements TaskQueue {
   }
 
   /** A deleted task, for events streams. */
-  tombstone(id: string, audience?: string, requestedBy?: string) {
+  tombstone(id: string, audience?: string, requestedBy?: string, parent?: string) {
     this.tombstones.set(id, {
       at: Date.now(),
       ...(audience === undefined ? {} : { audience }),
       ...(requestedBy === undefined ? {} : { requestedBy }),
+      ...(parent === undefined ? {} : { parent }),
     });
   }
 

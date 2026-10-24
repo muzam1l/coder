@@ -318,7 +318,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         headers: { accept: 'text/event-stream' },
         signal,
       }),
-    /** One stream of the named tasks' changes and every list change in the workspace; `last` resumes after an event id. */
+    /** The named tasks' state and every list change in the workspace since `last`, an event id, from one read. */
     events: (ids: string[], last?: string, signal?: AbortSignal): Promise<Response> =>
       this.send(queryPath('/admin/events', { tasks: ids }), {
         headers: { accept: 'text/event-stream', ...(last ? { 'last-event-id': last } : {}) },
@@ -375,7 +375,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       input: T,
     ): Promise<T extends { event: D['event'] } ? { tasks: string[] } : D['task']> =>
       this.post('/admin/tasks', input),
-    /** Follow the task's event stream until it ends or waits on an approval; `onLog` sees each log line as it lands. */
+    /** Poll the task's log stream every second until it ends or waits on an approval; `onLog` sees each log line as it lands. */
     wait: async (
       id: string,
       options: { onLog?: (line: TaskLog) => void } = {},
@@ -404,6 +404,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
         }
         // Leaving the loop cancels the body; aborting first surfaces as "This operation was aborted".
         if (ended) return this.tasks.get(id);
+        await new Promise(resolve => setTimeout(resolve, 1000));
       }
     },
   };

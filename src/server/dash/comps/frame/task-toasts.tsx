@@ -40,7 +40,7 @@ const SHOWN = new Set<TaskState>([...DONE, 'waiting']);
 const KEEP = 20;
 const MAX = 3;
 const TTL = 8000;
-// The Web Lock that picks the one tab holding the events stream, and the channel it shares them on.
+// The Web Lock that picks the one tab polling the events, and the channel it shares them on.
 const EVENTS = 'coder:events';
 const TASK = 'coder:task';
 const REPLAY = 'coder:task-replay';
@@ -53,6 +53,7 @@ const RUNNERS = 'coder:runners';
 const RESYNC_MS = 60_000;
 // Latest events a tab keeps, so a page that mounts later starts from them.
 const LATEST = 200;
+const POLL_MS = 5000;
 
 const read = (): Record<string, Watched> => {
   try {
@@ -138,16 +139,19 @@ type Message = {
   resync?: true;
 };
 
-/** One events stream per browser and organization: the tab holding the lock reads it, shares it on a channel, and a tab that takes over resumes from the last event id. */
+/** One events poll per browser and organization: the tab holding the lock polls, shares the events on a channel, and a tab that takes over resumes from the last event id. */
 function useEventsStream(ids: string[], leading: { current: boolean }, org: string) {
   const asked = useRef(ids);
   asked.current = ids;
   const current = useRef<{ key: string; abort: AbortController }>();
+  const sync = useRef(() => {});
   const key = [...ids].sort().join(',');
 
   useEffect(() => {
     const latest = new Map<string, TaskEvent>();
     const deliver = (event: TaskEvent) => {
+      // Each poll repeats what changed lately; pages hear a change once.
+      if (JSON.stringify(latest.get(event.id)) === JSON.stringify(event)) return;
       latest.delete(event.id);
       latest.set(event.id, event);
       if (latest.size > LATEST) latest.delete(latest.keys().next().value!);
@@ -159,6 +163,7 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
     };
     addEventListener(REPLAY, replay);
     let counts: TaskCountEvent | undefined;
+    let runners = '';
     const replayCounts = (event: Event) =>
       counts && (event as CustomEvent<(counts: TaskCountEvent) => void>).detail(counts);
     addEventListener(COUNTS_REPLAY, replayCounts);
@@ -177,7 +182,10 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
         counts = message.counts;
         dispatchEvent(new CustomEvent(COUNTS, { detail: counts }));
       }
-      if (message.runners) dispatchEvent(new CustomEvent(RUNNERS, { detail: message.runners }));
+      if (message.runners && JSON.stringify(message.runners) !== runners) {
+        runners = JSON.stringify(message.runners);
+        dispatchEvent(new CustomEvent(RUNNERS, { detail: message.runners }));
+      }
       if (message.resync) dispatchEvent(new Event(RESYNC));
       if (!message.reset) return;
       latest.clear();
@@ -185,7 +193,7 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
     };
     channel?.addEventListener('message', ({ data }: MessageEvent<Message>) => {
       if (!data.hello) return receive(data);
-      // A tab that just loaded: the next stream resumes for it too.
+      // A tab that just loaded: the next poll goes now, for it too.
       soon ??= setTimeout(() => {
         soon = undefined;
         current.current?.abort.abort();
@@ -194,37 +202,37 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
     });
     channel?.postMessage({ hello: true });
 
-    const lead = async () => {
+    const lead = async (signal: AbortSignal) => {
       leading.current = true;
       const resync = setInterval(() => {
         channel?.postMessage({ resync: true });
         receive({ resync: true });
       }, RESYNC_MS);
       try {
-        await follow();
+        await follow(signal);
       } finally {
         clearInterval(resync);
+        leading.current = false;
       }
     };
 
-    const follow = async () => {
-      while (!abort.signal.aborted) {
+    const follow = async (signal: AbortSignal) => {
+      while (!signal.aborted) {
         const once = new AbortController();
         const stop = () => once.abort();
-        abort.signal.addEventListener('abort', stop);
+        signal.addEventListener('abort', stop);
         const ids = asked.current;
         current.current = { key: [...ids].sort().join(','), abort: once };
-        let wait = 1000;
+        let wait = POLL_MS;
         try {
           const response = await client.tasks.events(ids, last, once.signal);
           // A server without the events stream: nothing to follow.
           if (response.status === 404) return void (leading.current = false);
           // Signed out: a tab that signs in again wakes the next try.
-          if (!response.ok || !response.body)
-            wait = [401, 403].includes(response.status) ? 60_000 : 5000;
-          else
+          if ([401, 403].includes(response.status)) wait = 60_000;
+          else if (response.ok && response.body)
             for await (const { event, data, id } of serverEvents(response.body)) {
-              // A stream replaced by the next one says nothing more.
+              // A poll replaced by the next one says nothing more.
               if (once.signal.aborted) break;
               const message: Message = {
                 ...(id ? { id } : {}),
@@ -239,8 +247,8 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
         } catch (reason) {
           if (!once.signal.aborted) console.error('coder dashboard: events', reason);
         }
-        abort.signal.removeEventListener('abort', stop);
-        // A new task set opens the next stream at once.
+        signal.removeEventListener('abort', stop);
+        // A new task set polls again at once.
         if (once.signal.aborted) continue;
         await new Promise<void>(done => {
           const timer = setTimeout(done, wait);
@@ -253,18 +261,40 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
       }
     };
 
-    if (channel)
-      void navigator.locks
-        .request(`${EVENTS}:${org}`, { signal: abort.signal }, lead)
-        .catch(reason => {
-          if (!abort.signal.aborted) console.error('coder dashboard: events', reason);
-        });
-    else void lead();
+    // A hidden tab polls nothing, unless it notifies of a watched task still running.
+    let turn: AbortController | undefined;
+    const wanted = () =>
+      document.visibilityState !== 'hidden' ||
+      (asked.current.length > 0 &&
+        localStorage.getItem(NOTIFY) === '1' &&
+        typeof Notification !== 'undefined' &&
+        Notification.permission === 'granted');
+    sync.current = () => {
+      if (!wanted()) {
+        turn?.abort();
+        turn = undefined;
+        return wake();
+      }
+      if (turn) return;
+      turn = new AbortController();
+      const signal = AbortSignal.any([abort.signal, turn.signal]);
+      if (channel)
+        void navigator.locks
+          .request(`${EVENTS}:${org}`, { signal }, () => lead(signal))
+          .catch(reason => {
+            if (!signal.aborted) console.error('coder dashboard: events', reason);
+          });
+      else void lead(signal);
+    };
+    const visibility = () => sync.current();
+    addEventListener('visibilitychange', visibility);
+    sync.current();
     return () => {
       abort.abort();
       wake();
       clearTimeout(soon);
       channel?.close();
+      removeEventListener('visibilitychange', visibility);
       removeEventListener(REPLAY, replay);
       removeEventListener(COUNTS_REPLAY, replayCounts);
     };
@@ -272,6 +302,7 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
 
   useEffect(() => {
     if (current.current && current.current.key !== key) current.current.abort.abort();
+    sync.current();
   }, [key]);
 }
 

@@ -266,11 +266,21 @@ export function TaskView({
   }, []);
 
   const [visible, setVisible] = useState(true);
+  const [focused, setFocused] = useState(true);
   useEffect(() => {
-    const sync = () => setVisible(document.visibilityState === 'visible');
+    const sync = () => {
+      setVisible(document.visibilityState === 'visible');
+      setFocused(document.hasFocus());
+    };
     sync();
     addEventListener('visibilitychange', sync);
-    return () => removeEventListener('visibilitychange', sync);
+    addEventListener('focus', sync);
+    addEventListener('blur', sync);
+    return () => {
+      removeEventListener('visibilitychange', sync);
+      removeEventListener('focus', sync);
+      removeEventListener('blur', sync);
+    };
   }, []);
 
   // Logs stream from when the task runs until the stream ends them, which waits for logs still arriving.
@@ -354,7 +364,7 @@ export function TaskView({
     catchUp,
   );
 
-  // A hidden tab holds no log stream and resumes from its cursor.
+  // Logs poll every second while the page has focus, every 5 s while only visible, and not while hidden.
   useEffect(() => {
     if (!streaming || !visible) return;
     const abort = new AbortController();
@@ -379,12 +389,12 @@ export function TaskView({
           if (abort.signal.aborted) return;
           console.error('coder dashboard: task stream', reason);
         }
-        await new Promise(done => setTimeout(done, 1000));
+        await new Promise(done => setTimeout(done, focused ? 1000 : 5000));
       }
     };
     void follow();
     return () => abort.abort();
-  }, [streaming, visible, round, follows]);
+  }, [streaming, visible, focused, round, follows]);
 
   const turns = task.turns ?? [
     {

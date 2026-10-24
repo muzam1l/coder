@@ -698,10 +698,10 @@ export class DrizzleQueue implements TaskQueue {
       sql`
       with gone as (
         delete from ${task} where ${this.fence(organizationId, id, fence)}
-        returning id, organization_id, public_id, audience, requested_by
+        returning id, organization_id, public_id, audience, requested_by, parent
       ), marked as (
-        insert into ${taskTombstone} (organization_id, public_id, audience, requested_by, deleted_at)
-        select organization_id, public_id, audience, requested_by, clock_timestamp() from gone
+        insert into ${taskTombstone} (organization_id, public_id, audience, requested_by, parent, deleted_at)
+        select organization_id, public_id, audience, requested_by, parent, clock_timestamp() from gone
       ), ${dropTaskSecrets(sql`select id from gone`)}
       select count(*)::int as deleted from gone`,
     );
@@ -1310,6 +1310,7 @@ export class DrizzleQueue implements TaskQueue {
         at: ms(row.deletedAt),
         ...(row.audience === null ? {} : { audience: row.audience }),
         ...(row.requestedBy === null ? {} : { requestedBy: row.requestedBy }),
+        ...(row.parent === null ? {} : { parent: row.parent }),
       })),
     };
   }

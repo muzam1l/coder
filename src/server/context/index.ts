@@ -182,9 +182,9 @@ export interface ServerContext {
   dashboardHosts?: import('../dash/serve').DashboardHosts;
   requestScopes?: Map<string, import('../routes/guards').RequestScope>;
   dbProfile?: import('../store/pg/client').DatabaseProfile;
-  /** Task changes for every open `/admin/events` stream, read once a second. */
+  /** Task changes for `/admin/events` requests, one read shared by those waiting. */
   taskWatcher?: import('../tasks/stream').TaskWatcher;
-  /** Task logs for every open `/admin/tasks/:id/stream`, read once a second per task. */
+  /** Task logs for `/admin/tasks/:id/stream` requests, one read at a time per task. */
   logWatcher?: import('../tasks/stream').LogWatcher;
   /** Runs `work` with Postgres's statement_timeout at `ms`; absent without a database. */
   statementTimeout?: <T>(ms: number, work: () => Promise<T>) => Promise<T>;

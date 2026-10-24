@@ -1199,6 +1199,7 @@ async function* serverLines(api: RemoteClient, taskId: string): AsyncGenerator<T
       } else if (event.event === 'end') ended = true;
     }
     if (ended) return;
+    await new Promise(resolve => setTimeout(resolve, 1000));
   }
 }
 async function* each<T>(items: T[] | Promise<T[]>): AsyncGenerator<T> {
@@ -1321,8 +1322,10 @@ async function askServer(
             Boolean(state.deleted) || TERMINAL_STATUSES.includes(state.status as Task['status']);
         if (answer !== undefined || ended) break;
       }
-      if (answer === undefined && !ended)
+      if (answer === undefined && !ended) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
         response = await api.tasks.events([id], last, abort.signal);
+      }
     }
     const text = typeof answer === 'string' ? answer : '';
 

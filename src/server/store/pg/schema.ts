@@ -418,9 +418,10 @@ export const taskTombstone = pgTable(
   {
     organizationId: text().notNull(),
     publicId: text().notNull(),
-    /** The task's audience and the member who asked, so only who saw it hears the delete. */
+    /** The task's audience, the member who asked and its parent, so only who saw it hears the delete. */
     audience: text(),
     requestedBy: text(),
+    parent: text(),
     deletedAt: at().notNull(),
   },
   t => [
