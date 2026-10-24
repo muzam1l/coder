@@ -1,7 +1,8 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import * as z from 'zod/mini';
-import type { AgentApp, Connection } from '../../agent/types';
+import type { AgentApp, Connection, ModelAttempt } from '../../agent/types';
+import type { Integration } from '../../integrations/types';
 import { handleKey, serverName } from '../../agent/mcp';
 import type { ConnectionRow } from '../../client/types';
 import { ACCESS, mcpEntrySchema } from '../../core/config';
@@ -23,7 +24,15 @@ import { requireWorkspaceAdmin } from '../routes/guards';
 import { encryptSecret, decryptSecret, decryptCredential } from '../store/secrets';
 import { authorizeUrl, oauthResource } from './oauth';
 import { sharedApps } from '../agents/apps';
-import { addCredential, removeCredential, visibleCredentials } from '../settings/credentials';
+import { defaultAgent } from '../../agent/load';
+import {
+  addCredential,
+  connectionFix,
+  parseCredentialId,
+  removeCredential,
+  visibleCredentials,
+  type ModelRun,
+} from '../settings/credentials';
 
 export type ConnectionContext = Pick<
   ServerContext,
@@ -37,6 +46,9 @@ export type ConnectionContext = Pick<
   | 'now'
   | 'fetch'
 >;
+
+/** How long an account's connect notice in a task is remembered, as long as its conversation. */
+const NOTICE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const slug = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i));
 const keyIn = z.union([
@@ -148,12 +160,18 @@ export function nativeCredential(config: ConnectionContext['config'], sealed: st
 export const nativeConnectionId = (owner: string, platform: string, platformUserId: string) =>
   `${owner}:${platform}-${createHash('sha256').update(platformUserId).digest('hex').slice(0, 12)}`;
 
+/** `accounts` are the owner's linked accounts when the caller read them already. */
 export async function nativeConnections(
   ctx: ConnectionContext,
   owner?: string,
+  accounts?: LinkedAccount[],
 ): Promise<Connection[]> {
   if (!owner || !ctx.auth?.linkedAccounts) return [];
-  return linkedConnections(ctx, owner, await ctx.auth.linkedAccounts(owner, ctx.store));
+  return linkedConnections(
+    ctx,
+    owner,
+    accounts ?? (await ctx.auth.linkedAccounts(owner, ctx.store)),
+  );
 }
 
 function linkedConnections(
@@ -165,6 +183,7 @@ function linkedConnections(
     .filter(
       account =>
         account.token &&
+        account.organizationId === ctx.organizationId &&
         account.organizations?.includes(ctx.organizationId) &&
         ctx.integrations[account.platform]?.auth.user,
     )
@@ -202,17 +221,77 @@ async function memberAccounts(
   return linked.flat();
 }
 
+/** Asks a platform account that names no member to connect, when its turn skipped a Claude or Codex entry that an unconnected member's own subscription has: `notice` once per account per task, `failure` for a turn nothing ran. */
+export async function connectNotice(
+  ctx: ServerContext,
+  integration: Integration,
+  input: {
+    task: string;
+    actor: string;
+    models: ModelRun[];
+    attempts: ModelAttempt[];
+    slug?: string;
+  },
+): Promise<{ url: string; failure: string; notice?: string } | undefined> {
+  const { models, attempts } = input;
+  const skipped = models
+    .filter(
+      run =>
+        (run.option.engine === 'claude' || run.option.engine === 'codex') &&
+        !attempts.some(attempt => attempt.model === run.model),
+    )
+    .map(run => run.option.engine);
+  if (!skipped.length) return undefined;
+  const owners = [
+    ...new Set(
+      (await ctx.store.list('credential')).flatMap(({ id }) => {
+        const { owner, name } = parseCredentialId(id);
+        return owner && skipped.some(engine => engine === name) ? [owner] : [];
+      }),
+    ),
+  ];
+  if (!owners.length) return undefined;
+  const linked = (await memberAccounts(ctx, owners)).filter(
+    account => account.platform === integration.id,
+  );
+  if (owners.every(owner => linked.some(account => account.userId === owner))) return undefined;
+  const url = await connectionFix(ctx, integration.id, input.slug);
+  const line = `[Connect ${integration.name}](${url}) to run on a personal subscription.`;
+  const first = await ctx.store.create(
+    'delivery',
+    `notice:${input.task}:${integration.id}:${input.actor}`,
+    { at: (ctx.now ?? Date.now)() },
+    { ttlMs: NOTICE_TTL_MS },
+  );
+
+  return { url, failure: `No model could run. ${line}`, ...(first ? { notice: line } : {}) };
+}
+
+async function visibleRecords(
+  ctx: ConnectionContext,
+  owner?: string,
+  secrets?: 'oauth' | 'all',
+): Promise<Connection[]> {
+  return (await ctx.store.list('connection', { visibleTo: owner, secrets }))
+    .map(row => row.value)
+    .filter(connection => !connection.owner || connection.owner === owner);
+}
+
 async function visibleConnections(
   ctx: ConnectionContext,
   owner?: string,
   secrets?: 'oauth' | 'all',
 ): Promise<Connection[]> {
   const native = await nativeConnections(ctx, owner);
-  const records = (await ctx.store.list('connection', { visibleTo: owner, secrets }))
-    .map(row => row.value)
-    .filter(connection => !connection.owner || connection.owner === owner);
 
-  return withLinks(records, native);
+  return withLinks(await visibleRecords(ctx, owner, secrets), native);
+}
+
+/** Whether a workspace connection or one of `viewer`'s own needs signing in again. */
+export async function needsReconnect(ctx: ConnectionContext, viewer?: string): Promise<boolean> {
+  return (await visibleConnections(ctx, viewer, 'oauth')).some(
+    connection => connectionRow(connection, viewer, ctx.config).status === 'needs-auth',
+  );
 }
 
 /** Members' platform records with their linked accounts' tokens, then the linked accounts no record holds. */
@@ -250,15 +329,17 @@ function withLinks(stored: Connection[], native: Connection[]): Connection[] {
   ];
 }
 
+/** `accounts` are the owner's linked accounts when the caller read them already. */
 export async function findConnection(
   ctx: ConnectionContext,
   id: string,
   owner?: string,
+  accounts?: LinkedAccount[],
 ): Promise<Connection | undefined> {
   const stored = await ctx.store.get('connection', id);
   if (stored) return !stored.owner || stored.owner === owner ? stored : undefined;
 
-  return (await nativeConnections(ctx, owner)).find(connection => connection.id === id);
+  return (await nativeConnections(ctx, owner, accounts)).find(connection => connection.id === id);
 }
 
 export async function connectionAllowed(
@@ -303,7 +384,14 @@ export async function nativeApp(
   if (!user) return;
   if (!apps) {
     const [shared, own] = await Promise.all([sharedApps(ctx), ctx.store.list('app')]);
-    apps = [...shared, ...own.map(row => row.value)];
+    // TODO: a picker naming each agent's app when more than one can sign in.
+    const builtin = defaultAgent();
+    const owned = own.map(row => row.value);
+    apps = [
+      ...shared,
+      ...owned.filter(app => app.agent === builtin),
+      ...owned.filter(app => app.agent !== builtin),
+    ];
   }
 
   return apps.find(app => {
@@ -400,7 +488,8 @@ export async function connectionRows(
     ? await ctx.store.get('delivery', `connection-authorized:${authorization}`)
     : undefined;
   const task = await taskRead;
-  const granted = task && new Set(await (await import('./resolve')).turnConnections(ctx, task));
+  const granted =
+    task && new Set((await (await import('./resolve')).turnConnections(ctx, task)).ids);
 
   const rows = records.map(connection => {
     const row = connectionRow(
@@ -787,16 +876,28 @@ export async function connectionGrants(
     .map(connection => connection.id);
 }
 
+/** A member's own connections the agent allows, and the linked accounts read for them. */
+export interface PersonalGrants {
+  ids: string[];
+  accounts: LinkedAccount[];
+}
+
 /** A member's own connections the agent allows, offered on the turns they ask for. */
 export async function personalGrants(
   ctx: ConnectionContext,
   owner: string,
   allowed?: string[],
-): Promise<string[]> {
-  return (await visibleConnections(ctx, owner))
+): Promise<PersonalGrants> {
+  const [accounts, records] = await Promise.all([
+    ctx.auth?.linkedAccounts ? ctx.auth.linkedAccounts(owner, ctx.store) : [],
+    visibleRecords(ctx, owner),
+  ]);
+  const ids = withLinks(records, await nativeConnections(ctx, owner, accounts))
     .filter(
       connection =>
         connection.owner === owner && (allowed === undefined || allowed.includes(connection.id)),
     )
     .map(connection => connection.id);
+
+  return { ids, accounts };
 }

@@ -32,7 +32,7 @@ import {
   EFFORTS,
   specName,
 } from '@/app/dash/[org]/settings/model-options';
-import { ModelChoices } from '@/app/dash/[org]/settings/model-pick';
+import { ModelChoices, placeBeside } from '@/app/dash/[org]/settings/model-pick';
 import { folderName } from '@/app/dash/[org]/tasks/list/task';
 import { watchTask } from '@/comps/frame/task-toasts';
 import { CHOICE, PLACEHOLDER, loadComposer, savedChoice, usableAgent } from './composer-data';
@@ -106,52 +106,52 @@ const folderOptions = (folders: LocalFolders, added: LocalFolder[], value: strin
   ];
 };
 
-/** A setting as one row naming its pick; the chevron unfolds its options in place, as a model's efforts do. */
+/** A setting as one row naming its pick; its options open beside it, as a model's efforts do. */
 function NestedPick({
   label,
   options,
   value,
-  open,
-  onOpen,
   onPick,
 }: {
   label: string;
   options: Option[];
   value: string;
-  open: boolean;
-  onOpen: (open: boolean) => void;
   onPick: (value: string) => void;
 }) {
+  const flyout = `${useId()}-pick`;
+
   return (
-    <>
-      <MenuRow>
-        <MenuItem
-          title={options.find(([key]) => key === value)?.[1] ?? options[0]?.[1]}
-          aria-label={label}
-          data-keep
-          onClick={() => onOpen(!open)}
-        />
-        <button
-          type="button"
-          class="pop-chev"
-          data-keep
-          aria-label={`${label} options`}
-          aria-expanded={open}
-          onClick={() => onOpen(!open)}
-        >
-          <Icon d={iRight} />
-        </button>
-      </MenuRow>
-      {open ? (
-        <div role="group" aria-label={label} class="pop-sub">
-          {options.map(([key, text]) => (
-            <MenuRadio key={key} on={key === value} onPick={() => onPick(key)}>
-              {text}
-            </MenuRadio>
-          ))}
-        </div>
-      ) : null}
-    </>
+    <MenuRow>
+      <MenuItem
+        title={options.find(([key]) => key === value)?.[1] ?? options[0]?.[1]}
+        aria-label={label}
+        data-keep
+        popovertarget={flyout}
+      />
+      <button
+        type="button"
+        class="pop-chev"
+        data-keep
+        popovertarget={flyout}
+        aria-label={`${label} options`}
+      >
+        <Icon d={iRight} />
+      </button>
+      <MenuPanel
+        id={flyout}
+        class="pop-flyout"
+        popover="auto"
+        role="group"
+        aria-label={label}
+        onBeforeToggle={placeBeside}
+      >
+        {options.map(([key, text]) => (
+          <MenuRadio key={key} on={key === value} onPick={() => onPick(key)}>
+            {text}
+          </MenuRadio>
+        ))}
+      </MenuPanel>
+    </MenuRow>
   );
 }
 
@@ -282,7 +282,6 @@ function Composer({
   // Why no credential can run it, once a start says so.
   const [needs, setNeeds] = useState<string>();
   // The model row whose effort choices are open.
-  const [expanded, setExpanded] = useState<string>();
   const [text, setText] = useState('');
   const [dismissed, setDismissed] = useState(false);
   const [at, setAt] = useState(0);
@@ -763,8 +762,6 @@ function Composer({
                 label="Agent"
                 options={agents}
                 value={choice.agent}
-                open={expanded === 'agent'}
-                onOpen={open => setExpanded(open ? 'agent' : undefined)}
                 onPick={value => apply({ agent: value })}
               />
             </>
@@ -776,8 +773,6 @@ function Composer({
                 label="Runs on"
                 options={lists.runners}
                 value={choice.runner}
-                open={expanded === 'runner'}
-                onOpen={open => setExpanded(open ? 'runner' : undefined)}
                 onPick={value => apply({ runner: value })}
               />
             </>

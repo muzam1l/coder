@@ -1,11 +1,6 @@
 import { type Found } from '../../client/types';
-import { safeEqual } from '../../utils/crypto';
-import { sign } from '../auth/nonce';
 import { type ServerContext } from '../context';
-import { pinnedRequest, publicAddress } from '../outbound';
-import { json, notFound } from '../routes/http';
-import { type Params } from '../routes/match';
-import { MemoryCache } from './models';
+import { json } from '../routes/http';
 
 const RUNNERS: Record<string, [string, ...string[]]> = {
   npm: ['npx', '-y'],
@@ -39,10 +34,6 @@ type ArgumentInput = {
 
 type Remote = { type: string; url: string; headers?: Input[] };
 
-type Icon = { src: string; mimeType?: string; sizes?: string[]; theme?: 'light' | 'dark' };
-
-export type IconFile = { type: string; bytes: Buffer<ArrayBuffer> };
-
 type Package = {
   registryType: string;
   identifier: string;
@@ -59,7 +50,6 @@ type Detail = {
   title?: string;
   description?: string;
   websiteUrl?: string;
-  icons?: Icon[];
   remotes?: Remote[];
   packages?: Package[];
   /** GitHub's registry adds the repository's own display name. */
@@ -129,159 +119,6 @@ function entryOf(server: Detail) {
   };
 }
 
-const ICON_BYTES = 64 * 1024;
-const ICON_SIDE = 2048;
-const RASTER = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
-
-/** The image type from its magic bytes, and its width and height from its header; PNG, JPEG and WebP only. */
-function sniff(bytes: Buffer): { type: string; width: number; height: number } | undefined {
-  if (bytes.length < 32) return undefined;
-  if (
-    bytes.toString('hex', 0, 8) === '89504e470d0a1a0a' &&
-    bytes.toString('latin1', 12, 16) === 'IHDR'
-  )
-    return { type: 'image/png', width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
-  if (bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WEBP') {
-    const chunk = bytes.toString('latin1', 12, 16);
-    const bits = bytes.readUInt32LE(21);
-    if (chunk === 'VP8X')
-      return {
-        type: 'image/webp',
-        width: 1 + bytes.readUIntLE(24, 3),
-        height: 1 + bytes.readUIntLE(27, 3),
-      };
-    if (chunk === 'VP8L')
-      return {
-        type: 'image/webp',
-        width: 1 + (bits & 0x3fff),
-        height: 1 + ((bits >> 14) & 0x3fff),
-      };
-    if (chunk === 'VP8 ')
-      return {
-        type: 'image/webp',
-        width: bytes.readUInt16LE(26) & 0x3fff,
-        height: bytes.readUInt16LE(28) & 0x3fff,
-      };
-    return undefined;
-  }
-  if (bytes.toString('hex', 0, 3) !== 'ffd8ff') return undefined;
-  // A JPEG's size is in its frame header, after the segments before it.
-  for (let at = 2; at + 9 <= bytes.length; at += 2 + bytes.readUInt16BE(at + 2)) {
-    if (bytes[at] !== 0xff) return undefined;
-    const marker = bytes[at + 1]!;
-    if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker))
-      return {
-        type: 'image/jpeg',
-        width: bytes.readUInt16BE(at + 7),
-        height: bytes.readUInt16BE(at + 5),
-      };
-  }
-
-  return undefined;
-}
-
-function checkIcon(bytes: Buffer<ArrayBuffer>): IconFile | undefined {
-  const image = bytes.length <= ICON_BYTES ? sniff(bytes) : undefined;
-  if (!image || !image.width || !image.height) return undefined;
-
-  return Math.max(image.width, image.height) <= ICON_SIDE ? { type: image.type, bytes } : undefined;
-}
-
-const iconSignature = (ctx: ServerContext, src: string) => sign(ctx, `mcp-icon:${src}`);
-
-const originOf = (value?: string) =>
-  value && URL.canParse(value) ? new URL(value).origin : undefined;
-
-/** The server's icon from our own origin: raster, hosted on its remote's or website's origin, nearest 32 to 64 px. */
-function iconOf(ctx: ServerContext, server: Detail): string | undefined {
-  const origins = new Set(
-    [...(server.remotes ?? []).map(remote => remote.url), server.websiteUrl].map(originOf),
-  );
-  const distance = ({ sizes = [] }: Icon) =>
-    Math.min(
-      256,
-      ...sizes
-        .map(size => parseInt(size))
-        .filter(side => side > 0)
-        .map(side => (side < 32 ? (32 - side) * 8 : Math.max(0, side - 64))),
-    );
-  const shown = ({ src }: Icon) => {
-    if (src.startsWith('data:')) {
-      const file = checkIcon(
-        Buffer.from(/^data:[^,]*;base64,(.*)$/s.exec(src)?.[1] ?? '', 'base64'),
-      );
-      return file && `data:${file.type};base64,${file.bytes.toString('base64')}`;
-    }
-    const url = URL.canParse(src) ? new URL(src) : undefined;
-    if (
-      url?.protocol !== 'https:' ||
-      url.username ||
-      url.password ||
-      !origins.has(url.origin) ||
-      /\.(svg|gif)$/i.test(url.pathname)
-    )
-      return undefined;
-
-    return `/mcp-icons/${iconSignature(ctx, src)}?${new URLSearchParams({ src })}`;
-  };
-
-  return (server.icons ?? [])
-    .filter(icon => !icon.mimeType || RASTER.includes(icon.mimeType))
-    .sort((a, b) => Number(!!a.theme) - Number(!!b.theme) || distance(a) - distance(b))
-    .map(shown)
-    .find(Boolean);
-}
-
-/** Fetches with no credentials or redirects, from the public address it checked; null when the icon is refused. */
-async function fetchIcon(ctx: ServerContext, src: string): Promise<IconFile | null> {
-  try {
-    const url = new URL(src);
-    if (url.protocol !== 'https:') return null;
-    const address = await publicAddress(url.hostname);
-    const init: RequestInit = {
-      headers: { accept: RASTER.join(',') },
-      credentials: 'omit',
-      redirect: 'manual',
-      signal: AbortSignal.timeout(3_000),
-    };
-    const response = ctx.fetch
-      ? await ctx.fetch(url, init)
-      : await pinnedRequest(url, init, address, undefined, ICON_BYTES);
-    if (response.status !== 200) return null;
-
-    return checkIcon(Buffer.from(await response.arrayBuffer())) ?? null;
-  } catch {
-    return null;
-  }
-}
-
-/** An icon the registry search signed, checked and cached; anyone may load it, only the search names new ones. */
-export async function mcpIcon(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  const src = url.searchParams.get('src') ?? '';
-  if (!safeEqual(iconSignature(ctx, src), params.signature ?? '')) return notFound();
-  const settings = (ctx.settings ??= {});
-  const icons = (settings.mcpIcons ??= new MemoryCache<IconFile | null>({
-    ttlMs: 3_600_000,
-    max: 300,
-    now: ctx.now,
-  }));
-  const icon = await icons.get(src, () => fetchIcon(ctx, src));
-  if (!icon) return notFound();
-
-  return new Response(icon.bytes, {
-    headers: {
-      'content-type': icon.type,
-      'cache-control': 'public, max-age=604800, immutable',
-      'x-content-type-options': 'nosniff',
-    },
-  });
-}
-
 type RegistryRow = {
   version: string;
   latest: boolean;
@@ -319,6 +156,60 @@ function compareVersions(a: string, b: string): number {
   return 0;
 }
 
+type RegistryPage = {
+  servers: Array<{
+    server: Detail;
+    _meta?: { 'io.modelcontextprotocol.registry/official'?: { isLatest?: boolean } };
+  }>;
+  metadata?: { nextCursor?: string };
+};
+
+function addServers(
+  source: RegistrySource,
+  rows: Map<string, RegistryRow>,
+  servers: RegistryPage['servers'],
+): void {
+  for (const { server, _meta } of servers) {
+    const latest = _meta?.['io.modelcontextprotocol.registry/official']?.isLatest === true;
+    const version = server.version ?? '';
+    const previous = rows.get(server.name);
+    if (
+      previous &&
+      (previous.latest !== latest
+        ? previous.latest
+        : compareVersions(previous.version, version) >= 0)
+    )
+      continue;
+    const entry = entryOf(server);
+    const verified =
+      /^[a-z0-9-]+(?:\.[a-z0-9-]+)+\//i.test(server.name) &&
+      !/^io\.github(?:\.|\/)/i.test(server.name);
+    const name = server.name.split('/').pop() ?? server.name;
+    const title =
+      verified && /^(mcp|mcp-server|server)$/i.test(name)
+        ? server.name.split('/')[0]!.split('.').pop()!
+        : name;
+    rows.set(server.name, {
+      version,
+      latest,
+      found: entry
+        ? {
+            name: server.name,
+            title:
+              server._meta?.['io.modelcontextprotocol.registry/publisher-provided']?.github
+                ?.displayName ??
+              server.title ??
+              title,
+            description: server.description ?? '',
+            ...(verified ? { verified: true } : {}),
+            ...(source.curated ? { curated: true } : {}),
+            ...entry,
+          }
+        : undefined,
+    });
+  }
+}
+
 export class RegistryIndex {
   private sources: RegistrySource[] = [
     {
@@ -342,23 +233,57 @@ export class RegistryIndex {
   private closed = false;
   inFlight?: Promise<void>;
 
-  response(ctx: ServerContext, search: string): Response {
+  async response(ctx: ServerContext, search: string): Promise<Response> {
     if ((ctx.now ?? Date.now)() >= this.refreshAt) this.refresh(ctx);
+    const q = search.trim().toLowerCase();
+    const direct = q
+      ? await Promise.all(
+          this.sources.map(async source => {
+            const rows = new Map<string, RegistryRow>();
+            if (!source.ready) {
+              try {
+                const query = new URLSearchParams({ search: q, limit: '100' });
+                const response = await (ctx.fetch ?? fetch)(`${source.url}?${query}`, {
+                  headers: { accept: 'application/json' },
+                  signal: AbortSignal.any([this.controller!.signal, AbortSignal.timeout(20_000)]),
+                });
+                if (!response.ok) throw new Error('Registry unavailable');
+                const { servers } = (await response.json()) as RegistryPage;
+                addServers(source, rows, servers);
+              } catch {}
+            }
+
+            return rows;
+          }),
+        )
+      : [];
+    const rows = this.sources.map((source, index) => {
+      const extra = direct[index];
+      if (!extra?.size) return source.rows;
+      const rows = new Map(source.rows);
+      for (const [name, row] of extra) if (!rows.has(name)) rows.set(name, row);
+
+      return rows;
+    });
     if (
       !this.inFlight &&
       this.sources.some(source => source.failed) &&
-      !this.sources.some(source => [...source.rows.values()].some(row => row.found))
+      !rows.some(source => [...source.values()].some(row => row.found))
     )
       return json({ error: 'The MCP registry did not answer. Try again.' }, 502);
-    const q = search.trim().toLowerCase();
     const seen = new Set<string>();
-    const found = this.sources.flatMap(source =>
-      [...source.rows].flatMap(([name, { found }], order) => {
+    const found = this.sources.flatMap((source, index) =>
+      [...rows[index]!].flatMap(([name, { found }], order) => {
         if (seen.has(name)) return [];
         seen.add(name);
         if (!found) return [];
-        // The server's own name and title, never its namespace, which is often io.github.<user>.
-        const names = [found.name.split('/').pop()!, found.title].map(value => value.toLowerCase());
+        // Only verified namespaces count as vendor names; GitHub namespaces name publishers.
+        const label = found.verified
+          ? found.name.split('/')[0]!.split('.').pop()!.toLowerCase()
+          : undefined;
+        const names = [found.name.split('/').pop()!, found.title, ...(label ? [label] : [])].map(
+          value => value.toLowerCase(),
+        );
         const quality =
           !q || names.includes(q)
             ? 0
@@ -370,7 +295,8 @@ export class RegistryIndex {
                   ? 3
                   : 4;
         if (quality === 4) return [];
-        const vendor = q && found.verified && quality < 3 ? 0 : 1;
+        // The publisher the search names first, then other verified publishers.
+        const vendor = !q || quality === 3 ? 2 : label === q ? 0 : found.verified ? 1 : 2;
 
         return [{ found, curated: source.curated, order, vendor, quality }];
       }),
@@ -431,50 +357,8 @@ export class RegistryIndex {
           signal: AbortSignal.any([signal, AbortSignal.timeout(20_000)]),
         });
         if (!response.ok) throw new Error('Registry unavailable');
-        const { servers, metadata } = (await response.json()) as {
-          servers: Array<{
-            server: Detail;
-            _meta?: { 'io.modelcontextprotocol.registry/official'?: { isLatest?: boolean } };
-          }>;
-          metadata?: { nextCursor?: string };
-        };
-        for (const { server, _meta } of servers) {
-          const latest = _meta?.['io.modelcontextprotocol.registry/official']?.isLatest === true;
-          const version = server.version ?? '';
-          const previous = rows.get(server.name);
-          if (
-            previous &&
-            (previous.latest !== latest
-              ? previous.latest
-              : compareVersions(previous.version, version) >= 0)
-          )
-            continue;
-          const entry = entryOf(server);
-          const icon = entry && iconOf(ctx, server);
-          const verified =
-            /^[a-z0-9-]+(?:\.[a-z0-9-]+)+\//i.test(server.name) &&
-            !/^io\.github(?:\.|\/)/i.test(server.name);
-          rows.set(server.name, {
-            version,
-            latest,
-            found: entry
-              ? {
-                  name: server.name,
-                  title:
-                    server._meta?.['io.modelcontextprotocol.registry/publisher-provided']?.github
-                      ?.displayName ??
-                    server.title ??
-                    server.name.split('/').pop() ??
-                    server.name,
-                  description: server.description ?? '',
-                  ...(verified ? { verified: true } : {}),
-                  ...(source.curated ? { curated: true } : {}),
-                  ...(icon ? { icon } : {}),
-                  ...entry,
-                }
-              : undefined,
-          });
-        }
+        const { servers, metadata } = (await response.json()) as RegistryPage;
+        addServers(source, rows, servers);
         if (!source.ready) source.rows = new Map(rows);
         cursor = metadata?.nextCursor;
         if (cursor && cursors.has(cursor)) throw new Error('Registry cursor repeated');
@@ -499,5 +383,5 @@ export async function mcpRegistry(req: Request, ctx: ServerContext, url: URL): P
   const settings = (ctx.settings ??= {});
   const index = (settings.registry ??= new RegistryIndex());
 
-  return index.response(ctx, url.searchParams.get('q') ?? '');
+  return await index.response(ctx, url.searchParams.get('q') ?? '');
 }

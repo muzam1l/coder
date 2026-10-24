@@ -8,7 +8,7 @@ import { execFile, spawn, type ChildProcess } from 'node:child_process';
 import { processTiming } from '../../utils/process';
 
 import { AGENT_TASK_PREFIX, execAgent, agentTaskOptions, threadReply } from '../../agent/exec';
-import type { AgentTask, TaskContext, TaskSource } from '../../agent/types';
+import type { AgentEvent, AgentTask, TaskContext, TaskSource } from '../../agent/types';
 import { defaultAgent } from '../../agent/load';
 import { pendingCall } from '../../core/task/async';
 import type { TaskTurn } from '../../client/types';
@@ -87,7 +87,7 @@ import {
   unknownOption,
   type NewTask,
 } from './create';
-import { rememberPost } from './conversation';
+import { deliverWaiting, rememberPost } from './conversation';
 import { askOpenAgain, syncApprovals, type ApprovalPost } from './approvals';
 import {
   sessionKey,
@@ -613,13 +613,16 @@ export async function inspectLocalTask(
   }
   const state = current.status;
   if (state !== 'completed' && state !== 'failed' && state !== 'cancelled') return false;
-  return ctx.queue.finish(
+  const finished = await ctx.queue.finish(
     ctx.organizationId,
     status.task.id,
     { status: state, result: current.result, error: current.error },
     now,
     fence,
   );
+  if (finished) deliverWaiting(ctx, status.task);
+
+  return finished;
 }
 
 function watchCompletion(
@@ -696,9 +699,9 @@ function watchCompletion(
 
       return replies;
     };
-    const post = async (text: string, problem = false, progress = false) => {
+    const post = async (text: string, problem = false, progress = false, notice?: string) => {
       const replies = await conversationReplies(progress);
-      const sent = await (problem ? replies.problem(text) : replies.post(text, progress));
+      const sent = await (problem ? replies.problem(text) : replies.post(text, progress, notice));
       if (!progress && receipt.posting !== undefined)
         receipt = { ...receipt, turns: receipt.posting + 1, posting: undefined };
       if (sent)
@@ -725,7 +728,10 @@ function watchCompletion(
             processTiming('completion.reply', { id });
             const answer = threadReply(saved.task, result, cancelled, turn);
             if (answer.skipped) appendTaskLog(saved.cwd, id, { kind: 'status', message: SKIPPED });
-            if (answer.text && !answer.duplicate) await post(answer.text, answer.problem);
+            // The notice goes with this run's first reply.
+            const notice = receipt.turns === (saved.turns ?? 0) ? answer.notice : undefined;
+            if (answer.text && !answer.duplicate)
+              await post(answer.text, answer.problem, false, notice);
           };
 
           for (;;) {
@@ -797,6 +803,13 @@ function watchCompletion(
                 if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
                 await reply({ error: { message: task.error ?? 'Task cancelled' } }, cancelled);
               }
+              const { endTyping } = await import('../chat');
+              await endTyping(ctx, saved.task).catch(error =>
+                console.error(
+                  `coder server: could not clear the working indicator of ${id}`,
+                  error,
+                ),
+              );
               break;
             }
             await resultSignal.wait(pollMs);
@@ -1166,6 +1179,7 @@ export async function resumeLocalTask(
   outputSchema?: object,
   overrides: LocalStart['overrides'] = {},
   context: Partial<TaskContext> = {},
+  event?: AgentEvent,
 ): Promise<boolean> {
   const priorWatch = ctx.store.completionWatches?.get(id);
   if (priorWatch) await priorWatch.work;
@@ -1181,6 +1195,7 @@ export async function resumeLocalTask(
     ...(previous ? await refreshedTask(ctx, previous.task) : {}),
     prompt: text,
     context: { ...previous?.task.context, ...context, ...(outputSchema ? { outputSchema } : {}) },
+    ...(event ? { event } : {}),
   };
 
   await ctx.store.put('snapshot', `local-start:${id}`, {

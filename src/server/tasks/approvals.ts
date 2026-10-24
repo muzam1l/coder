@@ -15,7 +15,7 @@ import type { Target } from '../chat';
 import { decryptSecret } from '../store/secrets';
 import type { TaskStatus } from '../store/types';
 import { ACCESS_UNCHECKED, linkedMember, writeCheck } from './events';
-import { conversationKey } from './conversation';
+import { threadConversation } from './conversation';
 
 /** How long a shown approval's post stays known, so a late answer still updates it. */
 const SHOWN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -359,16 +359,18 @@ export async function syncApprovals(
     const posted = posts.get(key);
     if (posted?.shownAt && (!approval.response || posted.shown === approval.response.answeredAt))
       continue;
-    if (!posted)
-      await ctx.store.create(
-        'delivery',
-        key,
-        { at: (ctx.now ?? Date.now)(), notice: noticeOf(task, approval) },
-        { ttlMs: SHOWN_TTL_MS },
-      );
+    const now = (ctx.now ?? Date.now)();
+    // A post this sync creates starts out leased to it.
+    const created: ApprovalPost = {
+      at: now,
+      notice: noticeOf(task, approval),
+      lease: now + LEASE_MS,
+    };
+    const fresh =
+      !posted && (await ctx.store.create('delivery', key, created, { ttlMs: SHOWN_TTL_MS }));
     // Another sync that found this post busy asked for one more look, at the record as it is then.
     for (let look = 0; look < 3; look++) {
-      const row = await lease(ctx, key);
+      const row = look === 0 && fresh ? created : await lease(ctx, key);
       if (!row) break;
       const notice = noticeOf(task, approval);
       const outcome = approval.response ? outcomeOf(approval.response) : undefined;
@@ -458,7 +460,8 @@ export async function answersShown(
   const tenant = await forInstallation(ctx, `${app.id}:${target.id}`);
   const task =
     tenant &&
-    (await tenant.store.conversationState(conversationKey(app.id, target.id, thread))).status;
+    (await threadConversation(tenant, ctx.integrations[app.integration], app.id, target.id, thread))
+      .status;
   if (!task) return false;
   if (answer.id)
     return Boolean(await tenant.store.get('delivery', postKey(task.task.id, answer.id)));
@@ -659,7 +662,7 @@ export async function clickedApproval(
   const tenant = await forInstallation(ctx, `${app.id}:${target.id}`);
   const status =
     tenant &&
-    (await tenant.store.conversationState(conversationKey(app.id, target.id, click.thread))).status;
+    (await threadConversation(tenant, integration, app.id, target.id, click.thread)).status;
   const event = status?.task.event;
   if (!tenant || !status || event?.appId !== app.id || event.installationId !== target.id) {
     console.warn(`coder server: ${app.id} answered an approval of an unknown task`);

@@ -16,6 +16,7 @@ import { json } from '../routes/http';
 import { mergePatch } from '../../core/types';
 import { type ServerContext } from '../context';
 import { type Store } from '../store/types';
+import { runsOnEach } from './credentials';
 
 /** The workspace's CLI config on the server: what `.coder/config.json` holds locally; a local server edits the user's own file. MCP servers are connections, not config. */
 
@@ -123,12 +124,21 @@ export async function body<T>(req: Request): Promise<T> {
   return value;
 }
 
+/** A model write, answered with the config and where its chain now runs. */
 export async function change(
   ctx: ServerContext,
   apply: (config: Partial<CoderConfig>) => void,
 ): Promise<Response> {
-  return updateConfig(ctx, apply).then(json).catch(taskError);
+  return updateConfig(ctx, apply)
+    .then(config => withRunsOn(ctx, config))
+    .then(json)
+    .catch(taskError);
 }
+
+const withRunsOn = async (ctx: ServerContext, config: Partial<CoderConfig>) => ({
+  ...config,
+  runsOn: await runsOnEach(ctx, config),
+});
 
 /** `GET /schema/config.v1.json`: the config file's JSON Schema, which a file's `$schema` names. */
 export const configSchemaDocument = () => json(configJsonSchema());
@@ -155,7 +165,13 @@ export async function patchConfiguration(
     .catch(() => {
       throw new ConfigError('A JSON body is required');
     })
-    .then(patch => patchConfig(ctx, patch))
+    .then(async patch => {
+      const config = await patchConfig(ctx, patch);
+      // The Models tab shows where its chain runs once a save changes it.
+      return ['chain', 'reviewModel', 'models'].some(key => key in patch)
+        ? withRunsOn(ctx, config)
+        : config;
+    })
     .then(json)
     .catch(taskError);
 }

@@ -2,7 +2,7 @@
 import { type Connection } from '../../agent/types';
 import { outcome } from '../agents/platform';
 import { completeAuthorization } from '../connections/oauth';
-import { connectionRows, nativeApp } from '../connections/records';
+import { nativeApp, needsReconnect } from '../connections/records';
 import { linkedOrganizations, scoped, type ServerContext, type SessionInfo } from '../context';
 import { consumeBoundNonce, issueNonce, nonceOrganization } from './nonce';
 import { operator, serverMode } from '../routes/guards';
@@ -21,9 +21,7 @@ export async function meRoute(
 ): Promise<Response> {
   const reconnect =
     (!ctx.auth || ctx.session?.organizationId) &&
-    (await connectionRows(ctx).catch(() => [])).some(
-      row => row.status === 'needs-auth' && (!row.owner || row.asker),
-    );
+    (await needsReconnect(ctx, ctx.session?.user.id).catch(() => false));
   if (!ctx.auth) {
     return json({
       mode: serverMode(ctx),
@@ -72,15 +70,16 @@ export function sessionSlug(ctx: ServerContext): string {
   return org?.slug ?? (ctx.auth ? ctx.organizationId : LOCAL_SLUG);
 }
 
-/** The same without a session, such as for a link posted to a platform: the slug as Wular last named it. */
+/** The same without a session, such as for a link posted to a platform: the slug as Wular last named it. `workspace` is the workspace row when read already; one without a slug has had no member sign in. */
 export async function organizationSlug(
   ctx: ServerContext,
-  workspace?: { slug: string },
+  workspace?: { slug?: string },
 ): Promise<string> {
   const known =
     ctx.session?.organizations.find(org => org.id === ctx.organizationId)?.slug ?? workspace?.slug;
 
   if (known || !ctx.auth) return known ?? LOCAL_SLUG;
+  if (workspace) return ctx.organizationId;
 
   return (await ctx.auth.organization?.(ctx.organizationId))?.slug ?? ctx.organizationId;
 }
@@ -210,6 +209,7 @@ export async function completeOAuth(
       {
         ...linkedOrganizations(session.organizations),
         token: encryptSecret(ctx.config, { app: app.id, token: user.token }),
+        organizationId: member.organizationId,
         ...(user.login ? { login: user.login } : {}),
       },
       store,

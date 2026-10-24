@@ -37,7 +37,12 @@ export default async function AgentAppPage({
   apps.catch(() => {});
   installations.catch(() => {});
   const back = (
-    <Back href="/dash/[org]/agents/[slug]/platforms" params={{ org, slug }} label="Platforms" />
+    <Back
+      href="/dash/[org]/agents/[slug]/platforms"
+      params={{ org, slug }}
+      label="Platforms"
+      back={search.get('back')}
+    />
   );
 
   return (

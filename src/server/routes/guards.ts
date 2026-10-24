@@ -379,6 +379,7 @@ export async function taskGuard(
   return {
     ...ctx,
     ...(loaded ? { store: loadedStore(ctx.store, status, loaded) } : {}),
+    ...(loaded?.workspace ? { callbackWorkspace: loaded.workspace } : {}),
     callbackTask: status,
   };
 }

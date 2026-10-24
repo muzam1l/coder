@@ -5,7 +5,7 @@ import './list.css';
 import { dynamic } from '@wular/pnext/dynamic';
 import { notFound } from '@wular/pnext/navigation';
 
-import { createUrl, load, loadAgent, unwrap } from '@/api/load';
+import { createUrl, load } from '@/api/load';
 import { stepOf } from '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/platform-state';
 import { Settle, Stream } from '@/comps/frame/stream';
 import { Loading } from '@/comps/ui/card';
@@ -79,45 +79,36 @@ export default async function SettingsTabPage({
       .integrations.list()
       .catch(() => []);
     const me = load(request).me();
-    // Which agents use each platform, for the Install menu; one page holds every agent a workspace has.
-    const agents = load(request)
-      .agents.list({ cursor: '', limit: 200 })
-      .then(page =>
-        page.items.map(({ id, name, platforms, source }) => ({
-          id,
-          name,
-          platforms: platforms.map(each => each.id),
-          ...(source === 'builtin' ? { builtin: true } : {}),
-        })),
-      )
-      .catch(() => []);
-    // Each built-in agent's step on each platform it uses, as its Platforms tab shows it, for the Workspace column.
-    const builtins = agents
-      .then(list =>
-        Promise.all(
-          list
-            .filter(agent => agent.builtin)
-            .map(async ({ id, name }) => {
-              const [row, apps, installations] = await Promise.all([
-                loadAgent(request, id),
-                load(request).apps.list(id).then(unwrap),
-                load(request).installations.list(id, { limit: 200, active: true }).then(unwrap),
-              ]);
-              const platforms = Object.keys(row.definition?.integrations ?? {});
-              return {
-                id,
-                name,
-                steps: Object.fromEntries(
-                  platforms.map(platform => [
-                    platform,
-                    stepOf(platform, apps, installations, createUrl(row, apps, platform)),
-                  ]),
-                ),
-              };
-            }),
-        ),
-      )
-      .catch(() => []);
+    // One page holds every agent: the Install menu's agents per platform, and each built-in agent's step for the Workspace column.
+    const page = load(request)
+      .agents.list({ cursor: '', limit: 200, apps: true })
+      .catch(() => ({ items: [], apps: [], installations: [] }));
+    const agents = page.then(({ items }) =>
+      items.map(({ id, name, platforms, source }) => ({
+        id,
+        name,
+        platforms: platforms.map(each => each.id),
+        ...(source === 'builtin' ? { builtin: true } : {}),
+      })),
+    );
+    const builtins = page.then(({ items, apps, installations }) =>
+      items
+        .filter(row => row.source === 'builtin')
+        .map(row => {
+          const own = apps.filter(app => app.agent === row.id);
+          const platforms = Object.keys(row.definition?.integrations ?? {});
+          return {
+            id: row.id,
+            name: row.name,
+            steps: Object.fromEntries(
+              platforms.map(platform => [
+                platform,
+                stepOf(platform, own, installations, createUrl(row, own, platform)),
+              ]),
+            ),
+          };
+        }),
+    );
     const search = new URL(request.url).searchParams;
     const outcome = readOutcome(search);
     const signIn = search.get('outcome');

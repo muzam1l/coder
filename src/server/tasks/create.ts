@@ -1,9 +1,9 @@
-import { connectionGrants } from '../connections/records';
+import { connectionGrants, connectNotice } from '../connections/records';
 import { narrowConnections } from '../../core/connections';
 import { checkFolder } from '../settings/folders';
 import { repositorySnapshot } from '../agents/connections';
 import { getApps } from '../store';
-import { dashPath, sessionSlug } from '../auth/members';
+import { dashPath, organizationSlug, sessionSlug } from '../auth/members';
 /** Tasks started from the dashboard, the CLI, or a schedule: a prompt or a flow, optionally on a workspace repo. */
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
@@ -28,7 +28,7 @@ import type { ServerContext } from '../context';
 import { turnStarter, type TaskPrincipal } from './access';
 import { syncLocalAgents } from '../store/local';
 import { runLocalTask } from './local';
-import { credentialFix, modelAttempts, resolveModels } from '../settings/credentials';
+import { credentialFix, failureText, modelAttempts, resolveModels } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { dispatchTokens, installationToken } from './context';
 import { chooseRunner, visibleRunner } from '../runners/select';
@@ -425,7 +425,16 @@ export async function refreshedTask(
   Partial<
     Pick<
       AgentTask,
-      'definition' | 'usage' | 'tools' | 'files' | 'access' | 'models' | 'runner' | 'runnerId'
+      | 'definition'
+      | 'usage'
+      | 'tools'
+      | 'files'
+      | 'access'
+      | 'models'
+      | 'runner'
+      | 'runnerId'
+      | 'failureReply'
+      | 'notice'
     >
   >
 > {
@@ -457,12 +466,29 @@ export async function refreshedTask(
   const match = event && matchAgent(event, agent, task.access);
   const usage = { ...agent.usage, ...pick };
   const starter = turnStarter(task);
-  const [route, { models, first }] = await Promise.all([
+  const conversation = event && task.source === event.integration ? event : undefined;
+  const [route, { models, first }, slug] = await Promise.all([
     turnRunner(ctx, task, starter),
     resolveModels(ctx, effectiveSettings({ ...agent, usage }), starter),
+    conversation && organizationSlug(ctx),
   ]);
   const attempts = modelAttempts(models, route.runner === 'http');
-  if (!attempts.length) throw await noCredential(ctx, models, first.engine, task);
+  // The turn's asker, when the account names no member, hears how it could run on a member's own subscription.
+  const actor = conversation?.chat?.message?.author.userId || conversation?.actor.id;
+  const connect =
+    conversation && actor && !task.context?.asker
+      ? await connectNotice(ctx, ctx.integrations[conversation.integration]!, {
+          task: task.id,
+          actor,
+          models,
+          attempts,
+          ...(slug ? { slug } : {}),
+        })
+      : undefined;
+  if (!attempts.length)
+    throw connect
+      ? new TaskInputError(connect.failure, 409, connect.url)
+      : await noCredential(ctx, models, first.engine, task);
 
   return {
     definition: agent.definition,
@@ -472,6 +498,12 @@ export async function refreshedTask(
     tools: match?.tools ?? declaredTools(agent, task.access),
     ...(agent.files ? { files: agent.files } : {}),
     access: agentAccess(agent, task.access),
+    ...(conversation
+      ? {
+          failureReply: connect?.failure ?? (await failureText(ctx, first.engine, slug)),
+          notice: connect?.notice,
+        }
+      : {}),
   };
 }
 

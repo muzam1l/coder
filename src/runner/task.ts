@@ -1111,6 +1111,7 @@ async function runCheckedOutTask(
               );
             result.reply = reply.text;
             result.ok = turn.status === 0;
+            result.error = turn.error?.message;
           }
           deliveredTurns = Math.max(deliveredTurns, turns.length);
           const current = loadTask(cwd, taskId);
@@ -1186,6 +1187,7 @@ async function runCheckedOutTask(
     await reportResult({
       status: cancelled ? 'cancelled' : result.ok ? 'completed' : 'failed',
       result: result.reply ?? result.result,
+      ...(!result.ok && result.error ? { error: result.error } : {}),
       tokens: result.tokens,
       ...(approvals().length ? { approvals: approvals() } : {}),
       ...(result.postedMessages?.length ? { postedMessages: result.postedMessages } : {}),

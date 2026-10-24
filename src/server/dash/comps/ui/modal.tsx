@@ -75,7 +75,11 @@ export function Modal({
       }}
       onClick={event => event.target === event.currentTarget && close()}
     >
-      <form method={onSubmit ? undefined : 'dialog'} onSubmit={onSubmit}>
+      <form
+        method={onSubmit ? undefined : 'dialog'}
+        // With nothing to submit, Enter in a field keeps the dialog open.
+        onSubmit={onSubmit ?? (dismiss && alone ? event => event.preventDefault() : undefined)}
+      >
         <header>
           {icon ? <Icon d={icon} /> : null}
           <h2 id={id}>{title}</h2>

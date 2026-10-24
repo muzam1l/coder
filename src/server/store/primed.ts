@@ -21,6 +21,7 @@ export interface Loaded {
   /** The credentials the task's turn may switch to. */
   credentials?: Array<{ id: string; value: StoredCredential }>;
   config?: StoredConfig;
+  workspace?: { slug?: string; name?: string };
   runner?: RunnerRecord;
   /** Sealed secret rows. */
   secrets?: { rows: string[] };

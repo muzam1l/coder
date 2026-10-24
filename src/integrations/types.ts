@@ -6,6 +6,7 @@ import type {
   SerializedThread,
   StateAdapter,
   Thread,
+  TypingOptions as ChatTypingOptions,
 } from 'chat';
 
 /** Access: read-only tools, or every tool with the engine's reviewer deciding what leaves the sandbox. */
@@ -382,9 +383,12 @@ export interface AdapterContext {
   active?(thread: string): Promise<boolean>;
   /** Whether the message belongs to a conversation the host knows. */
   knows?(channel: string, message: string): Promise<boolean>;
-  /** The app's own page on the platform, such as Slack's Home tab; none leaves it unpublished. */
-  home?(): Promise<Page | undefined>;
+  /** The app's own page on the platform, such as Slack's Home tab, for the platform user viewing it; none leaves it unpublished. */
+  home?(viewer?: string): Promise<Page | undefined>;
 }
+
+/** Chat SDK's typing options, plus the message being answered, for a platform that marks it (a GitHub reaction, a Slack DM's status). */
+export type TypingOptions = ChatTypingOptions & { messageId?: string };
 
 /** A button that opens a page; `id` tells the buttons of one page apart. */
 export interface LinkButton {
@@ -394,11 +398,11 @@ export interface LinkButton {
   primary?: boolean;
 }
 
-/** A page as data, laid out by the platform: a bold title over its text, sections, then buttons. Text is plain. */
+/** A page as data, laid out by the platform: a bold title over its text, sections with an optional button beside them, then buttons. Text is plain. */
 export interface Page {
   title: string;
   text?: string;
-  sections: Array<{ title: string; text: string }>;
+  sections: Array<{ title: string; text: string; link?: LinkButton }>;
   links: LinkButton[];
 }
 
@@ -666,10 +670,12 @@ export interface Integration {
   readonly installLabel?: string;
   /** How people reach an installed app listening to `events`, `{handle}` standing for its handle; `here` words it for the app's own page or DM. */
   readonly use?: string | ((events: string[], here?: boolean) => string | undefined);
-  /** Every prompt waits for its own answer, as a Linear agent session does, so notices repeat instead of going out once per thread. */
-  readonly answersEveryPrompt?: true;
-  /** Replies during a turn are progress; a final response must close it. */
-  readonly progressReplies?: true;
+  /** Every prompt in the event's thread waits for its own answer, as in a Linear agent session, so notices repeat instead of going out once per thread. */
+  answersEveryPrompt?(event: PlatformEvent): boolean;
+  /** Replies during a turn in the event's thread are progress; a final response must close it. */
+  progressReplies?(event: PlatformEvent): boolean;
+  /** Its working indicator stays until removed, such as a reaction; others clear on their own. */
+  readonly sticksTyping?: boolean;
   /** An outbound call proved the installation's token revoked. */
   isUninstalled?(error: unknown): boolean;
   /** What one account an installation covers is called, such as a Slack workspace of an org install. */
@@ -687,6 +693,8 @@ export interface Integration {
   readonly events: Record<string, EventSpec>;
   /** A Chat SDK thread id for sample events. */
   readonly sample?: string;
+  /** The item a Chat SDK thread belongs to, such as the issue of a Linear agent session; an item's threads are one conversation. Absent where each thread is its own item. */
+  item?(thread: string): string;
   /** The handle an app posts as, so its own comments are recognized; default is the app name. */
   author?(appName: string): string;
   readonly app: IntegrationApp;

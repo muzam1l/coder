@@ -2,10 +2,11 @@
 import { createHmac } from 'node:crypto';
 
 import { safeEqual } from '../../utils/crypto';
-import type { Adapter, Message, SerializedThread, Thread } from 'chat';
+import type { Adapter, EmojiValue, Message, SerializedThread, Thread } from 'chat';
 
 import type {
   AdapterContext,
+  TypingOptions,
   Space,
   OwnEvent,
   PlatformApp,
@@ -478,6 +479,9 @@ export function githubThreadUrl(event: PlatformEvent): string | undefined {
     : undefined;
 }
 
+const TYPING_TTL_MS = 24 * 60 * 60 * 1000;
+const typingKey = (threadId: string) => `github:typing:${threadId}`;
+
 export function githubPullRequest(event: PlatformEvent): number | undefined {
   const pull = /^github:[^:]+:(\d+)(?::|$)/.exec(event.chat?.thread.id ?? '');
   return pull ? Number(pull[1]) : undefined;
@@ -485,15 +489,66 @@ export function githubPullRequest(event: PlatformEvent): number | undefined {
 
 /** GitHub comments through Chat SDK: the app's webhook secret verifies, the host mints the installation token. */
 export async function githubAdapter(ctx: AdapterContext): Promise<Adapter> {
-  const [{ createGitHubAdapter }, { ConsoleLogger }] = await Promise.all([
+  const [{ GitHubAdapter }, { ConsoleLogger }] = await Promise.all([
     import('@chat-adapter/github'),
     import('chat'),
   ]);
+
+  /** Typing is a 👀 reaction on the asking comment, or the issue, kept in Chat state until the reply removes it. */
+  class TypingGitHubAdapter extends GitHubAdapter {
+    private reactions(threadId: string, messageId?: string) {
+      const { owner, repo, prNumber, reviewCommentId } = this.decodeThreadId(threadId);
+      const base = `/repos/${owner}/${repo}`;
+
+      return {
+        owner,
+        repo,
+        path: messageId
+          ? `${base}/${reviewCommentId ? 'pulls' : 'issues'}/comments/${messageId}/reactions`
+          : `${base}/issues/${prNumber}/reactions`,
+      };
+    }
+
+    // GitHub answers 200 for a reaction the app already left; only a new one is removed later.
+    override async startTyping(threadId: string, _status?: string, options?: TypingOptions) {
+      const { owner, repo, path } = this.reactions(threadId, options?.messageId);
+      const octokit = await this.getOctokitForThread(owner, repo);
+      const { status, data } = await octokit.request(`POST ${path}`, { content: 'eyes' });
+      if (status === 201)
+        await this.chat
+          ?.getState()
+          .appendToList(typingKey(threadId), { path, id: data.id }, { ttlMs: TYPING_TTL_MS });
+    }
+
+    async endTyping(threadId: string) {
+      const state = this.chat?.getState();
+      const added = (await state?.getList<{ path: string; id: number }>(typingKey(threadId))) ?? [];
+      if (!added.length) return;
+      await state!.delete(typingKey(threadId));
+      const { owner, repo } = this.reactions(threadId);
+      const octokit = await this.getOctokitForThread(owner, repo);
+      await Promise.all(added.map(({ path, id }) => octokit.request(`DELETE ${path}/${id}`)));
+    }
+
+    // A 👀 the agent leaves on purpose stays.
+    override async addReaction(threadId: string, messageId: string, emoji: EmojiValue | string) {
+      await super.addReaction(threadId, messageId, emoji);
+      const state = this.chat?.getState();
+      if (this.emojiToGitHubReaction(emoji) !== 'eyes' || !state) return;
+      const { path } = this.reactions(threadId, messageId);
+      const added = await state.getList<{ path: string; id: number }>(typingKey(threadId));
+      if (!added.some(entry => entry.path === path)) return;
+      await state.delete(typingKey(threadId));
+      for (const entry of added.filter(entry => entry.path !== path))
+        await state.appendToList(typingKey(threadId), entry, { ttlMs: TYPING_TTL_MS });
+    }
+  }
+
   const webhookSecret = (ctx.credentials as GithubAppCredentials | undefined)?.webhookSecret;
   const installationId = ctx.installationId;
   // One mint per request: the adapter asks before every API call.
   let minted: Promise<string> | undefined;
-  const adapter = createGitHubAdapter({
+  const adapter = new TypingGitHubAdapter({
     userName: ctx.name,
     // Set, so no GITHUB_* variable redirects the token or names a member as the app; no user has id 0.
     apiUrl: 'https://api.github.com',

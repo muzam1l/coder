@@ -236,7 +236,12 @@ async function bindInstall(
   if (result.user && session && ctx.auth)
     await ctx.auth.link(session.user, id!, result.user.id, {
       ...linkedOrganizations(session.organizations),
-      ...(result.user.token ? { token: encryptSecret(ctx.config, result.user.token) } : {}),
+      ...(result.user.token
+        ? {
+            token: encryptSecret(ctx.config, result.user.token),
+            organizationId: ctx.organizationId,
+          }
+        : {}),
       ...(result.user.login ? { login: result.user.login } : {}),
     });
 

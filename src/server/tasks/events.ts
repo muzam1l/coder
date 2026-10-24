@@ -1,6 +1,6 @@
 /** A platform event becomes a task: dedupe, installation, linked member, agent match, credential, then the queue. */
 import { secretRows, taskConnectionSecrets } from '../connections/resolve';
-import { connectionGrants } from '../connections/records';
+import { connectionGrants, connectNotice } from '../connections/records';
 import { dispatchFilePrefixes } from '../agents/repo';
 import { randomUUID } from 'node:crypto';
 import { effectiveSettings, matchAgent, agentAccess } from '../../agent/definition';
@@ -12,7 +12,7 @@ import { AgentLoadError } from '../../agent/load';
 import { dispatchStore } from '../store/primed';
 import { runLocalTask } from './local';
 import { syncLocalAgents } from '../store/local';
-import { credentialFix, modelAttempts, resolveModels } from '../settings/credentials';
+import { credentialFix, failureText, modelAttempts, resolveModels } from '../settings/credentials';
 import { dispatchTokens } from './context';
 import { chooseRunner } from '../runners/select';
 import {
@@ -24,6 +24,7 @@ import {
   describe,
   directAsk,
   forgetUnseen,
+  itemOf,
   recordUnseen,
   rememberConversation,
   steerConversation,
@@ -34,7 +35,7 @@ import { generateTaskId } from '../../core/state';
 import type { PendingDelivery } from './queue';
 import { answerInConversation, openApprovals, readApprovalCommand } from './approvals';
 import { dashPath, organizationSlug } from '../auth/members';
-import { eventSpace, syncMembers } from './access';
+import { eventSpace, spaceKey, syncMembers } from './access';
 
 const PENDING_TTL_MS = 60_000;
 
@@ -45,12 +46,21 @@ const SETUP_NOTICE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 /** Public and private replies to an event. */
 export interface Replies {
-  post(text: string, progress?: boolean): Promise<{ id?: string; ids?: string[] } | null | void>;
+  /** `notice` goes to the asker with the reply: privately where the platform can, else as a footer. */
+  post(
+    text: string,
+    progress?: boolean,
+    notice?: string,
+  ): Promise<{ id?: string; ids?: string[] } | null | void>;
   react?(emoji: string, message?: string): Promise<void>;
   /** A reply that reports a failure; Linear marks the session failed, elsewhere it is a plain reply. */
   problem(text: string): ReturnType<Replies['post']>;
   /** Resolves without posting where the platform has no private messages. */
   whisper(text: string): Promise<unknown>;
+  /** Shows the app working on the event until a reply, or the platform's own timeout. */
+  startTyping?(): Promise<void>;
+  /** Clears what `startTyping` showed where a reply does not. */
+  endTyping?(): Promise<void>;
 }
 
 /** Installs are bound from the dashboard; an unbound or removed one runs nothing. */
@@ -110,11 +120,6 @@ async function setupText(ctx: ServerContext, engine: string, slug?: string): Pro
   return `No model is configured yet. If you have access to it, [Add a model](${await credentialFix(ctx, engine, slug)}).`;
 }
 
-/** What the thread gets when a run fails without an answer. */
-async function failureText(ctx: ServerContext, engine: string, slug?: string): Promise<string> {
-  return `There was a problem with your connected model. If you have access to it, [Check the model](${await credentialFix(ctx, engine, slug)}).`;
-}
-
 /** A dashboard page at `path`, linked from the thread: the task's own when no reply came, the agent's settings when its model can't run. */
 function dashPage(ctx: ServerContext, slug: string, path: string): string | undefined {
   const base = ctx.config.publicUrl?.replace(/\/$/, '');
@@ -130,6 +135,8 @@ async function reservedConversation(
 ): Promise<TaskStatus | undefined> {
   const thread = event.chat?.thread.id;
   if (!ctx.local || event.repo || !thread) return undefined;
+  const integration = ctx.integrations[event.integration];
+  const item = itemOf(integration, thread);
   const receipts = await ctx.store.list<{ pending?: PendingHandoff }>('delivery', {
     prefix: 'delivery:',
   });
@@ -139,7 +146,7 @@ async function reservedConversation(
       task?.agent === agent &&
       task.event?.appId === event.appId &&
       task.event.installationId === event.installationId &&
-      task.event.chat?.thread.id === thread &&
+      itemOf(integration, task.event.chat?.thread.id ?? '') === item &&
       value.pending?.taskId
     );
   })?.value.pending;
@@ -160,7 +167,8 @@ export async function dispatchEvent(
   now: () => number,
   replies: Replies,
 ): Promise<{ taskId?: string; work?: Promise<void> }> {
-  const delivery = `delivery:${integration.id}:${app.id}:${event.installationId}:${event.chat?.thread.id ?? ''}:${event.deliveryId}`;
+  const item = event.chat ? itemOf(integration, event.chat.thread.id) : '';
+  const delivery = `delivery:${integration.id}:${app.id}:${event.installationId}:${item}:${event.deliveryId}`;
   const installation = await loadInstallation(ctx, app, event);
   if (!installation) {
     dropped(event, `installation ${event.installationId} is not bound or was removed`, 'error');
@@ -178,7 +186,7 @@ export async function dispatchEvent(
       delivery: { key: delivery, owner, at: now(), ttlMs: PENDING_TTL_MS },
       agent: app.agent,
       ...(event.chat
-        ? { conversation: conversationKey(event.appId, event.installationId, event.chat.thread.id) }
+        ? { conversation: conversationKey(event.appId, event.installationId, item) }
         : {}),
       ...(event.actor.id ? { actor: { platform: integration.id, id: event.actor.id } } : {}),
       installation,
@@ -236,7 +244,7 @@ export async function dispatchEvent(
     return {};
   }
 
-  const key = JSON.stringify([event.appId, event.installationId, event.chat?.thread.id]);
+  const key = JSON.stringify([event.appId, event.installationId, item]);
   const locks = (ctx.store.handoffs ??= new Map());
   const work = (locks.get(key) ?? Promise.resolve())
     .catch(() => {})
@@ -411,6 +419,13 @@ async function claimed(
     dropped(event, `${event.actor.login ?? event.actor.id} cannot write where it happened`);
     return {};
   }
+  // Not awaited, so dispatch doesn't wait on it; the host still keeps it alive until it lands.
+  const typing = replies
+    .startTyping?.()
+    .catch(error =>
+      console.error(`coder server: could not show ${event.deliveryId} is being worked on`, error),
+    );
+  if (typing) ctx.waitUntil?.(typing);
 
   const local = (task: AgentTask) =>
     handoff(
@@ -438,6 +453,7 @@ async function claimed(
       const saved = receipt.pending.task;
       if (saved.agent !== agent.id) {
         dropped(event, `its interrupted handoff belongs to agent ${saved.agent}`);
+        await replies.endTyping?.();
         return {};
       }
       return local(saved);
@@ -461,11 +477,35 @@ async function claimed(
   const current = talk
     ? (state?.status ?? (await reservedConversation(ctx, described, agent.id)))
     : undefined;
-  if (current)
+  // An item that moved to another space, such as a Linear issue to another team, starts a task there: a task never spans two spaces.
+  const found = current ? await eventSpace(ctx, integration, event, token) : undefined;
+  const moved = Boolean(
+    current?.task.space && found && current.task.space !== spaceKey({ ...event, space: found }),
+  );
+  if (current && !moved)
     return effect(async () => {
+      // The thread's first account, linked since, makes a task without `requestedBy` its member's.
+      const starter = current.task.event;
+      const adopted =
+        member &&
+        !current.task.requestedBy &&
+        current.task.source === event.integration &&
+        starter?.integration === event.integration &&
+        starter.actor.id === event.actor.id &&
+        (await ctx.queue.setRequestedBy(ctx.organizationId, current.task.id, member.id, now()));
+      // A space found private on arrival makes the item's tasks private, as the platform's own report does; it never widens.
+      const narrowed =
+        found?.private === true &&
+        current.task.event?.space?.private !== true &&
+        Boolean(current.task.space) &&
+        (await ctx.queue
+          .spaceChanged(ctx.organizationId, { ...event, space: found }, { private: true }, now())
+          .then(() => true));
+      const status =
+        ((adopted || narrowed) && (await ctx.store.get('task', current.task.id))) || current;
       await Promise.all([
-        steerConversation(ctx, current, described, user, now, state, member?.id),
-        syncMembers(ctx, integration, current.task.event ?? event, token),
+        steerConversation(ctx, status, described, user, now, state, member?.id),
+        syncMembers(ctx, integration, status.task.event ?? event, token),
       ]);
     });
 
@@ -476,10 +516,22 @@ async function claimed(
     resolveModels(ctx, effectiveSettings(agent), requestedBy),
     buildContext(ctx, integration, event, member ?? null),
     connectionGrants(ctx, undefined, agent.usage?.connections),
-    eventSpace(ctx, integration, event, token),
+    found ?? eventSpace(ctx, integration, event, token),
   ]);
   const attempts = modelAttempts(models, route.runner === 'http');
   const engine = first.engine;
+  const id = `${event.deliveryId}-${agent.id}`;
+  // An account that names no member hears how its turns could run on a member's own subscription.
+  const connect = async () =>
+    member || !event.actor.id
+      ? undefined
+      : connectNotice(ctx, integration, {
+          task: id,
+          actor: event.actor.id,
+          models,
+          attempts,
+          slug: await slug(),
+        });
   if (!attempts.length) {
     const spoken = described.mustReply ?? directAsk(integration, event);
     if (!spoken) {
@@ -488,14 +540,15 @@ async function claimed(
         `no usable ${models.map(run => run.model).join(' or ')} model${requestedBy ? '' : ' among the workspace credentials'}`,
         'error',
       );
+      await replies.endTyping?.();
       return {};
     }
     return effect(async () => {
-      // Once per thread, unless every prompt waits for an answer; a retry of the delivery that holds the mark may post again.
-      const key = `setup:${app.id}:${event.chat?.thread.id ?? event.deliveryId}`;
+      // Once per conversation, unless every prompt waits for an answer; a retry of the delivery that holds the mark may post again.
+      const key = `setup:${app.id}:${event.chat ? itemOf(integration, event.chat.thread.id) : event.deliveryId}`;
       const owner = event.deliveryId;
       const first =
-        integration.answersEveryPrompt ||
+        integration.answersEveryPrompt?.(event) ||
         (await ctx.store.create(
           'delivery',
           key,
@@ -503,11 +556,14 @@ async function claimed(
           { ttlMs: SETUP_NOTICE_TTL_MS },
         ));
       if (!first && (await ctx.store.get<{ owner?: string }>('delivery', key))?.owner !== owner)
-        return;
+        return replies.endTyping?.();
       try {
-        await replies.problem(await setupText(ctx, engine, await slug()));
+        await replies.problem(
+          (await connect())?.failure ?? (await setupText(ctx, engine, await slug())),
+        );
       } catch (error) {
-        if (!integration.answersEveryPrompt) await ctx.store.updateDelivery(key, owner, undefined);
+        if (!integration.answersEveryPrompt?.(event))
+          await ctx.store.updateDelivery(key, owner, undefined);
         throw error;
       }
     });
@@ -518,13 +574,13 @@ async function claimed(
   if (Buffer.byteLength(JSON.stringify(context)) > CONTEXT_LIMIT)
     throw new Error('Task context exceeds 256 KB');
 
-  const id = `${event.deliveryId}-${agent.id}`;
   const taskUrl = dashPage(ctx, await slug(), `/tasks/${id}`);
   const settingsUrl = dashPage(
     ctx,
     await slug(),
     `/agents/${encodeURIComponent(agent.id)}/settings`,
   );
+  const notice = await connect();
   const task: AgentTask = {
     id,
     source: event.integration as TaskSource,
@@ -532,7 +588,8 @@ async function claimed(
     flow: 'default',
     ...route,
     event: space ? { ...described, space } : described,
-    failureReply: await failureText(ctx, engine, await slug()),
+    failureReply: notice?.failure ?? (await failureText(ctx, engine, await slug())),
+    ...(notice?.notice ? { notice: notice.notice } : {}),
     ...(taskUrl ? { taskUrl } : {}),
     ...(settingsUrl ? { settingsUrl } : {}),
     author: integration.author?.(app.name) ?? app.name,
@@ -560,8 +617,8 @@ async function claimed(
       ctx.config.maxQueued ?? 1000,
       true,
       {
-        conversation: conversationRecord(described, id, admitted),
-        unseen: unseenAcknowledgement(described),
+        conversation: conversationRecord(ctx, described, id, admitted),
+        unseen: unseenAcknowledgement(ctx, described),
         secrets: secretRows(ctx, id, tokens.minted),
       },
     ),
@@ -636,10 +693,13 @@ export async function reportTaskFailure(
     console.error(`coder server: could not report the failure of task ${task.id}`, cause);
   });
   if (!app) return;
-  const { eventReplies } = await import('../chat');
+  const { endTyping, eventReplies } = await import('../chat');
 
   await recordFailure(ctx, app, error, event.installationId, event, () =>
     eventReplies(ctx, app, event),
+  );
+  await endTyping(ctx, task).catch(cause =>
+    console.error(`coder server: could not clear the working indicator of task ${task.id}`, cause),
   );
 }
 

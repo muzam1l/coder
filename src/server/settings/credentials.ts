@@ -275,19 +275,16 @@ export function runsOn(run: ModelRun, viewer?: string): string {
   return `${name} on ${accounts.join(', then ')}`;
 }
 
-/** Where each spec runs for `viewer`, by the spec as written; one the config can't resolve says why. */
+/** Where each chain model and the review model of `shown` run for `viewer`, by the spec as written; one the config can't resolve says why. */
 export async function runsOnEach(
   ctx: ServerContext,
-  specs: string[],
-  viewer?: string,
+  shown: Partial<CoderConfig>,
+  viewer = ctx.session?.user.id,
 ): Promise<Record<string, string>> {
-  const [shown, rows] = await Promise.all([
-    shownConfig(ctx),
-    ctx.store.listCredentials({ owner: viewer }),
-  ]);
+  const rows = await ctx.store.listCredentials({ owner: viewer });
   const config = effectiveConfig(ctx, shown);
   const lines = await Promise.all(
-    specs.map(async (spec): Promise<[string, string]> => {
+    [...config.chain, config.reviewModel].map(async (spec): Promise<[string, string]> => {
       try {
         const option = resolveTaskOptions({ model: spec }, config);
         const [run] = await modelRuns(ctx, config, rows, [option], viewer);
@@ -402,7 +399,7 @@ export async function completeLogin(
 }
 
 function mask(env: Record<string, string>): string {
-  if (env.CODEX_AUTH_JSON) return 'auth.json';
+  if (env.CODEX_AUTH_JSON) return '••••';
   const value = Object.values(env)[0] ?? '';
   return value.length > 16 ? `${value.slice(0, 5)}••••` : '••••';
 }
@@ -593,6 +590,26 @@ export async function credentialFix(
   );
 
   return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${page}${engine === 'custom' ? '' : `?engine=${encodeURIComponent(engine)}`}`;
+}
+
+/** Where a platform account connects to its member: the Connections page, open at that platform. */
+export async function connectionFix(
+  ctx: ServerContext,
+  integration: string,
+  slug?: string,
+): Promise<string> {
+  const page = dashPath(slug ?? (await organizationSlug(ctx)), '/settings/connections');
+
+  return `${ctx.config.publicUrl?.replace(/\/$/, '') ?? ''}${page}?connect=${encodeURIComponent(integration)}`;
+}
+
+/** What a thread gets when a run fails without an answer. */
+export async function failureText(
+  ctx: ServerContext,
+  engine: string,
+  slug?: string,
+): Promise<string> {
+  return `There was a problem with your connected model. If you have access to it, [Check the model](${await credentialFix(ctx, engine, slug)}).`;
 }
 
 const credentialSchema = z.object({

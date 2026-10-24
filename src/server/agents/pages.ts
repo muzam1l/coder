@@ -1,5 +1,5 @@
 /** What Coder shows on a platform: an agent's home page and the installer's welcome. */
-import type { Integration, Page } from '../../integrations/types';
+import type { Integration, LinkedMember, Page } from '../../integrations/types';
 
 /** An agent as a platform shows it: its current version. */
 export interface AgentSummary {
@@ -21,17 +21,32 @@ function ways(integration: Integration, handle: string, events: string[]) {
 const listening = (integration: Integration, agent?: AgentSummary) =>
   agent?.listens.find(entry => entry.integration === integration.id)?.events ?? [];
 
-/** The app's home page: what the agent is, how to use it here, and links to it and to Coder. */
+/** The app's home page: what the agent is, how to use it here, the viewer's own account, and links to it and to Coder. */
 export function homePage(
   integration: Integration,
   urls: { home: string; dash: string },
   name: string,
   agent: AgentSummary | undefined,
+  viewer?: { linked?: LinkedMember },
 ): Page {
   const slug = agent?.slug ?? name;
   const events = listening(integration, agent);
   const use = ways(integration, name, events);
   const listens = events.map(event => integration.events[event]?.description ?? event);
+  const login = viewer?.linked?.login;
+  const account = viewer && {
+    title: `${integration.name} account`,
+    ...(viewer.linked
+      ? { text: login ? `Connected as @${login}.` : 'Connected.' }
+      : {
+          text: 'Not connected.',
+          link: {
+            id: 'connect',
+            label: `Connect ${integration.name}`,
+            url: `${urls.dash}/settings/connections?connect=${encodeURIComponent(integration.id)}`,
+          },
+        }),
+  };
 
   return {
     title: agent?.name ?? name,
@@ -39,6 +54,7 @@ export function homePage(
     sections: [
       ...(use ? [{ title: 'Use it here', text: use }] : []),
       ...(listens.length ? [{ title: 'Listens to', text: listens.join('\n') }] : []),
+      ...(account ? [account] : []),
     ],
     links: [
       {

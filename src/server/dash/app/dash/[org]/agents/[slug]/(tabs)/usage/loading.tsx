@@ -16,7 +16,7 @@ export default function AgentUsageLoading() {
         ))}
       </Stats>
       <Card title="Tasks per day">
-        <Loading label="Loading usage" h={232} />
+        <Loading label="Loading usage" h={216} />
       </Card>
       <div class="grid-2">
         <Card title="By installation">

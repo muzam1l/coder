@@ -60,7 +60,7 @@ function AddModel({
 }: {
   credentials: CredentialRow[] | null;
   admin: boolean;
-  onAdd: (act: () => Promise<Config>) => Promise<boolean>;
+  onAdd: (act: () => Promise<Config & Pick<ModelsShape, 'runsOn'>>) => Promise<boolean>;
   onClose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
@@ -358,7 +358,7 @@ function AliasDialog({
   shape: ModelsShape;
   /** The name being changed; none adds one. */
   editing?: string;
-  onSave: (act: () => Promise<Config>) => Promise<boolean>;
+  onSave: (act: () => Promise<Config & Pick<ModelsShape, 'runsOn'>>) => Promise<boolean>;
   onClose: () => void;
 }) {
   const entry = editing ? shape.models[editing] : undefined;
@@ -496,18 +496,19 @@ export function ModelsList({
   const [aliasing, setAliasing] = useState<string | true>();
   const action = useAction();
   const settings = useConfig(config.config);
-  const send = (act: () => Promise<Config>, toast?: string) =>
+  const send = (act: () => Promise<Config & Pick<ModelsShape, 'runsOn'>>, toast?: string) =>
     action.run(
       'send',
       async () => {
-        await act();
-        setModels(await client.models.list());
+        const answer = await act();
+        setModels(now => ({ ...now, models: answer.models ?? {}, runsOn: answer.runsOn }));
       },
       { toast },
     );
-  // A chain or review change reads the models again for where each runs.
+  // A chain or review save answers where each model now runs.
   const save = async (patch: Parameters<typeof settings.patch>[0]) => {
-    if (await settings.patch(patch)) setModels(await client.models.list());
+    const answer = await settings.patch(patch);
+    if (answer) setModels(now => ({ ...now, runsOn: answer.runsOn }));
   };
   const chain = settings.value.chain ?? config.effective.chain ?? [];
   const review = settings.value.reviewModel ?? config.effective.reviewModel ?? '';

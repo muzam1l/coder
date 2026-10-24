@@ -445,9 +445,11 @@ function isNetworkHost(host: string): boolean {
   return bracketed ? net.isIPv6(bracketed[1]!) : host.length <= 253 && HOST_NAME.test(host);
 }
 
-/** Turn a model name off or back on: an endpoint by its flag, any other name by false. */
+/** Turn a model name off or back on: an endpoint by its flag, any other name by false; an alias is removed instead. */
 export function toggleModel(models: Record<string, ModelEntry>, name: string, disable: boolean) {
   const entry = models[name];
+  if (disable && typeof entry === 'string')
+    throw new Error(`Alias "${name}" can't be turned off; remove it instead.`);
   if (isEndpointModel(entry)) {
     if (disable) entry.disabled = true;
     else delete entry.disabled;
@@ -560,10 +562,9 @@ function toVersion1(old: Record<string, any>): { config: Record<string, any>; no
     if (!usage || typeof usage !== 'object') continue;
     if (usage.engine || usage.effort) {
       const { engine, model, effort, ...rest } = usage;
-      config.agents[id] = {
-        ...rest,
-        model: spec(engine ?? inferEngine(model, { models }), model, effort),
-      };
+      // An alias keeps its own engine.
+      const runs = engine ?? (typeof models[model] === 'string' ? undefined : inferEngine(model, { models }));
+      config.agents[id] = { ...rest, model: spec(runs, model, effort) };
       notes.push(`agents.${id}: its engine, model and effort are now model "${config.agents[id].model}"`);
     } else if (usage.model) usage.model = slash(usage.model, `agents.${id}.model`);
   }

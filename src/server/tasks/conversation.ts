@@ -5,7 +5,7 @@ import type { SerializedThread } from 'chat';
 
 import { definitionEvents } from '../../agent/definition';
 import { eventPrompt, reactionsPrompt, SINCE_LIMIT } from '../../agent/context/turn';
-import type { Agent, AgentApp, AgentEvent, TaskContext } from '../../agent/types';
+import type { Agent, AgentApp, AgentEvent, AgentTask, TaskContext } from '../../agent/types';
 import type { ConversationFacts, Integration, SinceMessage } from '../../integrations/types';
 import type { ServerContext } from '../context';
 import type { TaskStatus } from '../store/types';
@@ -50,8 +50,30 @@ export async function conversationState(
   event: AgentEvent,
 ): Promise<ConversationState> {
   if (!event.chat) return {};
-  const key = keyOf(event);
-  return ctx.store.conversationState(key);
+  return threadConversation(
+    ctx,
+    ctx.integrations[event.integration],
+    event.appId,
+    event.installationId,
+    event.chat.thread.id,
+  );
+}
+
+/** A thread's conversation: its item's, else one a task started under the thread itself before an item's threads were one conversation. */
+export async function threadConversation(
+  ctx: ServerContext,
+  integration: Integration | undefined,
+  appId: string,
+  installationId: string,
+  thread: string,
+): Promise<ConversationState> {
+  const key = conversationKey(appId, installationId, itemOf(integration, thread));
+  const state = await ctx.store.conversationState(key);
+  const own = conversationKey(appId, installationId, thread);
+  if (state.record || own === key) return state;
+  const legacy = await ctx.store.conversationState(own);
+
+  return legacy.record ? { ...state, record: legacy.record, status: legacy.status } : state;
 }
 
 /** A burst gathering under `batch:<conversation>` or `reactions:<conversation>`; the last writer owns it. */
@@ -70,8 +92,20 @@ interface Reaction {
   on: string;
 }
 
-const keyOf = (event: AgentEvent) =>
-  conversationKey(event.appId, event.installationId, event.chat!.thread.id);
+/** The platform item a thread belongs to. */
+export const itemOf = (integration: Integration | undefined, thread: string) =>
+  integration?.item?.(thread) ?? thread;
+
+const keyOf = (ctx: ServerContext, event: AgentEvent) =>
+  conversationKey(
+    event.appId,
+    event.installationId,
+    itemOf(ctx.integrations[event.integration], event.chat!.thread.id),
+  );
+
+/** Whether `event` came from the thread of `place`, such as the one a task's current turn answers in; a place without a thread takes any. */
+const samePlace = (place: AgentEvent | undefined, event: AgentEvent) =>
+  !place?.chat || place.chat.thread.id === event.chat?.thread.id;
 
 type BatchKind = keyof NonNullable<TaskContext['admissions']>;
 
@@ -96,11 +130,12 @@ export async function conversationTask(
   ctx: ServerContext,
   event: AgentEvent,
 ): Promise<TaskStatus | undefined> {
-  return event.chat ? (await ctx.store.conversationState(keyOf(event))).status : undefined;
+  return (await conversationState(ctx, event)).status;
 }
 
-/** What remembering a conversation writes: its record under the thread key, and its root message as known. */
+/** What remembering a conversation writes: its record under its item's key, and its root message as known. */
 export function conversationRecord(
+  ctx: ServerContext,
   event: AgentEvent,
   taskId: string,
   now: number,
@@ -110,7 +145,7 @@ export function conversationRecord(
   const root = thread.id.slice((thread.channelId?.length ?? -1) + 1);
 
   return {
-    key: keyOf(event),
+    key: keyOf(ctx, event),
     record: { at: now, taskId, ...(event.chat?.message ? { seen: event.chat.message.id } : {}) },
     root: knownKey(event.appId, event.installationId, channelOf(thread), root),
     ttlMs: CONVERSATION_TTL_MS,
@@ -124,7 +159,7 @@ export async function rememberConversation(
   taskId: string,
   now: number,
 ): Promise<void> {
-  const written = conversationRecord(event, taskId, now);
+  const written = conversationRecord(ctx, event, taskId, now);
   if (!written) return;
 
   await ctx.store.putMany(
@@ -169,7 +204,7 @@ async function markSeen(
 ): Promise<void> {
   if (!event.chat?.message) return;
   return ctx.store.markConversation(
-    keyOf(event),
+    keyOf(ctx, event),
     taskId,
     event.chat.message.id,
     now,
@@ -179,12 +214,13 @@ async function markSeen(
 
 /** What `forgetUnseen` acknowledges, as a new task's admission records it. */
 export function unseenAcknowledgement(
+  ctx: ServerContext,
   event: AgentEvent,
 ): { key: string; version: number; epoch?: string } | undefined {
   const through = event.conversation?.unseen;
   return event.chat && through !== undefined
     ? {
-        key: keyOf(event),
+        key: keyOf(ctx, event),
         version: through.version,
         ...(through.epoch ? { epoch: through.epoch } : {}),
       }
@@ -197,12 +233,12 @@ export async function recordUnseen(
   event: AgentEvent,
   message: SinceMessage,
 ): Promise<void> {
-  await ctx.store.appendUnseen(keyOf(event), message, CONVERSATION_TTL_MS);
+  await ctx.store.appendUnseen(keyOf(ctx, event), message, CONVERSATION_TTL_MS);
 }
 
 /** Acknowledges only the unseen snapshot carried by the delivered event. */
 export async function forgetUnseen(ctx: ServerContext, event: AgentEvent): Promise<void> {
-  const through = unseenAcknowledgement(event);
+  const through = unseenAcknowledgement(ctx, event);
   if (through) await ctx.store.acknowledgeUnseen(through.key, through.version, through.epoch);
 }
 
@@ -249,12 +285,13 @@ export async function describe(
   const thread = event.chat?.thread;
   if (!thread) return event;
   const direct = thread.isDM === true;
-  const mustReply = directAsk(integration, event) || integration.answersEveryPrompt === true;
+  const mustReply =
+    directAsk(integration, event) || integration.answersEveryPrompt?.(event) === true;
   const [unseen, facts] = await Promise.all([
     input.loaded
       ? (input.unseen ?? { messages: [], more: 0 })
       : ctx.store
-          .get<Unseen>('delivery', `since:${keyOf(event)}`)
+          .get<Unseen>('delivery', `since:${keyOf(ctx, event)}`)
           .then(value => value ?? { messages: [], more: 0 }),
     integration.conversation
       ? integration
@@ -372,15 +409,42 @@ async function steerRunning(
 
   // A message's author, `null` when unknown; only its owner's messages keep a personal connection this turn.
   const value = asker === undefined ? { text } : { text, asker };
+  const added = Boolean(await addInbox(ctx, status, 'steer', value, batch));
+  // A steered turn is not the asker's own, so it carries no notice.
+  if (added && status.task.notice) await takeNotice(ctx, status);
 
-  return Boolean(await addInbox(ctx, status, 'steer', value, batch));
+  return added;
+}
+
+const noticeKey = (status: Pick<TaskStatus, 'task' | 'generation'>) =>
+  `notice:${status.task.id}:${status.generation ?? 0}`;
+
+/** Takes the task's notice for one post of this run; false once a post or a steer took it. */
+export function takeNotice(
+  ctx: ServerContext,
+  status: Pick<TaskStatus, 'task' | 'generation'>,
+): Promise<boolean> {
+  return ctx.store.create(
+    'delivery',
+    noticeKey(status),
+    { at: (ctx.now ?? Date.now)() },
+    { ttlMs: CONVERSATION_TTL_MS },
+  );
+}
+
+/** Gives the notice back when the post that took it failed. */
+export function returnNotice(
+  ctx: ServerContext,
+  status: Pick<TaskStatus, 'task' | 'generation'>,
+): Promise<void> {
+  return ctx.store.delete('delivery', noticeKey(status));
 }
 
 /** Whether the task runs as a CLI task on this local server. */
 const runsHere = (ctx: ServerContext, task: TaskStatus['task']) =>
   Boolean(ctx.local) && !task.event?.repo && task.runner === 'local' && !task.runnerId;
 
-/** A stopped task resumes with the same engine history and this turn's reply requirement: locally in place, hosted through `continueTask`; false when another sender resumed it first. */
+/** A stopped task resumes with the same engine history, this turn's reply requirement and the thread it answers in: locally in place, hosted through `continueTask`; false when another sender resumed it first. */
 export async function resume(
   ctx: ServerContext,
   status: TaskStatus,
@@ -388,24 +452,26 @@ export async function resume(
   mustReply: boolean,
   admissions: TaskContext['admissions'],
   asker: string | undefined,
+  chat?: AgentEvent['chat'],
 ): Promise<boolean> {
   const { task } = status;
   const context = { mustReply, admissions: { ...task.context?.admissions, ...admissions }, asker };
+  const event = task.event && chat ? { ...task.event, chat } : task.event;
   if (runsHere(ctx, task))
-    return resumeLocalTask(ctx, ctx.local!.cwd, task.id, text, undefined, {}, context);
+    return resumeLocalTask(ctx, ctx.local!.cwd, task.id, text, undefined, {}, context, event);
   try {
     await continueTask(
       ctx,
-      { ...status, task: { ...task, context: { ...task.context, ...context } } },
+      { ...status, task: { ...task, event, context: { ...task.context, ...context } } },
       text,
     );
   } catch (error) {
     if (!(error instanceof TaskInputError && error.status === 409)) throw error;
     // A turn no credential runs is answered, not run.
-    if (!error.fix || !task.event) return false;
-    const app = await ctx.store.get('app', task.event.appId);
+    if (!error.fix || !event) return false;
+    const app = await ctx.store.get('app', event.appId);
     const { eventReplies } = await import('../chat');
-    if (app) await (await eventReplies(ctx, app, task.event)).problem(error.message);
+    if (app) await (await eventReplies(ctx, app, event)).problem(error.message);
   }
   return true;
 }
@@ -478,7 +544,7 @@ function steerDelivery(batch: Steer[]): { text: string; count: number } {
   return { text, count };
 }
 
-/** A message for a conversation's task: a running task takes it at its next turn; a stopped one resumes once the burst settles, every message in one event. */
+/** A message for a conversation's task: a task running in its thread takes it at its next turn; a stopped one resumes there once the burst settles, every message in one event; one running in another thread of the item takes it as a turn once it stops. */
 export async function steerConversation(
   ctx: ServerContext,
   status: TaskStatus,
@@ -488,10 +554,11 @@ export async function steerConversation(
   state?: ConversationState,
   asker?: string,
 ): Promise<void> {
-  const key = `batch:${keyOf(event)}`;
+  const key = `batch:${keyOf(ctx, event)}`;
   const pending = state ? state.batch : await ctx.store.get<Batch>('delivery', key);
   if (
     !pending?.items.length &&
+    samePlace(status.task.event, event) &&
     (await steerRunning(ctx, status, eventPrompt([event], user), undefined, asker ?? null))
   ) {
     await forgetUnseen(ctx, event);
@@ -530,78 +597,107 @@ export async function steerConversation(
     ctx,
     (async () => {
       await new Promise(resolve => setTimeout(resolve, ctx.config.steerBatchMs ?? STEER_BATCH_MS));
-      const taken = await takeBatch<Steer>(ctx, key, owner);
-      if (!taken) return;
-      const batch = taken.items.map((steer, index) =>
-        index === taken.items.length - 1
-          ? {
-              ...steer,
-              event: {
-                ...steer.event,
-                mustReply: steer.event.mustReply || taken.mustReply,
-                conversation: {
-                  ...steer.event.conversation,
-                  more: (steer.event.conversation?.more ?? 0) + (taken.more ?? 0),
-                },
-              },
-            }
-          : steer,
-      );
-      let finished = false;
-      let delivered = false;
-      let overtaken = false;
-      try {
-        for (let offset = 0; offset < batch.length;) {
-          const { fresh, through } = await admittedThrough(ctx, status, key, batch);
-          if (through > offset) {
-            delivered = true;
-            if (!(await finishBatch(ctx, key, owner, true, batch[through - 1]!.admission))) return;
-            offset = through;
-            continue;
-          }
-          const { text, count } = steerDelivery(batch.slice(offset));
-          const chunk = batch.slice(offset, offset + count);
-          const admission = chunk.at(-1)!.admission;
-          const author = chunk.every(steer => steer.asker === chunk[0]!.asker)
-            ? chunk[0]!.asker
-            : undefined;
-          const steered = await steerRunning(
-            ctx,
-            fresh,
-            text,
-            { key, owner, through: admission },
-            author ?? null,
-          );
-          const accepted =
-            steered ||
-            (await resume(
-              ctx,
-              fresh,
-              text,
-              chunk.some(steer => steer.event.mustReply === true),
-              { [kindOf(key)]: admission },
-              chunk.at(-1)!.asker,
-            ));
-          // A sender past its lease resumed the task first: its turn holds the leading messages, the rest go in as steers.
-          if (!accepted && !overtaken) {
-            overtaken = true;
-            continue;
-          }
-          if (!accepted) throw new Error('Conversation task did not accept the batch');
-          delivered = true;
-          if (!steered && !(await finishBatch(ctx, key, owner, true, admission))) return;
-          await markSeen(ctx, chunk.at(-1)!.event, status.task.id, now());
-          offset += count;
-        }
-        finished = true;
-      } catch (error) {
-        if (!(error instanceof BatchClaimLost)) throw error;
-      } finally {
-        if (!finished) await finishBatch(ctx, key, owner, false);
-        if (delivered) await kick(ctx, true, false, true);
-      }
+      await deliverBatch(ctx, status, key, owner, now);
     })(),
   );
+}
+
+/** Once a task stopped, the messages its item's other threads sent while it ran start its next turn. */
+export function deliverWaiting(ctx: ServerContext, task: AgentTask): void {
+  const event = task.event;
+  if (!event?.chat || task.source !== event.integration) return;
+  const key = `batch:${keyOf(ctx, event)}`;
+  detach(
+    ctx,
+    (async () => {
+      const waiting = await ctx.store.get<Batch>('delivery', key);
+      const status = waiting?.items.length && (await ctx.store.get('task', task.id));
+      if (status) await deliverBatch(ctx, status, key, waiting.owner, ctx.now ?? Date.now);
+    })(),
+  );
+}
+
+/** Delivers the batch `owner` wrote last, in order, one thread's run of messages at a time; what waits for a turn in another thread stays for the next sender. */
+async function deliverBatch(
+  ctx: ServerContext,
+  status: TaskStatus,
+  key: string,
+  owner: string,
+  now: () => number,
+): Promise<void> {
+  const taken = await takeBatch<Steer>(ctx, key, owner);
+  if (!taken) return;
+  const batch = taken.items.map((steer, index) =>
+    index === taken.items.length - 1
+      ? {
+          ...steer,
+          event: {
+            ...steer.event,
+            mustReply: steer.event.mustReply || taken.mustReply,
+            conversation: {
+              ...steer.event.conversation,
+              more: (steer.event.conversation?.more ?? 0) + (taken.more ?? 0),
+            },
+          },
+        }
+      : steer,
+  );
+  let finished = false;
+  let delivered = false;
+  let overtaken = false;
+  try {
+    for (let offset = 0; offset < batch.length;) {
+      const { fresh, through } = await admittedThrough(ctx, status, key, batch);
+      if (through > offset) {
+        delivered = true;
+        if (!(await finishBatch(ctx, key, owner, true, batch[through - 1]!.admission))) return;
+        offset = through;
+        continue;
+      }
+      const place = batch[offset]!.event;
+      const here = samePlace(fresh.task.event, place);
+      if (!here && ACTIVE_STATES.includes(fresh.status)) return;
+      const run = batch.slice(offset).findIndex(steer => !samePlace(steer.event, place));
+      const { text, count } = steerDelivery(
+        batch.slice(offset, run < 0 ? undefined : offset + run),
+      );
+      const chunk = batch.slice(offset, offset + count);
+      const admission = chunk.at(-1)!.admission;
+      const author = chunk.every(steer => steer.asker === chunk[0]!.asker)
+        ? chunk[0]!.asker
+        : undefined;
+      const steered =
+        here &&
+        (await steerRunning(ctx, fresh, text, { key, owner, through: admission }, author ?? null));
+      const accepted =
+        steered ||
+        (await resume(
+          ctx,
+          fresh,
+          text,
+          chunk.some(steer => steer.event.mustReply === true),
+          { [kindOf(key)]: admission },
+          chunk.at(-1)!.asker,
+          place.chat,
+        ));
+      // A sender past its lease resumed the task first: its turn holds the leading messages, the rest go in as steers.
+      if (!accepted && !overtaken) {
+        overtaken = true;
+        continue;
+      }
+      if (!accepted) throw new Error('Conversation task did not accept the batch');
+      delivered = true;
+      if (!steered && !(await finishBatch(ctx, key, owner, true, admission))) return;
+      await markSeen(ctx, chunk.at(-1)!.event, status.task.id, now());
+      offset += count;
+    }
+    finished = true;
+  } catch (error) {
+    if (!(error instanceof BatchClaimLost)) throw error;
+  } finally {
+    if (!finished) await finishBatch(ctx, key, owner, false);
+    if (delivered) await kick(ctx, true, false, true);
+  }
 }
 
 /** A reaction in a conversation whose task runs: gathered with the others for a while, then one steer; a stopped task is left alone. */
@@ -613,7 +709,7 @@ export async function reactToConversation(
 ): Promise<void> {
   const status = await conversationTask(ctx, event);
   if (!status || !ACTIVE_STATES.includes(status.status)) return;
-  const key = `reactions:${keyOf(event)}`;
+  const key = `reactions:${keyOf(ctx, event)}`;
   const owner = randomUUID();
   await ctx.store.appendBatch(key, owner, [{ ...reaction, admission: owner }], now(), BATCH_TTL_MS);
   detach(

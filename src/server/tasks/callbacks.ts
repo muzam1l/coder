@@ -4,7 +4,7 @@ import { type Approval } from '../../core/types';
 import { effectiveSettings } from '../../agent/definition';
 import { type TaskStatus, type TaskLogLine, type UsageRecord } from '../store/types';
 import { type ServerContext } from '../context';
-import { firstModel, taskContext, taskEngineCredentials, uninstall } from './context';
+import { taskContext, taskEngineCredentials, uninstall } from './context';
 import { effectiveConfig, taskConfig } from '../settings/config';
 import { splitEngineSpec } from '../../core/config';
 import { writeBackCodexAuth } from '../settings/credentials';
@@ -16,7 +16,14 @@ import { taskClaims, taskTokenHash } from './access';
 import { bearerToken } from '../routes/guards';
 import { json } from '../routes/http';
 import { type EngineLogin } from '../settings/logins';
-import { CONVERSATION_TTL_MS, knownPosts, rememberPost } from './conversation';
+import {
+  CONVERSATION_TTL_MS,
+  deliverWaiting,
+  knownPosts,
+  rememberPost,
+  returnNotice,
+  takeNotice,
+} from './conversation';
 import { askOpenAgain, syncApprovals } from './approvals';
 
 /** How long a reply or react call id is remembered, so a late retry still posts once. */
@@ -73,6 +80,8 @@ type TaskCallback = {
 export type CallbackContext = ServerContext & {
   callbackTask?: TaskStatus;
   callbackLogin?: EngineLogin;
+  /** The workspace's slug and name, read with the task. */
+  callbackWorkspace?: { slug?: string; name?: string };
 };
 
 export async function readMessages(
@@ -227,7 +236,10 @@ export async function reportResult(
     ? knownPosts(authorized.task.event, body.postedMessages ?? [])
     : [];
   if (body.status === 'running' || body.status === 'waiting') {
-    if (posted.length) await rememberPost(ctx, authorized.task.event!, body.postedMessages!, now);
+    if (posted.length) {
+      await rememberPost(ctx, authorized.task.event!, body.postedMessages!, now);
+      endTyping(ctx, authorized.task);
+    }
     await ctx.queue.patchTask(
       ctx.organizationId,
       id,
@@ -324,6 +336,10 @@ export async function reportResult(
     const { reportTaskFailure } = await import('./events');
     await reportTaskFailure(ctx, authorized.task, body.error ?? 'The machine failed');
   }
+  if (completed) {
+    endTyping(ctx, authorized.task);
+    deliverWaiting(ctx, authorized.task);
+  }
 
   if (completed)
     await stopTaskMachine(
@@ -362,6 +378,19 @@ async function announceApprovals(
         );
     })(),
   );
+}
+
+/** A runner posts its replies itself, so its reports clear the working indicator, after the answer. */
+function endTyping(ctx: CallbackContext, task: TaskStatus['task']): void {
+  const work = import('../chat')
+    .then(chat => chat.endTyping(ctx, task))
+    .catch(error =>
+      console.error(
+        `coder server: could not clear the working indicator of task ${task.id}`,
+        error,
+      ),
+    );
+  ctx.waitUntil?.(work);
 }
 
 const CALL_ID = /^[a-f0-9-]{36}$/;
@@ -410,7 +439,18 @@ export async function sendReply(req: Request, ctx: CallbackContext): Promise<Res
   const text = body.text.trim();
 
   return conversationCall(ctx, 'reply', body.id, async ({ event, replies }) => {
-    const sent = await replies.post(text, true);
+    // The turn's first tool post carries the notice; where tool posts are progress, the final reply does.
+    const authorized = ctx.callbackTask!;
+    const notice =
+      authorized.task.notice &&
+      !ctx.integrations[event.integration]?.progressReplies?.(event) &&
+      (await takeNotice(ctx, authorized))
+        ? authorized.task.notice
+        : undefined;
+    const sent = await replies.post(text, true, notice).catch(async error => {
+      if (notice) await returnNotice(ctx, authorized);
+      throw error;
+    });
     if (sent)
       await rememberPost(
         ctx,
@@ -475,18 +515,19 @@ export async function taskConnection(req: Request, ctx: CallbackContext): Promis
     | undefined;
   if (typeof body?.connection !== 'string' || !body.connection)
     return json({ error: 'A connection id is required' }, 400);
-  const { task } = ctx.callbackTask!;
+  const authorized = ctx.callbackTask!;
+  const { task } = authorized;
   const { connectionToken, taskAsker, turnConnections } = await import('../connections/resolve');
   const { findConnection } = await import('../connections/records');
   const { actAsRefusal } = await import('./changes');
-  const [connection, ids] = await Promise.all([
-    findConnection(ctx, body.connection, taskAsker(task)),
-    turnConnections(ctx, task),
-  ]);
-  if (!connection || !ids.includes(body.connection))
+  const turn = await turnConnections(ctx, task);
+  const connection = await findConnection(ctx, body.connection, taskAsker(task), turn.accounts);
+  if (!connection || !turn.ids.includes(body.connection))
     return json({ error: 'Unknown connection' }, 404);
   try {
-    const refusal = connection.owner ? await actAsRefusal(ctx, task, connection) : undefined;
+    const refusal = connection.owner
+      ? await actAsRefusal(ctx, authorized, connection, turn.accounts)
+      : undefined;
     if (refusal) return json({ error: refusal }, 403);
     const { token, name } = await connectionToken(
       ctx,
@@ -494,6 +535,7 @@ export async function taskConnection(req: Request, ctx: CallbackContext): Promis
       body.connection,
       typeof body.refused === 'string' ? body.refused : undefined,
       { url: body.url, connectionCreatedAt: body.connectionCreatedAt },
+      connection,
     );
     if (token) return json({ token });
     const platform = task.event && ctx.integrations[task.event.integration]?.name;
@@ -515,17 +557,11 @@ export async function readContext(
   const authorized = ctx.callbackTask!;
 
   try {
-    const { connectionSecrets: _secrets, ...context } = await taskContext(ctx, authorized);
-    // The list shows the model each task runs with, so the turn records it as it starts.
-    const model = firstModel(authorized.task);
-    if (model && model !== authorized.task.usage?.resolvedModel)
-      await ctx.queue.patchTask(
-        ctx.organizationId,
-        authorized.task.id,
-        { resolvedModel: model },
-        (ctx.now ?? Date.now)(),
-        { attempts: authorized.attempts, tokenHash: authorized.tokenHash },
-      );
+    const { connectionSecrets: _secrets, ...context } = await taskContext(
+      ctx,
+      authorized,
+      ctx.callbackWorkspace,
+    );
     return json({
       ...context,
       generation: authorized.generation ?? 0,

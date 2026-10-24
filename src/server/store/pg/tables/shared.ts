@@ -151,6 +151,7 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
       context: r.context,
       files: r.files,
       failureReply: r.failureReply,
+      notice: r.notice,
       taskUrl: r.taskUrl,
       settingsUrl: r.settingsUrl,
     }),

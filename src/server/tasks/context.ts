@@ -278,15 +278,19 @@ export async function eventTokens(
 }
 
 /** The workspace's dashboard on this server's public URL, where a task's Coder tools link. */
-export async function taskDashboard(ctx: ServerContext): Promise<string | undefined> {
+export async function taskDashboard(
+  ctx: ServerContext,
+  workspace?: { slug?: string },
+): Promise<string | undefined> {
   const base = ctx.config.publicUrl?.replace(/\/$/, '');
 
-  return base ? `${base}${dashPath(await organizationSlug(ctx))}` : undefined;
+  return base ? `${base}${dashPath(await organizationSlug(ctx, workspace))}` : undefined;
 }
 
 export async function taskContext(
   ctx: ServerContext,
   status: TaskStatus,
+  workspace?: { slug?: string },
 ): Promise<{
   task: TaskStatus['task'];
   tokens: Record<string, string>;
@@ -339,9 +343,9 @@ export async function taskContext(
 
   const { actAsRefusal } = await import('./changes');
   const resolved = await resolvedTaskConnections(ctx, status, tokens, connection =>
-    actAsRefusal(ctx, task, connection),
+    actAsRefusal(ctx, status, connection),
   );
-  const dashboard = await taskDashboard(ctx);
+  const dashboard = await taskDashboard(ctx, workspace);
   const engineCredentials = await taskEngineCredentials(ctx, task, effectiveConfig(ctx, config));
   const connectionEnv = { ...resolved.env };
   const warnings = [...resolved.warnings];
@@ -535,8 +539,9 @@ export async function taskHosts(
     for (const entry of Object.values(config.models ?? {}))
       if (isEndpointModel(entry)) hosts.push(...hostOf(entry.baseUrl));
 
-  for (const id of await turnConnections(ctx, task)) {
-    const connection = await findConnection(ctx, id, taskAsker(task));
+  const turn = await turnConnections(ctx, task);
+  for (const id of turn.ids) {
+    const connection = await findConnection(ctx, id, taskAsker(task), turn.accounts);
     if (connection?.provider === 'mcp') hosts.push(...hostOf(connection.endpoint?.url));
     else if (connection) integrations.add(connection.provider);
   }

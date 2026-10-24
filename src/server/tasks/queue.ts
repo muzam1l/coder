@@ -200,6 +200,7 @@ export type TaskRefresh = Pick<AgentTask, 'prompt' | 'context'> &
   Partial<
     Pick<
       AgentTask,
+      | 'event'
       | 'definition'
       | 'usage'
       | 'tools'
@@ -208,6 +209,8 @@ export type TaskRefresh = Pick<AgentTask, 'prompt' | 'context'> &
       | 'models'
       | 'runner'
       | 'runnerId'
+      | 'failureReply'
+      | 'notice'
     >
   >;
 
@@ -364,6 +367,13 @@ export interface TaskQueue {
     patch: TaskPatch,
     now: number,
     fence?: TaskFence,
+  ): Promise<boolean>;
+  /** Makes a task without `requestedBy` that member's, its DM audience too; false when it already has one. */
+  setRequestedBy(
+    organizationId: string,
+    id: string,
+    requestedBy: string,
+    now: number,
   ): Promise<boolean>;
   /** Archives tasks stopped longer than AUTO_ARCHIVE_MS, or only `ids`; deltas carry the change. */
   archiveStopped(organizationId: string | undefined, now: number, ids?: string[]): Promise<void>;
@@ -923,6 +933,23 @@ export class StoreQueue implements TaskQueue {
         ...(approvals ? { task: withApprovals(task, approvals) } : {}),
         updatedAt: now,
       });
+      return true;
+    });
+  }
+
+  setRequestedBy(
+    _organizationId: string,
+    id: string,
+    requestedBy: string,
+    now: number,
+  ): Promise<boolean> {
+    return this.serial(async () => {
+      const current = await this.read(id);
+      if (!current || current.task.requestedBy) return false;
+      const task = { ...current.task, requestedBy };
+      if (task.audience === 'dm:') task.audience = `dm:${requestedBy}`;
+      await this.store.put('task', id, { ...current, task, updatedAt: now });
+
       return true;
     });
   }

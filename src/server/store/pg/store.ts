@@ -197,7 +197,8 @@ export class DrizzleStore implements Store {
     readonly organizationId: string,
     readonly now: () => number = Date.now,
     readonly encryption: Pick<ServerConfig, 'encryptionKey' | 'previousEncryptionKey'> = {},
-    private readonly inTransaction = false,
+    /** The advisory locks the enclosing transaction holds; absent outside one. */
+    private readonly locks?: Set<string>,
     private readonly notifications = Boolean(
       (db as Db & { $client?: postgres.Sql }).$client?.unsafe,
     ),
@@ -502,8 +503,9 @@ export class DrizzleStore implements Store {
 
   async transaction<T>(key: string, work: (store: DrizzleStore) => Promise<T>): Promise<T> {
     const lock = sql`select pg_advisory_xact_lock(3, hashtext(${key}))`;
-    if (this.inTransaction) {
-      await this.db.execute(lock);
+    if (this.locks) {
+      if (!this.locks.has(key)) await this.db.execute(lock);
+      this.locks.add(key);
       return work(this);
     }
     return this.db.transaction(async tx => {
@@ -515,7 +517,7 @@ export class DrizzleStore implements Store {
           this.organizationId,
           this.now,
           this.encryption,
-          true,
+          new Set([key]),
           this.notifications,
         ),
       );
@@ -1062,6 +1064,7 @@ export class DrizzleStore implements Store {
           app,
           credentials: secret.value,
           token: installationSecret.value,
+          sharedKey: shared.key,
         })
         .from(install)
         .innerJoin(
@@ -1072,6 +1075,7 @@ export class DrizzleStore implements Store {
           ),
         )
         .innerJoin(secret, eq(secret.id, app.credentialsSecretId))
+        .leftJoin(shared, eq(shared.id, app.sharedAppId))
         .leftJoin(installationSecret, eq(installationSecret.id, install.tokenSecretId))
         .where(
           and(this.mine(install.organizationId), eq(install.key, id), isNull(install.deletedAt)),
@@ -1081,7 +1085,7 @@ export class DrizzleStore implements Store {
     return (
       row && {
         installation: installationValue(row.installation, row.app, row.token),
-        app: appValue(row.app, row.credentials),
+        app: appValue(row.app, row.credentials, row.sharedKey),
       }
     );
   }
@@ -1202,7 +1206,7 @@ export class DrizzleStore implements Store {
       credentials: JsonRow[];
       runners: JsonRow[];
       connections: Connection[];
-      workspace: { slug: string; name: string } | null;
+      workspace: { slug?: string; name?: string } | null;
       files: Record<string, RepoFile>;
       tokens: Record<string, unknown>;
     }>(
@@ -1231,8 +1235,8 @@ export class DrizzleStore implements Store {
         ${sealedRows(sql`${runner}`, sql`${mine(sql`r.organization_id`)} and r.is_default and ${owned(sql`r.owner`)}`)} as runners,
         (select coalesce(jsonb_agg(${withSecret(sql`c.record`, sql`s.value`)} order by c.key), '[]'::jsonb) from ${connection} c left join ${secret} s on s.id = c.secret_id
           where ${mine(sql`c.organization_id`)} and ${owned(sql`c.owner`)}) as connections,
-        (select case when ${workspace.slug} is null then null else jsonb_build_object('slug', ${workspace.slug}, 'name', ${workspace.name}) end
-          from ${workspace} where ${mine(workspace.organizationId)}) as workspace,
+        coalesce((select jsonb_strip_nulls(jsonb_build_object('slug', ${workspace.slug}, 'name', ${workspace.name}))
+          from ${workspace} where ${mine(workspace.organizationId)}), '{}'::jsonb) as workspace,
         (select coalesce(jsonb_object_agg(${t.key}, ${t.value}), '{}'::jsonb) from ${t}
           where ${this.live(t.expiresAt)} and ${t.key} like any(${sql.param(files)}::text[])) as files,
         ${heldTokensQuery(this.organizationId, [input.installation.id], [input.installation.app])} as tokens`,

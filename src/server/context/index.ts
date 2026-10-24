@@ -89,6 +89,8 @@ export interface LinkExtra {
   /** The user's role in each of `organizations`. */
   roles?: Record<string, string>;
   token?: string;
+  /** The workspace `token` was granted in, the only one that uses it. */
+  organizationId?: string;
   /** The platform's own handle for the user (GitHub login), when the link learned it. */
   login?: string;
 }
@@ -258,7 +260,6 @@ export interface ServerSettings {
   runnerInstances?: Map<string, { signature: string; runner: Runner }>;
   configUpdate?: Promise<unknown>;
   registry?: import('../settings/mcp').RegistryIndex;
-  mcpIcons?: import('../settings/models').MemoryCache<import('../settings/mcp').IconFile | null>;
   probes?: import('../settings/models').MemoryCache<import('../../client/types').ProbeResult>;
 }
 

@@ -45,7 +45,7 @@ export function MenuItem({
   danger,
   ...rest
 }: Parts &
-  Omit<JSX.HTMLAttributes<HTMLButtonElement>, 'title' | 'icon' | 'type' | 'disabled'> & {
+  Omit<JSX.ButtonHTMLAttributes<HTMLButtonElement>, 'title' | 'icon' | 'type' | 'disabled'> & {
     title: ComponentChildren;
     /** A full page load: another site or a server endpoint; in-app pages use `MenuLink`. */
     href?: string;

@@ -18,6 +18,7 @@ import {
   nativeCredential,
   personalGrants,
   type ConnectionContext,
+  type PersonalGrants,
 } from './records';
 import { sharedApps } from '../agents/apps';
 import { sharedConversation } from '../tasks/access';
@@ -60,20 +61,25 @@ async function envKey(ctx: ConnectionContext, connection: Connection): Promise<s
 export const taskAsker = (task: AgentTask) =>
   task.context?.asker ?? (sharedConversation(task) ? undefined : task.requestedBy);
 
-/** A turn's connections: the task's grants and, on a conversation turn, the personal ones of the member who asked it. */
-export async function turnConnections(ctx: ConnectionContext, task: AgentTask): Promise<string[]> {
+/** A turn's connection ids: the task's grants and, on a conversation turn, the personal ones of the member who asked it, with the linked accounts read for those. */
+export async function turnConnections(
+  ctx: ConnectionContext,
+  task: AgentTask,
+): Promise<{ ids: string[] } & Partial<PersonalGrants>> {
   const asker = taskAsker(task);
-  const own = task.event && asker ? await personalGrants(ctx, asker, task.usage?.connections) : [];
+  const own =
+    task.event && asker ? await personalGrants(ctx, asker, task.usage?.connections) : undefined;
 
-  return [...new Set([...(task.connections ?? []), ...own])];
+  return { ...own, ids: [...new Set([...(task.connections ?? []), ...(own?.ids ?? [])])] };
 }
 
-/** `actAs` refuses a personal connection until its owner approved acting as them for the task, else answers nothing. */
+/** `actAs` refuses a personal connection until its owner approved acting as them for the task, else answers nothing; `turn` is the turn's connections when the caller read them. */
 export async function resolveConnections(
   ctx: ConnectionContext,
   task: AgentTask,
   handles: Record<string, string> = {},
   actAs?: (connection: Connection) => Promise<string | undefined>,
+  turn?: Awaited<ReturnType<typeof turnConnections>>,
 ) {
   const mcp: Record<string, McpServerSpec> = {};
   const env: Record<string, string> = {};
@@ -83,14 +89,14 @@ export async function resolveConnections(
   const warnings: string[] = [];
   const secrets: string[] = [];
   const asker = taskAsker(task);
-  const ids = await turnConnections(ctx, task);
+  const { ids, accounts } = turn ?? (await turnConnections(ctx, task));
   const stored = ids.length
     ? await ctx.store.list('connection', { ids, visibleTo: asker, secrets: 'all' })
     : [];
   const saved = new Set(stored.map(row => row.id));
   let nativeError: unknown;
   const native = ids.some(id => !saved.has(id))
-    ? await nativeConnections(ctx, asker).catch(error => {
+    ? await nativeConnections(ctx, asker, accounts).catch(error => {
         console.error('coder server: native connection lookup failed', error);
         nativeError = error;
         return [];
@@ -298,6 +304,7 @@ async function nativeToken(
       value =>
         value.platform === provider &&
         value.token &&
+        value.organizationId === ctx.organizationId &&
         value.organizations?.includes(ctx.organizationId) &&
         (!account || value.platformUserId === account),
     );
@@ -399,15 +406,16 @@ function keyToken(
   return key && tokenFingerprint(key) !== refused ? key : undefined;
 }
 
-/** A task's OAuth connection token or personal key on first use, refreshed then; `refused` names, by its fingerprint, a token its server refused, which refreshes only while it is still the current one. No token when it needs reconnecting: the refusal is marked on the connection or link. */
+/** A task's OAuth connection token or personal key on first use, refreshed then; `refused` names, by its fingerprint, a token its server refused, which refreshes only while it is still the current one. No token when it needs reconnecting: the refusal is marked on the connection or link. `found` is the connection when the caller already read it for the task's asker. */
 export async function connectionToken(
   ctx: ConnectionContext,
   task: AgentTask,
   id: string,
   refused?: string,
   resolved: { url?: unknown; connectionCreatedAt?: unknown } = {},
+  found?: Connection,
 ): Promise<{ token?: string; name?: string }> {
-  const connection = await findConnection(ctx, id, taskAsker(task));
+  const connection = found ?? (await findConnection(ctx, id, taskAsker(task)));
   const key = connection?.auth === 'key' && connection.owner && connection.provider === 'mcp';
   if (!connection || (connection.auth !== 'oauth' && !key) || connection.broken)
     return { name: connection?.name };
@@ -429,9 +437,10 @@ export async function resolvedTaskConnections(
   handles: Record<string, string>,
   actAs?: (connection: Connection) => Promise<string | undefined>,
 ) {
-  if (!status.task.connections?.length && !(status.task.event && taskAsker(status.task)))
+  const turn = await turnConnections(ctx, status.task);
+  if (!turn.ids.length)
     return { mcp: {}, env: {}, tokens: handles, warnings: [], secrets: [], saved: false };
-  const id = resolvedId(status, await turnConnections(ctx, status.task));
+  const id = resolvedId(status, turn.ids);
 
   const known = await ctx.store.get('snapshot', id);
   if (known && 'resolvedConnections' in known) {
@@ -446,9 +455,8 @@ export async function resolvedTaskConnections(
         saved: true,
       };
   }
-  const live = await ctx.store.get('task', status.task.id);
-  const resolved = await resolveConnections(ctx, status.task, handles, actAs);
-  if (!resolved.warnings.length && live)
+  const resolved = await resolveConnections(ctx, status.task, handles, actAs, turn);
+  if (!resolved.warnings.length)
     await ctx.store.withAppLock(`connections:${status.task.id}`, async store => {
       const current = await store.get('task', status.task.id);
       if (

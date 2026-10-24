@@ -28,7 +28,8 @@ export async function sharedApps(
   own?: Promise<Array<{ id: string; value: AgentApp }>>,
 ): Promise<AgentApp[]> {
   const store =
-    ctx.serverOrganizationId && ctx.serverOrganizationId !== ctx.organizationId
+    // Postgres keeps shared apps under the empty organization id.
+    ctx.serverOrganizationId !== undefined && ctx.serverOrganizationId !== ctx.organizationId
       ? (ctx.scope?.(ctx.serverOrganizationId).store ?? ctx.store)
       : ctx.store;
 

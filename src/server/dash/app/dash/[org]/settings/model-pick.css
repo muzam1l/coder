@@ -106,9 +106,6 @@
 .pop-chev[aria-expanded='true'] .ic {
   rotate: 90deg;
 }
-.pop-sub {
-  padding-left: 32px;
-}
 /* a row's effort choices, beside the row */
 .pop-flyout {
   position: fixed;

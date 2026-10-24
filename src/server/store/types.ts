@@ -197,7 +197,8 @@ export interface DispatchLoaded {
   credentials: Array<{ id: string; value: StoredCredential }>;
   runners: Array<{ id: string; value: RunnerRecord }>;
   connections: Connection[];
-  workspace?: { slug: string; name: string };
+  /** The workspace's slug and name as Wular last named them; empty before any member signed in. */
+  workspace?: { slug?: string; name?: string };
   tokens: TokenState;
 }
 

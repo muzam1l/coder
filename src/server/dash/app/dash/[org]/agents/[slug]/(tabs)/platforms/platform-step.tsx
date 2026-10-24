@@ -23,9 +23,9 @@ export function PlatformStep({
   agent,
   builtin,
   operator,
-  admin,
   unreachable,
   failed,
+  quiet,
 }: {
   step: Step;
   info?: IntegrationInfo;
@@ -36,10 +36,10 @@ export function PlatformStep({
   builtin: boolean;
   /** The viewer runs this server and can set up its shared apps. */
   operator: boolean;
-  /** The viewer owns or administers this workspace and can uninstall apps. */
-  admin: boolean;
   unreachable?: boolean;
   failed?: Parameters<typeof PlatformActions>[0]['failed'];
+  /** No installed badge, where the row already shows the installed accounts. */
+  quiet?: boolean;
 }) {
   const { id } = step;
   const name = info?.name ?? id;
@@ -84,7 +84,7 @@ export function PlatformStep({
     <span class="plat-step">
       {step.gone ? (
         <Badge tone="warn">uninstalled</Badge>
-      ) : state === 'created' && shared ? null : (
+      ) : (state === 'created' && shared) || (state === 'installed' && quiet) ? null : (
         // A shared app is never created by this workspace, only installed.
         <Badge tone={REACH_BADGE[state].tone}>{REACH_BADGE[state].label}</Badge>
       )}
@@ -94,7 +94,6 @@ export function PlatformStep({
         name={name}
         apps={step.apps}
         installed={step.live.length > 0}
-        installs={admin ? step.live : []}
         reinstall={step.gone}
         createUrl={step.createUrl}
         create={info.create}

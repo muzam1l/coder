@@ -41,7 +41,10 @@ const titled = (title: string, text?: string) =>
 function pageBlocks({ title, text, sections, links }: Page, divider?: boolean) {
   return [
     titled(title, text),
-    ...sections.map(entry => titled(entry.title, entry.text)),
+    ...sections.map(entry => ({
+      ...titled(entry.title, entry.text),
+      ...(entry.link ? { accessory: linkButton(entry.link) } : {}),
+    })),
     ...(divider ? [{ type: 'divider' }] : []),
     { type: 'actions', elements: links.map(linkButton) },
   ];
@@ -49,7 +52,7 @@ function pageBlocks({ title, text, sections, links }: Page, divider?: boolean) {
 
 /** Publishes the Home tab for the user who opened it. */
 export async function publishHome(ctx: AdapterContext, user: string): Promise<void> {
-  const page = await ctx.home?.();
+  const page = await ctx.home?.(user);
   if (!page || !ctx.installationId) return;
   await slackApi(
     'views.publish',

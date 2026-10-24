@@ -1,5 +1,5 @@
 /** Writes a task asks for that a person confirms: a typed operation kept as one of the task's approvals, applied with the routes' own core functions once the approver's role allows it. */
-import type { AgentTask, AgentUsage, Connection } from '../../agent/types';
+import type { AgentUsage, Connection } from '../../agent/types';
 import { APPROVERS, changeDecisionMessage } from '../../core/approvals';
 import type { CustomModelConfig } from '../../core/config';
 import { CoderError } from '../../core/errors';
@@ -14,7 +14,7 @@ import { getVersion } from '../agents/records';
 import { json } from '../routes/http';
 import { adminRole, bearerToken } from '../routes/guards';
 import type { Params } from '../routes/match';
-import type { ServerContext, SessionInfo } from '../context';
+import type { LinkedAccount, ServerContext, SessionInfo } from '../context';
 import { serverRunnerId } from '../runners/select';
 import { shownConfig, updateConfig } from '../settings/config';
 import { aliasEntry, toggleEntry, updateEntry } from '../settings/models';
@@ -413,21 +413,22 @@ export async function requestChange(
 const approvalId = (now: number) =>
   `apr-${now.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
-/** Why a task may not act as `connection`'s owner, for the model; none once the owner approved it for this task. The first use asks them, once. */
+/** Why a task may not act as `connection`'s owner, for the model; none once the owner approved it for this task. The first use asks them, once. `status` is the task as this request read it, `accounts` the owner's linked accounts when read already. */
 export async function actAsRefusal(
   ctx: ServerContext,
-  task: AgentTask,
+  status: TaskStatus,
   connection: Connection,
+  accounts?: LinkedAccount[],
 ): Promise<string | undefined> {
   const owner = connection.owner!;
-  const current = (await ctx.store.get('task', task.id))?.task ?? task;
+  const current = status.task;
   const asks = (current.context?.approvals ?? []).filter(approval => {
     const operation = changeOf(approval)?.operation;
     return operation?.kind === 'act-as' && operation.connection.id === connection.id;
   });
   const asked = asks.find(approval => approval.response?.decision !== 'closed');
   // A message from anyone else while this turn runs ends acting as the owner until the next turn.
-  const steered = (await readInbox(ctx, task.id)).some(
+  const steered = (await readInbox(ctx, current.id, -1, status.generation ?? 0)).some(
     entry =>
       entry.kind === 'steer' &&
       typeof entry.value === 'object' &&
@@ -436,7 +437,7 @@ export async function actAsRefusal(
       entry.value.asker !== owner,
   );
   if (asked?.response?.decision === 'accept' && !steered) return undefined;
-  const links = await ctx.auth?.linkedAccounts?.(owner).catch(() => []);
+  const links = accounts ?? (await ctx.auth?.linkedAccounts?.(owner).catch(() => []));
   const person =
     links?.find(link => link.name)?.name ||
     (owner === current.requestedBy ? current.context?.user?.name : undefined) ||
@@ -451,7 +452,7 @@ export async function actAsRefusal(
     !asked &&
     (await ctx.store.create(
       'delivery',
-      `act-as:${task.id}:${connection.id}:${asks.length}`,
+      `act-as:${current.id}:${connection.id}:${asks.length}`,
       { at: now },
       { ttlMs: ctx.config.taskTimeoutMs ?? 60 * 60 * 1000 },
     ));
@@ -472,7 +473,7 @@ export async function actAsRefusal(
         asker: owner,
       } satisfies ChangeRequest,
     };
-    await ctx.queue.patchTask(ctx.organizationId, task.id, { approvals: [approval] }, now);
+    await ctx.queue.patchTask(ctx.organizationId, current.id, { approvals: [approval] }, now);
     (ctx.waitUntil ?? (() => {}))(
       syncApprovals(ctx, current, [approval]).catch(error =>
         console.error(`coder server: could not post request ${approval.id}`, error),

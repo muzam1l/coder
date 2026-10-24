@@ -127,7 +127,7 @@ import {
   probe,
   updateModel,
 } from '../settings/models';
-import { mcpIcon, mcpRegistry } from '../settings/mcp';
+import { mcpRegistry } from '../settings/mcp';
 import {
   listConnections,
   createConnection,
@@ -155,7 +155,6 @@ const pagesRoutes = [
   route('GET', CLI_CLIENT_PATH, cliDocument, { guard: metadataAllowed }),
   route('GET', RESOURCE_PATH, resourceDocument, { guard: metadataAllowed }),
   route('GET', '/health', (req, ctx) => health(ctx)),
-  route('GET', '/mcp-icons/:signature', mcpIcon),
   route('GET', new URL(CONFIG_SCHEMA_URL).pathname, configSchemaDocument),
   route('GET', '/', home, { guard: pageSession }),
   route('GET', '/login', signIn, { guard: signInAllowed }),

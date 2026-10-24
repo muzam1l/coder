@@ -31,14 +31,14 @@ export function useConfig(first: Config) {
       answer => {
         saved.current = answer;
         if (seq === sent.current) setValue(answer);
-        return true;
+        return answer;
       },
       reason => {
         if (seq === sent.current) {
           setValue(saved.current);
           toastFailure(reason);
         }
-        return false;
+        return undefined;
       },
     );
   };

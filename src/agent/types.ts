@@ -204,6 +204,8 @@ export interface AgentTask {
   context?: TaskContext;
   /** What the platform thread gets when the run fails without an answer. */
   failureReply?: string;
+  /** A line for the turn's asker under its reply: privately where the platform can, else as a footer. */
+  notice?: string;
   /** The task's dashboard page, linked when the agent returns no reply where one is due. */
   taskUrl?: string;
   /** The agent's settings page, linked when its engine can't run the model it is set to. */

@@ -606,6 +606,7 @@ export function platformLinks(
       name: row.name,
       email: row.email,
       ...(row.organizations ? { organizations: row.organizations } : {}),
+      ...(row.organizationId ? { organizationId: row.organizationId } : {}),
       ...(row.login ? { login: row.login } : {}),
       ...(token ? { token } : {}),
       ...(row.refusedAt ? { refusedAt: row.refusedAt.getTime() } : {}),
@@ -619,6 +620,7 @@ export function platformLinks(
         ...(extra.organizations ? { organizations: extra.organizations } : {}),
         ...(extra.roles ? { roles: extra.roles } : {}),
         ...(extra.login ? { login: extra.login } : {}),
+        ...(extra.token ? { organizationId: extra.organizationId ?? null } : {}),
       };
       return linkTransaction(store, `link:${platform}:${platformUserId}`, async db => {
         const [row] = await db
@@ -715,6 +717,7 @@ export function platformLinks(
           email: platformLink.email,
           organizations: platformLink.organizations,
           roles: platformLink.roles,
+          login: platformLink.login,
           token: secret.value,
         })
         .from(platformLink)
@@ -729,6 +732,7 @@ export function platformLinks(
           email: row.email,
           ...(row.organizations ? { organizations: row.organizations } : {}),
           ...(row.roles ? { roles: row.roles } : {}),
+          ...(row.login ? { login: row.login } : {}),
           ...(row.token ? { token: row.token } : {}),
         }
       );

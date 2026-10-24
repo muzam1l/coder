@@ -18,7 +18,7 @@ import {
 } from '../../core/config';
 import { probeEndpoint } from '../../core/models';
 import { credentialEnv, runsOnEach } from './credentials';
-import { ConfigError, effectiveConfig, shownConfig, body, change } from './config';
+import { ConfigError, shownConfig, body, change } from './config';
 import { json } from '../routes/http';
 
 const MODEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
@@ -130,12 +130,8 @@ export async function listModels(
   url: URL,
 ): Promise<Response> {
   const shown = await shownConfig(ctx);
-  const { chain, reviewModel } = effectiveConfig(ctx, shown);
 
-  return json({
-    ...modelList(shown),
-    runsOn: await runsOnEach(ctx, [...chain, reviewModel], ctx.session?.user.id),
-  });
+  return json({ ...modelList(shown), runsOn: await runsOnEach(ctx, shown) });
 }
 
 export async function createModel(
@@ -248,7 +244,11 @@ export async function enableModel(
   return change(ctx, config => toggleEntry(config, params.name!, false));
 }
 
-/** Turns any model name off or back on: a built-in, a custom model or an alias. */
+/** Turns a built-in or custom model off or back on. */
 export function toggleEntry(config: Partial<CoderConfig>, name: string, disabled: boolean) {
-  toggleModel((config.models ??= {}), name, disabled);
+  try {
+    toggleModel((config.models ??= {}), name, disabled);
+  } catch (error) {
+    throw new ConfigError((error as Error).message);
+  }
 }

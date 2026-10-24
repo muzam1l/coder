@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'preact/hooks';
-import { useParams, useRouter } from '@wular/pnext/navigation/client';
+import { useParams, usePathname, useRouter } from '@wular/pnext/navigation/client';
 
 import type { AppCheck, CreateStart } from '@coder/client/types';
 import type { CreateField, CreateStep, PlatformPost } from '@coder/integrations/types';
@@ -871,11 +871,10 @@ export function CreateButton(options: CreateOptions) {
   );
 }
 
-/** The one next step for a platform, and its installs in the row menu, which ends at each app's page. */
+/** The one next step for a platform; the row menu installs again and ends at each app's page, which lists its installs. */
 export function PlatformActions({
   apps,
   installed,
-  installs = [],
   reinstall,
   shared = false,
   failed,
@@ -886,8 +885,6 @@ export function PlatformActions({
   agent?: string;
   apps: AppChoice[];
   installed: boolean;
-  /** Live installs the viewer may uninstall. */
-  installs?: InstallChoice[];
   /** The app whose every install was removed on the platform. */
   reinstall?: string;
   /** The apps are this server's shared ones, installed but never created here. */
@@ -898,19 +895,13 @@ export function PlatformActions({
   const params = useParams<'/dash/[org]/agents/[slug]/platforms'>();
   const { org } = params;
   const slug = agent ?? params.slug;
+  // Off the agent's own pages, an app's page leads back to where it was opened.
+  const path = usePathname();
+  const back = path.startsWith(`/dash/${org}/agents/${slug}`) ? undefined : path;
   const { busy, install } = useInstall();
   const { leaving, start, dialogs } = useCreate(options);
-  const [uninstalling, setUninstalling] = useState<InstallChoice>();
   const { integration, name, create } = options;
   const main = apps.find(app => app.id === reinstall) ?? apps[0];
-  const uninstallation =
-    uninstalling && installs.some(install => install.id === uninstalling.id) ? (
-      <UninstallDialog
-        install={uninstalling}
-        name={name}
-        onClose={() => setUninstalling(undefined)}
-      />
-    ) : null;
   const failure = failed ? (
     <FailedDialog
       name={failed.name}
@@ -940,7 +931,7 @@ export function PlatformActions({
         )}
         <Menu
           button={installed ? 'icon' : { size: 'sm', class: 'split-more' }}
-          label={`More for ${integration}`}
+          label={`More for ${name}`}
           wide
           summary={<Icon d={installed ? iDots : iDown} />}
         >
@@ -963,25 +954,13 @@ export function PlatformActions({
               />
             );
           })}
-          {installs.map(install => (
-            <MenuItem
-              key={`uninstall ${install.id}`}
-              icon={iX}
-              title={
-                apps.length > 1
-                  ? `Uninstall ${install.app} from ${install.account}`
-                  : `Uninstall from ${install.account}`
-              }
-              danger
-              onClick={() => setUninstalling(install)}
-            />
-          ))}
           {apps.map(app => (
             <MenuLink
               key={`manage ${app.id}`}
               icon={iSliders}
               href="/dash/[org]/agents/[slug]/platforms/[app]"
               params={{ org, slug, app: app.id }}
+              search={back ? { back } : undefined}
             >
               {apps.length > 1 ? `Manage ${app.name}` : 'Manage app'}
             </MenuLink>
@@ -989,7 +968,6 @@ export function PlatformActions({
         </Menu>
       </span>
       {dialogs}
-      {uninstallation}
       {failure}
     </>
   );

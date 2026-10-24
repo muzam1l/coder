@@ -430,6 +430,8 @@ export interface AgentQuery extends PageQuery {
   q?: string;
   platform?: string;
   type?: string;
+  /** A page also lists its agents' apps and their installs. */
+  apps?: boolean;
 }
 export interface CredentialQuery extends PageQuery {
   fields?: 'id';
@@ -612,8 +614,6 @@ export type Found = {
   curated?: true;
   title: string;
   description: string;
-  /** The server's icon, served from this server. */
-  icon?: string;
   type: string;
   command?: string;
   args?: string[];

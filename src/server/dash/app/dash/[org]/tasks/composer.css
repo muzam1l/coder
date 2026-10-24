@@ -193,38 +193,6 @@ dialog.compose-dialog::backdrop {
   }
 }
 
-/* the chevron beside a model opens its efforts under it */
-.pop-chev {
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  align-self: stretch;
-  aspect-ratio: 1;
-  width: auto;
-  border: 0;
-  background: none;
-  color: var(--dim);
-  cursor: pointer;
-}
-.pop-chev:focus-visible {
-  outline-offset: -2px;
-}
-.pop-chev:hover,
-.pop-chev[aria-expanded='true'] {
-  color: var(--fg);
-  background: var(--wash);
-}
-.pop-chev .ic {
-  width: 14px;
-  height: 14px;
-  transition: rotate 0.15s;
-}
-.pop-chev[aria-expanded='true'] .ic {
-  rotate: 90deg;
-}
-.pop-sub {
-  padding-left: 32px;
-}
 /* local server: the folder select, or a path box in its place */
 .composer-line .folder {
   display: contents;

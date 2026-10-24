@@ -72,6 +72,8 @@ export const platformLink = pgTable(
     organizations: jsonb().$type<string[]>(),
     /** The user's role in each of those workspaces, refreshed at sign-in. */
     roles: jsonb().$type<Record<string, string>>(),
+    /** The workspace the token was granted in, the only one that uses it. */
+    organizationId: text(),
     /** The platform's user token from the link's OAuth, sealed. */
     tokenSecretId: secretId(),
     /** When the platform refused the token's refresh; a new token clears it. */
@@ -277,6 +279,7 @@ export const task = pgTable(
     context: jsonb().$type<TaskContext>(),
     files: jsonb().$type<Record<string, string>>(),
     failureReply: text(),
+    notice: text(),
     taskUrl: text(),
     settingsUrl: text(),
     result: jsonb().$type<TaskOutcome>(),

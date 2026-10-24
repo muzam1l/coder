@@ -2,7 +2,7 @@ import type { TaskStatus } from '../store/types';
 import { SERVER_LIMITS } from '../limits';
 import { scoped, type ServerContext } from '../context';
 import { loadedStore } from '../store/primed';
-import { machineFirewall } from './context';
+import { firstModel, machineFirewall } from './context';
 import type { ClaimedTask, RunningTask, TaskFence } from './queue';
 import type { Runner } from '../runners';
 import { taskRunner } from '../runners/select';
@@ -15,6 +15,7 @@ import {
 } from './local';
 import { loadTask } from '../../core/state';
 import { syncDuePosts } from './approvals';
+import { deliverWaiting } from './conversation';
 
 function deadline<T>(work: Promise<T>, ms: number, operation: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout>;
@@ -67,6 +68,7 @@ async function fail(
     const failed = await ctx.store.get('task', status.task.id);
     if (failed) await reportTaskFailure(ctx, failed.task, error);
     await stopTaskMachine(ctx, status, true, runner);
+    if (failed) deliverWaiting(ctx, failed.task);
   }
 
   return finished;
@@ -98,7 +100,11 @@ async function inspect(ctx: ServerContext, status: RunningTask, now: number): Pr
         generation: status.generation ?? 0,
       },
     );
-    if (finished) await stopTaskMachine(ctx, status, true, runner);
+    if (finished) {
+      await stopTaskMachine(ctx, status, true, runner);
+      const cancelled = await ctx.store.get('task', status.task.id);
+      if (cancelled) deliverWaiting(ctx, cancelled.task);
+    }
     return finished;
   }
   if (!status.handle) {
@@ -305,11 +311,18 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
           throw error;
         },
       );
+      // The list shows the model each turn starts with, recorded with its handle.
+      const model = firstModel(status.task);
       if (
         !(await taskCtx.queue.patchTask(
           claimed.organizationId,
           status.task.id,
-          { handle },
+          {
+            handle,
+            ...(model && model !== status.task.usage?.resolvedModel
+              ? { resolvedModel: model }
+              : {}),
+          },
           now(),
           active,
         ))

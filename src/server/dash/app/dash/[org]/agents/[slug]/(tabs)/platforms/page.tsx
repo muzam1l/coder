@@ -21,7 +21,7 @@ import { MoreList } from '@/comps/ui/menu';
 import { Settle } from '@/comps/frame/stream';
 import { loadAgent } from '@/api/load';
 import { needsTunnel } from '@/api/types';
-import { editableAgent, eventNames, isAdmin } from '@/api/types';
+import { editableAgent, eventNames } from '@/api/types';
 import { TunnelGuide } from '@/app/dash/[org]/settings/tunnel-guide';
 import { Platform } from '@/app/dash/[org]/agents/agent/agent-pills';
 import {
@@ -54,7 +54,6 @@ function Platforms({
   installations,
   catalog,
   operator = false,
-  admin = false,
   failed,
   issues,
 }: {
@@ -65,8 +64,6 @@ function Platforms({
   catalog: IntegrationInfo[];
   /** The viewer runs this server and can set up its shared apps. */
   operator?: boolean;
-  /** The viewer owns or administers this workspace and can uninstall apps. */
-  admin?: boolean;
   /** The last setup, when it failed unexpectedly. */
   failed?: SetupOutcome;
   /** Where to report an unexpected failure. */
@@ -196,7 +193,6 @@ function Platforms({
                       agent={agent.id}
                       builtin={builtin}
                       operator={operator}
-                      admin={admin}
                       unreachable={catalog.some(entry => entry.unreachable)}
                       failed={
                         failed?.platform === id
@@ -346,7 +342,6 @@ export default async function AgentPlatformsPage({
                     installations={all}
                     catalog={integrations}
                     operator={who?.operator === true}
-                    admin={who ? isAdmin(who) : false}
                     failed={inRow ? failed : undefined}
                     issues={who?.server?.issuesUrl}
                   />

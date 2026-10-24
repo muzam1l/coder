@@ -21,6 +21,7 @@ function backTo(back: string | null | undefined): { to: To; label: string } | un
   const [, , , section, slug] = url.pathname.split('/');
   let label: string = HEADS[section as keyof typeof HEADS]?.title ?? 'Back';
   if (section === 'tasks' && slug) label = 'Task';
+  if (section === 'settings') label = slug ? slug[0]!.toUpperCase() + slug.slice(1) : 'Settings';
   if (section === 'agents' && slug)
     try {
       label = decodeURIComponent(slug);

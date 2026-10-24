@@ -12,6 +12,7 @@ import type {
   PlatformApp,
   PlatformEvent,
   Space,
+  TypingOptions,
   WebhookTarget,
 } from '../types';
 import type { SlackAppCredentials } from './app';
@@ -452,6 +453,17 @@ export async function slackAdapter(ctx: AdapterContext): Promise<Adapter> {
             key === 'getState' ? () => state : Reflect.get(target, key, receiver),
         }),
       );
+    }
+
+    // A whole DM has no thread, so its status goes on the asking message.
+    override startTyping(threadId: string, status?: string, options?: TypingOptions) {
+      const { channel, threadTs } = this.decodeThreadId(threadId);
+      const target =
+        threadTs || !options?.messageId
+          ? threadId
+          : this.encodeThreadId({ channel, threadTs: options.messageId });
+
+      return super.startTyping(target, status, options);
     }
 
     protected override markEventDelivered(): void {}

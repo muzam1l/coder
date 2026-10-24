@@ -18,7 +18,7 @@ import {
   agentProblems,
 } from './records';
 import { syncLocalAgents } from '../store/local';
-import { agentApps } from './connections';
+import { agentApps, appRow, installationRow } from './connections';
 import { failedDeliveries } from '../tasks/events';
 import { decodeCursor, json, notFound, page, pageLimit, paged } from '../routes/http';
 import { agentModels, listRunsOn, modelAttempts } from '../settings/credentials';
@@ -333,10 +333,12 @@ export async function agentsPage(
   const q = url.searchParams.get('q')?.trim().toLowerCase();
   const source = AGENT_TYPES[url.searchParams.get('type') ?? ''];
   const platform = url.searchParams.get('platform');
+  const withApps = url.searchParams.get('apps') === '1';
   const apps = ctx.store.list('app');
-  const [appRows, installations, candidates] = await Promise.all([
+  const [appRows, installations, listed, candidates] = await Promise.all([
     apps,
     ctx.store.list('installation'),
+    withApps ? agentApps(ctx, undefined, apps) : [],
     all
       ? all
           .filter(
@@ -379,9 +381,21 @@ export async function agentsPage(
   }
   const result = page(rows, limit, last => agentOrderKey(last.record));
   const preferred = defaultAgent();
+  // With `apps=1`, the listed agents' apps, the workspace's and the server's shared ones, and their installs.
+  const agents = new Set(result.items.map(({ record }) => record.id));
+  const agentAppRows = listed.filter(({ value }) => agents.has(value.agent));
+  const appIds = new Set(agentAppRows.map(({ value }) => value.id));
 
   return {
     ...result,
+    ...(withApps
+      ? {
+          apps: agentAppRows.map(({ value }) => appRow(ctx, value)),
+          installations: installations
+            .filter(({ value }) => appIds.has(value.app) && (!value.deletedAt || value.uninstalled))
+            .map(({ value }) => installationRow(ctx, value)),
+        }
+      : {}),
     items: await Promise.all(
       result.items.map(async ({ record, version, ids }) => {
         const source = await sourceUrl(ctx, record, version, apps);

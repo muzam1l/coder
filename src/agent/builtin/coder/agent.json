@@ -23,7 +23,11 @@
     },
     "linear": {
       "events": {
-        "mention": true
+        "mention": true,
+        "issue": true,
+        "comment": {
+          "match": "[Cc]oder"
+        }
       }
     }
   }

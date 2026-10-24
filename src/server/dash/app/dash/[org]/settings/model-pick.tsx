@@ -129,7 +129,7 @@ export function ModelChoices({
 }
 
 /** Opens a row's effort choices beside the row, on the left when the right has no room, and under it on a phone; the list itself never moves. */
-function placeBeside(event: ToggleEvent) {
+export function placeBeside(event: ToggleEvent) {
   const pop = event.currentTarget as HTMLElement;
   const row = document.querySelector(`[popovertarget="${pop.id}"]`)?.parentElement;
   const box = row?.getBoundingClientRect();

@@ -197,7 +197,8 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
               : Q extends { fields: 'id,name' }
                 ? Pick<AgentRow, 'id' | 'name'>
                 : AgentCardRow
-          >
+          > &
+            (Q extends { apps: true } ? { apps: AppRow[]; installations: InstallationRow[] } : {})
         : Q extends { fields: 'id' }
           ? Array<Pick<AgentRow, 'id'>>
           : Q extends { fields: 'id,name' }
@@ -563,7 +564,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   };
   readonly config = {
     get: (): Promise<ConfigShape> => this.request('/admin/config'),
-    patch: (body: import('./types').ConfigPatch): Promise<Config> =>
+    patch: (body: import('./types').ConfigPatch): Promise<Config & Pick<ModelsShape, 'runsOn'>> =>
       this.request('/admin/config', {
         method: 'PATCH',
         headers: { 'content-type': 'application/merge-patch+json' },
@@ -578,26 +579,26 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       model: string;
       envKey?: string;
       contextWindow?: number;
-    }): Promise<Config> => this.post('/admin/models', body),
+    }): Promise<Config & Pick<ModelsShape, 'runsOn'>> => this.post('/admin/models', body),
     probe: (body: { baseUrl: string; envKey?: string; key?: string }): Promise<ProbeResult> =>
       this.post('/admin/models/probe', body),
-    remove: (name: string): Promise<Config> =>
+    remove: (name: string): Promise<Config & Pick<ModelsShape, 'runsOn'>> =>
       this.request(`/admin/models/${encodeURIComponent(name)}`, {
         method: 'DELETE',
       }),
     update: (
       name: string,
       body: { baseUrl?: string; model?: string; envKey?: string; contextWindow?: number },
-    ): Promise<Config> =>
+    ): Promise<Config & Pick<ModelsShape, 'runsOn'>> =>
       this.request(`/admin/models/${encodeURIComponent(name)}`, {
         method: 'PATCH',
         body: JSON.stringify(body),
       }),
-    alias: (name: string, spec: string): Promise<Config> =>
+    alias: (name: string, spec: string): Promise<Config & Pick<ModelsShape, 'runsOn'>> =>
       this.post(`/admin/models/${encodeURIComponent(name)}/alias`, { spec }),
-    enable: (name: string): Promise<Config> =>
+    enable: (name: string): Promise<Config & Pick<ModelsShape, 'runsOn'>> =>
       this.post(`/admin/models/${encodeURIComponent(name)}/enable`),
-    disable: (name: string): Promise<Config> =>
+    disable: (name: string): Promise<Config & Pick<ModelsShape, 'runsOn'>> =>
       this.post(`/admin/models/${encodeURIComponent(name)}/disable`),
   };
   readonly mcp = {

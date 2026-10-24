@@ -1,4 +1,4 @@
-/** Agent sessions come through the Chat SDK adapter, loaded on first use; the host handles only the app's revocation itself. */
+/** Agent sessions come through the Chat SDK adapter, loaded on first use; the host verifies and parses every other webhook itself. */
 import { createHmac } from 'node:crypto';
 
 import type {
@@ -7,6 +7,7 @@ import type {
   ChatInstance,
   EmojiValue,
   Message,
+  SerializedThread,
   Thread,
 } from 'chat';
 
@@ -58,34 +59,140 @@ export function linearTarget(req: Request, raw: string): WebhookTarget | undefin
     : undefined;
 }
 
+type Issue = {
+  id?: string;
+  title?: string;
+  description?: string | null;
+  teamId?: string;
+  state?: { name?: string };
+  labels?: Array<{ id?: string; name?: string }>;
+  priorityLabel?: string;
+  assignee?: { name?: string } | null;
+  botActor?: unknown;
+};
+
+/** A Linear webhook with the fields read here: the app's revocation and Issue and Comment changes. */
+type Webhook = {
+  type?: string;
+  action?: string;
+  organizationId?: string;
+  oauthClientId?: string;
+  actor?: { id?: string; type?: string; name?: string } | null;
+  data?: Issue & {
+    body?: string;
+    parentId?: string | null;
+    parent?: { body?: string } | null;
+    issue?: Issue | null;
+  };
+  /** An update's previous values, a key for each property it changed. */
+  updatedFrom?: Record<string, unknown> & { labelIds?: string[] };
+};
+
+/** Whether the event happened in an agent session, where every prompt gets an answer and replies are progress. */
+export const linearSession = (event: PlatformEvent) =>
+  /:s:[^:]+$/.test(event.chat?.thread.id ?? '');
+
+/** Whether `text` @-mentions the app by handle or profile link, which goes to an agent session instead. */
+function mentions(text: string | null | undefined, handle: string): boolean {
+  const name = handle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+  return new RegExp(`(^|[^\\w-])@${name}(?![\\w-])|/profiles/${name}(?![\\w-])`, 'i').test(
+    text ?? '',
+  );
+}
+
+/** What an issue update changed that an agent acts on, a line each; removed labels and reordering are not. */
+function changes(issue: Issue, before: NonNullable<Webhook['updatedFrom']>): string[] {
+  const added = (issue.labels ?? []).filter(
+    label => before.labelIds && label.id && !before.labelIds.includes(label.id),
+  );
+
+  return [
+    'stateId' in before && issue.state?.name && `Moved to ${issue.state.name}`,
+    added.length > 0 && `Labeled ${added.map(label => label.name).join(', ')}`,
+    'priority' in before && issue.priorityLabel && `Priority ${issue.priorityLabel}`,
+    'assigneeId' in before &&
+      (issue.assignee?.name ? `Assigned to ${issue.assignee.name}` : 'Unassigned'),
+    ('title' in before || 'description' in before) && 'Edited',
+  ].filter((line): line is string => Boolean(line));
+}
+
+/** An Issue or Comment webhook as its catalog event; only people's changes count, so the agent never answers itself. */
+function dataEvent(req: Request, body: Webhook, app: PlatformApp): PlatformEvent | undefined {
+  const data = body.data;
+  if (body.actor?.type !== 'user' || !body.actor.id || !data || data.botActor) return;
+  let issue: Issue | null | undefined;
+  let text: string | undefined;
+  let comment: string | undefined;
+  if (body.type === 'Issue') {
+    const about = [data.title, data.description].filter(Boolean).join('\n\n');
+    const changed =
+      body.action === 'update' && body.updatedFrom ? changes(data, body.updatedFrom) : [];
+    issue = data;
+    // A mention in a new issue's description starts an agent session.
+    if (body.action === 'create' && !mentions(data.description, app.name)) text = about;
+    else if (changed.length) text = `${changed.join('\n')}\n\n${about}`;
+  } else if (
+    body.type === 'Comment' &&
+    body.action === 'create' &&
+    // A reply under a mention is a prompt of that mention's agent session.
+    !mentions(data.body, app.name) &&
+    !mentions(data.parent?.body, app.name)
+  ) {
+    issue = data.issue;
+    text = data.body;
+    comment = data.parentId ?? data.id;
+  }
+  if (!issue?.id || !text || !body.organizationId) return;
+  const thread: SerializedThread = {
+    _type: 'chat:Thread',
+    adapterName: 'linear',
+    channelId: `linear:${issue.id}`,
+    id: comment ? `linear:${issue.id}:c:${comment}` : `linear:${issue.id}`,
+    isDM: false,
+  };
+
+  return {
+    integration: 'linear',
+    type: body.type === 'Issue' ? 'issue' : 'comment',
+    appId: app.id,
+    installationId: body.organizationId,
+    deliveryId: req.headers.get('linear-delivery') ?? '',
+    actor: { id: body.actor.id, ...(body.actor.name ? { login: body.actor.name } : {}) },
+    text,
+    ...(issue.teamId ? { space: { kind: 'team' as const, id: issue.teamId } } : {}),
+    chat: { thread },
+  };
+}
+
+/** Every signed webhook but agent sessions, which the Chat SDK adapter verifies and handles. */
 export function linearOwnEvents(
   req: Request,
   raw: string,
   app: PlatformApp,
   credentials: unknown,
 ): OwnEvent | undefined {
-  const body = JSON.parse(raw) as {
-    type?: string;
-    action?: string;
-    organizationId?: string;
-    oauthClientId?: string;
-  };
-  if (body.type !== 'OAuthApp' || body.action !== 'revoked') return undefined;
+  const body = JSON.parse(raw) as Webhook;
+  if (body.type === 'AgentSessionEvent') return undefined;
   const secret = (credentials as { webhookSecret?: string }).webhookSecret;
   if (!verifyLinearWebhook(raw, req.headers.get('linear-signature'), secret))
     return { invalid: true };
-  return body.organizationId && body.oauthClientId === app.id.slice('linear:'.length)
-    ? { uninstalled: `${app.id}:${body.organizationId}` }
-    : { invalid: true };
+  if (body.type === 'OAuthApp')
+    return body.action === 'revoked' &&
+      body.organizationId &&
+      body.oauthClientId === app.id.slice('linear:'.length)
+      ? { uninstalled: `${app.id}:${body.organizationId}` }
+      : { invalid: true };
+  const event = dataEvent(req, body, app);
+
+  return event ? { events: [event] } : { ack: true };
 }
 
-/** Linear marks a session unresponsive without an activity within 10 seconds, so the agent thinks aloud before dispatch. */
 export function linearChatEvent(
   type: string,
-  thread: Thread,
+  _thread: Thread,
   message: Message,
 ): Pick<PlatformEvent, 'type' | 'actor' | 'promptContext'> & Partial<Pick<PlatformEvent, 'text'>> {
-  void thread.startTyping('Reading the issue').catch(() => {});
   const context = (message.raw as { agentSessionPromptContext?: string }).agentSessionPromptContext;
   // A mention in the issue description starts the session on Linear's own notice; the issue's title is the ask.
   const title = SESSION_NOTICE.test(message.text)

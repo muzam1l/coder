@@ -164,7 +164,7 @@ function Find({
 
   return (
     <div class="conn-find">
-      <Search value={query} label="Search platforms and MCP servers, or paste an MCP server URL" onInput={search} />
+      <Search value={query} label="Search platforms and MCP servers, or paste an MCP server URL" onInput={search} autofocus />
       <div class="conn-hits" role="listbox" aria-label="Services" aria-busy={Boolean(found && !found.items)}>
         {target ? (
           <MenuItem
@@ -198,9 +198,6 @@ function Find({
             {found.items.map(server => (
               <MenuItem
                 key={server.name}
-                icon={
-                  server.icon ? <img src={server.icon} alt="" width="20" height="20" /> : undefined
-                }
                 title={
                   <>
                     {server.title}
@@ -227,7 +224,6 @@ function usePlatform({
   rows,
   scope,
   operator,
-  admin,
   builtin,
   onAdded,
 }: {
@@ -235,7 +231,6 @@ function usePlatform({
   rows: ConnectionRow[];
   scope: Scope;
   operator: boolean;
-  admin: boolean;
   builtin?: Builtin;
   onAdded: (row: ConnectionRow) => void;
 }) {
@@ -253,7 +248,6 @@ function usePlatform({
         agent={builtin!.id}
         builtin
         operator={operator}
-        admin={admin}
       />
     </div>
   ) : null;
@@ -536,7 +530,7 @@ function Connect({
     local ? 'workspace' : (first ?? (platform || !admin ? 'personal' : 'workspace')),
   );
   const platformForm = platform
-    ? usePlatform({ info: pick.info, rows, scope, operator, admin, builtin, onAdded })
+    ? usePlatform({ info: pick.info, rows, scope, operator, builtin, onAdded })
     : undefined;
   const mcpForm = platform ? undefined : useMcp({ ...pick, scope, onAdded });
   const form = (platformForm ?? mcpForm)!;
@@ -548,11 +542,7 @@ function Connect({
       title={
         <span class="conn-title">
           {onBack ? <IconButton label="Back" onClick={onBack}><Icon d={iLeft} /></IconButton> : null}
-          {platform ? (
-            <BrandIcon brand={pick.info.brand} />
-          ) : pick.server?.icon ? (
-            <img src={pick.server.icon} alt="" width="20" height="20" />
-          ) : null}
+          {platform ? <BrandIcon brand={pick.info.brand} /> : null}
           {title}
         </span>
       }

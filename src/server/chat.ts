@@ -4,8 +4,8 @@ import { createHash } from 'node:crypto';
 import type { Chat, Message, SerializedMessage, SerializedThread, Thread } from 'chat';
 
 import { definitionEvents, eventOptions } from '../agent/definition';
-import { postReplyParts, reactToMessage } from '../agent/exec';
-import { type AgentApp, type AgentEvent } from '../agent/types';
+import { postReplyParts, reactToMessage, withNotice } from '../agent/exec';
+import { type AgentApp, type AgentEvent, type AgentTask } from '../agent/types';
 import { agentWithVersion } from './agents/records';
 import { syncLocalAgents } from './store/local';
 import type {
@@ -13,7 +13,9 @@ import type {
   ChatRoute,
   Space,
   Integration,
+  LinkedMember,
   TokenBound,
+  TypingOptions,
 } from '../integrations/types';
 import { forInstallation, type ServerContext } from './context';
 import { appChatState, LocalChatState } from './store/chat';
@@ -24,10 +26,17 @@ import {
   DELIVERY_TTL_MS,
   dispatchEvent,
   dropped,
+  linkedMember,
   recordFailure,
   type Replies,
 } from './tasks/events';
-import { conversationKey, knownKey, reactToConversation, recordUnseen } from './tasks/conversation';
+import {
+  conversationKey,
+  itemOf,
+  knownKey,
+  reactToConversation,
+  recordUnseen,
+} from './tasks/conversation';
 import { dashPath, organizationSlug } from './auth/members';
 import { kick } from './tasks/kick';
 import { answersShown } from './tasks/approvals';
@@ -196,16 +205,23 @@ export async function deliver(
     dropped(event, `installation ${key} is not granted ${event.account ?? 'its account'}`);
     return;
   }
-  const dispatched = await dispatchEvent(
-    tenant,
-    integration,
-    app,
-    credentials,
-    event,
-    ctx.now ?? Date.now,
-    replies,
-  );
-  await dispatched.work;
+  let dispatched: Awaited<ReturnType<typeof dispatchEvent>>;
+  try {
+    dispatched = await dispatchEvent(
+      tenant,
+      integration,
+      app,
+      credentials,
+      event,
+      ctx.now ?? Date.now,
+      replies,
+    );
+    await dispatched.work;
+  } catch (error) {
+    // A dispatch that fails after the working indicator started clears it.
+    await replies.endTyping?.().catch(() => {});
+    throw error;
+  }
   if (!dispatched.taskId) return;
 
   await kick(tenant, true, false, true);
@@ -220,14 +236,31 @@ function threadReplies(
   limit?: number,
   failed?: (error: unknown) => Promise<void>,
 ): Replies {
+  const messageId = typeof message === 'string' ? message : message?.id;
+  const asker = typeof user === 'string' ? user : user?.userId;
+  let typing: Promise<void> | undefined;
+  const endTyping = async () => {
+    await typing?.catch(() => {});
+    await thread.adapter.endTyping?.(thread.id);
+  };
+  // A reply ends the working indicator; failing to clear it never fails the reply.
+  const replied = async <T>(sent: T) => {
+    await endTyping().catch(error =>
+      console.error(`coder server: could not clear the working indicator in ${thread.id}`, error),
+    );
+
+    return sent;
+  };
   // Where the platform answers one message, the reply goes to the one that raised the event, not the thread's newest.
-  const post = async (text: string, progress = false) => {
-    const sent = await postReplyParts(thread, text, limit, message, progress).catch(async error => {
+  const post = async (text: string, progress = false, notice?: string) => {
+    const sent = await withNotice(thread, text, notice, asker, text =>
+      postReplyParts(thread, text, limit, message, progress),
+    ).catch(async error => {
       await failed?.(error);
       throw error;
     });
 
-    return { id: sent.at(-1)?.id, ids: sent.map(message => message.id) };
+    return replied({ id: sent.at(-1)?.id, ids: sent.map(message => message.id) });
   };
   const marks = (
     thread.adapter as {
@@ -237,15 +270,23 @@ function threadReplies(
 
   return {
     post,
-    react: (emoji, target) =>
-      reactToMessage(
-        thread,
-        emoji,
-        target ?? (typeof message === 'string' ? message : message?.id),
-      ),
-    problem: text => (marks ? marks.call(thread.adapter, thread.id, text) : post(text)),
+    react: (emoji, target) => reactToMessage(thread, emoji, target ?? messageId),
+    problem: async text =>
+      marks ? replied(await marks.call(thread.adapter, thread.id, text)) : post(text),
     whisper: text =>
       user ? thread.postEphemeral(user, text, { fallbackToDM: false }) : Promise.resolve(null),
+    startTyping: () => {
+      const options: TypingOptions = {
+        ...(asker ? { initiatorUserId: asker } : {}),
+        ...(messageId ? { messageId } : {}),
+      };
+      typing = thread.adapter.startTyping(thread.id, 'Working', options);
+
+      return typing;
+    },
+    endTyping: async () => {
+      if (typing) await endTyping();
+    },
   };
 }
 
@@ -273,13 +314,26 @@ export async function eventReplies(
 ): Promise<Replies> {
   if (!event.chat)
     return { post: async () => {}, problem: async () => {}, whisper: async () => {} };
+  // A resumed turn keeps the starter as actor; its own asker wrote the current message.
   return threadReplies(
     await eventThread(ctx, app, event),
-    event.actor.id || undefined,
+    event.chat.message?.author.userId || event.actor.id || undefined,
     event.chat.message?.id || undefined,
     ctx.integrations[app.integration]?.replyLimit,
     error => failedPost(ctx, app, event.installationId, error),
   );
+}
+
+/** Clears the working indicator in a task's conversation, when its turn ended or replied from elsewhere. */
+export async function endTyping(ctx: ServerContext, task: AgentTask): Promise<void> {
+  const event = task.event;
+  if (!event?.chat || task.source !== event.integration) return;
+  if (!ctx.integrations[event.integration]?.sticksTyping) return;
+  const app = await ctx.store.get('app', event.appId);
+  if (!app) return;
+  const thread = await eventThread(ctx, app, event);
+
+  await thread.adapter.endTyping?.(thread.id);
 }
 
 async function failedPost(ctx: ServerContext, app: AgentApp, installation: string, error: unknown) {
@@ -360,7 +414,8 @@ async function unseen(
     return undefined;
   });
   if (!tenant) return;
-  const event: Pick<AgentEvent, 'appId' | 'installationId' | 'chat'> = {
+  const event: Pick<AgentEvent, 'integration' | 'appId' | 'installationId' | 'chat'> = {
+    integration: app.integration,
     appId: app.id,
     installationId: target.id,
     chat: { thread: stored(thread.toJSON()) },
@@ -427,7 +482,7 @@ export function adapterContext(
             }),
           active: async thread => {
             const tenant = await forInstallation(ctx, `${app.id}:${target.id}`);
-            const key = conversationKey(app.id, target.id, thread);
+            const key = conversationKey(app.id, target.id, itemOf(integration, thread));
 
             return Boolean(await tenant?.store.get('delivery', key));
           },
@@ -437,17 +492,35 @@ export function adapterContext(
 
             return Boolean(await tenant?.store.get('delivery', key));
           },
-          home: async () => {
+          home: async viewer => {
             const base = ctx.config.publicUrl;
             if (!base || !dash) return undefined;
-            const agent = await agentSummary(ctx, app, target);
+            const [agent, account] = await Promise.all([
+              agentSummary(ctx, app, target),
+              viewer ? viewerAccount(ctx, integration, app, target, viewer) : undefined,
+            ]);
 
-            return homePage(integration, { home: base, dash }, app.name, agent);
+            return homePage(integration, { home: base, dash }, app.name, agent, account);
           },
         }
       : {}),
     privateState: () => new LocalChatState(),
   };
+}
+
+/** The viewer's platform account, linked to a member of the workspace the installation is bound to or not; none where the workspace has no members. */
+async function viewerAccount(
+  ctx: ServerContext,
+  integration: Integration,
+  app: AgentApp,
+  target: Target,
+  viewer: string,
+): Promise<{ linked?: LinkedMember } | undefined> {
+  const tenant = await workspace(ctx, app, target);
+  if (!tenant?.auth) return undefined;
+  const member = await linkedMember(tenant, integration, { actor: { id: viewer } });
+
+  return member ? { linked: { id: viewer, ...(member.login ? { login: member.login } : {}) } } : {};
 }
 
 /** An agent of the workspace the installation is bound to, the app's own by default. */

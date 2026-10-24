@@ -426,7 +426,7 @@ export function CredentialsList({
     rows.find(row => row.subscription && row.name === engine);
   // One subscription per engine: a new one asks before it replaces the saved one.
   const replacing = (engine: (typeof ENGINES)[number], run: () => void) =>
-    subscription(engine.id) ? replace.ask(`Replace your ${engine.name} subscription?`, run) : run();
+    subscription(engine.id) ? replace.ask(`Replace the personal ${engine.name} subscription?`, run) : run();
   const remove = (row: CredentialRow) =>
     action.run(`remove:${row.scope}/${row.name}`, () =>
       client.credentials.remove(row.name, { workspace: row.scope === 'workspace' }),
@@ -438,15 +438,19 @@ export function CredentialsList({
         <Card look="filled" title="Subscriptions">
           <div class="cred-engine">
             <p class="muted cred-note">
-              Personal: each member signs in with their own. A subscription runs its owner's tasks and
-              1:1 DMs with agents, never the workspace's shared threads.
+              Personal: each member signs in with their own. A subscription runs its owner's tasks,
+              and platform turns from accounts connected on{' '}
+              <a class="link" href={`/dash/${org}/settings/connections`}>
+                Connections
+              </a>
+              .
             </p>
             <table class="rows creds">
               <tbody>
                 {signIns.map(engine => {
                   const row = subscription(engine.id);
                   const active = logins[engine.id];
-                  const account = [row?.account?.email, row?.account?.plan, row?.masked];
+                  const account = [row?.account?.email, row?.account?.plan];
                   return (
                     <Row
                       key={engine.id}

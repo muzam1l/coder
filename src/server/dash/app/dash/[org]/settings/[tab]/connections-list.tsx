@@ -8,11 +8,11 @@ import { useSearchParams } from '@wular/pnext/navigation/client';
 import { client } from '@/utils/client';
 import { toastFailure, useAction } from '@/utils/action';
 import { Card, Empty } from '@/comps/ui/card';
-import { Button, LinkButton } from '@/comps/ui/button';
+import { Button } from '@/comps/ui/button';
 import { Icon } from '@/comps/ui/icon';
 import { Menu } from '@/comps/ui/menu';
 import { MenuItem } from '@/comps/ui/menu-items';
-import { iDots, iLock, iPlus, iRight, iUsers } from '@/comps/ui/icons';
+import { iAgent, iDots, iLock, iPlus, iUsers } from '@/comps/ui/icons';
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { useAddDialog, useRemove } from './list';
 import { AddConnection, returning, useAdd, type Pick } from './connection-add';
@@ -135,8 +135,10 @@ export function ConnectionsList({
   builtins: Builtins;
 }) {
   const [rows, setRows] = useState(first.filter(row => row.provider !== 'env'));
-  // A chat's reconnect link opens the new key row of a key connection.
-  const reconnecting = useSearchParams().get('reconnect');
+  // A chat's reconnect link opens the new key row of a key connection; its connect link marks a platform's row.
+  const search = useSearchParams();
+  const reconnecting = search.get('reconnect');
+  const connecting = search.get('connect');
   const [keying, setKeying] = useState(
     rows.find(row => row.name === reconnecting && row.auth === 'key'),
   );
@@ -170,7 +172,17 @@ export function ConnectionsList({
   const [perAgent, setPerAgent] = useState<IntegrationInfo>();
 
   // A built-in agent's next step on a platform, the same component its Platforms tab renders.
-  const Step = ({ step, info, agent = builtin!.id }: { step: StepData; info: IntegrationInfo; agent?: string }) => (
+  const Step = ({
+    step,
+    info,
+    agent = builtin!.id,
+    quiet,
+  }: {
+    step: StepData;
+    info: IntegrationInfo;
+    agent?: string;
+    quiet?: boolean;
+  }) => (
     <PlatformStep
       step={step}
       info={info}
@@ -178,21 +190,42 @@ export function ConnectionsList({
       agent={agent}
       builtin
       operator={operator}
-      admin={admin}
       unreachable={catalog.some(entry => entry.unreachable)}
+      quiet={quiet}
     />
+  );
+
+  // Where an app is installed, as a dot and its accounts.
+  const Installed = ({ accounts, title }: { accounts: Array<string | undefined>; title?: string }) => (
+    <>
+      <i class="conn-dot" />
+      <span class="conn-name" title={title}>
+        {[...new Set(accounts.filter(Boolean))].join(', ') || 'installed'}
+      </span>
+      <span class="grow" />
+    </>
   );
 
   // A platform whose apps are each agent's own, like Slack: who has one installed, and the dialog that sets them up.
   const PerAgent = ({ info }: { info: IntegrationInfo }) => {
-    const installed = builtins.flatMap(agent =>
-      (agent.steps[info.id]?.live ?? []).map(entry => `${agent.name} · ${entry.account}`),
+    const live = builtins.flatMap(agent =>
+      (agent.steps[info.id]?.live ?? []).map(entry => ({ agent: agent.name, account: entry.account })),
     );
-    return (
+    return live.length ? (
       <>
-        {installed.length ? <span class="conn-name">{[...new Set(installed)].join(', ')}</span> : <Badge>not set up</Badge>}
-        <Button size="sm" variant={installed.length ? 'ghost' : undefined} onClick={() => setPerAgent(info)}>
-          {installed.length ? 'Manage' : `Set up ${info.name}`}
+        <Installed
+          accounts={live.map(entry => entry.account)}
+          title={live.map(entry => `${entry.agent} in ${entry.account ?? info.name}`).join(', ')}
+        />
+        <Button size="sm" variant="ghost" onClick={() => setPerAgent(info)}>
+          Manage
+        </Button>
+      </>
+    ) : (
+      <>
+        <Badge>not set up</Badge>
+        <Button size="sm" onClick={() => setPerAgent(info)}>
+          Set up {info.name}
         </Button>
       </>
     );
@@ -202,7 +235,11 @@ export function ConnectionsList({
     const apps = service.rows.filter(row => row.agent);
     const own = service.rows.find(row => !row.owner && !row.agent);
     if (service.info?.builtinApp === 'own' && builtins.some(agent => agent.steps[service.info!.id]))
-      return <PerAgent info={service.info} />;
+      return (
+        <div class="conn-cell">
+          <PerAgent info={service.info} />
+        </div>
+      );
     if (service.info) {
       const info = service.info;
       const step = builtin?.steps[info.id];
@@ -211,26 +248,17 @@ export function ConnectionsList({
       const nameOf = (id: string) => agents.find(agent => agent.id === id)?.name ?? id;
       return (
         <div class="conn-cell">
-          {step?.live.length ? (
-            <span class="conn-name">{[...new Set(step.live.map(entry => entry.account))].join(', ')}</span>
-          ) : null}
-          {step ? <Step step={step} info={info} /> : null}
-          {others.map(id => (
-            <LinkButton
-              key={id}
-              variant="ghost"
-              size="sm"
-              href="/dash/[org]/agents/[slug]/platforms"
-              params={{ org, slug: id }}
-              rightIcon={iRight}
+          {step?.live.length ? <Installed accounts={step.live.map(entry => entry.account)} /> : null}
+          {others.length ? (
+            <span
+              class="conn-others"
+              title={`Their own ${info.name} apps: ${others.map(nameOf).join(', ')}`}
             >
-              {nameOf(id)} ·{' '}
-              {apps
-                .filter(row => row.agent === id)
-                .map(row => row.account ?? row.name)
-                .join(', ')}
-            </LinkButton>
-          ))}
+              <Icon d={iAgent} />
+              {others.length}
+            </span>
+          ) : null}
+          {step ? <Step step={step} info={info} quiet /> : null}
           {step || others.length ? null : <span class="dim">—</span>}
         </div>
       );
@@ -239,6 +267,7 @@ export function ConnectionsList({
       return (
         <div class="conn-cell">
           <State row={own} label={own.name} busy={action.pending === own.id} onReconnect={admin ? () => reconnect(own) : undefined} />
+          <span class="grow" />
           {admin ? <RowMenu row={own} onReconnect={() => reconnect(own)} onRemoved={() => drop(own)} /> : null}
         </div>
       );
@@ -264,22 +293,33 @@ export function ConnectionsList({
     const mine = service.rows.find(row => row.asker);
     const others = service.rows.filter(row => row.owner && !row.asker);
     const template = service.rows[0];
+    const count = others.length ? (
+      <span class="conn-others" title={others.map(row => row.owner?.name ?? 'A member').join(', ')}>
+        <Icon d={iUsers} />
+        {others.length}
+      </span>
+    ) : null;
     return (
       <div class="conn-cell">
         {mine ? (
           <>
             <State row={mine} busy={action.pending === mine.id} onReconnect={() => reconnect(mine)} />
             <span class="grow" />
+            {count}
             <RowMenu row={mine} onReconnect={() => reconnect(mine)} onRemoved={() => drop(mine)} />
           </>
         ) : service.info && !service.info.connectable ? (
-          <span class="dim grow">—</span>
+          <>
+            <span class="dim grow">—</span>
+            {count}
+          </>
         ) : (
           <>
             <Button
               variant="ghost"
               size="sm"
               leftIcon={iPlus}
+              autoFocus={service.key === connecting}
               onClick={() =>
                 service.info
                   ? add({ name: service.info.name, provider: service.info.id })
@@ -292,17 +332,19 @@ export function ConnectionsList({
               Connect
             </Button>
             <span class="grow" />
+            {count}
           </>
         )}
-        {others.length ? (
-          <span class="conn-others" title={others.map(row => row.owner?.name ?? 'A member').join(', ')}>
-            <Icon d={iUsers} />
-            {others.length}
-          </span>
-        ) : null}
       </div>
     );
   };
+
+  const groups = (
+    [
+      ['Platforms', list.filter(service => service.info)],
+      ['MCP servers', list.filter(service => !service.info)],
+    ] as const
+  ).filter(([, services]) => services.length);
 
   return (
     <>
@@ -311,6 +353,11 @@ export function ConnectionsList({
           <>
             <div class="table-scroll">
               <table class="conns">
+                <colgroup>
+                  <col class="conns-svc" />
+                  <col />
+                  {local ? null : <col />}
+                </colgroup>
                 <thead>
                   <tr>
                     <th>Service</th>
@@ -318,38 +365,49 @@ export function ConnectionsList({
                     {local ? null : <th>{viewer ? `Personal · ${viewer}` : 'Personal'}</th>}
                   </tr>
                 </thead>
-                <tbody>
-                  {list.map(service => (
-                    <tr key={service.key}>
-                      <td>
-                        <span class="conn-svc" title={service.where}>
-                          {service.info ? <BrandIcon brand={service.info.brand} /> : <span class="conn-mark">{service.name[0]}</span>}
-                          <b>{service.name}</b>
-                        </span>
-                      </td>
-                      {service.info && !service.info.connectable && !service.rows.length ? (
-                        // No app here yet: one step serves both sides, so one cell holds it.
-                        <td colSpan={local ? 1 : 2}>
-                          <div class="conn-cell">
-                            {service.info.builtinApp === 'own' &&
-                            builtins.some(agent => agent.steps[service.info!.id]) ? (
-                              <PerAgent info={service.info} />
-                            ) : builtin?.steps[service.info.id] ? (
-                              <Step step={builtin.steps[service.info.id]!} info={service.info} />
-                            ) : (
-                              <span class="dim">—</span>
-                            )}
-                          </div>
-                        </td>
-                      ) : (
-                        <>
-                          <td>{workspace(service)}</td>
-                          {local ? null : <td>{personal(service)}</td>}
-                        </>
-                      )}
+                {groups.map(([label, services]) => (
+                  <tbody key={label}>
+                    <tr class="conns-group">
+                      <th colSpan={local ? 2 : 3}>{label}</th>
                     </tr>
-                  ))}
-                </tbody>
+                    {services.map(service => (
+                      <tr
+                        key={service.key}
+                        class={service.key === connecting ? 'conns-marked' : undefined}
+                      >
+                        <td>
+                          <span class="conn-svc" title={service.where}>
+                            {service.info ? <BrandIcon brand={service.info.brand} /> : <span class="conn-mark">{service.name[0]}</span>}
+                            <b>{service.name}</b>
+                          </span>
+                        </td>
+                        {service.info &&
+                        !service.info.connectable &&
+                        !service.rows.length &&
+                        !builtins.some(agent => agent.steps[service.info!.id]?.live.length) ? (
+                          // No app here yet: one step serves both sides, so one cell holds it.
+                          <td colSpan={local ? 1 : 2}>
+                            <div class="conn-cell">
+                              {service.info.builtinApp === 'own' &&
+                              builtins.some(agent => agent.steps[service.info!.id]) ? (
+                                <PerAgent info={service.info} />
+                              ) : builtin?.steps[service.info.id] ? (
+                                <Step step={builtin.steps[service.info.id]!} info={service.info} />
+                              ) : (
+                                <span class="dim">—</span>
+                              )}
+                            </div>
+                          </td>
+                        ) : (
+                          <>
+                            <td>{workspace(service)}</td>
+                            {local ? null : <td>{personal(service)}</td>}
+                          </>
+                        )}
+                      </tr>
+                    ))}
+                  </tbody>
+                ))}
               </table>
             </div>
             {local ? null : <p class="conns-hint">Personal accounts run only on their owner's turns.</p>}

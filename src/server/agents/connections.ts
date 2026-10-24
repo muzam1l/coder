@@ -37,11 +37,15 @@ export async function adminInstallLink(
   });
 }
 
-/** This workspace's apps and the server's shared ones, for one agent or all. */
-export async function agentApps(ctx: ServerContext, agent?: string | null) {
+/** This workspace's apps and the server's shared ones, for one agent or all; `ownRead` reuses a read of the workspace's. */
+export async function agentApps(
+  ctx: ServerContext,
+  agent?: string | null,
+  ownRead = ctx.store.list('app'),
+) {
   const server = ctx.serverOrganizationId;
   const [own, shared] = await Promise.all([
-    ctx.store.list('app'),
+    ownRead,
     server !== undefined && server !== ctx.organizationId && ctx.scope
       ? ctx
           .scope(server)
@@ -62,7 +66,7 @@ export async function agentApps(ctx: ServerContext, agent?: string | null) {
 }
 
 /** An app as the dashboard sees it. */
-function appRow(ctx: ServerContext, app: AgentApp) {
+export function appRow(ctx: ServerContext, app: AgentApp) {
   const { credentials, ...safe } = app;
   const settings = app.builtin
     ? undefined
@@ -308,23 +312,21 @@ export async function listInstallations(
     limit: pageLimit(url, 200),
   });
 
-  return json(
-    rows.map(({ id, value }) => {
-      const { token: _token, ...safe } = value;
-      const app = ctx.integrations[value.integration]?.app;
-      const url = value.account.url ?? app?.accountUrl?.(value.account);
-      const installationUrl = app?.installationUrl?.(value);
+  return json(rows.map(({ id, value }) => ({ id, value: installationRow(ctx, value) })));
+}
 
-      return {
-        id,
-        value: {
-          ...safe,
-          account: { ...safe.account, ...(url ? { url } : {}) },
-          ...(installationUrl ? { installationUrl } : {}),
-        },
-      };
-    }),
-  );
+/** An installation as the dashboard sees it: no token, with its account's and its own page on the platform. */
+export function installationRow(ctx: ServerContext, value: Installation) {
+  const { token: _token, ...safe } = value;
+  const app = ctx.integrations[value.integration]?.app;
+  const url = value.account.url ?? app?.accountUrl?.(value.account);
+  const installationUrl = app?.installationUrl?.(value);
+
+  return {
+    ...safe,
+    account: { ...safe.account, ...(url ? { url } : {}) },
+    ...(installationUrl ? { installationUrl } : {}),
+  };
 }
 
 /** `?agent=` fills that agent's name into create steps that prefill the platform's form; `?public=1` asks for the public one. */

@@ -100,19 +100,26 @@ const MODEL_UNAVAILABLE =
 
 /** The turn's reply, including skipped answers, missing answers and failures. */
 export function threadReply(
-  task: Pick<AgentTask, 'event' | 'context' | 'failureReply' | 'taskUrl' | 'settingsUrl'>,
+  task: Pick<
+    AgentTask,
+    'event' | 'context' | 'failureReply' | 'notice' | 'taskUrl' | 'settingsUrl'
+  >,
   result: { finalMessage?: string | null; error?: { message?: string } | null } | null | undefined,
   cancelled: boolean,
   turn?: Pick<TurnResultEntry, 'prompt' | 'steers' | 'lastReply'>,
-): { text: string; problem: boolean; skipped?: true; duplicate?: boolean } {
+): { text: string; problem: boolean; skipped?: true; duplicate?: boolean; notice?: string } {
   const answer = result?.finalMessage?.trim();
-  const progress = task.event && INTEGRATIONS[task.event.integration]?.progressReplies;
+  const progress =
+    task.event && INTEGRATIONS[task.event.integration]?.progressReplies?.(task.event);
   const lastReply = turn?.lastReply?.trim();
+  // The reply tool's first post carried the notice when it posted this turn; progress posts carry none.
+  const notice = task.notice && (progress || !lastReply) ? { notice: task.notice } : {};
   // Claude Code reports its own errors as the final message; a failed run gets the failure text instead.
   if (answer && answer.replace(/^`+|`+$/g, '').trim() !== EMPTY_MESSAGE && !result?.error)
     return {
       text: answer,
       problem: false,
+      ...notice,
       ...(!progress && lastReply && normalizedReply(answer) === normalizedReply(lastReply)
         ? { duplicate: true }
         : {}),
@@ -121,7 +128,7 @@ export function threadReply(
   if (result?.error && lastReply && !progress) return { text: '', problem: true, duplicate: true };
   if (cancelled) return { text: error, problem: false };
   if (result && !result.error) {
-    if (progress && lastReply) return { text: lastReply, problem: false };
+    if (progress && lastReply) return { text: lastReply, problem: false, ...notice };
     if (
       turn?.lastReply?.trim() ||
       replyRequired(
@@ -179,6 +186,24 @@ export function replyParts(text: string, limit?: number): string[] {
   return parts;
 }
 
+/** Posts a reply with the turn's notice: privately to the asker where the platform can, else as a footer under it. */
+export async function withNotice<T>(
+  thread: Thread,
+  text: string,
+  notice: string | undefined,
+  asker: string | undefined,
+  send: (text: string) => Promise<T>,
+): Promise<T> {
+  if (!notice) return send(text);
+  if (!thread.adapter.postEphemeral || !asker) return send(`${text}\n\n---\n\n${notice}`);
+  const sent = await send(text);
+  await thread
+    .postEphemeral(asker, notice, { fallbackToDM: false })
+    .catch(error => console.error(`coder: could not show the notice in ${thread.id}`, error));
+
+  return sent;
+}
+
 export async function postReplyParts(
   thread: Thread,
   text: string,
@@ -210,6 +235,7 @@ export async function postReply(
   problem = false,
   progress = false,
   prepared?: Thread,
+  notice?: string,
 ): Promise<string[]> {
   const thread = prepared ?? (await eventThread(integration, event, token, author));
   const adapter = thread.adapter;
@@ -221,12 +247,9 @@ export async function postReply(
     return id ? [id] : [];
   }
   // Send Markdown through the platform adapter.
-  const messages = await postReplyParts(
-    thread,
-    text,
-    integration.replyLimit,
-    event.chat?.message?.id,
-    progress,
+  const asker = notice && (event.chat?.message?.author.userId || event.actor.id);
+  const messages = await withNotice(thread, text, notice, asker, text =>
+    postReplyParts(thread, text, integration.replyLimit, event.chat?.message?.id, progress),
   );
 
   return messages.flatMap(sent => (sent.id ? [sent.id] : []));
@@ -314,6 +337,8 @@ export interface ExecResult {
   flow: string;
   /** Default flow: the engine's answer, posted to the platform unless `post` was false. */
   reply?: string;
+  /** Why the turn failed, as the engine said. */
+  error?: string;
   posted?: boolean;
   postedMessages?: string[];
   taskId?: string;
@@ -555,6 +580,7 @@ export async function execAgent(options: {
       problem,
       skipped,
       duplicate,
+      notice,
     } = turn
       ? threadReply(task, turn, false, turn)
       : threadReply(task, completed.result, completed.status === 'cancelled');
@@ -572,14 +598,17 @@ export async function execAgent(options: {
             problem,
             false,
             await prepared,
+            notice,
           ),
         )
       : [];
+    const error = (turn ?? completed.result)?.error?.message;
 
     return {
       ok: completed.status === 'completed',
       flow,
       reply,
+      ...(error ? { error } : {}),
       posted,
       ...(postedMessages.length ? { postedMessages } : {}),
       taskId: dispatched.taskId,

@@ -13,15 +13,36 @@ table.conns {
   text-transform: uppercase;
   color: var(--dim);
 }
+.conns-group th {
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+}
+.conns-group + tr > td {
+  border-top: 0;
+}
 .conns td {
   height: 52px;
   padding: 0 16px;
   border-top: 1px solid var(--line);
   vertical-align: middle;
 }
-.conns th:first-child,
-.conns td:first-child {
+.conns-marked td {
+  background: var(--accbg);
+}
+table.conns {
+  table-layout: fixed;
+}
+.conns col {
+  width: 37%;
+}
+.conns col.conns-svc {
   width: 26%;
+}
+/* the personal side apart from the workspace's actions */
+.conns th + th + th,
+.conns td + td + td {
+  padding-left: 48px;
 }
 .conn-svc {
   display: inline-flex;

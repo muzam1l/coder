@@ -62,6 +62,7 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
         context: j.context ?? null,
         files: j.files ?? null,
         failureReply: j.failureReply ?? null,
+        notice: j.notice ?? null,
         taskUrl: j.taskUrl ?? null,
         settingsUrl: j.settingsUrl ?? null,
         result: value.result ?? null,
