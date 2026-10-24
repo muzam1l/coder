@@ -303,10 +303,9 @@ async function applyEnvironment(
   const { CODEX_AUTH_JSON: authJson, [MACHINE_SANDBOX_ENV]: _, ...env } = remote.credential.env;
   Object.assign(process.env, env);
   process.env[WORKSPACE_CONFIG_ENV] = JSON.stringify(remote.config ?? {});
-  if (remote.gitAuthor) {
-    process.env.GIT_AUTHOR_NAME = process.env.GIT_COMMITTER_NAME = remote.gitAuthor.name;
-    process.env.GIT_AUTHOR_EMAIL = process.env.GIT_COMMITTER_EMAIL = remote.gitAuthor.email;
-  }
+  // Each turn sets git's identity from its credential choice, starting from this default.
+  delete process.env.CODER_GIT_AUTHOR;
+  if (remote.gitAuthor) process.env.CODER_GIT_AUTHOR = JSON.stringify(remote.gitAuthor);
   process.env.CODER_MCP_MODE = 'cloud';
   process.env.CODER_MCP_CONNECTION_ENV = JSON.stringify(
     connectionVariables(remote.connections ?? {}),
@@ -1001,12 +1000,7 @@ async function runCheckedOutTask(
           const work = driveAsyncTool(tool, call.runId, cwd, started, call.timeout, {
             integrationToken: tool.platform ? remote.tokens[tool.platform] : undefined,
             checksToken: remote.checksToken,
-            links: reviewLinks(
-              auth.server,
-              remote.dashboard,
-              remote.task.taskUrl,
-              remote.reviewAssets,
-            ),
+            links: reviewLinks(auth.server, remote.task.taskUrl, remote.reviewAssets),
             onModel: onFlowModel,
             stop: timeout,
           })

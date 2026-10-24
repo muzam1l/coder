@@ -112,6 +112,8 @@ export interface AgentApp extends PlatformApp {
   shared?: string;
   /** Encrypted JSON (`encryptSecret`) of `GithubAppCredentials` or `SlackAppCredentials`. */
   credentials: string;
+  /** The app's bot user id on the platform, read once for its commit identity. */
+  botId?: number;
   createdAt: number;
 }
 

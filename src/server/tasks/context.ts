@@ -8,7 +8,7 @@ import {
   type BrokerRule,
 } from '../runners/kinds/vercel-sandbox';
 import type { Integration, TokenBound } from '../../integrations/types';
-import type { AgentEvent, Installation } from '../../agent/types';
+import type { AgentApp, AgentEvent, Installation } from '../../agent/types';
 import { effectiveSettings } from '../../agent/definition';
 import type { EngineCredential, Store, TaskStatus } from '../store/types';
 import { dropKey, heldKey, type HeldToken } from '../store/types';
@@ -217,9 +217,10 @@ const tokenFailed = (id: string) => (error: unknown) => {
 export async function eventTokens(
   ctx: ServerContext,
   task: TaskStatus['task'],
-): Promise<{ tokens: Record<string, string>; checksToken?: string }> {
+): Promise<{ tokens: Record<string, string>; checksToken?: string; app?: AgentApp }> {
   const tokens: Record<string, string> = {};
   let checksToken: string | undefined;
+  let app: AgentApp | undefined;
   const event = task.event;
   if (!event && !task.parent) return { tokens };
 
@@ -227,11 +228,12 @@ export async function eventTokens(
   if (event) {
     const integration = ctx.integrations[event.integration];
     if (!integration) throw new Error(`Unknown integration "${event.integration}"`);
-    const [app, found] = await Promise.all([
+    const [row, found] = await Promise.all([
       ctx.store.get('app', event.appId),
       ctx.store.get('installation', `${event.appId}:${event.installationId}`),
     ]);
-    if (!app) throw new Error(`Unknown app "${event.appId}"`);
+    if (!row) throw new Error(`Unknown app "${event.appId}"`);
+    app = row;
     if (!found || found.deletedAt) throw new Error('Installation is gone');
     installation = found;
 
@@ -281,7 +283,29 @@ export async function eventTokens(
     }),
   );
 
-  return { tokens, ...(checksToken ? { checksToken } : {}) };
+  return { tokens, ...(checksToken ? { checksToken } : {}), ...(app ? { app } : {}) };
+}
+
+/** The task's default commit identity: the event app's bot when it holds that app's token, its user id read once and kept on the app. A member's identity comes only from a turn approved to act as them, never from the task's own user. */
+export async function commitIdentity(
+  ctx: ServerContext,
+  task: TaskStatus['task'],
+  tokens: Record<string, string>,
+  app?: AgentApp,
+): Promise<{ name: string; email: string } | undefined> {
+  const event = task.event;
+  const repos = event && ctx.integrations[event.integration]?.repos;
+  const token = event && tokens[event.integration];
+  if (!repos?.commitAuthor || !task.author || !token || !app) return undefined;
+  try {
+    const bot = await repos.commitAuthor({ login: task.author, id: app.botId }, token, ctx.fetch);
+    if (app.botId === undefined) await updateMetadata(ctx.store, 'app', app.id, { botId: bot.id });
+
+    return { name: bot.name, email: bot.email };
+  } catch (error) {
+    console.error(`coder server: commit identity lookup failed for ${task.id}`, error);
+    return undefined;
+  }
 }
 
 /** The workspace's dashboard on this server's public URL, where a task's Coder tools link. */
@@ -314,7 +338,7 @@ export async function taskContext(
   connectionSecrets: string[];
 }> {
   const task = await withModels(ctx, status.task);
-  const [{ tokens, checksToken }, config, credential]: [
+  const [{ tokens, checksToken, app }, config, credential]: [
     Awaited<ReturnType<typeof eventTokens>>,
     Partial<CoderConfig>,
     EngineCredential,
@@ -334,10 +358,10 @@ export async function taskContext(
     const shared = tools.length === read.length && read.every(scope => tools.includes(scope));
     if (shared) postToken = tokens[event.integration];
     else {
-      const [app, installation] = await Promise.all([
-        ctx.store.get('app', event.appId),
-        ctx.store.get('installation', `${event.appId}:${event.installationId}`),
-      ]);
+      const installation = await ctx.store.get(
+        'installation',
+        `${event.appId}:${event.installationId}`,
+      );
       if (!app || !installation || installation.deletedAt)
         throw new Error('Conversation installation is gone');
       postToken = await installationToken(
@@ -351,13 +375,7 @@ export async function taskContext(
     }
   }
 
-  // Commits made in the task credit the app's own account.
-  const repos = event && ctx.integrations[event.integration]?.repos;
-  const appToken = event && tokens[event.integration];
-  const gitAuthor =
-    repos?.commitAuthor && task.author && appToken
-      ? await repos.commitAuthor(task.author, appToken).catch(() => undefined)
-      : undefined;
+  const gitAuthor = await commitIdentity(ctx, task, tokens, app);
 
   const { actAsRefusal } = await import('./changes');
   const resolved = await resolvedTaskConnections(ctx, status, tokens, connection =>
@@ -470,7 +488,9 @@ export async function taskCredential(
   task: TaskStatus['task'],
 ): Promise<EngineCredential> {
   const [first] = (await withModels(ctx, task)).models ?? [];
-  const engine = (first ? splitEngineSpec(first.model).engine : 'claude') as EngineCredential['engine'];
+  const engine = (
+    first ? splitEngineSpec(first.model).engine : 'claude'
+  ) as EngineCredential['engine'];
   const selected = first?.credential && (await ctx.store.get('credential', first.credential));
   if (selected) return { engine, ...decryptCredential(ctx.config, selected) };
   if (!task.runnerId && !ctx.local) throw new Error('no-credential');

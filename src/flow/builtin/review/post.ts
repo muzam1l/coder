@@ -13,7 +13,7 @@ export interface ReviewFinding {
   inline?: boolean;
 }
 
-/** Where a posted review links: Coder, the task's page and, when themed, its images; `from` names who posted it. */
+/** Where a posted review links: Coder's own site, the task's page and, when themed, its images; `from` names who posted it. */
 export interface ReviewLinks {
   from: 'cloud' | 'cli';
   coder: string;
@@ -21,25 +21,18 @@ export interface ReviewLinks {
   task?: string;
 }
 
-/** A cloud runner's links: its dashboard, the task's page, and themed images when its server offers them. */
-export function reviewLinks(
-  server: string,
-  dashboard?: string,
-  task?: string,
-  images?: string,
-): ReviewLinks {
-  const url = new URL(server);
-
+/** A cloud runner's links: its server's site, the task's page, and themed images when its server offers them. */
+export function reviewLinks(server: string, task?: string, images?: string): ReviewLinks {
   return {
     from: 'cloud',
-    coder: dashboard || url.origin,
+    coder: new URL(server).origin,
     ...(images !== undefined ? { images } : {}),
     ...(task ? { task } : {}),
   };
 }
 
 export interface ReviewPost {
-  note: string;
+  title: string;
   target: ReviewTarget;
   findings: ReviewFinding[];
   /** The reviewer's own markdown above the list; may be empty. */
@@ -52,7 +45,7 @@ const picture = (images: string, name: string, alt: string) =>
 
 const capital = (word: string) => word[0]!.toUpperCase() + word.slice(1);
 
-/** Breaks every tag, link, image, reference definition, character reference and mention in model text, code spans included. */
+/** Breaks every tag, link, image, autolink, reference definition, character reference and mention in model text, code spans included. */
 const neutral = (text: string) =>
   text
     .replace(/<([A-Za-z/!?])/g, '<\u200b$1')
@@ -60,7 +53,9 @@ const neutral = (text: string) =>
     .replace(/\]:/g, ']\u200b:')
     .replace(/!\[/g, '!\u200b[')
     .replace(/&([#A-Za-z])/g, '&\u200b$1')
-    .replace(/@([\w-])/g, '@\u200b$1');
+    .replace(/@([\w-])/g, '@\u200b$1')
+    .replace(/(https?):\/\//gi, '$1\u200b://')
+    .replace(/www\./gi, 'www\u200b.');
 
 /** Model-written markdown: it adds no HTML, link, image or mention. */
 const guarded = (text: string) => neutral(text.trim());
@@ -68,7 +63,7 @@ const guarded = (text: string) => neutral(text.trim());
 const PUNCTUATION = /[!-/:-@[-`{-~]/;
 
 /** A model-written title on one line, read as CommonMark does: code spans stay, every other bracket, backtick and stray backslash is escaped, so it cannot leave its own link. */
-const title = (text: string) => {
+const oneLine = (text: string) => {
   const line = neutral(text.replace(/\s+/g, ' ').trim());
   let label = '';
   for (let at = 0; at < line.length;) {
@@ -104,17 +99,17 @@ const codeSpan = (text: string) => {
 };
 
 export function reviewCheckSummary(
-  note: string,
+  title: string,
   findings: ReviewFinding[],
   url: string,
   task?: string,
 ): string {
-  const heading = title(note);
+  const heading = oneLine(title);
   const lines = [heading.length > 200 ? `${heading.slice(0, 199)}…` : heading];
   const link = `[View the review](${url})${task ? ` · [View task](${task})` : ''}`;
   let length = lines[0]!.length + 1 + link.length;
   for (const [index, finding] of findings.entries()) {
-    const line = `- ${capital(finding.severity)} ${title(finding.summary)} ${codeSpan(`${finding.file}:${finding.start_line ? `${finding.start_line}-` : ''}${finding.line}`)}`;
+    const line = `- ${capital(finding.severity)} ${oneLine(finding.summary)} ${codeSpan(`${finding.file}:${finding.start_line ? `${finding.start_line}-` : ''}${finding.line}`)}`;
     const remaining = findings.length - index - 1;
     const tail = remaining ? `and ${remaining} more` : '';
     if (length + 1 + line.length + (tail ? 1 + tail.length : 0) > 65_000) {
@@ -148,17 +143,17 @@ function footer(links: ReviewLinks): string {
   ].join(' ');
 }
 
-/** The review body: the reviewer's note and body, a force-push warning, the findings list headed by the reviewed range, links, and the reviewed head. */
+/** The review body: the reviewer's title and body, a force-push warning, the findings list headed by the reviewed range, links, and the reviewed head. */
 export function reviewBody(review: ReviewPost, threads: Map<string, string> = new Map()): string {
   const { target, findings, links } = review;
-  const note = review.note?.replace(/\s+/g, ' ').trim() ?? '';
-  const heading = note.length > 200 ? `${note.slice(0, 199)}…` : note;
+  const title = review.title?.replace(/\s+/g, ' ').trim() ?? '';
+  const heading = title.length > 200 ? `${title.slice(0, 199)}…` : title;
   const reviewed = `Reviewed ${range(target)}`;
   const threadOf = (finding: ReviewFinding) =>
     finding.inline === false ? undefined : threads.get(finding.fingerprint);
   const items = findings.map(finding => {
     const thread = threadOf(finding);
-    const label = title(finding.summary);
+    const label = oneLine(finding.summary);
     // A linked title leads to the full path and the failure in its thread; one without a thread shows both here.
     const heading = thread ? `[${label}](${thread})` : label;
     const file = thread ? finding.file.split('/').pop() : finding.file;
@@ -180,7 +175,7 @@ export function reviewBody(review: ReviewPost, threads: Map<string, string> = ne
     : '';
 
   return [
-    title(heading) || (!review.body.trim() && !findings.length ? 'Nothing to report.' : ''),
+    oneLine(heading) || (!review.body.trim() && !findings.length ? 'Nothing to report.' : ''),
     guarded(review.body),
     target.forcePushed && target.since
       ? `> [!WARNING]\n> The branch no longer contains <code>${target.since.slice(0, 7)}</code> after a force-push. This review covers lines changed since it.`
@@ -196,7 +191,7 @@ export function reviewBody(review: ReviewPost, threads: Map<string, string> = ne
 /** One finding's inline comment: its title, severity and failure, with the marker that keeps it from posting twice. */
 export function inlineComment(finding: ReviewFinding, images?: string): string {
   return [
-    `### ${title(finding.summary)}`,
+    `### ${oneLine(finding.summary)}`,
     images === undefined
       ? `**${capital(finding.severity)}**`
       : picture(images, `sev-${finding.severity}`, capital(finding.severity)),
@@ -237,6 +232,7 @@ export async function postReview(
     return { url: posted.url, posted: fresh.length };
   } catch (error) {
     if (!comments.length) throw error;
+    if (stopped()) throw new Error('The review was stopped before posting.');
     // The platform refuses a whole review when one comment misses its diff; the body alone still lists every finding.
     console.error(
       `coder review: posting ${target.repo}#${target.number} again without inline comments`,

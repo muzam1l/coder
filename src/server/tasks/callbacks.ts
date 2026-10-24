@@ -489,10 +489,16 @@ export async function refreshCredential(
   });
 }
 
-/** A turn's OAuth connection token or personal key on first use, `refused` naming by fingerprint a token its server refused; the refresh token stays here. A personal one first needs its owner's approval, else is refused with the reason the model reads. One that needs reconnecting answers `needs-auth`, logged once per task. */
+/** A turn's OAuth connection token or personal key on first use, `refused` naming by fingerprint a token its server refused; the refresh token stays here. A personal one first needs its owner's approval, else is refused with the reason the model reads. One that needs reconnecting answers `needs-auth`, logged once per task. With `git`, only whether the turn acts as the connection now, with its commit identity. */
 export async function taskConnection(req: Request, ctx: CallbackContext): Promise<Response> {
   const body = (await req.json().catch(() => undefined)) as
-    | { connection?: unknown; refused?: unknown; url?: unknown; connectionCreatedAt?: unknown }
+    | {
+        connection?: unknown;
+        refused?: unknown;
+        url?: unknown;
+        connectionCreatedAt?: unknown;
+        git?: unknown;
+      }
     | undefined;
   if (typeof body?.connection !== 'string' || !body.connection)
     return json({ error: 'A connection id is required' }, 400);
@@ -505,11 +511,27 @@ export async function taskConnection(req: Request, ctx: CallbackContext): Promis
   const connection = await findConnection(ctx, body.connection, taskAsker(task), turn.accounts);
   if (!connection || !turn.ids.includes(body.connection))
     return json({ error: 'Unknown connection' }, 404);
+  // A turn's git probe answers whether an approved personal connection acts now, with its commit identity, and never asks or mints a token.
+  const git = body.git === true;
   try {
     const refusal = connection.owner
-      ? await actAsRefusal(ctx, authorized, connection, turn.accounts)
+      ? await actAsRefusal(ctx, authorized, connection, turn.accounts, !git)
       : undefined;
     if (refusal) return json({ error: refusal }, 403);
+    if (git) {
+      // The identity comes from the connection's own login and id, with no token to read them by.
+      const author =
+        connection.login && connection.account !== undefined
+          ? await ctx.integrations[connection.provider]?.repos
+              ?.commitAuthor?.({ login: connection.login, id: connection.account }, '', ctx.fetch)
+              .catch((error: unknown) => {
+                console.error('coder server: commit author lookup failed', error);
+                return undefined;
+              })
+          : undefined;
+
+      return json(author ? { author: { name: author.name, email: author.email } } : {});
+    }
     const { token, name } = await connectionToken(
       ctx,
       task,

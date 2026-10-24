@@ -4,7 +4,16 @@
  */
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import * as z from 'zod';
@@ -107,7 +116,8 @@ export interface ReviewSummary {
 }
 
 export interface ReviewResult {
-  note: string;
+  /** The reviewer's headline; may be empty. */
+  title: string;
   findings: Finding[];
   /** The reviewer's own markdown beyond the findings; may be empty. */
   body: string;
@@ -122,9 +132,9 @@ export function renderReviewMarkdown(result: ReviewResult & { runId: string }): 
   const range = `\`${summary.baseSha}\`${summary.worktree ? ' through the working tree' : `..\`${summary.headSha}\``}`;
   const warnings = (summary.warnings ?? []).flatMap(w => [w, '']);
   if (summary.worktree && !summary.files)
-    return `${[...(result.note?.trim() ? [result.note.trim(), ''] : []), '# Coder review', '', `Nothing to review from ${range}.`, '', ...warnings, `Flow run: \`${result.runId}\``].join('\n')}\n`;
+    return `${[...(result.title?.trim() ? [result.title.trim(), ''] : []), '# Coder review', '', `Nothing to review from ${range}.`, '', ...warnings, `Flow run: \`${result.runId}\``].join('\n')}\n`;
   const lines = [
-    ...(result.note?.trim() ? [result.note.trim(), ''] : []),
+    ...(result.title?.trim() ? [result.title.trim(), ''] : []),
     '# Coder review',
     '',
     `Reviewed ${result.pr ? `pull request #${result.pr.number}, ` : ''}${range}${summary.model ? ` with ${summary.model}` : ''} in ${(summary.elapsedMs / 1000).toFixed(1)}s.`,
@@ -252,7 +262,7 @@ export async function postReviewHere(
     {
       target: result.pr,
       findings: result.findings,
-      note: result.note ?? '',
+      title: result.title ?? '',
       body: result.body,
       links: currentReviewLinks() ?? localReviewLinks(),
     },
@@ -263,7 +273,7 @@ export async function postReviewHere(
 
   return {
     ...result,
-    note: result.note ?? '',
+    title: result.title ?? '',
     summary: { ...result.summary, posted: posted.posted, url: posted.url },
   };
 }
@@ -287,17 +297,55 @@ export async function postReviewRun(
   return { ...(await postReviewHere(record.result as ReviewResult, cwd)), runId };
 }
 
-/** Git config in the environment that sends `token` to the platform's clone host, kept out of the command line. */
-export function fetchEnvironment(token: string): Record<string, string> {
+/** Git config in the environment that sends `token` to the origin of `url`, the platform's clone host by default, kept out of the command line, with no system or global config read. */
+export function fetchEnvironment(token: string, url?: string): Record<string, string> {
   const repos = INTEGRATIONS[REVIEW_PLATFORM]!.repos!;
   const count = Number(process.env.GIT_CONFIG_COUNT ?? 0);
   const basic = Buffer.from(`${repos.credentialUsername}:${token}`).toString('base64');
+  const origin = url ? new URL(url).origin : `https://${repos.cloneHosts[0]}`;
 
   return {
+    // No repository-configured transport, such as `ext::`, ever sees the header.
+    GIT_ALLOW_PROTOCOL: 'https',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: '/dev/null',
     GIT_CONFIG_COUNT: String(count + 1),
-    [`GIT_CONFIG_KEY_${count}`]: `http.https://${repos.cloneHosts[0]}/.extraheader`,
+    [`GIT_CONFIG_KEY_${count}`]: `http.${origin}/.extraheader`,
     [`GIT_CONFIG_VALUE_${count}`]: `AUTHORIZATION: basic ${basic}`,
   };
+}
+
+/** A credentialed fetch that reads none of the checkout's config: it runs in a temporary bare repository holding the checkout's refs and writes into the checkout's object store, so the checkout reads the fetched commits. */
+export function fetchInto(
+  cwd: string,
+  exec: ReviewExec,
+  token: string,
+  url?: string,
+): { fetch: ReviewExec; env: Record<string, string>; close(): void } {
+  const gitPath = (name: string) =>
+    path.resolve(cwd, exec('git', ['rev-parse', '--git-path', name]).trim());
+  const objects = gitPath('objects');
+  const shallow = gitPath('shallow');
+  const refs = exec('git', ['for-each-ref', '--format=%(objectname) %(refname)']);
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'coder-review-'));
+  // A shallow checkout keeps the boundary the fetch moved.
+  const close = () => {
+    if (existsSync(path.join(dir, 'shallow'))) copyFileSync(path.join(dir, 'shallow'), shallow);
+    rmSync(dir, { recursive: true, force: true });
+  };
+  try {
+    const env = { ...fetchEnvironment(token, url), GIT_DIR: dir, GIT_OBJECT_DIRECTORY: objects };
+    const fetch = reviewCli(cwd, env);
+    fetch('git', ['init', '-q', '--bare']);
+    // The checkout's refs and shallow boundary tell the remote what is already here.
+    writeFileSync(path.join(dir, 'packed-refs'), `# pack-refs with: peeled fully-peeled\n${refs}`);
+    if (existsSync(shallow)) copyFileSync(shallow, path.join(dir, 'shallow'));
+
+    return { fetch, env, close };
+  } catch (error) {
+    close();
+    throw error;
+  }
 }
 
 /** A pull request's range and fetched commits, read with the driver's token or local user token. */
@@ -340,14 +388,18 @@ async function pullRequestTarget(
   let last = previous;
   if (![range.baseSha, range.headSha, ...(last ? [last] : [])].every(sha => hasCommit(exec, sha))) {
     const url = `${INTEGRATIONS[REVIEW_PLATFORM]!.repos!.url(repo)}.git`;
-    const fetching = services.exec ?? reviewCli(cwd, fetchEnvironment(token));
+    const fetching = services.exec
+      ? { fetch: services.exec, close() {} }
+      : fetchInto(cwd, exec, token, url);
     const refs = ['fetch', '-q', url, range.baseSha, range.headSha];
     try {
-      fetching('git', [...refs, ...(last ? [last] : [])]);
+      fetching.fetch('git', [...refs, ...(last ? [last] : [])]);
     } catch (error) {
       if (!last) throw error;
-      fetching('git', refs);
+      fetching.fetch('git', refs);
       last = undefined;
+    } finally {
+      fetching.close();
     }
   }
   const since = a.since ? commitOf(exec, a.since) : last;
@@ -590,7 +642,7 @@ export default async function review(
                 : 'no issues'
           }`,
           summary: reviewCheckSummary(
-            result.note,
+            result.title,
             result.findings,
             result.summary.url!,
             currentReviewLinks()?.task,
@@ -712,7 +764,7 @@ async function reviewChange(
   if (worktree && !ranges.size)
     return {
       findings: [],
-      note: '',
+      title: '',
       body: '',
       summary: {
         baseSha,
@@ -764,7 +816,7 @@ async function reviewChange(
           });
       }),
     ),
-    note: z.string().describe('One line on the change as a whole, under 200 characters, or empty.'),
+    title: z.string().describe('A headline for this review, under 200 characters, or empty.'),
     body: z
       .string()
       .describe(
@@ -851,7 +903,7 @@ async function reviewChange(
 
   const result: ReviewResult = {
     findings,
-    note: reviewed.data.note.trim(),
+    title: reviewed.data.title.trim(),
     body: reviewed.data.body.trim(),
     summary,
     ...(pr ? { pr } : {}),

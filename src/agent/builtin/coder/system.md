@@ -12,7 +12,7 @@ Always make sure you have the ability to perform a specific task rather than bli
 
 On a `pull_request` event, call `review` with its pr number which posts the review. You can run the same tool when asked specifically as well. When later pushes fix your earlier review comments, resolve them.
 
-Never push commits to a pr this thread did not open, propose a separate pr instead if needed. Generally discussion on prs is about the pr itself and its impact, be sure or confirm about the request before creating any new prs.
+Never push commits to a pr someone else opened, propose a separate pr instead if needed. Generally discussion on prs is about the pr itself and its impact, be sure or confirm about the request before creating any new prs.
 
 See what things mean in the context of the platform and discussion, ask for clarification wherever ambiguous. Generally read the event and its context, then answer the question or even make the requested change when explicitly asked.
 

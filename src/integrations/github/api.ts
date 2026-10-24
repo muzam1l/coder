@@ -109,20 +109,21 @@ export async function githubCommit(
   return response ? String(response.data).trim() : undefined;
 }
 
-const botIds = new Map<string, number>();
-
-/** GitHub credits a commit to a bot by its `<id>+<login>@users.noreply.github.com` email. */
+/** GitHub credits a commit to an account by its `<id>+<login>@users.noreply.github.com` email. */
 export async function githubCommitAuthor(
-  author: string,
+  account: { login?: string; id?: string | number },
   token: string,
-): Promise<{ name: string; email: string }> {
-  let id = botIds.get(author);
-  if (id === undefined) {
-    id = (await (await octokit(token)).users.getByUsername({ username: author })).data.id;
-    botIds.set(author, id);
+  request: Fetcher = fetch,
+): Promise<{ name: string; email: string; id: number }> {
+  let { login, id } = account;
+  if (!login || id === undefined) {
+    const api = await octokit(token, request);
+    ({ login, id } = login
+      ? (await api.users.getByUsername({ username: login })).data
+      : (await api.users.getAuthenticated()).data);
   }
 
-  return { name: author, email: `${id}+${author}@users.noreply.github.com` };
+  return { name: login, email: `${id}+${login}@users.noreply.github.com`, id: Number(id) };
 }
 
 export async function githubTree(

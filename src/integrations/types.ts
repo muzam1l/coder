@@ -731,8 +731,12 @@ export interface Repositories {
   pullRequest(event: PlatformEvent): number | undefined;
   /** A pull request's Chat SDK thread. */
   pullRequestThread(repo: string, number: number): SerializedThread;
-  /** The git name and email that credit a commit to the app's account `author`. */
-  commitAuthor?(author: string, token: string): Promise<{ name: string; email: string }>;
+  /** The git name, email and user id that credit a commit to a platform account, a bot or a member; a missing id is read by login, a missing login from the token's own user. */
+  commitAuthor?(
+    account: { login?: string; id?: string | number },
+    token: string,
+    request?: typeof fetch,
+  ): Promise<{ name: string; email: string; id: number }>;
   readonly reviews?: PullRequestReviews;
 }
 

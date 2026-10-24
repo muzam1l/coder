@@ -39,7 +39,7 @@ const review: AsyncTool<ReviewInput> = {
     const reviewed = result as ReviewResult;
     const text = renderReviewMarkdown({ ...reviewed, runId });
     if (reviewed.summary.url)
-      return `${text}\nThe review is on the pull request, so a reply repeating it adds nothing.\n`;
+      return `${text}\nThe review is on the pull request, so a reply repeating it adds nothing. Still answer anything else asked.\n`;
     if (!reviewed.pr) return text;
 
     return `${text}\nNot posted. To post it on the pull request as the user, escalate \`coder review --post --run ${runId}\`.\n`;

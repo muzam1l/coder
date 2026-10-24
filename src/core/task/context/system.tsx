@@ -84,7 +84,7 @@ const Workspace = ({ scratch, writes }: SystemPromptParts) => (
   <workspace>
     {[
       writes &&
-        'Leave changes in the checkout uncommitted. Its diff is reported when the turn ends. Do not commit, switch branches or push in the current workspace or elsewhere.',
+        'Leave changes in the checkout uncommitted. Its diff is reported when the turn ends. Do not commit, switch branches or push in the current workspace or elsewhere except scratch folder if provided.',
       scratch &&
         writes &&
         `Scratch folder is provided for clones, git writes and anything else, deleted with the task: ${scratch}`,

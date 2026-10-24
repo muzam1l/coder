@@ -176,7 +176,57 @@ export function nativeToolEnvironment(
   );
 }
 
-/** Git's credentials for the platform servers: a written token, or a connection's that the helper asks the task's server for on first use. An installation's token wins for the owner it covers; a read-only connection never pushes as its account. */
+/** A turn's personal connection the task's server lets it act as now, with that account's commit identity; it never asks and gets no token, which the helper fetches on use. Probed together, the first approved in the turn's order wins. */
+async function actingConnection(
+  endpoint: { url: string; token: string },
+  connections: string[],
+): Promise<{ connection: string; author?: { name: string; email: string } } | undefined> {
+  const probes = await Promise.all(
+    connections.map(async connection => {
+      try {
+        const response = await fetch(endpoint.url, {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${endpoint.token}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({ connection, git: true }),
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) return undefined;
+        const body = (await response.json()) as { author?: { name?: unknown; email?: unknown } };
+        const { name, email } = body.author ?? {};
+
+        return {
+          connection,
+          ...(typeof name === 'string' && typeof email === 'string'
+            ? { author: { name, email } }
+            : {}),
+        };
+      } catch (error) {
+        console.error(`coder: act-as probe failed for ${connection}`, error);
+        return undefined;
+      }
+    }),
+  );
+
+  return probes.find(probe => probe !== undefined);
+}
+
+/** Git's name and email for the turn's commits. */
+const identityEnvironment = (
+  author: { name: string; email: string } | undefined,
+): Record<string, string> =>
+  author
+    ? {
+        GIT_AUTHOR_NAME: author.name,
+        GIT_COMMITTER_NAME: author.name,
+        GIT_AUTHOR_EMAIL: author.email,
+        GIT_COMMITTER_EMAIL: author.email,
+      }
+    : {};
+
+/** Git's credentials and identity for the turn, from one choice: a personal connection its owner approved acting as pushes and commits as them (refused later, nothing pushes), else the installation covering the repository's owner pushes and the app's bot commits (`CODER_GIT_AUTHOR`). A connection's token is asked of the task's server on use; a read-only connection never pushes as its account. */
 export async function gitToolEnvironment(
   servers: McpServerSpec[],
 ): Promise<{ env: Record<string, string>; close(): Promise<void> }> {
@@ -201,10 +251,20 @@ export async function gitToolEnvironment(
           ...(password ? { password } : {}),
           ...(connection ? { connection } : {}),
           ...(server.account ? { owner: server.account.toLowerCase() } : {}),
+          actAs: false,
         }))
       : [];
   });
-  if (!credentials.length) return { env: {}, close: async () => {} };
+  const connections = [...new Set(credentials.flatMap(entry => entry.connection ?? []))];
+  const acting =
+    endpoint && connections.length ? await actingConnection(endpoint, connections) : undefined;
+  for (const entry of credentials)
+    entry.actAs = !!acting && !!entry.connection && entry.connection === acting.connection;
+  const fallback = process.env.CODER_GIT_AUTHOR
+    ? (JSON.parse(process.env.CODER_GIT_AUTHOR) as { name: string; email: string })
+    : undefined;
+  const identity = identityEnvironment(acting ? acting.author : fallback);
+  if (!credentials.length) return { env: identity, close: async () => {} };
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'coder-git-'));
   const helper = path.join(root, 'credential.cjs');
   try {
@@ -212,7 +272,7 @@ export async function gitToolEnvironment(
     const connected = credentials.some(entry => entry.connection);
     const tokens = { credentials, ...(connected ? { endpoint } : {}) };
     await fs.writeFile(path.join(root, 'tokens.json'), JSON.stringify(tokens), { mode: 0o600 });
-    // The installation covering the owner, else the personal accounts (the owner's own first), else any installation.
+    // The account acted as, then the installation covering the owner, else the personal accounts (the owner's own first), else any installation.
     await fs.writeFile(
       helper,
       `const fs = require('node:fs');
@@ -225,9 +285,11 @@ process.stdin.on('end', async () => {
   const owner = (fields.path || '').split('/')[0].toLowerCase();
   const hosted = credentials.filter(entry => fields.protocol === 'https' && fields.host === entry.host);
   const apps = hosted.filter(entry => !entry.connection);
-  const members = hosted.filter(entry => entry.connection);
+  const members = hosted.filter(entry => entry.connection && !entry.actAs);
   const covering = apps.find(entry => entry.owner === owner);
-  const ordered = covering
+  // The account acted as is the only credential: refused, the push fails rather than pushing another way under its name.
+  const acting = hosted.filter(entry => entry.actAs);
+  const ordered = acting.length ? acting : covering
     ? [covering]
     : [...members.filter(entry => entry.owner === owner), ...members.filter(entry => entry.owner !== owner), ...apps.filter(entry => !entry.owner), ...apps.filter(entry => entry.owner)];
   for (const credential of ordered) {
@@ -249,6 +311,7 @@ process.stdin.on('end', async () => {
 
     return {
       env: {
+        ...identity,
         GIT_CONFIG_COUNT: String(count + 3),
         [`GIT_CONFIG_KEY_${count}`]: 'credential.helper',
         [`GIT_CONFIG_VALUE_${count}`]: '',

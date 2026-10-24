@@ -99,7 +99,7 @@ Installs start from the dashboard. **[Connect GitHub]** adds the shared GitHub a
 
 Operators set up the shared apps in the dashboard's Operator area at `/dash/<workspace>/operator`, one per platform, named `SERVER_NAME` or Wular unless they pick a name, and every operator action lands in its audit log. Entering it asks for a fresh Wular Auth sign-in and lasts an hour, or 15 minutes without activity; on local and memory servers the admin token holder is the operator.
 
-Each task gets the narrowest platform token: on GitHub an installation token for the event's repository with only the permissions its tools need, on Slack the install's bot token. A GitHub App also asks for Checks: Read and write, for review checks; existing apps list it under **[Update on GitHub]**, and each installation accepts it once.
+Each task gets the narrowest platform token: on GitHub an installation token for the event's repository with only the permissions its tools need, on Slack the install's bot token. Each turn's git pushes with the installation covering the repository and commits as the app's bot. A member who approves acting as them on their GitHub connection gets the turn's pushes and commits under their own GitHub account instead. A GitHub App also asks for Checks: Read and write, for review checks; existing apps list it under **[Update on GitHub]**, and each installation accepts it once.
 
 ## Credentials
 

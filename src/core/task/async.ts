@@ -86,7 +86,12 @@ export async function startAsyncTool<I>(
   if (timeout !== undefined && !(timeout > 0))
     throw new Error('timeout must be a positive number of seconds');
   const cwd = task.cwd ?? process.cwd();
-  const posts = Boolean(tool.platform && process.env[tokenEnvName(tool.platform)]);
+  // A cloud task on a repository has its runner hold the app token, whatever servers this turn has.
+  const posts = Boolean(
+    tool.platform &&
+    (process.env[tokenEnvName(tool.platform)] ||
+      (process.env.CODER_MCP_MODE === 'cloud' && task.repo)),
+  );
 
   return updateCalls(taskDir, calls => {
     const pending = pendingCall(taskDir, tool.name);
