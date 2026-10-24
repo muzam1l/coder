@@ -14,7 +14,7 @@ Coder turns any model into an agent you own: tasks on this machine, from your co
 - [model](model.md): manage models: built-ins, aliases, custom endpoints
 - [connection](connection.md): platform accounts and MCP servers tasks use
 
-## `review [--base <base>] [--head <head>] [--pr <pr>] [--since <since>] [--path <path>] [--exclude <exclude>] [--post] [--md] [--model <model>] [--depth <depth>] [--json] [--cwd <cwd>]`
+## `review [--base <base>] [--head <head>] [--pr <pr>] [--since <since>] [--path <path>] [--exclude <exclude>] [--post] [--run <run>] [--md] [--model <model>] [--depth <depth>] [--json] [--cwd <cwd>]`
 
 review changed code with a built-in flow
 
@@ -22,7 +22,7 @@ Review changed code with a read-only agent. Every reported finding is checked
 against the repository. Runs the built-in `review` flow. A local review covers
 everything since the merge-base with the origin default branch, including
 uncommitted and untracked files. Changed submodules are reviewed file by file.
-PR reviews can post deduplicated inline comments.
+PR reviews can post one review with inline comments, never repeating a finding.
 
 Related: `coder flow watch`, `coder docs review`.
 
@@ -32,7 +32,8 @@ Related: `coder flow watch`, `coder docs review`.
 - `--since <since>` keep only PR files and hunks changed since this commit
 - `--path <path>` review only this path, relative to cwd (repeatable)
 - `--exclude <exclude>` leave this path out, relative to cwd (repeatable)
-- `--post` post deduplicated inline comments and sticky PR summary
+- `--post` post the review on the pull request, as the signed-in gh user
+- `--run <run>` with --post, post this finished review run instead of reviewing again
 - `--md` markdown output (the default)
 - `--model <model>` model name[/effort] or engine/model[/effort] (sol/low, claude/opus, codex/gpt-6.1-sol/high) for the review task (default: reviewModel)
 - `--depth <depth>` what to report: low only critical and major, high nits too (default: medium)
@@ -45,6 +46,7 @@ coder review --base main  # review everything since main locally
 coder review --path src --exclude src/gen  # review src without generated code
 coder review --pr 42 --post  # review and post to pull request 42
 coder review --depth high  # report nits too
+coder review --post --run <id>  # post a finished review run
 ```
 
 ## `config [action] [key] [value] [--workspace] [--json] [--cwd <cwd>]`

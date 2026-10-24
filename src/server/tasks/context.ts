@@ -213,14 +213,15 @@ const tokenFailed = (id: string) => (error: unknown) => {
   return undefined;
 };
 
-/** The task's tokens by handle: the event installation's, then one per other installation of the agent's apps; a task with no event has them only as a child. */
+/** The task's tokens by handle: the event installation's, then one per other installation of the agent's apps; a task with no event has them only as a child. An event on a pull request also gets a checks-only token, kept apart from them. */
 export async function eventTokens(
   ctx: ServerContext,
   task: TaskStatus['task'],
-): Promise<Record<string, string>> {
+): Promise<{ tokens: Record<string, string>; checksToken?: string }> {
   const tokens: Record<string, string> = {};
+  let checksToken: string | undefined;
   const event = task.event;
-  if (!event && !task.parent) return tokens;
+  if (!event && !task.parent) return { tokens };
 
   let installation: Installation | undefined;
   if (event) {
@@ -234,19 +235,25 @@ export async function eventTokens(
     if (!found || found.deletedAt) throw new Error('Installation is gone');
     installation = found;
 
-    // A review that posts needs the comment scope and nothing more.
-    const posts = task.flow === 'review' && task.args?.post === true;
     tokens[event.integration] = await installationToken(
       ctx,
       integration,
       installation,
       decryptSecret(ctx.config, app.credentials),
       {
-        tools:
-          task.tools[event.integration] ?? (posts ? integration.tools.presets['read-only'] : []),
+        tools: task.tools[event.integration] ?? [],
       },
       ctx.config.taskTimeoutMs,
     );
+    if (integration.repos?.reviews && integration.repos.pullRequest(event) !== undefined)
+      checksToken = await installationToken(
+        ctx,
+        integration,
+        installation,
+        decryptSecret(ctx.config, app.credentials),
+        { purpose: 'checks' },
+        ctx.config.taskTimeoutMs,
+      ).catch(tokenFailed(installation.id));
   }
   const others = (await agentInstallations(ctx, task)).filter(
     other => other.id !== installation?.id && other.integration in task.tools,
@@ -274,7 +281,7 @@ export async function eventTokens(
     }),
   );
 
-  return tokens;
+  return { tokens, ...(checksToken ? { checksToken } : {}) };
 }
 
 /** The workspace's dashboard on this server's public URL, where a task's Coder tools link. */
@@ -294,7 +301,9 @@ export async function taskContext(
 ): Promise<{
   task: TaskStatus['task'];
   tokens: Record<string, string>;
+  checksToken?: string;
   dashboard?: string;
+  reviewAssets?: string;
   postToken?: string;
   credential: EngineCredential;
   engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
@@ -304,8 +313,8 @@ export async function taskContext(
   connectionSecrets: string[];
 }> {
   const task = await withModels(ctx, status.task);
-  const [tokens, config, credential]: [
-    Record<string, string>,
+  const [{ tokens, checksToken }, config, credential]: [
+    Awaited<ReturnType<typeof eventTokens>>,
     Partial<CoderConfig>,
     EngineCredential,
   ] = await Promise.all([
@@ -346,6 +355,9 @@ export async function taskContext(
     actAsRefusal(ctx, status, connection),
   );
   const dashboard = await taskDashboard(ctx, workspace);
+  // A path resolves against this server's public URL; an absolute URL stays as it is.
+  const reviewAssets =
+    ctx.config.reviewAssets && URL.parse(ctx.config.reviewAssets, ctx.config.publicUrl)?.href;
   const engineCredentials = await taskEngineCredentials(ctx, task, effectiveConfig(ctx, config));
   const connectionEnv = { ...resolved.env };
   const warnings = [...resolved.warnings];
@@ -372,6 +384,7 @@ export async function taskContext(
     ...Object.values(resolved.tokens),
     ...Object.values(tokens),
     ...(postToken ? [postToken] : []),
+    ...(checksToken ? [checksToken] : []),
     ...credentialSecrets(credential.env),
     ...(engineCredentials?.flatMap(row => credentialSecrets(row.credential.env)) ?? []),
   ]);
@@ -379,7 +392,9 @@ export async function taskContext(
   const common = {
     task: safeTask,
     tokens: { ...resolved.tokens, ...tokens },
+    ...(checksToken ? { checksToken } : {}),
     ...(dashboard ? { dashboard } : {}),
+    ...(reviewAssets ? { reviewAssets } : {}),
     ...(postToken ? { postToken } : {}),
     credential,
     ...(engineCredentials ? { engineCredentials } : {}),
@@ -635,7 +650,7 @@ export async function taskLogSecrets(ctx: ServerContext, status: TaskStatus): Pr
         limit: 1,
       })
     ).length
-      ? Object.values(await eventTokens(ctx, status.task))
+      ? Object.values((await eventTokens(ctx, status.task)).tokens)
       : [];
 
   if (recovered.length)

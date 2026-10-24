@@ -358,7 +358,7 @@ function specManifest(publicUrl: string, spec: AppSpec, isPublic?: boolean): Git
     permissions: {
       ...githubAppPermissions(spec.access),
       ...(events.some(event => Object.hasOwn(APP_EVENTS, event))
-        ? { issues: 'write', pull_requests: 'write' }
+        ? { issues: 'write', pull_requests: 'write', checks: 'write' }
         : {}),
       // The membership webhooks need it; task tokens never carry it.
       members: 'read',
@@ -543,6 +543,7 @@ async function mintInstallationToken(
     installationId,
     ...(scope.permissions ? { permissions: scope.permissions } : {}),
   })) as { token: string; expiresAt: string };
+
   return { token, expiresAt: Date.parse(expiresAt) };
 }
 
@@ -565,6 +566,8 @@ function githubReuseKey(credentials: unknown, bound?: TokenBound): string {
 
 /** The narrowest token for a bound: the permissions its tools need, on every repository of the installation. */
 export function githubTokenScope(bound: TokenBound = {}): { permissions?: Record<string, string> } {
+  if (bound.purpose === 'checks') return { permissions: { metadata: 'read', checks: 'write' } };
+
   return bound.tools ? { permissions: githubAppPermissions(bound.tools) } : {};
 }
 

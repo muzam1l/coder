@@ -251,7 +251,6 @@ export const task = pgTable(
     status: text().$type<TaskState>().notNull(),
     agent: text().notNull(),
     flow: text().notNull(),
-    reviewKey: text(),
     runnerKind: text().notNull(),
     access: text().$type<AgentTask['access']>(),
     installationId: bigint({ mode: 'number' }).references(() => integrationAppInstallation.id),
@@ -338,9 +337,6 @@ export const task = pgTable(
       .on(t.organizationId)
       .where(sql`${t.status} in ('queued', 'running', 'waiting')`),
     index().on(t.status, t.createdAt),
-    index()
-      .on(t.organizationId, t.reviewKey)
-      .where(sql`${t.status} in ('running', 'waiting')`),
   ],
 );
 

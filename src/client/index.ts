@@ -614,9 +614,6 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     list: (repo: string): Promise<Array<{ number: number; title: string }>> =>
       this.request(queryPath('/admin/pulls', { repo })),
   };
-  review(body: TaskInput & { repo: string; pr: number; post?: boolean }): Promise<D['task']> {
-    return this.post('/admin/review', body);
-  }
   usage<Q extends UsageQuery = {}>(
     options: Q = {} as Q,
   ): Promise<

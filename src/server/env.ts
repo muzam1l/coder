@@ -86,6 +86,7 @@ const schema = z.object({
   ),
   SERVER_NAME: z.optional(z.string().check(z.trim())),
   ISSUES_URL: emptyAsUnset(z.optional(url(() => true, 'must be a URL'))),
+  REVIEW_ASSETS: emptyAsUnset(z.optional(z.string().check(z.trim()))),
   VERCEL_PROJECT_PRODUCTION_URL: z.optional(z.string()),
   VERCEL_URL: z.optional(z.string()),
   VERCEL: z.optional(z.string()),
@@ -144,6 +145,7 @@ export function loadServerConfig(
     ...(publicUrl ? { publicUrl } : {}),
     ...(values.SERVER_NAME ? { name: values.SERVER_NAME } : {}),
     issuesUrl: values.ISSUES_URL ?? ISSUES_URL,
+    ...(values.REVIEW_ASSETS ? { reviewAssets: values.REVIEW_ASSETS } : {}),
     ...(databaseUrl
       ? {
           databaseUrl,

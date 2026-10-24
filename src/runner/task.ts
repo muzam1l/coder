@@ -64,6 +64,7 @@ import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mai
 import type { Task, McpServerSpec, ResolvedTaskOptions } from '../core/types';
 import type { FlowHooks } from '../flow/runtime';
 import { asyncTools } from '../core/task/context/tools';
+import { reviewLinks } from '../flow/builtin/review/post';
 import {
   readJsonFile,
   writeJsonFileAtomic,
@@ -75,13 +76,16 @@ import { CLAUDE_PROJECT, taskHistory } from './history';
 import { claimCalls, driveAsyncTool, pendingCall } from '../core/task/async';
 
 const exec = promisify(execFile);
+
 type RemoteTask = {
   task: AgentTask;
   generation: number;
   logCursor?: number;
   timeoutMs?: number;
   tokens: Record<string, string>;
+  checksToken?: string;
   dashboard?: string;
+  reviewAssets?: string;
   postToken?: string;
   credential: EngineCredential;
   engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
@@ -337,6 +341,7 @@ async function historySecrets(
   return [
     token,
     ...Object.values(remote.tokens),
+    ...(remote.checksToken ? [remote.checksToken] : []),
     ...(remote.postToken ? [remote.postToken] : []),
     ...Object.values(remote.connectionEnv ?? {}),
     ...Object.entries(remote.credential.env)
@@ -982,6 +987,8 @@ async function runCheckedOutTask(
           if (!tool) continue;
           const work = driveAsyncTool(tool, call.runId, cwd, started, call.timeout, {
             integrationToken: tool.platform ? remote.tokens[tool.platform] : undefined,
+            checksToken: remote.checksToken,
+            links: reviewLinks(auth.server, remote.dashboard, remote.task.taskUrl, remote.reviewAssets),
             onModel: onFlowModel,
             stop: timeout,
           })

@@ -64,7 +64,15 @@ export function engineEnvironment(env: NodeJS.ProcessEnv = process.env): NodeJS.
   return {
     ...Object.fromEntries(
       Object.entries(env).filter(
-        ([key]) => !key.startsWith('CODER_CONNECTION_') && key !== 'CODER_MCP_CONNECTION_ENV',
+        ([key]) =>
+          !key.startsWith('CODER_CONNECTION_') &&
+          !/^APP_TOKEN(?:_|$)/.test(key) &&
+          ![
+            'CODER_MCP_CONNECTION_ENV',
+            'CODER_REPLY_URL',
+            'CODER_REPLY_TOKEN',
+            'CODER_TASK_TOKEN',
+          ].includes(key),
       ),
     ),
     ...Object.fromEntries(

@@ -616,6 +616,85 @@ export interface IntegrationAuth {
   ): Promise<Space | undefined>;
 }
 
+/** A pull request under review: its range, and the head of the reviewer's last finished review there. */
+export interface ReviewTarget {
+  repo: string;
+  number: number;
+  /** The handle whose reviews and comments count as the reviewer's own. */
+  author: string;
+  baseSha: string;
+  headSha: string;
+  since?: string;
+  forcePushed?: boolean;
+  prior?: Array<{
+    file: string;
+    line: number;
+    title: string;
+    state: 'open' | 'replied' | 'resolved';
+  }>;
+}
+
+/** One inline comment of a posted review, on a changed line. */
+export interface ReviewComment {
+  startLine?: number;
+  file: string;
+  line: number;
+  body: string;
+}
+
+/** One review per run, with head markers on reviews and fingerprint markers on inline comments. */
+export interface PullRequestReviews {
+  startCheck(
+    pr: { repo: string; headSha: string },
+    check: { name: string; detailsUrl?: string },
+    token: string,
+    request?: typeof fetch,
+  ): Promise<{ id: number; url?: string } | undefined>;
+  finishCheck(
+    pr: { repo: string },
+    id: number,
+    outcome: {
+      conclusion: 'success' | 'neutral' | 'failure' | 'skipped' | 'cancelled';
+      title: string;
+      summary: string;
+      detailsUrl?: string;
+    },
+    token: string,
+    request?: typeof fetch,
+  ): Promise<void>;
+  /** A pull request number or browser URL; undefined for anything else. */
+  parse(value: number | string): { number: number; repo?: string } | undefined;
+  /** `owner/name` of a checkout's origin on this platform. */
+  repository(cwd: string): string | undefined;
+  /** The pull request's current head, without review history. */
+  head(
+    pr: { repo: string; number: number },
+    token: string,
+    request?: typeof fetch,
+  ): Promise<string>;
+  /** The range to review, and `since` from the head marker of the author's newest review. */
+  target(
+    pr: { repo: string; number: number; author?: string },
+    token: string,
+    request?: typeof fetch,
+  ): Promise<ReviewTarget>;
+  /** Thread URLs of the author's inline comments, by the fingerprint marker each carries. */
+  threads(
+    pr: { repo: string; number: number; author: string },
+    token: string,
+    request?: typeof fetch,
+  ): Promise<Map<string, string>>;
+  /** Posts one review; `body` is asked again with the new comments' threads once they exist. */
+  post(
+    pr: { repo: string; number: number; headSha: string },
+    review: { comments: ReviewComment[]; body(threads: Map<string, string>): string },
+    token: string,
+    request?: typeof fetch,
+  ): Promise<{ url: string }>;
+  /** The token of the person signed in on this machine, for reviews run here. */
+  localToken(cwd: string): string;
+}
+
 /** Repository reads, for an integration that hosts code. */
 export interface Repositories {
   /** HTTPS clone hosts it may place in a verified event. */
@@ -652,6 +731,7 @@ export interface Repositories {
   pullRequest(event: PlatformEvent): number | undefined;
   /** A pull request's Chat SDK thread. */
   pullRequestThread(repo: string, number: number): SerializedThread;
+  readonly reviews?: PullRequestReviews;
 }
 
 export interface Integration {
@@ -727,6 +807,7 @@ export interface Integration {
 
 /** What a minted token may reach: the permissions its tools need, across its whole installation. */
 export interface TokenBound {
+  purpose?: 'checks';
   tools?: string[];
 }
 
