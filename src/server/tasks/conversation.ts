@@ -285,8 +285,7 @@ export async function describe(
   const thread = event.chat?.thread;
   if (!thread) return event;
   const direct = thread.isDM === true;
-  const mustReply =
-    directAsk(integration, event) || integration.answersEveryPrompt?.(event) === true;
+  const mustReply = directAsk(integration, event);
   const [unseen, facts] = await Promise.all([
     input.loaded
       ? (input.unseen ?? { messages: [], more: 0 })
@@ -310,14 +309,15 @@ export async function describe(
   ]);
   // A recorded message the hook fetched again counts once.
   const recorded = new Set(unseen.messages.flatMap(message => message.id ?? []));
+  const hooked = (facts.since ?? []).map(message => ({ thread: thread.id, ...message }));
   const fetched = new Map(
-    facts.since?.flatMap(message => (message.id ? [[message.id, message] as const] : [])),
+    hooked.flatMap(message => (message.id ? [[message.id, message] as const] : [])),
   );
   const all = [
     ...unseen.messages.map(
       ({ sequence: _sequence, ...message }) => (message.id && fetched.get(message.id)) || message,
     ),
-    ...(facts.since ?? []).filter(message => !message.id || !recorded.has(message.id)),
+    ...hooked.filter(message => !message.id || !recorded.has(message.id)),
   ];
   const since = all.slice(0, SINCE_LIMIT);
   const more = (facts.since ? 0 : unseen.more) + all.length - since.length;
@@ -471,7 +471,7 @@ export async function resume(
     if (!error.fix || !event) return false;
     const app = await ctx.store.get('app', event.appId);
     const { eventReplies } = await import('../chat');
-    if (app) await (await eventReplies(ctx, app, event)).problem(error.message);
+    if (app) await (await eventReplies(ctx, app, event)).post(error.message);
   }
   return true;
 }
@@ -513,7 +513,6 @@ function steerDelivery(batch: Steer[]): { text: string; count: number } {
           since: undefined,
           more: (event.conversation?.more ?? 0) + (event.conversation?.since?.length ?? 0),
         },
-        promptContext: undefined,
         chat: event.chat
           ? {
               thread: event.chat.thread,

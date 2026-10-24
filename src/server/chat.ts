@@ -5,7 +5,8 @@ import type { Chat, Message, SerializedMessage, SerializedThread, Thread } from 
 
 import { definitionEvents, eventOptions } from '../agent/definition';
 import { postReplyParts, reactToMessage, withNotice } from '../agent/exec';
-import { type AgentApp, type AgentEvent, type AgentTask } from '../agent/types';
+import { type AgentApp, type AgentEvent } from '../agent/types';
+import type { TaskStatus } from './store/types';
 import { agentWithVersion } from './agents/records';
 import { syncLocalAgents } from './store/local';
 import type {
@@ -228,22 +229,26 @@ export async function deliver(
   return dispatched.taskId;
 }
 
-/** Replies through a Chat SDK thread: public posts as Markdown in parts the platform accepts, and private ones only where the platform has them. */
+/** Replies through a Chat SDK thread: public posts as Markdown in parts the platform accepts, and private ones only where the platform has them; `clear` ends the working indicator. */
 function threadReplies(
   thread: Thread,
   user?: Message['author'] | string,
   message?: Message | string,
   limit?: number,
   failed?: (error: unknown) => Promise<void>,
+  clear = async () => thread.adapter.endTyping?.(thread.id),
 ): Replies {
   const messageId = typeof message === 'string' ? message : message?.id;
   const asker = typeof user === 'string' ? user : user?.userId;
   let typing: Promise<void> | undefined;
+  let cleared = false;
   const endTyping = async () => {
+    if (cleared) return;
+    cleared = true;
     await typing?.catch(() => {});
-    await thread.adapter.endTyping?.(thread.id);
+    await clear();
   };
-  // A reply ends the working indicator; failing to clear it never fails the reply.
+  // The first reply ends the working indicator; failing to clear it never fails the reply.
   const replied = async <T>(sent: T) => {
     await endTyping().catch(error =>
       console.error(`coder server: could not clear the working indicator in ${thread.id}`, error),
@@ -252,9 +257,9 @@ function threadReplies(
     return sent;
   };
   // Where the platform answers one message, the reply goes to the one that raised the event, not the thread's newest.
-  const post = async (text: string, progress = false, notice?: string) => {
+  const post = async (text: string, notice?: string) => {
     const sent = await withNotice(thread, text, notice, asker, text =>
-      postReplyParts(thread, text, limit, message, progress),
+      postReplyParts(thread, text, limit, message),
     ).catch(async error => {
       await failed?.(error);
       throw error;
@@ -262,25 +267,15 @@ function threadReplies(
 
     return replied({ id: sent.at(-1)?.id, ids: sent.map(message => message.id) });
   };
-  const marks = (
-    thread.adapter as {
-      postProblem?(threadId: string, text: string): Promise<{ id?: string } | null | void>;
-    }
-  ).postProblem;
 
   return {
     post,
     react: (emoji, target) => reactToMessage(thread, emoji, target ?? messageId),
-    problem: async text =>
-      marks ? replied(await marks.call(thread.adapter, thread.id, text)) : post(text),
     whisper: text =>
       user ? thread.postEphemeral(user, text, { fallbackToDM: false }) : Promise.resolve(null),
     startTyping: () => {
-      const options: TypingOptions = {
-        ...(asker ? { initiatorUserId: asker } : {}),
-        ...(messageId ? { messageId } : {}),
-      };
-      typing = thread.adapter.startTyping(thread.id, 'Working', options);
+      const options: TypingOptions = messageId ? { messageId } : {};
+      typing = thread.adapter.startTyping(thread.id, undefined, options);
 
       return typing;
     },
@@ -306,34 +301,44 @@ export async function eventThread(
   return chat.thread(event.chat.thread.id);
 }
 
-/** Replies in the thread of an event that did not come through the adapter: GitHub pull requests, events sent by an admin. */
+/** Replies in the thread of an event that did not come through the adapter: GitHub pull requests, events sent by an admin, a task's `turn`. */
 export async function eventReplies(
   ctx: ServerContext,
   app: AgentApp,
   event: AgentEvent,
+  turn?: TaskStatus,
 ): Promise<Replies> {
-  if (!event.chat)
-    return { post: async () => {}, problem: async () => {}, whisper: async () => {} };
+  if (!event.chat) return { post: async () => {}, whisper: async () => {} };
+  const thread = await eventThread(ctx, app, event);
   // A resumed turn keeps the starter as actor; its own asker wrote the current message.
   return threadReplies(
-    await eventThread(ctx, app, event),
+    thread,
     event.chat.message?.author.userId || event.actor.id || undefined,
     event.chat.message?.id || undefined,
     ctx.integrations[app.integration]?.replyLimit,
     error => failedPost(ctx, app, event.installationId, error),
+    turn && (() => endTyping(ctx, turn, thread)),
   );
 }
 
-/** Clears the working indicator in a task's conversation, when its turn ended or replied from elsewhere. */
-export async function endTyping(ctx: ServerContext, task: AgentTask): Promise<void> {
+/** Clears the working indicator of a task's turn once, at its first post, its failure or its end; a turn that showed none or cleared it already costs nothing. */
+export async function endTyping(
+  ctx: ServerContext,
+  status: TaskStatus,
+  thread?: Thread,
+): Promise<void> {
+  const { task } = status;
   const event = task.event;
-  if (!event?.chat || task.source !== event.integration) return;
-  if (!ctx.integrations[event.integration]?.sticksTyping) return;
-  const app = await ctx.store.get('app', event.appId);
-  if (!app) return;
-  const thread = await eventThread(ctx, app, event);
+  if (status.typingEnded || !event?.chat || task.source !== event.integration) return;
+  if (!(task.context?.mustReply ?? event.mustReply)) return;
+  const fence = { generation: status.generation ?? 0 };
+  const now = (ctx.now ?? Date.now)();
+  const patch = { typingEnded: true };
+  if (!(await ctx.queue.patchTask(ctx.organizationId, task.id, patch, now, fence))) return;
+  const app = thread ? undefined : await ctx.store.get('app', event.appId);
+  const target = thread ?? (app && (await eventThread(ctx, app, event)));
 
-  await thread.adapter.endTyping?.(thread.id);
+  await target?.adapter.endTyping?.(target.id);
 }
 
 async function failedPost(ctx: ServerContext, app: AgentApp, installation: string, error: unknown) {
@@ -343,7 +348,7 @@ async function failedPost(ctx: ServerContext, app: AgentApp, installation: strin
   if (tenant) await uninstall(tenant.store, id, (ctx.now ?? Date.now)());
 }
 
-/** A Chat SDK message as the integration's event, or nothing when no event of the app's integration fits it; `delivery` names it within its thread. */
+/** A Chat SDK message as the integration's event, or nothing when no event of the app's integration fits it. */
 function chatEvent(
   integration: Integration,
   app: AgentApp,
@@ -351,7 +356,6 @@ function chatEvent(
   route: ChatRoute,
   thread: Thread,
   message: Message,
-  delivery = message.id,
   answers = false,
 ): AgentEvent | undefined {
   // A shared app hears messages only when its agent is addressed, by its plain name too; an answer to its own approval counts as addressed.
@@ -384,7 +388,7 @@ function chatEvent(
     appId: app.id,
     installationId: target.id,
     deliveryId: createHash('sha256')
-      .update(`${app.id}\n${target.id}\n${thread.id}\n${delivery}`)
+      .update(`${app.id}\n${target.id}\n${thread.id}\n${message.id}`)
       .digest('base64url')
       .slice(0, 22),
     actor: {
@@ -422,6 +426,8 @@ async function unseen(
   };
 
   await recordUnseen(tenant, event as AgentEvent, {
+    id: message.id,
+    thread: thread.id,
     author: message.author.userName || message.author.userId,
     text: message.text,
     sentAt: message.metadata.dateSent.toISOString(),
@@ -579,10 +585,10 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
   });
   if (!target) return chat;
   // Dispatch continues after the handler so no webhook waits on it.
-  const receive = async (route: ChatRoute, thread: Thread, message: Message, delivery?: string) => {
+  const receive = async (route: ChatRoute, thread: Thread, message: Message) => {
     const answers =
       route === 'message' && (await answersShown(ctx, app, target, thread.id, message.text));
-    const event = chatEvent(integration, app, target, route, thread, message, delivery, answers);
+    const event = chatEvent(integration, app, target, route, thread, message, answers);
     if (!event) {
       if (message.author.isBot !== true) await unseen(ctx, app, target, thread, message);
       return;
@@ -594,15 +600,15 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
   };
   chat.onNewMention((thread, message) => receive('mention', thread, message));
   chat.onNewMessage(/[\s\S]*/, (thread, message) => receive('message', thread, message));
-  // An edit steers like a new message.
-  chat.onMessageUpdated((thread, message) =>
-    receive(
-      message.isMention ? 'mention' : 'message',
-      thread,
-      message,
-      `edit\n${message.id}\n${message.metadata.editedAt?.toISOString() ?? ''}`,
-    ),
-  );
+  // An edit is the message again with its new text; its delivery stays done once it started or steered a turn, so only edits within that day count.
+  chat.onMessageUpdated((thread, message) => {
+    if ((ctx.now ?? Date.now)() - message.metadata.dateSent.getTime() > DELIVERY_TTL_MS) return;
+    const names = [app.name, ...(target.self ? [target.self] : [])];
+    const mention =
+      message.isMention || thread.isDM || unmentioned(message.text, names) !== undefined;
+
+    return receive(mention ? 'mention' : 'message', thread, message);
+  });
   // Reactions raise no event; those in a running task's conversation are gathered into one steer.
   chat.onReaction(async reaction => {
     if (!reaction.added || reaction.user.isBot === true) return;

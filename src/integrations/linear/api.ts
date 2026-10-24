@@ -1,11 +1,4 @@
-import type {
-  Access,
-  MessageDraft,
-  MessagePlace,
-  PlatformEvent,
-  Space,
-  ToolServer,
-} from '../types';
+import type { Access, PlatformEvent, Space, ToolServer } from '../types';
 
 export async function canWriteLinear(
   event: PlatformEvent,
@@ -54,7 +47,7 @@ export async function canWriteLinear(
   );
 }
 
-/** An agent session's space: its issue's team, public only when Linear says so (`issue.team`). */
+/** An event's space: its issue's team, public only when Linear says so (`issue.team`). */
 export async function linearSpace(
   event: PlatformEvent,
   token: string,
@@ -157,39 +150,4 @@ export function linearToolServer(
       : "On the app's token; the workspace the app is installed in.",
     instructions: 'get_issue reads an issue by id or identifier such as ENG-123.',
   };
-}
-
-/** The bound adapter's agent activities. */
-interface LinearActivities {
-  postElicitation(
-    threadId: string,
-    body: string,
-    options: Array<{ label: string; value: string }>,
-  ): Promise<{ id?: string }>;
-  postProgress(threadId: string, text: string): Promise<unknown>;
-}
-
-/** Buttons are a select elicitation whose pick comes back as a prompt holding the value. */
-export async function postLinearMessage(
-  { thread }: MessagePlace,
-  { markdown: text, collapsed, buttons, hint, link }: MessageDraft,
-): Promise<string | undefined> {
-  const adapter = thread.adapter as unknown as LinearActivities;
-  const markdown = [
-    text,
-    collapsed && `+++ ${collapsed.summary}\n\n${collapsed.markdown}\n\n+++`,
-    hint,
-    link && `[${link.label}](${link.url})`,
-  ]
-    .filter(Boolean)
-    .join('\n\n');
-  const sent = buttons?.length
-    ? await adapter.postElicitation(
-      thread.id,
-      markdown,
-      buttons.map(button => ({ label: button.label, value: button.value })),
-    )
-    : ((await adapter.postProgress(thread.id, markdown)) as { id?: string });
-
-  return sent.id;
 }

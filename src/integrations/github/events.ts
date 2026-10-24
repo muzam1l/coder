@@ -2,7 +2,7 @@
 import { createHmac } from 'node:crypto';
 
 import { safeEqual } from '../../utils/crypto';
-import type { Adapter, EmojiValue, Message, SerializedThread, Thread } from 'chat';
+import type { Adapter, EmojiValue, Message, SerializedThread, Thread, WebhookOptions } from 'chat';
 
 import type {
   AdapterContext,
@@ -92,8 +92,9 @@ function text(title?: string, body?: string | null): string {
 const mentions = (text: string, slug: string) =>
   new RegExp(`(^|[^\\w-])@${slug}(?![\\w-])`, 'i').test(text);
 const MAINTAINERS = ['OWNER', 'MEMBER'];
+const COMMENT_EVENTS = ['issue_comment', 'pull_request_review_comment'];
 /** Webhooks the Chat SDK adapter verifies and handles. */
-const ADAPTER_EVENTS = ['issue_comment', 'pull_request_review_comment', 'ping'];
+const ADAPTER_EVENTS = [...COMMENT_EVENTS, 'ping'];
 
 function json(raw: string): unknown {
   try {
@@ -496,6 +497,41 @@ export async function githubAdapter(ctx: AdapterContext): Promise<Adapter> {
 
   /** Typing is a 👀 reaction on the asking comment, or the issue, kept in Chat state until the reply removes it. */
   class TypingGitHubAdapter extends GitHubAdapter {
+    // The adapter takes only new comments; an edited one reaches Chat as an update of its message.
+    override async handleWebhook(request: Request, options?: WebhookOptions): Promise<Response> {
+      const name = request.headers.get('x-github-event') ?? '';
+      const raw = await request.clone().text();
+      const payload = json(raw) as
+        | (Parameters<TypingGitHubAdapter['handleIssueComment']>[0] &
+            Parameters<TypingGitHubAdapter['handleReviewComment']>[0])
+        | undefined;
+      if (!COMMENT_EVENTS.includes(name) || payload?.action !== 'edited' || !this.chat)
+        return super.handleWebhook(request, options);
+      if (!(await this.webhookVerifier?.(request, raw)))
+        return new Response('Invalid signature', { status: 401 });
+
+      const { comment, repository } = payload;
+      const at = { owner: repository.owner.login, repo: repository.name };
+      let message;
+      if (name === 'issue_comment') {
+        const { number, pull_request } = payload.issue;
+        const type = pull_request ? 'pr' : 'issue';
+        const threadId = this.encodeThreadId({ ...at, prNumber: number, type });
+        message = this.parseIssueComment(comment, repository, number, threadId, type);
+      } else {
+        const { number } = payload.pull_request;
+        const root = comment.in_reply_to_id ?? comment.id;
+        const threadId = this.encodeThreadId({ ...at, prNumber: number, reviewCommentId: root });
+        message = this.parseReviewComment(comment, repository, number, threadId);
+      }
+      void this.chat.processMessageUpdated(
+        { adapter: this, threadId: message.threadId, message },
+        options,
+      );
+
+      return new Response('ok', { status: 200 });
+    }
+
     private reactions(threadId: string, messageId?: string) {
       const { owner, repo, prNumber, reviewCommentId } = this.decodeThreadId(threadId);
       const base = `/repos/${owner}/${repo}`;

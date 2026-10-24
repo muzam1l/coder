@@ -32,7 +32,7 @@ import {
 } from './conversation';
 import { eventPrompt } from '../../agent/context/turn';
 import { generateTaskId } from '../../core/state';
-import type { PendingDelivery } from './queue';
+import { ACTIVE_STATES, type PendingDelivery } from './queue';
 import { answerInConversation, openApprovals, readApprovalCommand } from './approvals';
 import { dashPath, organizationSlug } from '../auth/members';
 import { eventSpace, spaceKey, syncMembers } from './access';
@@ -47,14 +47,8 @@ const SETUP_NOTICE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 /** Public and private replies to an event. */
 export interface Replies {
   /** `notice` goes to the asker with the reply: privately where the platform can, else as a footer. */
-  post(
-    text: string,
-    progress?: boolean,
-    notice?: string,
-  ): Promise<{ id?: string; ids?: string[] } | null | void>;
+  post(text: string, notice?: string): Promise<{ id?: string; ids?: string[] } | null | void>;
   react?(emoji: string, message?: string): Promise<void>;
-  /** A reply that reports a failure; Linear marks the session failed, elsewhere it is a plain reply. */
-  problem(text: string): ReturnType<Replies['post']>;
   /** Resolves without posting where the platform has no private messages. */
   whisper(text: string): Promise<unknown>;
   /** Shows the app working on the event until a reply, or the platform's own timeout. */
@@ -216,9 +210,11 @@ export async function dispatchEvent(
         delivery,
         { owner, loaded: loaded && { ...loaded, store: primed.store } },
       );
-      // A task's admission and a handoff's work write the receipt themselves; anything else is done here.
-      if (!result.work && !result.taskId && !result.steered)
-        await ctx.store.updateDelivery(delivery, owner, { at: now() }, { ttlMs: DELIVERY_TTL_MS });
+      // A task's admission and a handoff's work write the receipt themselves; a message that started nothing keeps none, so an edit of it still counts, and Chat SDK dedupes its redeliveries.
+      if (!result.work && !result.taskId && !result.steered) {
+        const done = event.chat?.message ? undefined : { at: now() };
+        await ctx.store.updateDelivery(delivery, owner, done, { ttlMs: DELIVERY_TTL_MS });
+      }
       await result.work;
 
       return result.taskId ? { taskId: result.taskId } : {};
@@ -401,6 +397,7 @@ async function claimed(
     if (message)
       await recordUnseen(ctx, event, {
         id: message.id,
+        thread: event.chat!.thread.id,
         author: message.author.userName || message.author.userId,
         text: event.text,
         sentAt: message.metadata.dateSent,
@@ -413,20 +410,12 @@ async function claimed(
   const canWrite = await writeCheck(ctx, integration, event, token);
   if (canWrite === null)
     return effect(async () => {
-      await replies.problem(ACCESS_UNCHECKED);
+      await replies.post(ACCESS_UNCHECKED);
     });
   if (canWrite === false) {
     dropped(event, `${event.actor.login ?? event.actor.id} cannot write where it happened`);
     return {};
   }
-  // Not awaited, so dispatch doesn't wait on it; the host still keeps it alive until it lands.
-  const typing = replies
-    .startTyping?.()
-    .catch(error =>
-      console.error(`coder server: could not show ${event.deliveryId} is being worked on`, error),
-    );
-  if (typing) ctx.waitUntil?.(typing);
-
   const local = (task: AgentTask) =>
     handoff(
       ctx,
@@ -482,6 +471,20 @@ async function claimed(
   const moved = Boolean(
     current?.task.space && found && current.task.space !== spaceKey({ ...event, space: found }),
   );
+  // Only an ask that must be answered shows 👀; a running turn takes it while its own one still shows.
+  const turn = current && !moved && ACTIVE_STATES.includes(current.status) ? current : undefined;
+  if (
+    directAsk(integration, event) &&
+    (!turn || ((turn.task.context?.mustReply ?? turn.task.event?.mustReply) && !turn.typingEnded))
+  ) {
+    // Not awaited, so dispatch doesn't wait on it; the host still keeps it alive until it lands.
+    const typing = replies
+      .startTyping?.()
+      .catch(error =>
+        console.error(`coder server: could not show ${event.deliveryId} is being worked on`, error),
+      );
+    if (typing) ctx.waitUntil?.(typing);
+  }
   if (current && !moved)
     return effect(async () => {
       // The thread's first account, linked since, makes a task without `requestedBy` its member's.
@@ -544,26 +547,23 @@ async function claimed(
       return {};
     }
     return effect(async () => {
-      // Once per conversation, unless every prompt waits for an answer; a retry of the delivery that holds the mark may post again.
+      // Once per conversation; a retry of the delivery that holds the mark may post again.
       const key = `setup:${app.id}:${event.chat ? itemOf(integration, event.chat.thread.id) : event.deliveryId}`;
       const owner = event.deliveryId;
-      const first =
-        integration.answersEveryPrompt?.(event) ||
-        (await ctx.store.create(
-          'delivery',
-          key,
-          { at: now(), owner },
-          { ttlMs: SETUP_NOTICE_TTL_MS },
-        ));
+      const first = await ctx.store.create(
+        'delivery',
+        key,
+        { at: now(), owner },
+        { ttlMs: SETUP_NOTICE_TTL_MS },
+      );
       if (!first && (await ctx.store.get<{ owner?: string }>('delivery', key))?.owner !== owner)
         return replies.endTyping?.();
       try {
-        await replies.problem(
+        await replies.post(
           (await connect())?.failure ?? (await setupText(ctx, engine, await slug())),
         );
       } catch (error) {
-        if (!integration.answersEveryPrompt?.(event))
-          await ctx.store.updateDelivery(key, owner, undefined);
+        await ctx.store.updateDelivery(key, owner, undefined);
         throw error;
       }
     });
@@ -671,7 +671,7 @@ export async function recordFailure(
   try {
     await (
       await replies()
-    ).problem(
+    ).post(
       error instanceof AgentLoadError
         ? error.message
         : `Coder could not handle this message. If you run this server, check its logs. Otherwise [report the problem](${ctx.config.issuesUrl}).`,
@@ -684,9 +684,10 @@ export async function recordFailure(
 /** A platform task that ended before its agent answered: a direct ask's thread gets the failure reply once. */
 export async function reportTaskFailure(
   ctx: ServerContext,
-  task: AgentTask,
+  status: TaskStatus,
   error: unknown,
 ): Promise<void> {
+  const { task } = status;
   const event = task.event;
   if (!event || task.source !== event.integration) return;
   const app = await ctx.store.get('app', event.appId).catch(cause => {
@@ -696,9 +697,9 @@ export async function reportTaskFailure(
   const { endTyping, eventReplies } = await import('../chat');
 
   await recordFailure(ctx, app, error, event.installationId, event, () =>
-    eventReplies(ctx, app, event),
+    eventReplies(ctx, app, event, status),
   );
-  await endTyping(ctx, task).catch(cause =>
+  await endTyping(ctx, status).catch(cause =>
     console.error(`coder server: could not clear the working indicator of task ${task.id}`, cause),
   );
 }

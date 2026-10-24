@@ -8,7 +8,7 @@ import type { AgentEvent, TaskContext } from '../types';
 /** `since` holds at most this many messages; past that the agent is told how many more there are. */
 export const SINCE_LIMIT = 50;
 
-/** One message as the event JSON carries it: id, position, text with the address removed, author, time. */
+/** One message as the event JSON carries it: id, thread, position, text with the address removed, author, time. */
 function messageJson(event: AgentEvent) {
   const message = event.chat?.message;
   if (!message)
@@ -20,6 +20,7 @@ function messageJson(event: AgentEvent) {
 
   return {
     id: message.id,
+    thread: event.chat!.thread.id,
     ...(event.conversation?.index !== undefined ? { index: event.conversation.index } : {}),
     text: event.text,
     ...(message.isMention ? { mention: true } : {}),
@@ -62,7 +63,7 @@ export function eventJson(
       const key = id ?? JSON.stringify(message);
       return !seen.has(key) && Boolean(seen.add(key));
     });
-  const since = unseen.slice(0, SINCE_LIMIT).map(({ id: _id, ...message }) => message);
+  const since = unseen.slice(0, SINCE_LIMIT);
   const more =
     events.reduce((total, each) => total + (each.conversation?.more ?? 0), 0) +
     unseen.length -
@@ -85,7 +86,6 @@ export function eventJson(
     ...(events.length === 1
       ? { message: messageJson(event) }
       : { messages: events.map(messageJson) }),
-    ...(event.promptContext ? { context: event.promptContext } : {}),
     ...(since.length ? { since } : {}),
     ...(more ? { more } : {}),
     ...(user ? { requester: { name: user.name } } : {}),

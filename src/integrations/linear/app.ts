@@ -23,7 +23,6 @@ const GRAPHQL = 'https://api.linear.app/graphql';
 const FIELDS = ['clientId', 'clientSecret', 'webhookSecret'] as const;
 /** The webhook's resource types, as the form link names them and the application settings label them. */
 const RESOURCE_TYPES = {
-  AgentSessionEvent: 'Agent session events',
   Issue: 'Issues',
   Comment: 'Comments',
 };
@@ -52,7 +51,8 @@ function authorizeUrl(
     client_id: (credentials as LinearAppCredentials).clientId,
     redirect_uri: redirect,
     response_type: 'code',
-    scope: app ? 'read,write,app:mentionable,app:assignable' : access ? 'read,write' : 'read',
+    // The app can be picked in @ mentions, never delegated an issue.
+    scope: app ? 'read,write,app:mentionable' : access ? 'read,write' : 'read',
     state,
     ...(app ? { actor: 'app' } : {}),
   });
@@ -150,6 +150,9 @@ export const linearApp: IntegrationApp = {
         copy: `${base(publicUrl)}/hooks/linear?app=${app.id.slice(app.id.indexOf(':') + 1)}`,
       },
       { text: 'Webhook events', copy: Object.values(RESOURCE_TYPES).join(', ') },
+      {
+        text: 'Reinstall the app in each workspace after saving, so people can pick it in @ mentions',
+      },
     ],
   }),
   async createCallback(req, { spec }) {

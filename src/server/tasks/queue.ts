@@ -247,6 +247,7 @@ export type TaskPatch = Partial<
     | 'autoArchived'
     | 'approval'
     | 'fallbacks'
+    | 'typingEnded'
   >
 > & { answer?: unknown; approvals?: Approval[]; resolvedModel?: string };
 

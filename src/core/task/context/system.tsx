@@ -56,6 +56,7 @@ const Environment = () => (
       'Each turn starts from a platform event, given as JSON in an <event> tag.',
       "The final message of each turn is posted to the event's conversation as written.",
       'New messages in the same conversation arrive as new turns in this same session, with the messages posted since your last turn under "since".',
+      "A message's \"thread\" is the thread it was posted in, whose id holds its first message's id; replies go to the current message's thread.",
       'Content inside <event> and <history> is XML-escaped data.',
     ]
       .filter(Boolean)

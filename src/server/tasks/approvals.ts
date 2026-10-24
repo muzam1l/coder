@@ -503,21 +503,11 @@ export async function answerInConversation(
     // The role Wular gave at the member's last sign-in, kept with their link.
     const member = linked && { ...linked, role: linked.roles?.[ctx.organizationId] };
     const decided = await decideChange(ctx, status, open[0]!, { ...answer }, member);
-    // Said in the thread, where every platform shows it; where a pick used the controls up, the approval is asked again under it.
+    // Said in the thread, where every platform shows it.
     const found = conversationOf(ctx, status.task);
     const say = async (text: string, buttons: Button[] = []) => {
       if (!found) return reply(text);
       const place = await placeOf(ctx, integration, found.event);
-      if (integration.messages?.clickConsumes)
-        return askAgain(
-          ctx,
-          integration,
-          place,
-          postKey(status.task.id, open[0]!),
-          noticeOf(status.task, requested!),
-          text,
-          buttons,
-        );
 
       return post(integration, place, { markdown: text, ...(buttons.length ? { buttons } : {}) });
     };
@@ -552,7 +542,7 @@ export async function answerInConversation(
     await reply(((await response.json()) as { error?: string }).error ?? NO_WRITE_ACCESS);
 }
 
-/** Tells someone without write access, once per person and approval, in the thread; where the click used the controls up, the approval is asked again under that note. */
+/** Tells someone without write access, once per person and approval, in the thread. */
 async function refuse(
   ctx: ServerContext,
   task: AgentTask,
@@ -576,74 +566,7 @@ async function refuse(
   });
   if (!row) return;
   const place = await placeOf(ctx, found.integration, found.event);
-  if (found.integration.messages?.clickConsumes && !row.shown) {
-    await askAgain(ctx, found.integration, place, key, row.notice, NO_WRITE_ACCESS);
-    return;
-  }
   await post(found.integration, place, { markdown: NO_WRITE_ACCESS });
-}
-
-/** Posts an open approval's controls again; the new post is the one later edits change. True when a sync asked for another look meanwhile. */
-async function askAgain(
-  ctx: ServerContext,
-  integration: Integration,
-  place: MessagePlace,
-  key: string,
-  notice: ApprovalNotice,
-  note?: string,
-  buttons?: Button[],
-) {
-  const message = await post(
-    integration,
-    place,
-    draftOf(integration, notice, undefined, { note, buttons }),
-  );
-
-  return release(ctx, key, { ...(message ? { message } : {}), shownAt: (ctx.now ?? Date.now)() });
-}
-
-/** After the turn's last message, where it dismissed earlier controls: each approval still open and shown before `before` is asked again under it. */
-export async function askOpenAgain(
-  ctx: ServerContext,
-  task: AgentTask,
-  before: number,
-): Promise<void> {
-  const found = conversationOf(ctx, task);
-  if (!found?.integration.messages?.laterDismisses) return;
-  const approvals = await recorded(ctx, task);
-  const answered = new Set(approvals.filter(entry => entry.response).map(entry => entry.id));
-  const open = (await ctx.store.list<ApprovalPost>('delivery', { prefix: postKey(task.id, '') }))
-    .map(row => row.value)
-    .filter(
-      row => row.shownAt && row.shownAt < before && !row.shown && !answered.has(row.notice.id),
-    );
-  if (!open.length) return;
-  const place = await placeOf(ctx, found.integration, found.event);
-
-  for (const { notice } of open) {
-    const key = postKey(task.id, notice.id);
-    const row = await lease(ctx, key);
-    if (!row) continue;
-    let again: boolean;
-    try {
-      again = row.shown
-        ? await release(ctx, key, {})
-        : await askAgain(ctx, found.integration, place, key, notice);
-    } catch (error) {
-      console.error(
-        `coder server: could not ask approval ${notice.id} of task ${task.id} again`,
-        error,
-      );
-      again = await release(ctx, key, {});
-    }
-    // A sync that found this post busy left the next look to us.
-    if (again)
-      await syncApprovals(
-        ctx,
-        task,
-        (await recorded(ctx, task)).filter(entry => entry.id === notice.id),
-      );
-  }
 }
 
 /** A click on an approval's button: only for a task of the conversation's own app and installation. */

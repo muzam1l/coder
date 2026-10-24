@@ -33,7 +33,6 @@ import {
 } from '../core/state';
 import type { McpServerSpec, ResolvedTaskOptions, Task } from '../core/types';
 import type { Integration } from '../integrations/types';
-import type { Replies } from '../server/tasks/events';
 import {
   agentAccess,
   definitionEvents,
@@ -107,28 +106,24 @@ export function threadReply(
   result: { finalMessage?: string | null; error?: { message?: string } | null } | null | undefined,
   cancelled: boolean,
   turn?: Pick<TurnResultEntry, 'prompt' | 'steers' | 'lastReply'>,
-): { text: string; problem: boolean; skipped?: true; duplicate?: boolean; notice?: string } {
+): { text: string; skipped?: true; duplicate?: boolean; notice?: string } {
   const answer = result?.finalMessage?.trim();
-  const progress =
-    task.event && INTEGRATIONS[task.event.integration]?.progressReplies?.(task.event);
   const lastReply = turn?.lastReply?.trim();
-  // The reply tool's first post carried the notice when it posted this turn; progress posts carry none.
-  const notice = task.notice && (progress || !lastReply) ? { notice: task.notice } : {};
+  // The reply tool's first post carried the notice when it posted this turn.
+  const notice = task.notice && !lastReply ? { notice: task.notice } : {};
   // Claude Code reports its own errors as the final message; a failed run gets the failure text instead.
   if (answer && answer.replace(/^`+|`+$/g, '').trim() !== EMPTY_MESSAGE && !result?.error)
     return {
       text: answer,
-      problem: false,
       ...notice,
-      ...(!progress && lastReply && normalizedReply(answer) === normalizedReply(lastReply)
+      ...(lastReply && normalizedReply(answer) === normalizedReply(lastReply)
         ? { duplicate: true }
         : {}),
     };
   const error = result?.error?.message?.trim() ?? '';
-  if (result?.error && lastReply && !progress) return { text: '', problem: true, duplicate: true };
-  if (cancelled) return { text: error, problem: false };
+  if (result?.error && lastReply) return { text: '', duplicate: true };
+  if (cancelled) return { text: error };
   if (result && !result.error) {
-    if (progress && lastReply) return { text: lastReply, problem: false, ...notice };
     if (
       turn?.lastReply?.trim() ||
       replyRequired(
@@ -137,26 +132,21 @@ export function threadReply(
         turn?.steers,
       ) === false
     )
-      return { text: '', problem: false, skipped: true };
+      return { text: '', skipped: true };
     const link = task.taskUrl ? ` [See the task](${task.taskUrl})` : '';
 
-    return { text: `${EMPTY_MESSAGE_NOTICE}${link}`, problem: false };
+    return { text: `${EMPTY_MESSAGE_NOTICE}${link}` };
   }
 
   if (MODEL_UNAVAILABLE.test(error)) {
     const fix = task.settingsUrl
       ? `[Open the agent's settings](${task.settingsUrl}) to pick another one.`
       : "An admin can pick another one in the agent's settings.";
-    return { text: `This agent's model is not available in this workspace. ${fix}`, problem: true };
+    return { text: `This agent's model is not available in this workspace. ${fix}` };
   }
 
-  return { text: task.failureReply ?? error, problem: true };
+  return { text: task.failureReply ?? error };
 }
-
-/** An adapter that can mark a reply as a failure, as Linear's error activity does. */
-type ProblemAdapter = { postProblem?(threadId: string, text: string): ReturnType<Replies['post']> };
-
-type ProgressAdapter = { postProgress?(threadId: string, text: string): Promise<{ id: string }> };
 
 /** Split replies at paragraph boundaries where the platform's limit allows. */
 export function replyParts(text: string, limit?: number): string[] {
@@ -209,17 +199,13 @@ export async function postReplyParts(
   text: string,
   limit?: number,
   message?: Message | string,
-  progress = false,
 ) {
   const sent: { id: string }[] = [];
-  const ongoing = progress && (thread.adapter as ProgressAdapter).postProgress;
   for (const part of replyParts(text, limit))
     sent.push(
-      ongoing
-        ? await ongoing.call(thread.adapter, thread.id, part)
-        : message && thread.adapter.reply
-          ? await thread.reply(message, { markdown: part })
-          : await thread.post({ markdown: part }),
+      message && thread.adapter.reply
+        ? await thread.reply(message, { markdown: part })
+        : await thread.post({ markdown: part }),
     );
 
   return sent;
@@ -232,24 +218,14 @@ export async function postReply(
   text: string,
   token: string,
   author = integration.id,
-  problem = false,
-  progress = false,
   prepared?: Thread,
   notice?: string,
 ): Promise<string[]> {
   const thread = prepared ?? (await eventThread(integration, event, token, author));
-  const adapter = thread.adapter;
-  const marks = (adapter as ProblemAdapter).postProblem;
-  if (problem && marks) {
-    const sent = await marks.call(adapter, thread.id, text);
-    const id = sent?.id;
-
-    return id ? [id] : [];
-  }
   // Send Markdown through the platform adapter.
   const asker = notice && (event.chat?.message?.author.userId || event.actor.id);
   const messages = await withNotice(thread, text, notice, asker, text =>
-    postReplyParts(thread, text, integration.replyLimit, event.chat?.message?.id, progress),
+    postReplyParts(thread, text, integration.replyLimit, event.chat?.message?.id),
   );
 
   return messages.flatMap(sent => (sent.id ? [sent.id] : []));
@@ -577,7 +553,6 @@ export async function execAgent(options: {
     const turn = readTurnResults(cwd, dispatched.taskId)[first];
     const {
       text: reply,
-      problem,
       skipped,
       duplicate,
       notice,
@@ -589,17 +564,7 @@ export async function execAgent(options: {
     const posted = posting && Boolean(reply) && !duplicate;
     const postedMessages = posted
       ? await postTurnReply(cwd, dispatched.taskId, first, async () =>
-          postReply(
-            integration!,
-            event!,
-            reply,
-            token,
-            task.author,
-            problem,
-            false,
-            await prepared,
-            notice,
-          ),
+          postReply(integration!, event!, reply, token, task.author, await prepared, notice),
         )
       : [];
     const error = (turn ?? completed.result)?.error?.message;

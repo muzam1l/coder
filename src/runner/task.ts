@@ -947,16 +947,8 @@ async function runCheckedOutTask(
   const previousTurns = savedTask?.generation === remote.generation ? savedTask.usageStart : 0;
   const firstTurn = savedTask?.generation === remote.generation ? savedTask.turn : 0;
   let deliveredTurns = firstTurn + 1;
-  const post = (text: string, problem = false, progress = false) =>
-    postReply(
-      INTEGRATIONS[event!.integration]!,
-      event!,
-      text,
-      postToken!,
-      remote.task.author,
-      problem,
-      progress,
-    );
+  const post = (text: string) =>
+    postReply(INTEGRATIONS[event!.integration]!, event!, text, postToken!, remote.task.author);
   const approvals = () => (taskId ? listApprovals(resolveTaskDir(cwd, taskId)) : []);
   const onApproval = async (approval: unknown) => {
     await taskRequest(auth.server, auth.token, id, '/result', {
@@ -1106,7 +1098,7 @@ async function runCheckedOutTask(
             if (remote.task.source === event?.integration && reply.text && !reply.duplicate)
               postedMessages.push(
                 ...(await postTurnReply(cwd, taskId, deliveredTurns + offset, () =>
-                  post(reply.text, reply.problem),
+                  post(reply.text),
                 )),
               );
             result.reply = reply.text;

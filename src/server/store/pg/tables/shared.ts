@@ -171,6 +171,7 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
     logSeq: r.logSeq ?? undefined,
     logBytes: r.logBytes ?? undefined,
     logsComplete: r.logsComplete,
+    typingEnded: r.typingEnded,
     archivedAt: optionalMs(r.archivedAt),
     approval: r.approval,
     answer: Array.isArray(r.answer) ? r.answer : undefined,

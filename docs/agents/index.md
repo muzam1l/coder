@@ -87,10 +87,11 @@ An integration gives an agent two things on a platform:
 | --- | --- | --- | --- | --- |
 | GitHub | A GitHub App per agent | `mention`, `pull_request`, `issue`, `comment` | [`github-mcp-server`](https://github.com/github/github-mcp-server) on the installation token | The same, on the person's token |
 | Slack | A Slack app per agent | `mention`, `dm`, `channel`, `command` | [Slack MCP Server](https://github.com/korotovsky/slack-mcp-server) on the bot token: the bot's channels, no search | [Slack MCP](https://docs.slack.dev/ai/slack-mcp-server) on the person's token, with search |
-| Linear | A Linear OAuth app, webhooks to `<PUBLIC_URL>/hooks/linear?app=<client id>` | `mention`: an agent session, `issue`, `comment` | [Linear's MCP](https://linear.app/docs/mcp) on the app's token | The same, on the person's token |
+| Linear | A Linear OAuth app, webhooks to `<PUBLIC_URL>/hooks/linear?app=<client id>` | `mention`, `issue`, `comment` | [Linear's MCP](https://linear.app/docs/mcp) on the app's token | The same, on the person's token |
 
 - **Slack:** `dm` takes every message in direct and group DMs, and `channel` every message in the agent's channels, up to Slack's 30,000 events per workspace per app per hour.
-- **Linear:** mentions get comment replies; progress and approvals stay in the agent session. `issue` takes issues people create or change, and `comment` every comment by a person that doesn't mention the agent; both need Issues and Comments ticked in the app's webhook settings.
+- **Linear:** `mention` takes a comment naming `@<app>`, `issue` issues people create or change, and `comment` every other comment by a person; replies go in the asking comment's thread. All need Issues and Comments ticked in the app's webhook settings.
 - **Slack:** the app's Home tab shows the agent and how to use it, and links to this server's tasks and agents unfurl into a short card.
+- **Every platform:** an edited message counts like a new one, unless it already started or steered a turn. A message the agent must answer gets 👀 until the first reply.
 
 Publishing an agent updates its apps' events and permissions: Coder updates a Slack app itself, and lists the changes for GitHub and Linear (**[Update on *platform*]** later). `coder agent integrations show <id>` lists each event's and preset's tools. A host limits the platforms it offers with `SERVER_INTEGRATIONS` ([Self-host](../self-host.md)).

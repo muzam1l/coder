@@ -44,10 +44,9 @@ export const github: Integration = {
   use: 'Mention @{handle} in an issue or pull request.',
   organizationApps: true,
   publicApps: true,
-  sticksTyping: true,
   prompt: [
     'A conversation is an issue or pull request with its comments and inline review threads; a reply goes to the thread that asked.',
-    "The repository is checked out on its default branch. Push to a pull request's branch only when it lives in this repository and changes were asked for; fork pull requests get reads and comments only.",
+    "The repository is checked out on its default branch, without submodules; `git submodule update --init <path>` fetches one the work needs. Push to a pull request's branch only when it lives in this repository and changes were asked for; fork pull requests get reads and comments only.",
     'Replies are GitHub Markdown; cite file paths; link a pull request after changing it.',
     'The review tool posts findings as inline review comments marked coder-review:fp.',
   ].join('\n'),

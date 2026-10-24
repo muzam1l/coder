@@ -88,7 +88,7 @@ import {
   type NewTask,
 } from './create';
 import { deliverWaiting, rememberPost } from './conversation';
-import { askOpenAgain, syncApprovals, type ApprovalPost } from './approvals';
+import { syncApprovals, type ApprovalPost } from './approvals';
 import {
   sessionKey,
   pushInbox,
@@ -541,7 +541,7 @@ export async function startQueuedLocalTask(
       )
     ) {
       const { reportTaskFailure } = await import('./events');
-      await reportTaskFailure(ctx, status.task, error);
+      await reportTaskFailure(ctx, status, error);
     }
   }
   return true;
@@ -670,7 +670,7 @@ function watchCompletion(
       if (!(await ctx.store.updateDelivery(key, previous.owner, receipt))) return;
     } else if (!(await ctx.store.create('delivery', key, receipt))) return;
 
-    const owns = async (progress = false) => {
+    const owns = async () => {
       if (!saved.fence) return true;
       const current = await ctx.store.get('task', saved.task.id);
       return (
@@ -678,31 +678,31 @@ function watchCompletion(
         (current.generation ?? 0) === saved.fence.generation &&
         current.attempts === saved.fence.attempts &&
         current.tokenHash === saved.fence.tokenHash &&
-        current.status !== 'queued' &&
-        (!progress || ['running', 'waiting'].includes(current.status))
+        current.status !== 'queued'
       );
     };
     let replies: Awaited<ReturnType<(typeof import('../chat'))['eventReplies']>> | undefined;
-    const conversationReplies = async (progress: boolean) => {
+    const conversationReplies = async () => {
       const event = saved.task.event;
       if (!event || saved.task.source !== event.integration)
         throw new Error('The task has no conversation');
 
-      if (!(await owns(progress))) throw new Error('The conversation task is no longer running');
+      if (!(await owns())) throw new Error('The conversation task is no longer running');
 
       if (!replies) {
         const app = await ctx.store.get('app', event.appId);
         if (!app) throw new Error('Local completion has no app');
         const { eventReplies } = await import('../chat');
-        replies = await eventReplies(ctx, app, event);
+        const turn = await ctx.store.get('task', saved.task.id);
+        replies = await eventReplies(ctx, app, event, turn);
       }
 
       return replies;
     };
-    const post = async (text: string, problem = false, progress = false, notice?: string) => {
-      const replies = await conversationReplies(progress);
-      const sent = await (problem ? replies.problem(text) : replies.post(text, progress, notice));
-      if (!progress && receipt.posting !== undefined)
+    const post = async (text: string, notice?: string) => {
+      const replies = await conversationReplies();
+      const sent = await replies.post(text, notice);
+      if (receipt.posting !== undefined)
         receipt = { ...receipt, turns: receipt.posting + 1, posting: undefined };
       if (sent)
         await rememberPost(
@@ -730,8 +730,7 @@ function watchCompletion(
             if (answer.skipped) appendTaskLog(saved.cwd, id, { kind: 'status', message: SKIPPED });
             // The notice goes with this run's first reply.
             const notice = receipt.turns === (saved.turns ?? 0) ? answer.notice : undefined;
-            if (answer.text && !answer.duplicate)
-              await post(answer.text, answer.problem, false, notice);
+            if (answer.text && !answer.duplicate) await post(answer.text, notice);
           };
 
           for (;;) {
@@ -749,13 +748,11 @@ function watchCompletion(
                 saved.task.source === saved.task.event?.integration &&
                 answer.text &&
                 !answer.duplicate;
-              if (sending) await conversationReplies(false);
+              if (sending) await conversationReplies();
               const next = receipt.turns + 1;
               receipt = { ...receipt, posting: sending ? receipt.turns : undefined };
               if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
-              const before = (ctx.now ?? Date.now)();
               await reply(result, false, turn);
-              if (sending) await askOpenAgain(ctx, { ...saved.task, id }, before);
               receipt = { ...receipt, turns: next, posting: undefined };
               if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
             }
@@ -803,13 +800,16 @@ function watchCompletion(
                 if (!(await ctx.store.updateDelivery(key, owner, receipt))) return;
                 await reply({ error: { message: task.error ?? 'Task cancelled' } }, cancelled);
               }
+              // Read after the replies, so a turn they cleared does nothing more.
+              const ended = await ctx.store.get('task', saved.task.id);
               const { endTyping } = await import('../chat');
-              await endTyping(ctx, saved.task).catch(error =>
-                console.error(
-                  `coder server: could not clear the working indicator of ${id}`,
-                  error,
-                ),
-              );
+              if (ended)
+                await endTyping(ctx, ended).catch(error =>
+                  console.error(
+                    `coder server: could not clear the working indicator of ${id}`,
+                    error,
+                  ),
+                );
               break;
             }
             await resultSignal.wait(pollMs);

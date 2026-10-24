@@ -36,9 +36,11 @@ export const slack: Integration = {
   installLabel: 'Add to Slack',
   use: (events, here) => slackWays('{handle}', events, here ? 'message it here' : undefined),
   covered: 'Slack workspace',
+  // A thread inside a 1:1 DM belongs to the whole DM.
+  item: thread => thread.replace(/^(slack:D[A-Z0-9]+:).+$/, '$1'),
   sample: 'slack:C0000000000:1700000000.000100',
   prompt: [
-    'A conversation is a Slack thread, or a whole 1:1 DM. A group DM works like a channel.',
+    'A conversation is a Slack thread, or a whole 1:1 DM with its threads. A group DM works like a channel.',
     'Replies render as Slack Markdown: headings, lists, tables, code blocks, quotes. Mention a person as <@USER_ID>.',
     'Link pull requests and issues by full URL; a bare number like #123 renders only on GitHub.',
   ].join('\n'),

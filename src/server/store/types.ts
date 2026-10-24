@@ -508,6 +508,8 @@ export interface TaskStatus {
   /** Derived for task rows returned by the server. */
   lastActivityAt?: number;
   lastTurnMs?: number;
+  /** This turn's working indicator was cleared. */
+  typingEnded?: boolean;
   /** Derived for task rows returned by the server: its own pick, else its engine's default. */
   model?: string;
   /** A read-only row for a task the CLI ran on this machine. */

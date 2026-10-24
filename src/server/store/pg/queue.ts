@@ -786,6 +786,7 @@ export class DrizzleQueue implements TaskQueue {
           attempts: 0,
           generation: sql`${task.generation} + 1`,
           inboxAck: -1,
+          typingEnded: null,
           result: null,
           error: null,
           tokens: null,

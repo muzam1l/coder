@@ -24,7 +24,7 @@ import {
   returnNotice,
   takeNotice,
 } from './conversation';
-import { askOpenAgain, syncApprovals } from './approvals';
+import { syncApprovals } from './approvals';
 
 /** How long a reply or react call id is remembered, so a late retry still posts once. */
 const CALL_TTL_MS = 24 * 60 * 60 * 1000;
@@ -238,7 +238,7 @@ export async function reportResult(
   if (body.status === 'running' || body.status === 'waiting') {
     if (posted.length) {
       await rememberPost(ctx, authorized.task.event!, body.postedMessages!, now);
-      endTyping(ctx, authorized.task);
+      endTyping(ctx, authorized);
     }
     await ctx.queue.patchTask(
       ctx.organizationId,
@@ -263,8 +263,7 @@ export async function reportResult(
         statuses: ['running', 'waiting'],
       },
     );
-    if (body.approvals || posted.length)
-      await announceApprovals(ctx, id, Boolean(body.approvals), posted.length ? now : undefined);
+    if (body.approvals) await announceApprovals(ctx, id);
 
     return json({ ok: true });
   }
@@ -274,8 +273,7 @@ export async function reportResult(
       attempts: authorized.attempts,
       tokenHash: authorized.tokenHash,
     });
-  if (body.approvals || posted.length)
-    await announceApprovals(ctx, id, Boolean(body.approvals), posted.length ? now : undefined);
+  if (body.approvals) await announceApprovals(ctx, id);
 
   const output = typeof body.result === 'string' ? body.result : JSON.stringify(body.result ?? '');
   const result = {
@@ -334,10 +332,10 @@ export async function reportResult(
 
   if (completed && body.machine) {
     const { reportTaskFailure } = await import('./events');
-    await reportTaskFailure(ctx, authorized.task, body.error ?? 'The machine failed');
+    await reportTaskFailure(ctx, authorized, body.error ?? 'The machine failed');
   }
   if (completed) {
-    endTyping(ctx, authorized.task);
+    if (!body.machine) endTyping(ctx, authorized);
     deliverWaiting(ctx, authorized.task);
   }
 
@@ -352,38 +350,23 @@ export async function reportResult(
   return json({ ok: true });
 }
 
-/** After the runner has its answer: syncs the conversation with the task's approvals when the report carried them, then, when the runner posted the turn's messages before `before`, asks again under them the open approvals they dismissed. */
-async function announceApprovals(
-  ctx: CallbackContext,
-  id: string,
-  sync: boolean,
-  before?: number,
-): Promise<void> {
+/** After the runner has its answer: syncs the conversation with the task's approvals the report carried. */
+async function announceApprovals(ctx: CallbackContext, id: string): Promise<void> {
   const task = (await ctx.store.get('task', id))?.task;
-  if (!task) return;
+  if (!task?.context?.approvals) return;
 
   (ctx.waitUntil ?? (() => {}))(
-    (async () => {
-      // The sync holds each post's lease, which a concurrent ask would find busy and skip.
-      if (sync && task.context?.approvals)
-        await syncApprovals(ctx, task, task.context.approvals).catch(error =>
-          console.error(`coder server: could not show the approvals of task ${id}`, error),
-        );
-      if (before !== undefined)
-        await askOpenAgain(ctx, task, before).catch(error =>
-          console.error(
-            `coder server: could not ask the open approvals of task ${id} again`,
-            error,
-          ),
-        );
-    })(),
+    syncApprovals(ctx, task, task.context.approvals).catch(error =>
+      console.error(`coder server: could not show the approvals of task ${id}`, error),
+    ),
   );
 }
 
-/** A runner posts its replies itself, so its reports clear the working indicator, after the answer. */
-function endTyping(ctx: CallbackContext, task: TaskStatus['task']): void {
+/** A runner posts its replies itself, so its first post or the turn's end clears the working indicator, after the answer. */
+function endTyping(ctx: CallbackContext, status: TaskStatus): void {
+  const task = status.task;
   const work = import('../chat')
-    .then(chat => chat.endTyping(ctx, task))
+    .then(chat => chat.endTyping(ctx, status))
     .catch(error =>
       console.error(
         `coder server: could not clear the working indicator of task ${task.id}`,
@@ -404,7 +387,7 @@ async function conversationReplies(ctx: CallbackContext, authorized: TaskStatus)
   if (!app) throw new Error('The conversation app is gone');
   const { eventReplies } = await import('../chat');
 
-  return { event, replies: await eventReplies(ctx, app, event) };
+  return { event, replies: await eventReplies(ctx, app, event, authorized) };
 }
 
 /** Runs `send` once per call id for this attempt; a retry of a sent call is answered without posting. */
@@ -439,15 +422,13 @@ export async function sendReply(req: Request, ctx: CallbackContext): Promise<Res
   const text = body.text.trim();
 
   return conversationCall(ctx, 'reply', body.id, async ({ event, replies }) => {
-    // The turn's first tool post carries the notice; where tool posts are progress, the final reply does.
+    // The turn's first tool post carries the notice.
     const authorized = ctx.callbackTask!;
     const notice =
-      authorized.task.notice &&
-      !ctx.integrations[event.integration]?.progressReplies?.(event) &&
-      (await takeNotice(ctx, authorized))
+      authorized.task.notice && (await takeNotice(ctx, authorized))
         ? authorized.task.notice
         : undefined;
-    const sent = await replies.post(text, true, notice).catch(async error => {
+    const sent = await replies.post(text, notice).catch(async error => {
       if (notice) await returnNotice(ctx, authorized);
       throw error;
     });

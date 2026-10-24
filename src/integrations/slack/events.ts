@@ -2,7 +2,15 @@
 import { createHmac } from 'node:crypto';
 
 import type { SlackAdapter, SlackAdapterConfig, SlackEvent } from '@chat-adapter/slack';
-import type { Adapter, ChatInstance, Message, StateAdapter, Thread, WebhookOptions } from 'chat';
+import type {
+  Adapter,
+  ChatInstance,
+  EmojiValue,
+  Message,
+  StateAdapter,
+  Thread,
+  WebhookOptions,
+} from 'chat';
 import * as z from 'zod/mini';
 
 import { safeEqual } from '../../utils/crypto';
@@ -332,6 +340,9 @@ export function slackThreadUrl(event: PlatformEvent): string | undefined {
   return thread ? `https://slack.com/archives/${thread[1]}/p${thread[2]}${thread[3]}` : undefined;
 }
 
+const TYPING_TTL_MS = 24 * 60 * 60 * 1000;
+const typingKey = (threadId: string) => `slack:typing:${threadId}`;
+
 /** Stands in for a workspace's bot token until a Web API call needs it, so a webhook is answered before any token lookup. */
 const PENDING = 'coder-pending:';
 
@@ -373,7 +384,7 @@ function viaFetch(request: typeof fetch, mint: (teamId: string) => Promise<strin
 
 /** Slack through Chat SDK: the app's signing secret verifies, the host's bound installations hold the bot tokens. */
 export async function slackAdapter(ctx: AdapterContext): Promise<Adapter> {
-  const [{ SlackAdapter }, { ConsoleLogger }] = await Promise.all([
+  const [{ SlackAdapter }, { ConsoleLogger, defaultEmojiResolver }] = await Promise.all([
     import('@chat-adapter/slack'),
     import('chat'),
   ]);
@@ -405,20 +416,23 @@ export async function slackAdapter(ctx: AdapterContext): Promise<Adapter> {
       return super.handleReactionEvent(event, options);
     }
 
-    // Filtered before Chat looks up the author and mentions: a plain message the host does not take is dropped.
+    // Filtered before Chat looks up the author and mentions: a plain message the host does not take is dropped, an edit by its new text.
     protected override handleMessageEvent(event: SlackEvent, options?: WebhookOptions): void {
+      const sent =
+        event.subtype === 'message_changed' && event.message
+          ? { ...event.message, channel: event.channel, channel_type: event.channel_type }
+          : event;
       const plain =
         event.type === 'message' &&
-        event.subtype !== 'message_changed' &&
         event.subtype !== 'message_deleted' &&
         event.channel_type !== 'im' &&
-        !this.parseMessage(event).isMention;
+        !this.parseMessage(sent).isMention;
       if (!plain || !this.hears) return super.handleMessageEvent(event, options);
 
       const work = (async () => {
-        if (!(await this.hears!(messageEvent(event.channel_type), event.text ?? ''))) return;
+        if (!(await this.hears!(messageEvent(event.channel_type), sent.text ?? ''))) return;
         this.unnamed =
-          Boolean(event.thread_ts) && !(await this.active?.(this.threadIdForMessageEvent(event)));
+          Boolean(sent.thread_ts) && !(await this.active?.(this.threadIdForMessageEvent(sent)));
         super.handleMessageEvent(event, options);
       })();
       options?.waitUntil?.(work);
@@ -455,15 +469,39 @@ export async function slackAdapter(ctx: AdapterContext): Promise<Adapter> {
       );
     }
 
-    // A whole DM has no thread, so its status goes on the asking message.
-    override startTyping(threadId: string, status?: string, options?: TypingOptions) {
-      const { channel, threadTs } = this.decodeThreadId(threadId);
-      const target =
-        threadTs || !options?.messageId
-          ? threadId
-          : this.encodeThreadId({ channel, threadTs: options.messageId });
+    // Typing is a 👀 on the asking message, kept in Chat state until the reply removes it.
+    override async startTyping(threadId: string, _status?: string, options?: TypingOptions) {
+      const ts = options?.messageId ?? this.decodeThreadId(threadId).threadTs;
+      if (!ts) return;
+      try {
+        await super.addReaction(threadId, ts, 'eyes');
+      } catch (error) {
+        // Slack refuses a 👀 the app already left; only a new one is removed later.
+        if ((error as { data?: { error?: string } }).data?.error === 'already_reacted') return;
+        throw error;
+      }
+      await this.chat?.getState().appendToList(typingKey(threadId), ts, { ttlMs: TYPING_TTL_MS });
+    }
 
-      return super.startTyping(target, status, options);
+    async endTyping(threadId: string) {
+      const state = this.chat?.getState();
+      const added = (await state?.getList<string>(typingKey(threadId))) ?? [];
+      if (!added.length) return;
+      await state!.delete(typingKey(threadId));
+
+      await Promise.all(added.map(ts => super.removeReaction(threadId, ts, 'eyes')));
+    }
+
+    // A 👀 the agent leaves on purpose where the working one is stays.
+    override async addReaction(threadId: string, messageId: string, emoji: EmojiValue | string) {
+      const state = this.chat?.getState();
+      const eyes = defaultEmojiResolver.toSlack(emoji).replace(/:/g, '') === 'eyes';
+      const added = eyes && state ? await state.getList<string>(typingKey(threadId)) : [];
+      if (!added.includes(messageId)) return super.addReaction(threadId, messageId, emoji);
+
+      await state!.delete(typingKey(threadId));
+      for (const ts of added.filter(ts => ts !== messageId))
+        await state!.appendToList(typingKey(threadId), ts, { ttlMs: TYPING_TTL_MS });
     }
 
     protected override markEventDelivered(): void {}

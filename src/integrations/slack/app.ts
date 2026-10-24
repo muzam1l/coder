@@ -544,7 +544,8 @@ export function slackAppScopes(tools: Access | string[] = 'auto', events: string
   ];
 }
 const APP_EVENTS: Record<string, string[]> = {
-  mention: ['app_mention'],
+  // An edit that adds a mention arrives only as a `message` event.
+  mention: ['app_mention', 'message.channels', 'message.groups'],
   dm: ['message.im', 'message.mpim'],
   channel: ['message.channels', 'message.groups'],
 };

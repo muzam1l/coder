@@ -66,7 +66,7 @@ async function fail(
   if (finished) {
     const { reportTaskFailure } = await import('./events');
     const failed = await ctx.store.get('task', status.task.id);
-    if (failed) await reportTaskFailure(ctx, failed.task, error);
+    if (failed) await reportTaskFailure(ctx, failed, error);
     await stopTaskMachine(ctx, status, true, runner);
     if (failed) deliverWaiting(ctx, failed.task);
   }

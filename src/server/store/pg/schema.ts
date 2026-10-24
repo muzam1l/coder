@@ -301,6 +301,8 @@ export const task = pgTable(
     logBytes: integer(),
     /** The runner reported its last line of this attempt; cleared with the handle. */
     logsComplete: boolean(),
+    /** This turn's working indicator was cleared; a new turn resets it. */
+    typingEnded: boolean(),
     archivedAt: at(),
     approval: jsonb().$type<Approval>(),
     answer: jsonb(),

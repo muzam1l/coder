@@ -706,8 +706,6 @@ export interface AgentEvent {
   actor: { id: string; login?: string; role?: string; agent?: boolean };
   /** Human text attached to the event: mention body, comment, PR title + body. */
   text: string;
-  /** What the platform tells an agent about where the event happened, such as a Linear issue; bounded. */
-  promptContext?: string;
   /** The Chat SDK thread and message it happened in, without raw platform payloads; replies go to this thread. */
   chat?: { thread: SerializedThread; message?: SerializedMessage };
   repo?: {

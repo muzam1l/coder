@@ -612,7 +612,22 @@ interface ReviewComment {
 }
 
 export function reviewCli(cwd = process.cwd(), token?: string): ReviewExec {
-  const env = token ? { ...process.env, GH_TOKEN: token } : process.env;
+  const count = Number(process.env.GIT_CONFIG_COUNT) || 0;
+  // git's fetch asks this helper, which reads the token from its environment, never from disk.
+  const env = token
+    ? {
+        ...process.env,
+        GH_TOKEN: token,
+        GIT_TERMINAL_PROMPT: '0',
+        GIT_CONFIG_COUNT: String(count + 2),
+        [`GIT_CONFIG_KEY_${count}`]: 'credential.helper',
+        [`GIT_CONFIG_VALUE_${count}`]: '',
+        [`GIT_CONFIG_KEY_${count + 1}`]: 'credential.helper',
+        [`GIT_CONFIG_VALUE_${count + 1}`]:
+          '!f() { if [ "$1" = get ]; then printf "username=x-access-token\\npassword=%s\\n" "$GH_TOKEN"; fi; }; f',
+      }
+    : process.env;
+
   return (command, args, input) =>
     execFileSync(command, args, {
       cwd,

@@ -27,8 +27,6 @@ export interface PlatformEvent {
   text: string;
   /** The text @-mentions the app, on an event with no chat message to say so (an opened GitHub issue). */
   mentioned?: true;
-  /** What the platform tells an agent about where the event happened, such as a Linear issue; bounded. */
-  promptContext?: string;
   /** The platform account it happened in (Slack team, GitHub org), for an installation that covers several. */
   account?: string;
   /** The Chat SDK thread and message it happened in, without raw platform payloads; replies go to this thread. */
@@ -387,7 +385,7 @@ export interface AdapterContext {
   home?(viewer?: string): Promise<Page | undefined>;
 }
 
-/** Chat SDK's typing options, plus the message being answered, for a platform that marks it (a GitHub reaction, a Slack DM's status). */
+/** Chat SDK's typing options, plus the message being answered, which gets the 👀 reaction. */
 export type TypingOptions = ChatTypingOptions & { messageId?: string };
 
 /** A button that opens a page; `id` tells the buttons of one page apart. */
@@ -422,8 +420,10 @@ export interface EventSpec {
 
 /** A message the agent did not get as a turn, as `since` lists it. */
 export interface SinceMessage {
-  /** The platform's message id, so a message counts once; not shown to the agent. */
+  /** The platform's message id, so a message counts once. */
   id?: string;
+  /** The id of the thread it was posted in. */
+  thread?: string;
   author: string;
   text: string;
   sentAt: string;
@@ -544,10 +544,6 @@ export interface IntegrationMessages {
   direct?(ctx: AdapterContext, user: string, page: Page): Promise<void>;
   /** Buttons can ask for text (`Button.ask`); elsewhere they click as they are. */
   readonly asks?: true;
-  /** A click uses the buttons up: the platform drops them with the answer. */
-  readonly clickConsumes?: true;
-  /** A later message in the thread dismisses earlier buttons, so buttons still wanted go out again after it. */
-  readonly laterDismisses?: true;
 }
 
 /** A push to a branch, with the paths its listed commits touched. */
@@ -670,12 +666,6 @@ export interface Integration {
   readonly installLabel?: string;
   /** How people reach an installed app listening to `events`, `{handle}` standing for its handle; `here` words it for the app's own page or DM. */
   readonly use?: string | ((events: string[], here?: boolean) => string | undefined);
-  /** Every prompt in the event's thread waits for its own answer, as in a Linear agent session, so notices repeat instead of going out once per thread. */
-  answersEveryPrompt?(event: PlatformEvent): boolean;
-  /** Replies during a turn in the event's thread are progress; a final response must close it. */
-  progressReplies?(event: PlatformEvent): boolean;
-  /** Its working indicator stays until removed, such as a reaction; others clear on their own. */
-  readonly sticksTyping?: boolean;
   /** An outbound call proved the installation's token revoked. */
   isUninstalled?(error: unknown): boolean;
   /** What one account an installation covers is called, such as a Slack workspace of an org install. */
@@ -693,7 +683,7 @@ export interface Integration {
   readonly events: Record<string, EventSpec>;
   /** A Chat SDK thread id for sample events. */
   readonly sample?: string;
-  /** The item a Chat SDK thread belongs to, such as the issue of a Linear agent session; an item's threads are one conversation. Absent where each thread is its own item. */
+  /** The item a Chat SDK thread belongs to, such as the issue of a Linear comment thread; an item's threads are one conversation. Absent where each thread is its own item. */
   item?(thread: string): string;
   /** The handle an app posts as, so its own comments are recognized; default is the app name. */
   author?(appName: string): string;
@@ -730,7 +720,7 @@ export interface Integration {
     message: Message,
     app: PlatformApp,
   ):
-    | (Pick<PlatformEvent, 'type' | 'actor' | 'promptContext'> &
+    | (Pick<PlatformEvent, 'type' | 'actor'> &
         Partial<Pick<PlatformEvent, 'text'>>)
     | undefined;
 }

@@ -1,23 +1,29 @@
-/** Agent sessions come through the Chat SDK adapter, loaded on first use; the host verifies and parses every other webhook itself. */
+/** Comments come through the Chat SDK adapter, loaded on first use; the host verifies and parses every other webhook itself. */
 import { createHmac } from 'node:crypto';
 
+import type { LinearAdapter } from '@chat-adapter/linear';
 import type {
   Adapter,
   AdapterPostableMessage,
   ChatInstance,
   EmojiValue,
-  Message,
   SerializedThread,
-  Thread,
+  WebhookOptions,
 } from 'chat';
 
 import { safeEqual } from '../../utils/crypto';
-import type { AdapterContext, OwnEvent, PlatformApp, PlatformEvent, WebhookTarget } from '../types';
+import type {
+  AdapterContext,
+  OwnEvent,
+  PlatformApp,
+  PlatformEvent,
+  TypingOptions,
+  WebhookTarget,
+} from '../types';
 import type { LinearAppCredentials } from './app';
 
-const PROMPT_CONTEXT_LIMIT = 16 * 1024;
-
-const SESSION_NOTICE = /^This thread is for an agent session with /;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const typingKey = (threadId: string) => `linear:typing:${threadId}`;
 
 /** Linear's webhook check: an HMAC of the body under the app's secret, sent within the last minute. */
 export function verifyLinearWebhook(
@@ -36,8 +42,9 @@ export function verifyLinearWebhook(
 export function linearTarget(req: Request, raw: string): WebhookTarget | undefined {
   const app = new URL(req.url).searchParams.get('app');
   let body: {
+    type?: unknown;
     organizationId?: unknown;
-    agentSession?: { issue?: { teamId?: unknown; team?: { id?: unknown } } };
+    data?: { issue?: { teamId?: unknown; team?: { id?: unknown } } };
   };
   try {
     body = JSON.parse(raw);
@@ -45,14 +52,14 @@ export function linearTarget(req: Request, raw: string): WebhookTarget | undefin
     return undefined;
   }
   const organization = body.organizationId;
-  // The issue's team, unknown (`''`) when the payload names none, until `space` asks Linear; unknown counts as private.
-  const issue = body.agentSession?.issue;
+  // A comment's issue team, unknown (`''`) when the payload names none, until `space` asks Linear; unknown counts as private.
+  const issue = body.data?.issue;
   const team = issue?.teamId ?? issue?.team?.id;
   return app && typeof organization === 'string'
     ? {
         app,
         installation: organization,
-        ...(body.agentSession
+        ...(body.type === 'Comment'
           ? { space: { kind: 'team' as const, id: typeof team === 'string' ? team : '' } }
           : {}),
       }
@@ -71,35 +78,23 @@ type Issue = {
   botActor?: unknown;
 };
 
-/** A Linear webhook with the fields read here: the app's revocation and Issue and Comment changes. */
+/** A Linear webhook with the fields read here: the app's revocation and Issue changes. */
 type Webhook = {
   type?: string;
   action?: string;
   organizationId?: string;
   oauthClientId?: string;
   actor?: { id?: string; type?: string; name?: string } | null;
-  data?: Issue & {
-    body?: string;
-    parentId?: string | null;
-    parent?: { body?: string } | null;
-    issue?: Issue | null;
-  };
+  data?: Issue;
   /** An update's previous values, a key for each property it changed. */
   updatedFrom?: Record<string, unknown> & { labelIds?: string[] };
 };
 
-/** Whether the event happened in an agent session, where every prompt gets an answer and replies are progress. */
-export const linearSession = (event: PlatformEvent) =>
-  /:s:[^:]+$/.test(event.chat?.thread.id ?? '');
-
-/** Whether `text` @-mentions the app by handle or profile link, which goes to an agent session instead. */
-function mentions(text: string | null | undefined, handle: string): boolean {
-  const name = handle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-  return new RegExp(`(^|[^\\w-])@${name}(?![\\w-])|/profiles/${name}(?![\\w-])`, 'i').test(
-    text ?? '',
+/** Whether `text` @-mentions the app by name. */
+const mentions = (text: string, name: string) =>
+  new RegExp(`(^|[^\\w-])@${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![\\w-])`, 'i').test(
+    text,
   );
-}
 
 /** What an issue update changed that an agent acts on, a line each; removed labels and reordering are not. */
 function changes(issue: Issue, before: NonNullable<Webhook['updatedFrom']>): string[] {
@@ -117,55 +112,40 @@ function changes(issue: Issue, before: NonNullable<Webhook['updatedFrom']>): str
   ].filter((line): line is string => Boolean(line));
 }
 
-/** An Issue or Comment webhook as its catalog event; only people's changes count, so the agent never answers itself. */
-function dataEvent(req: Request, body: Webhook, app: PlatformApp): PlatformEvent | undefined {
-  const data = body.data;
-  if (body.actor?.type !== 'user' || !body.actor.id || !data || data.botActor) return;
-  let issue: Issue | null | undefined;
-  let text: string | undefined;
-  let comment: string | undefined;
-  if (body.type === 'Issue') {
-    const about = [data.title, data.description].filter(Boolean).join('\n\n');
-    const changed =
-      body.action === 'update' && body.updatedFrom ? changes(data, body.updatedFrom) : [];
-    issue = data;
-    // A mention in a new issue's description starts an agent session.
-    if (body.action === 'create' && !mentions(data.description, app.name)) text = about;
-    else if (changed.length) text = `${changed.join('\n')}\n\n${about}`;
-  } else if (
-    body.type === 'Comment' &&
-    body.action === 'create' &&
-    // A reply under a mention is a prompt of that mention's agent session.
-    !mentions(data.body, app.name) &&
-    !mentions(data.parent?.body, app.name)
-  ) {
-    issue = data.issue;
-    text = data.body;
-    comment = data.parentId ?? data.id;
-  }
-  if (!issue?.id || !text || !body.organizationId) return;
+/** An Issue webhook as the `issue` event; only people's changes count, so the agent never answers itself. */
+function issueEvent(req: Request, body: Webhook, app: PlatformApp): PlatformEvent | undefined {
+  const issue = body.data;
+  if (body.type !== 'Issue' || body.actor?.type !== 'user' || !body.actor.id) return;
+  if (!issue?.id || issue.botActor || !body.organizationId) return;
+  const about = [issue.title, issue.description].filter(Boolean).join('\n\n');
+  const changed =
+    body.action === 'update' && body.updatedFrom ? changes(issue, body.updatedFrom) : [];
+  const text =
+    body.action === 'create' ? about : changed.length ? `${changed.join('\n')}\n\n${about}` : '';
+  if (!text) return;
   const thread: SerializedThread = {
     _type: 'chat:Thread',
     adapterName: 'linear',
     channelId: `linear:${issue.id}`,
-    id: comment ? `linear:${issue.id}:c:${comment}` : `linear:${issue.id}`,
+    id: `linear:${issue.id}`,
     isDM: false,
   };
 
   return {
     integration: 'linear',
-    type: body.type === 'Issue' ? 'issue' : 'comment',
+    type: 'issue',
     appId: app.id,
     installationId: body.organizationId,
     deliveryId: req.headers.get('linear-delivery') ?? '',
     actor: { id: body.actor.id, ...(body.actor.name ? { login: body.actor.name } : {}) },
     text,
+    ...(body.action === 'create' && mentions(about, app.name) ? { mentioned: true as const } : {}),
     ...(issue.teamId ? { space: { kind: 'team' as const, id: issue.teamId } } : {}),
     chat: { thread },
   };
 }
 
-/** Every signed webhook but agent sessions, which the Chat SDK adapter verifies and handles. */
+/** Every signed webhook but comments, which the Chat SDK adapter verifies and handles. */
 export function linearOwnEvents(
   req: Request,
   raw: string,
@@ -173,7 +153,7 @@ export function linearOwnEvents(
   credentials: unknown,
 ): OwnEvent | undefined {
   const body = JSON.parse(raw) as Webhook;
-  if (body.type === 'AgentSessionEvent') return undefined;
+  if (body.type === 'Comment') return undefined;
   const secret = (credentials as { webhookSecret?: string }).webhookSecret;
   if (!verifyLinearWebhook(raw, req.headers.get('linear-signature'), secret))
     return { invalid: true };
@@ -183,30 +163,12 @@ export function linearOwnEvents(
       body.oauthClientId === app.id.slice('linear:'.length)
       ? { uninstalled: `${app.id}:${body.organizationId}` }
       : { invalid: true };
-  const event = dataEvent(req, body, app);
+  const event = issueEvent(req, body, app);
 
   return event ? { events: [event] } : { ack: true };
 }
 
-export function linearChatEvent(
-  type: string,
-  _thread: Thread,
-  message: Message,
-): Pick<PlatformEvent, 'type' | 'actor' | 'promptContext'> & Partial<Pick<PlatformEvent, 'text'>> {
-  const context = (message.raw as { agentSessionPromptContext?: string }).agentSessionPromptContext;
-  // A mention in the issue description starts the session on Linear's own notice; the issue's title is the ask.
-  const title = SESSION_NOTICE.test(message.text)
-    ? /<issue\b[^>]*>\s*<title>([^<]+)<\/title>/.exec(context ?? '')?.[1]?.trim()
-    : undefined;
-  return {
-    type,
-    actor: { id: message.author.userId, login: message.author.userName },
-    ...(title ? { text: title } : {}),
-    ...(context ? { promptContext: context.slice(0, PROMPT_CONTEXT_LIMIT) } : {}),
-  };
-}
-
-/** Linear agent sessions through Chat SDK: the host verifies the webhook signature, then mints the workspace's app token. */
+/** Linear comments through Chat SDK: the host verifies the webhook signature, then mints the workspace's app token. */
 export async function linearAdapter(ctx: AdapterContext): Promise<Adapter> {
   const [{ LinearAdapter }, { ConsoleLogger, defaultEmojiResolver }] = await Promise.all([
     import('@chat-adapter/linear'),
@@ -242,71 +204,84 @@ export async function linearAdapter(ctx: AdapterContext): Promise<Adapter> {
       this.defaultOrganizationId = this.organization!;
     }
 
+    /** The app user's handle, kept a day in Chat state. */
+    private async handle(): Promise<string> {
+      const state = this.chat!.getState();
+      const key = `linear:handle:${this.botUserId}`;
+      const known = await state.get<string>(key);
+      if (known) return known;
+      const { displayName } = await this.getClient().user(this.botUserId);
+      await state.set(key, displayName, DAY_MS);
+
+      return displayName;
+    }
+
+    // New and edited comments; a mention of the app user, typed by handle or picked as its profile link, reads as `@<name>`.
+    protected override async onCommentEvent(
+      payload: Parameters<LinearAdapter['onCommentEvent']>[0],
+      options?: WebhookOptions,
+    ): Promise<void> {
+      const { data } = payload;
+      const chat = this.chat;
+      const edit = payload.action === 'update';
+      if ((!edit && payload.action !== 'create') || !chat || !data.issueId || !data.user) return;
+      const { issueId, user } = data;
+
+      await this.withWebhookInstallation(payload.organizationId, async () => {
+        const handle = /@|\/profiles\//.test(data.body)
+          ? await this.handle().catch(error => {
+              console.error('coder server: could not read the Linear app user', error);
+              return undefined;
+            })
+          : undefined;
+        const self = handle?.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const mention =
+          self &&
+          new RegExp(
+            `https://linear\\.app/[^/\\s]+/profiles/${self}(?![\\w-])|(?<![\\w-])@${self}(?![\\w-])`,
+            'gi',
+          );
+        const body = mention ? data.body.replace(mention, `@${this.userName}`) : data.body;
+        const message = this.parseMessage({
+          kind: 'comment',
+          organizationId: payload.organizationId,
+          comment: {
+            id: data.id,
+            body,
+            issueId,
+            parentId: data.parentId ?? undefined,
+            createdAt: data.createdAt,
+            updatedAt: data.updatedAt,
+            url: payload.url ?? undefined,
+            user: {
+              type: 'user',
+              id: user.id,
+              displayName: /\/profiles\/([^/?#]+)/.exec(user.url)?.[1] ?? '',
+              fullName: user.name,
+              email: user.email,
+              avatarUrl: user.avatarUrl ?? undefined,
+            },
+          },
+        });
+        const threadId = this.encodeThreadId({ issueId, commentId: data.parentId || data.id });
+
+        if (edit) void chat.processMessageUpdated({ adapter: this, threadId, message }, options);
+        else void chat.processMessage(this, threadId, message, options);
+      });
+    }
+
     private bound<T>(work: () => Promise<T>): Promise<T> {
       if (this.requestContext.getStore()) return work();
       if (!this.organization) return Promise.reject(new Error('No Linear workspace to post for'));
       return this.withInstallation(this.organization, work);
     }
 
-    private async commentThread(issueId: string, agentSessionId: string) {
-      await this.ensureValidToken();
-      type Comment = { id: string; parentId?: string | null };
-      type Prompts = { nodes: Array<{ createdAt: string; sourceComment?: Comment | null }> };
-      const { agentSession: session } = (await this.getClient().client.request(
-        `query LinearReplyTarget($id: String!) {
-          agentSession(id: $id) {
-            comment { id parentId }
-            first: activities(first: 1, filter: { type: { eq: "prompt" } }) {
-              nodes { createdAt sourceComment { id parentId } }
-            }
-            last: activities(last: 1, filter: { type: { eq: "prompt" } }) {
-              nodes { createdAt sourceComment { id parentId } }
-            }
-          }
-        }`,
-        { id: agentSessionId },
-      )) as { agentSession: { comment?: Comment | null; first: Prompts; last: Prompts } | null };
-      if (!session) throw new Error('Linear returned no agent session');
-      // Linear documents no sort direction, so the newer end of the prompts is the latest one.
-      const prompt = [...session.first.nodes, ...session.last.nodes].sort((a, b) =>
-        b.createdAt.localeCompare(a.createdAt),
-      )[0];
-      // A sidebar message is a reply under the session's own comment, or no comment at all.
-      const sidebar = (source?: Comment | null) =>
-        !source || Boolean(session.comment && source.parentId === session.comment.id);
-      if (prompt && sidebar(prompt.sourceComment)) return undefined;
-      const comment = prompt ? prompt.sourceComment : session.comment;
-      const parent = comment?.parentId;
-
-      return this.encodeThreadId({ issueId, commentId: parent ?? undefined });
-    }
-
-    private async postActivity(agentSessionId: string, type: 'response' | 'error', body: string) {
-      const result = await this.getClient().createAgentActivity({
-        agentSessionId,
-        content: { type: type as never, body },
-      });
-      const activity = await result.agentActivity;
-      if (!result.success || !activity) throw new Error(`Linear ${type} activity failed`);
-
-      return { id: activity.id };
-    }
-
     override postMessage(threadId: string, message: AdapterPostableMessage) {
-      return this.bound(async () => {
-        const { issueId, agentSessionId } = this.decodeThreadId(threadId);
-        if (!agentSessionId) return super.postMessage(threadId, message);
-        const target = await this.commentThread(issueId, agentSessionId);
-        if (!target) return super.postMessage(threadId, message);
-        const sent = await super.postMessage(target, message);
-        await this.postActivity(
-          agentSessionId,
-          'response',
-          `[Replied in a comment](${sent.raw.comment.url})`,
-        );
+      return this.bound(() => super.postMessage(threadId, message));
+    }
 
-        return { ...sent, threadId };
-      });
+    override editMessage(threadId: string, messageId: string, message: AdapterPostableMessage) {
+      return this.bound(() => super.editMessage(threadId, messageId, message));
     }
 
     override addReaction(threadId: string, messageId: string, emoji: EmojiValue | string) {
@@ -315,65 +290,32 @@ export async function linearAdapter(ctx: AdapterContext): Promise<Adapter> {
       );
     }
 
-    override startTyping(threadId: string, status?: string) {
-      return this.bound(() => super.startTyping(threadId, status));
-    }
-
-    postProgress(threadId: string, text: string) {
-      const { agentSessionId } = this.decodeThreadId(threadId);
-      if (!agentSessionId) return this.postMessage(threadId, { markdown: text });
+    // Typing is a 👀 on the asking comment, or the issue, kept in Chat state until the reply removes it.
+    override startTyping(threadId: string, _status?: string, options?: TypingOptions) {
+      const { issueId, commentId } = this.decodeThreadId(threadId);
+      const comment = options?.messageId ?? commentId;
 
       return this.bound(async () => {
         await this.ensureValidToken();
-        const result = await this.getClient().createAgentActivity({
-          agentSessionId,
-          content: { type: 'thought' as never, body: text },
+        const { reaction } = await this.getClient().createReaction({
+          ...(comment ? { commentId: comment } : { issueId }),
+          emoji: '👀',
         });
-        const activity = await result.agentActivity;
-        if (!result.success || !activity) throw new Error('Linear progress activity failed');
-
-        return { id: activity.id };
+        await this.chat
+          ?.getState()
+          .appendToList(typingKey(threadId), reaction.id, { ttlMs: DAY_MS });
       });
     }
 
-    /** A `select` elicitation whose pick comes back as a prompt holding the option's value; outside a session, a comment. */
-    postElicitation(
-      threadId: string,
-      body: string,
-      options: Array<{ label: string; value: string }>,
-    ): Promise<{ id?: string }> {
-      const { agentSessionId } = this.decodeThreadId(threadId);
-      if (!agentSessionId) return this.postMessage(threadId, { markdown: body });
+    async endTyping(threadId: string) {
+      const state = this.chat?.getState();
+      const added = (await state?.getList<string>(typingKey(threadId))) ?? [];
+      if (!added.length) return;
+      await state!.delete(typingKey(threadId));
 
-      return this.bound(async () => {
+      await this.bound(async () => {
         await this.ensureValidToken();
-        const result = await this.getClient().createAgentActivity({
-          agentSessionId,
-          content: { type: 'elicitation' as never, body },
-          signal: 'select' as never,
-          signalMetadata: { options },
-        });
-        const activity = await result.agentActivity;
-        if (!result.success || !activity) throw new Error('Linear elicitation activity failed');
-
-        return { id: activity.id };
-      });
-    }
-
-    /** Failures follow the latest prompt and mark the session as failed. */
-    postProblem(threadId: string, text: string) {
-      return this.bound(async () => {
-        const { issueId, agentSessionId } = this.decodeThreadId(threadId);
-        if (!agentSessionId) return super.postMessage(threadId, { markdown: text });
-        const target = await this.commentThread(issueId, agentSessionId);
-        const sent = target ? await super.postMessage(target, { markdown: text }) : undefined;
-        const activity = await this.postActivity(
-          agentSessionId,
-          'error',
-          sent ? `[Failed in a comment](${sent.raw.comment.url})` : text,
-        );
-
-        return sent ?? activity;
+        await Promise.all(added.map(id => this.getClient().deleteReaction(id)));
       });
     }
   }
@@ -382,7 +324,7 @@ export async function linearAdapter(ctx: AdapterContext): Promise<Adapter> {
   const organization = ctx.installationId;
   return new BoundLinearAdapter(
     {
-      mode: 'agent-sessions',
+      mode: 'comments',
       userName: ctx.name,
       // Set, so no LINEAR_* variable redirects the token or replaces the key.
       apiUrl: 'https://api.linear.app/graphql',
