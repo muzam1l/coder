@@ -1,7 +1,7 @@
 import { type Params } from '../routes/match';
 import { isDeepStrictEqual } from 'node:util';
 import { assertNotReserved, agentsFromSources, repoAgentOverride } from '../../agent/load';
-import { effectiveSettings, parseAgentsUsage, usageEntry } from '../../agent/definition';
+import { parseAgentsUsage, usageEntry } from '../../agent/definition';
 import { type ServerContext } from '../context';
 import { getAgent, getVersion, publishAgent, setAgentSettings, toAgent } from './records';
 import { syncApps } from './repo';
@@ -116,17 +116,16 @@ export async function updateSettings(
   );
 }
 
-/** A saved agent only the saver's own credentials run, as a warning for the save toast. */
+/** A saved model only the saver's own credential runs, as a warning for the save toast. */
 async function personalWarning(ctx: ServerContext, record: AgentRecord) {
+  const settings = record.settings ?? {};
   const viewer = ctx.session?.user.id;
-  if (!viewer) return {};
-  const version = await getVersion(ctx.store, record.id, record.currentVersion);
-  const settings = effectiveSettings({ definition: version?.definition, usage: record.settings });
+  if (!viewer || (!settings.engine && !settings.model)) return {};
   const { models } = await resolveModels(ctx, settings, viewer);
 
   return personalOnly(models)
     ? {
-        warning: `Only your personal credential runs ${modelName(models.find(run => run.credentials.length)!.option)}. Add a workspace credential so this agent works for everybody.`,
+        warning: `Only your personal credential runs ${modelName(models[0]!.option)}. Others fall back to the chain until a workspace credential runs it.`,
       }
     : {};
 }
