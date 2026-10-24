@@ -304,6 +304,7 @@ export async function taskContext(
   checksToken?: string;
   dashboard?: string;
   reviewAssets?: string;
+  gitAuthor?: { name: string; email: string };
   postToken?: string;
   credential: EngineCredential;
   engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
@@ -350,6 +351,14 @@ export async function taskContext(
     }
   }
 
+  // Commits made in the task credit the app's own account.
+  const repos = event && ctx.integrations[event.integration]?.repos;
+  const appToken = event && tokens[event.integration];
+  const gitAuthor =
+    repos?.commitAuthor && task.author && appToken
+      ? await repos.commitAuthor(task.author, appToken).catch(() => undefined)
+      : undefined;
+
   const { actAsRefusal } = await import('./changes');
   const resolved = await resolvedTaskConnections(ctx, status, tokens, connection =>
     actAsRefusal(ctx, status, connection),
@@ -395,6 +404,7 @@ export async function taskContext(
     ...(checksToken ? { checksToken } : {}),
     ...(dashboard ? { dashboard } : {}),
     ...(reviewAssets ? { reviewAssets } : {}),
+    ...(gitAuthor ? { gitAuthor } : {}),
     ...(postToken ? { postToken } : {}),
     credential,
     ...(engineCredentials ? { engineCredentials } : {}),

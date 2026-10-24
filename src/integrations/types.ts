@@ -731,6 +731,8 @@ export interface Repositories {
   pullRequest(event: PlatformEvent): number | undefined;
   /** A pull request's Chat SDK thread. */
   pullRequestThread(repo: string, number: number): SerializedThread;
+  /** The git name and email that credit a commit to the app's account `author`. */
+  commitAuthor?(author: string, token: string): Promise<{ name: string; email: string }>;
   readonly reviews?: PullRequestReviews;
 }
 

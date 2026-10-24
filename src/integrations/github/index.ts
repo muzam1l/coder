@@ -2,6 +2,7 @@ import type { Integration } from '../types';
 import {
   canWriteGithub,
   githubCommit,
+  githubCommitAuthor,
   githubTree,
   githubRepository,
   githubRepositoryUrl,
@@ -111,6 +112,7 @@ export const github: Integration = {
     pullRequests: listGithubPullRequests,
     pullRequest: githubPullRequest,
     pullRequestThread: (repo, number) => githubThread(repo, number, true),
+    commitAuthor: githubCommitAuthor,
     reviews: githubReviews,
   },
   target: githubTarget,

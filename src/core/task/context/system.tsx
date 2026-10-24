@@ -84,8 +84,10 @@ const Workspace = ({ scratch, writes }: SystemPromptParts) => (
   <workspace>
     {[
       writes &&
-        'Never run git write commands (commit, checkout, stash, reset, rebase, merge, push) in any repository on disk; leave changes uncommitted.',
-      scratch && writes && `Scratch folder, git writes allowed, deleted with the task: ${scratch}`,
+        'Leave changes in the checkout uncommitted. Its diff is reported when the turn ends. Do not commit, switch branches or push in the current workspace or elsewhere.',
+      scratch &&
+        writes &&
+        `Scratch folder is provided for clones, git writes and anything else, deleted with the task: ${scratch}`,
       'Never print secret values; pass them straight to the process that needs them.',
     ]
       .filter(Boolean)
