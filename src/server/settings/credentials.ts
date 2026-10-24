@@ -327,17 +327,15 @@ export async function modelProblem(
   return `No credential runs ${model}. ${fix}`;
 }
 
-/** Whether only personal credentials run a list's first model, so an agent on it answers only its owner's turns. */
-export const personalOnly = (models: ModelRun[]): boolean => {
-  const first = models[0];
-
-  return Boolean(
-    first &&
-    !first.machine &&
-    first.credentials.length &&
-    first.credentials.every(id => parseCredentialId(id).owner),
+/** Whether the model chain runs only on personal credentials. */
+export function personalOnly(models: ModelRun[]): boolean {
+  return (
+    models.some(run => run.credentials.length > 0) &&
+    models.every(
+      run => !run.machine && run.credentials.every(id => Boolean(parseCredentialId(id).owner)),
+    )
   );
-};
+}
 
 /** Workspace credentials plus the caller's own; nobody sees another member's. */
 export async function visibleCredentials(

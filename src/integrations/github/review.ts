@@ -141,33 +141,40 @@ async function target(
     if (own.length)
       try {
         const [owner, name] = pr.repo.split('/');
-        const { data: result } = await call<{
-          data?: {
-            repository: {
-              pullRequest: {
-                reviewThreads: {
-                  nodes: Array<{
-                    isResolved: boolean;
-                    comments: { nodes: Array<{ databaseId: number }> };
-                  }>;
+        let after: string | undefined;
+        while (true) {
+          const { data: result } = await call<{
+            data?: {
+              repository: {
+                pullRequest: {
+                  reviewThreads: {
+                    pageInfo: { hasNextPage: boolean; endCursor: string };
+                    nodes: Array<{
+                      isResolved: boolean;
+                      comments: { nodes: Array<{ databaseId: number }> };
+                    }>;
+                  };
                 };
               };
             };
-          };
-          errors?: unknown[];
-        }>(token, `${API}/graphql`, request, {
-          method: 'POST',
-          body: {
-            query:
-              'query($owner:String!,$name:String!,$number:Int!){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ reviewThreads(last:100){ nodes{ isResolved comments(first:1){ nodes{ databaseId } } } } } } }',
-            variables: { owner, name, number: pr.number },
-          },
-        });
-        if (result.errors?.length || !result.data)
-          throw new Error('Review thread history unavailable');
-        for (const thread of result.data.repository.pullRequest.reviewThreads.nodes)
-          if (thread.isResolved)
-            for (const comment of thread.comments.nodes) resolved.add(comment.databaseId);
+            errors?: unknown[];
+          }>(token, `${API}/graphql`, request, {
+            method: 'POST',
+            body: {
+              query:
+                'query($owner:String!,$name:String!,$number:Int!,$after:String){ repository(owner:$owner,name:$name){ pullRequest(number:$number){ reviewThreads(first:100,after:$after){ nodes{ isResolved comments(first:1){ nodes{ databaseId } } } pageInfo{ hasNextPage endCursor } } } } }',
+              variables: { owner, name, number: pr.number, ...(after ? { after } : {}) },
+            },
+          });
+          if (result.errors?.length || !result.data)
+            throw new Error('Review thread history unavailable');
+          const page = result.data.repository.pullRequest.reviewThreads;
+          for (const thread of page.nodes)
+            if (thread.isResolved)
+              for (const comment of thread.comments.nodes) resolved.add(comment.databaseId);
+          if (!page.pageInfo?.hasNextPage) break;
+          after = page.pageInfo.endCursor;
+        }
       } catch (error) {
         console.error('github: review history keeps threads unresolved', error);
       }
