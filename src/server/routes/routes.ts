@@ -74,7 +74,7 @@ import {
 import { completeInstall, installPage } from '../agents/install';
 import { completeOAuth, meRoute, startOAuth } from '../auth/members';
 import { MCP_CLIENT_PATH, oauthCallback, oauthClientDocument } from '../connections/oauth';
-import { hook, listFlows, listPulls, review, runFlow } from '../tasks/flows';
+import { hook, listFlows, listPulls, runFlow } from '../tasks/flows';
 import { type ServerContext } from '../context';
 import { readUsage, readUsageTotals } from '../tasks/usage';
 import { checkFolder, cloneFolder, localFolders, pickFolder } from '../settings/folders';
@@ -402,7 +402,6 @@ const flowsRoutes = [
   route('GET', '/flows', listFlows),
   route('GET', '/pulls', listPulls),
   route('POST', '/flows/:name/run', runFlow),
-  route('POST', '/review', review),
 ];
 
 /** The admin table before its guard; tests dispatch through it with their own contexts. */

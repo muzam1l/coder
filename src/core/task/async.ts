@@ -9,8 +9,10 @@ import { heldConnections, steerTask } from './actions';
 import type { Task } from '../types';
 import { readJsonFile, withFileLock, writeJsonFileAtomic } from '../../utils/fsx';
 import { drivePreparedRun, pidAlive, prepareRun, stopFlowTasks } from '../../flow/executor';
+import { builtinFlowsDir } from '../../flow/discover';
 import { detachRun, readFlowRecord, readRawRecord } from '../../flow/runs';
 import type { FlowHooks } from '../../flow/runtime';
+import type { ReviewLinks } from '../../flow/builtin/review/post';
 
 /** A tool that runs a flow and answers later: one call at a time, `limit` per turn. */
 export interface AsyncTool<I = any> {
@@ -84,7 +86,12 @@ export async function startAsyncTool<I>(
   if (timeout !== undefined && !(timeout > 0))
     throw new Error('timeout must be a positive number of seconds');
   const cwd = task.cwd ?? process.cwd();
-  const posts = Boolean(tool.platform && process.env[tokenEnvName(tool.platform)]);
+  // A cloud task on a repository has its runner hold the app token, whatever servers this turn has.
+  const posts = Boolean(
+    tool.platform &&
+    (process.env[tokenEnvName(tool.platform)] ||
+      (process.env.CODER_MCP_MODE === 'cloud' && task.repo)),
+  );
 
   return updateCalls(taskDir, calls => {
     const pending = pendingCall(taskDir, tool.name);
@@ -98,7 +105,10 @@ export async function startAsyncTool<I>(
 
     const record = prepareRun(tool.flow, {
       cwd,
-      args: tool.args(input, cwd, posts ? task.author : undefined),
+      args: {
+        ...tool.args(input, cwd, posts ? task.author : undefined),
+        ...(task.pullRequest !== undefined ? { eventPr: task.pullRequest } : {}),
+      },
     });
     calls.push({ tool: tool.name, runId: record.runId, turn, ...(timeout ? { timeout } : {}) });
     // A cloud task's runner drives its calls, with the credential each model runs on.
@@ -139,7 +149,13 @@ export async function driveAsyncTool(
   cwd: string,
   taskId: string,
   timeout?: number,
-  runner?: { integrationToken?: string; onModel: FlowHooks['onModel']; stop: AbortSignal },
+  runner?: {
+    integrationToken?: string;
+    checksToken?: string;
+    links?: ReviewLinks;
+    onModel: FlowHooks['onModel'];
+    stop: AbortSignal;
+  },
 ): Promise<void> {
   const taskDir = resolveTaskDir(cwd, taskId);
   const mark = (patch: Partial<AsyncCall>) =>
@@ -156,35 +172,45 @@ export async function driveAsyncTool(
       : undefined;
   // The flow's tasks never see the app's token.
   if (tokenName && !runner) delete process.env[tokenName];
-  let run: { requestStop(): void; runningIds(): string[] } | undefined;
+  let run: Parameters<NonNullable<FlowHooks['onStart']>>[0] | undefined;
   let timer: NodeJS.Timeout | undefined;
   let stop = () => {};
   const ended = new Promise<'timeout' | 'stopped'>(resolve => {
     if (timeout) timer = setTimeout(() => resolve('timeout'), timeout * 1000);
     stop = () => resolve('stopped');
-    if (runner) runner.stop.addEventListener('abort', stop, { once: true });
-    else {
+    if (runner) {
+      runner.stop.addEventListener('abort', stop, { once: true });
+      if (runner.stop.aborted) stop();
+    } else {
       process.once('SIGINT', stop);
       process.once('SIGTERM', stop);
     }
   });
+  let interrupted = false;
   let outcome: string;
   try {
     await mark({ pid: process.pid });
     const record = readRawRecord(runId);
     if (!record) throw new Error(`No flow run "${runId}".`);
+    // A repository's own flow of the same name gets neither the app's nor the checks token.
+    const builtin = record.script.startsWith(builtinFlowsDir() + path.sep);
     const done = await Promise.race([
       drivePreparedRun(
         record,
         cwd,
         { onStart: started => (run = started), ...(runner ? { onModel: runner.onModel } : {}) },
-        integrationToken,
+        builtin ? integrationToken : undefined,
+        runner?.links,
+        loadTask(cwd, taskId)?.access,
+        builtin ? runner?.checksToken : undefined,
       ),
       ended,
     ]);
     if (typeof done === 'string') {
-      await stopFlowTasks(runId, run?.runningIds());
+      // Stopping first, so the flow sees a stop rather than a failed child.
       run?.requestStop();
+      await stopFlowTasks(runId, run?.runningIds());
+      interrupted = true;
       outcome =
         done === 'timeout'
           ? `${name} timed out after ${timeout}s and was stopped`
@@ -194,6 +220,21 @@ export async function driveAsyncTool(
     outcome = `${name} ${runId} failed: ${error instanceof Error ? error.message : String(error)}`;
   } finally {
     clearTimeout(timer);
+    // A stopped run's flow cannot finish what it started; its stop hooks do.
+    if (interrupted)
+      await Promise.all(
+        [...(run?.stopHooks ?? [])].map(async hook => {
+          try {
+            // A hook gets ten seconds, so a stuck one cannot hold a stopped run.
+            await Promise.race([
+              hook(),
+              new Promise(resolve => setTimeout(resolve, 10_000).unref()),
+            ]);
+          } catch (error) {
+            console.error('coder flow: stop hook failed', error);
+          }
+        }),
+      );
     runner?.stop.removeEventListener('abort', stop);
     process.off('SIGINT', stop);
     process.off('SIGTERM', stop);

@@ -27,6 +27,8 @@ export interface ServerConfig {
   /** Bearer for `/admin/*` on a memory server, which has no sign-in; ignored with Postgres. */
   adminToken?: string;
   publicUrl?: string;
+  /** Themed review images, a path on this server or a URL; unset posts basic reviews. */
+  reviewAssets?: string;
   /** What the dashboard calls this server; `Coder` unless set. */
   name?: string;
   /** `ISSUES_URL`: where the dashboard sends bug reports. */

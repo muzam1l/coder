@@ -64,6 +64,7 @@ import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mai
 import type { Task, McpServerSpec, ResolvedTaskOptions } from '../core/types';
 import type { FlowHooks } from '../flow/runtime';
 import { asyncTools } from '../core/task/context/tools';
+import { reviewLinks } from '../flow/builtin/review/post';
 import {
   readJsonFile,
   writeJsonFileAtomic,
@@ -75,13 +76,17 @@ import { CLAUDE_PROJECT, taskHistory } from './history';
 import { claimCalls, driveAsyncTool, pendingCall } from '../core/task/async';
 
 const exec = promisify(execFile);
+
 type RemoteTask = {
   task: AgentTask;
   generation: number;
   logCursor?: number;
   timeoutMs?: number;
   tokens: Record<string, string>;
+  checksToken?: string;
   dashboard?: string;
+  reviewAssets?: string;
+  gitAuthor?: { name: string; email: string };
   postToken?: string;
   credential: EngineCredential;
   engineCredentials?: Array<{ id: string; credential: EngineCredential }>;
@@ -213,17 +218,21 @@ export async function checkout(
           gitOptions,
         );
       });
-      return cwd;
+    } else {
+      // A sandbox snapshot already holds the clone.
+      if (!(await present(path.join(cwd, '.git'))))
+        await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
+      await exec(
+        'git',
+        ['-C', cwd, 'fetch', '--depth', '50', 'origin', repo.defaultBranch],
+        gitOptions,
+      );
+      await exec('git', ['-C', cwd, 'checkout', '--detach', 'FETCH_HEAD'], gitOptions);
     }
-    // A sandbox snapshot already holds the clone.
-    if (!(await present(path.join(cwd, '.git'))))
-      await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
-    await exec(
-      'git',
-      ['-C', cwd, 'fetch', '--depth', '50', 'origin', repo.defaultBranch],
-      gitOptions,
+    await fs.writeFile(
+      baseFile(root),
+      (await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout,
     );
-    await exec('git', ['-C', cwd, 'checkout', '--detach', 'FETCH_HEAD'], gitOptions);
   } finally {
     await fs.rm(credentialDir, { recursive: true, force: true });
   }
@@ -264,11 +273,15 @@ export async function releaseCheckout(cwd: string): Promise<void> {
 
 const MAX_DIFF_BYTES = 1024 * 1024;
 
-/** What the task changed in its checkout, new files included. */
-async function changes(cwd: string): Promise<string> {
+/** The commit the task's checkout started on, so commits made in it still show in its diff. */
+const baseFile = (root: string) => path.join(root, '.checkout-base');
+
+/** What the task changed in its checkout since it started, new files and commits included. */
+async function changes(cwd: string, root: string): Promise<string> {
   const options = { maxBuffer: 64 * 1024 * 1024 };
+  const base = (await fs.readFile(baseFile(root), 'utf8').catch(() => 'HEAD')).trim();
   await exec('git', ['-C', cwd, 'add', '--intent-to-add', '--all'], options);
-  const { stdout } = await exec('git', ['-C', cwd, 'diff', 'HEAD'], options);
+  const { stdout } = await exec('git', ['-C', cwd, 'diff', base], options);
   return Buffer.byteLength(stdout) > MAX_DIFF_BYTES
     ? `${Buffer.from(stdout).subarray(0, MAX_DIFF_BYTES).toString()}\n[diff truncated]`
     : stdout;
@@ -290,6 +303,9 @@ async function applyEnvironment(
   const { CODEX_AUTH_JSON: authJson, [MACHINE_SANDBOX_ENV]: _, ...env } = remote.credential.env;
   Object.assign(process.env, env);
   process.env[WORKSPACE_CONFIG_ENV] = JSON.stringify(remote.config ?? {});
+  // Each turn sets git's identity from its credential choice, starting from this default.
+  delete process.env.CODER_GIT_AUTHOR;
+  if (remote.gitAuthor) process.env.CODER_GIT_AUTHOR = JSON.stringify(remote.gitAuthor);
   process.env.CODER_MCP_MODE = 'cloud';
   process.env.CODER_MCP_CONNECTION_ENV = JSON.stringify(
     connectionVariables(remote.connections ?? {}),
@@ -337,6 +353,7 @@ async function historySecrets(
   return [
     token,
     ...Object.values(remote.tokens),
+    ...(remote.checksToken ? [remote.checksToken] : []),
     ...(remote.postToken ? [remote.postToken] : []),
     ...Object.values(remote.connectionEnv ?? {}),
     ...Object.entries(remote.credential.env)
@@ -982,6 +999,8 @@ async function runCheckedOutTask(
           if (!tool) continue;
           const work = driveAsyncTool(tool, call.runId, cwd, started, call.timeout, {
             integrationToken: tool.platform ? remote.tokens[tool.platform] : undefined,
+            checksToken: remote.checksToken,
+            links: reviewLinks(auth.server, remote.task.taskUrl, remote.reviewAssets),
             onModel: onFlowModel,
             stop: timeout,
           })
@@ -1183,7 +1202,7 @@ async function runCheckedOutTask(
       tokens: result.tokens,
       ...(approvals().length ? { approvals: approvals() } : {}),
       ...(result.postedMessages?.length ? { postedMessages: result.postedMessages } : {}),
-      ...(event?.repo ? { diff: await changes(cwd).catch(() => undefined) } : {}),
+      ...(event?.repo ? { diff: await changes(cwd, root).catch(() => undefined) } : {}),
     });
     return result;
   } catch (error) {

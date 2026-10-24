@@ -89,23 +89,10 @@ export async function runFlow(
   params: Params,
   url: URL,
 ): Promise<Response> {
+  if (params.name === 'review') return json({ error: 'Reviews run through the review tool.' }, 400);
+
   return body<NewTask>(req)
     .then(input => run(ctx, { ...input, flow: params.name }))
-    .catch(taskError);
-}
-
-export async function review(
-  req: Request,
-  ctx: ServerContext,
-  params: Params,
-  url: URL,
-): Promise<Response> {
-  return body<NewTask & { post?: boolean }>(req)
-    .then(({ post, ...input }) => {
-      if (!input.repo || !input.pr) throw new TaskInputError('repo and pr are required');
-
-      return run(ctx, { ...input, flow: 'review', args: { post: post === true } });
-    })
     .catch(taskError);
 }
 

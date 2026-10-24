@@ -307,21 +307,37 @@ export function listRunsOn(models: ModelRun[], viewer?: string): string {
     : 'No credential runs any listed model';
 }
 
-/** Why an agent's own model can't run in a shared thread, where only workspace credentials and a local server's own logins count; `link` makes the fix a link. */
+/** Why an agent's own model can't run for anyone: no workspace credential, no local sign-in, and none of `viewer`'s own. `link` makes the fix a link. */
 export async function modelProblem(
   ctx: ServerContext,
   settings: { engine?: string; model?: string },
   link = false,
+  viewer?: string,
 ): Promise<string | undefined> {
   if (!settings.engine && !settings.model) return undefined;
-  const [first] = (await resolveModels(ctx, settings)).models;
+  // A viewer's own credential saves it too: the agent then runs their turns only until a workspace one is added.
+  const [first] = (await resolveModels(ctx, settings, viewer)).models;
   if (first!.credentials.length || first!.machine) return undefined;
   const engine = first!.option.engine;
   const name = ENGINE_NAMES[engine] ?? engine;
+  const model = settings.model ? `${settings.model} (${name})` : name;
   const add = `Add one in Settings → ${engine === 'custom' ? 'Models' : 'Credentials'}`;
+  const fix = `${link ? `[${add}](${await credentialFix(ctx, engine)})` : add}, or pick another model.`;
 
-  return `No workspace credential runs ${settings.model ? `${settings.model} (${name})` : name}. ${link ? `[${add}](${await credentialFix(ctx, engine)})` : add}, or pick another model.`;
+  return `No credential runs ${model}. ${fix}`;
 }
+
+/** Whether only personal credentials run a list's first model, so an agent on it answers only its owner's turns. */
+export const personalOnly = (models: ModelRun[]): boolean => {
+  const first = models[0];
+
+  return Boolean(
+    first &&
+    !first.machine &&
+    first.credentials.length &&
+    first.credentials.every(id => parseCredentialId(id).owner),
+  );
+};
 
 /** Workspace credentials plus the caller's own; nobody sees another member's. */
 export async function visibleCredentials(

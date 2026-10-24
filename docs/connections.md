@@ -17,7 +17,7 @@ For workspace Acme, agent Coder, and member Ada:
 | | Workspace | Ada's personal |
 |---|---|---|
 | Slack | `slack`: Coder's bot. Reads the channels it's in, can't search, posts as Coder. | `slack-user`: Ada's account. Searches everything Ada can see; acts as Ada. |
-| GitHub | `github-acme`: the app's installation on `acme`. Comments as `coder-cloud-ai[bot]`. | `github-user`: Ada's sign-in. A pull request shows Ada as its author. |
+| GitHub | `github-acme`: the app's installation on `acme`. Comments, commits and pushes as `coder-cloud-ai[bot]`. | `github-user`: Ada's sign-in. Once Ada approves the act-as request, the turn commits and pushes as Ada, and a pull request lists Ada as its author. |
 | Linear | `linear-acme`: the app. "My issues" are the app's. | `linear-user`: Ada's sign-in. "My issues" are hers. |
 | Notion (MCP) | `notion`: a Notion MCP token from Acme's workspace owner. | `notion-user`: Ada's own Notion sign-in. |
 

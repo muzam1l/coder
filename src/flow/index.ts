@@ -15,7 +15,7 @@ import {
 import type { DiscoveredFlow, FlowEvent, FlowRecord } from './types';
 import type { RunOptions, RunSummary, StopSummary } from './executor';
 
-export { task, steer, gate, pipeline, log, flow } from './runtime';
+export { task, steer, gate, pipeline, log, flow, onRunStop } from './runtime';
 export { CoderError } from '../core/dispatch';
 export type {
   FlowEvent,

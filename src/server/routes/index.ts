@@ -76,7 +76,6 @@ async function request(
       ) &&
       (task ||
         adminTask ||
-        (parts[1] === 'admin' && parts[2] === 'review') ||
         (parts[1] === 'admin' &&
           parts[2] === 'flows' &&
           parts.length === 5 &&

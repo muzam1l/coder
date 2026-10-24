@@ -27,6 +27,7 @@ Required variables carry a *.
 | `CODER_CACHE_HOME` | path | OS cache directory for `wular-coder` | Archived tasks, flows and usage |
 | `WORK_DIR` | path | `~/.coder/state/global/server-tasks` | Where the local runner keeps each task's work folder: its working directory, or its checkout with a repository. The folder stays across turns and goes with `task delete` |
 | `SERVER_NAME` | string | `Coder` | What the dashboard calls this server, in its sidebar server menu |
+| `REVIEW_ASSETS` | path or URL | unset | Themed images for posted pull request reviews (`sev-*` and `btn-*` SVGs, dark and light); a path resolves against `PUBLIC_URL`. Unset posts plain Markdown reviews |
 | `ISSUES_URL` | URL | `https://github.com/muzam1l/coder/issues/new` | Where the dashboard sends bug reports from its Report issue button |
 | `SERVER_LIMITS` | JSON | `{}` | Request rates and task slots ([Limits and monitoring](#limits-and-monitoring)) |
 | `CLAUDE_SUBSCRIPTIONS` | `1` | off | Offer **[Sign in with Claude]** for personal credentials |
@@ -98,7 +99,7 @@ Installs start from the dashboard. **[Connect GitHub]** adds the shared GitHub a
 
 Operators set up the shared apps in the dashboard's Operator area at `/dash/<workspace>/operator`, one per platform, named `SERVER_NAME` or Wular unless they pick a name, and every operator action lands in its audit log. Entering it asks for a fresh Wular Auth sign-in and lasts an hour, or 15 minutes without activity; on local and memory servers the admin token holder is the operator.
 
-Each task gets the narrowest platform token: on GitHub an installation token for the event's repository with only the permissions its tools need, on Slack the install's bot token.
+Each task gets the narrowest platform token: on GitHub an installation token for the event's repository with only the permissions its tools need, on Slack the install's bot token. Each turn's git pushes with the installation covering the repository and commits as the app's bot. A member who approves acting as them on their GitHub connection gets the turn's pushes and commits under their own GitHub account instead. A GitHub App also asks for Checks: Read and write, for review checks; existing apps list it under **[Update on GitHub]**, and each installation accepts it once.
 
 ## Credentials
 

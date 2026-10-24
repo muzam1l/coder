@@ -103,46 +103,6 @@ function isEmpty(text: string) {
   return bare.trim() === EMPTY_MESSAGE;
 }
 
-/** A result's message as pretty JSON when it is JSON, else as markdown. */
-type Finding = {
-  file: string;
-  line: number;
-  severity: string;
-  category?: string;
-  summary: string;
-  failure_scenario?: string;
-};
-
-const isFindings = (json: unknown): json is { findings: Finding[] } =>
-  typeof json === 'object' &&
-  json !== null &&
-  Array.isArray((json as { findings?: unknown }).findings) &&
-  (json as { findings: unknown[] }).findings.every(
-    f => typeof f === 'object' && f !== null && 'file' in f && 'summary' in f,
-  );
-
-/** A review.s findings, one per changed line, worst first. */
-function Findings({ findings }: { findings: Finding[] }) {
-  if (!findings.length) return <p class="body muted">No findings.</p>;
-  return (
-    <ul class="findings">
-      {findings.map((f, index) => (
-        <li key={index} class={`finding ${f.severity}`}>
-          <p class="finding-head">
-            <span class="sev">{f.severity}</span>
-            <span class="loc">
-              {f.file}:{f.line}
-            </span>
-            {f.category ? <span class="cat">{f.category}</span> : null}
-          </p>
-          <p class="finding-sum">{f.summary}</p>
-          {f.failure_scenario ? <p class="finding-why muted">{f.failure_scenario}</p> : null}
-        </li>
-      ))}
-    </ul>
-  );
-}
-
 /** A result as the platform got it: an empty answer is the notice when a reply was due, else the skip. */
 function ResultBody({ value, required }: { value: unknown; required: boolean }) {
   const text = messageOf(value, 'Result received.');
@@ -152,7 +112,6 @@ function ResultBody({ value, required }: { value: unknown; required: boolean }) 
     try {
       json = JSON.parse(text);
     } catch {}
-  if (isFindings(json)) return <Findings findings={json.findings} />;
   if (json && typeof json === 'object')
     return <pre class="body json">{JSON.stringify(json, null, 2)}</pre>;
   return <div class="body md">{markdown(text)}</div>;

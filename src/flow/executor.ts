@@ -47,6 +47,8 @@ export interface RunOptions {
   cwd?: string;
   /** Platform credential for built-in integrations; never persisted with the run. */
   integrationToken?: string;
+  checksToken?: string;
+  links?: RunContext['links'];
   connections?: RunContext['connections'];
   /** The agent's access, which caps every task this run starts. */
   access?: Access;
@@ -353,8 +355,11 @@ function beginRun(
     running: new Set(),
     taskCount: 0,
     stopping: false,
+    stopHooks: new Set(),
     hooks,
     ...(opts.integrationToken ? { integrationToken: opts.integrationToken } : {}),
+    ...(opts.checksToken ? { checksToken: opts.checksToken } : {}),
+    ...(opts.links ? { links: opts.links } : {}),
     ...(opts.connections ? { connections: opts.connections } : {}),
     ...(opts.access ? { access: opts.access } : {}),
   };
@@ -427,6 +432,7 @@ async function execute(
   hooks.onStart?.({
     runId: started.ctx.runId,
     requestStop: started.markStopped,
+    stopHooks: started.ctx.stopHooks,
     runningIds: () => [...started.ctx.running],
   });
   if (started.replayable) emitFlowEvent(started.ctx, { kind: 'replay', count: started.replayable });
@@ -455,6 +461,9 @@ export function drivePreparedRun(
   cwd: string,
   hooks: FlowHooks,
   integrationToken?: string,
+  links?: RunContext['links'],
+  access?: Access,
+  checksToken?: string,
 ): Promise<RunSummary> {
   return execute(
     '',
@@ -463,6 +472,9 @@ export function drivePreparedRun(
       concurrency: record.concurrencySet ? record.concurrency : undefined,
       maxTasks: record.maxTasks,
       ...(integrationToken ? { integrationToken } : {}),
+      ...(links ? { links } : {}),
+      ...(checksToken ? { checksToken } : {}),
+      ...(access ? { access } : {}),
     },
     hooks,
     record.runId,

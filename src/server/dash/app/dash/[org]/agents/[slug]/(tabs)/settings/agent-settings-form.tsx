@@ -6,6 +6,7 @@ import { useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import { client } from '@/utils/client';
 import { useAction } from '@/utils/action';
+import { showToast } from '@/comps/frame/task-toasts';
 import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Link } from '@wular/pnext/link';
@@ -35,7 +36,6 @@ export function AgentSettingsForm({
   agent,
   catalog,
   shape,
-  chain,
   runners,
   connections,
 }: {
@@ -43,8 +43,6 @@ export function AgentSettingsForm({
   catalog: IntegrationInfo[];
   /** The workspace's models, for the model picker. */
   shape: ModelsShape;
-  /** The workspace chain, which runs when no model is set. */
-  chain: string[];
   runners: Option[];
   /** The workspace's connections, to narrow. */
   connections: ConnectionRow[];
@@ -55,7 +53,6 @@ export function AgentSettingsForm({
   const action = useAction({ refresh: true });
   const removing = useAction({ leaves: true });
   const busy = Boolean(action.pending);
-  const [saved, setSaved] = useState('');
   const [query, setQuery] = useState('');
   const [hits, setHits] = useState<Panel[]>();
   const [deleting, setDeleting] = useState(false);
@@ -133,9 +130,16 @@ export function AgentSettingsForm({
       if (Object.keys(entry).length) (next.integrations ??= {})[id] = entry;
     }
     if (agent.settings?.disabled) next.disabled = true;
-    setSaved('');
-    if (await action.run('save', () => client.agents.settings(agent.id, next)))
-      setSaved('Saved. New tasks use these settings.');
+    let warning: string | undefined;
+    const saved = await action.run('save', async () => {
+      ({ warning } = await client.agents.settings(agent.id, next));
+    });
+    if (saved)
+      showToast(
+        'Saved',
+        warning ?? 'New tasks use these settings.',
+        warning ? 'warning' : 'success',
+      );
   };
 
   return (
@@ -171,7 +175,7 @@ export function AgentSettingsForm({
                 empty={
                   agent.definition?.model
                     ? { label: `Its own, ${specName(agent.definition.model, shape.builtin)}`, sub: 'from agent.json' }
-                    : chainChoice(chain, shape)
+                    : chainChoice()
                 }
                 value={model}
                 onChange={setModel}
@@ -356,11 +360,6 @@ export function AgentSettingsForm({
 
         {panel === 'manage' ? null : (
           <div class="form-actions save">
-            {saved ? (
-              <span class="flash" role="status">
-                {saved}
-              </span>
-            ) : null}
             <Button type="submit" loading={busy}>
               Save
             </Button>

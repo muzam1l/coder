@@ -28,6 +28,6 @@
 
 ## Gate
 
-- CLI tests in `../tests/<domain>/` (agent/cli/core/flow, with TUI in cli/tui), server tests in `../tests/server/` by topic, named for the behaviour; a fix starts red.
+- CLI tests in private repo coder-workspace (local ../) `coder-workspace/` (agent/cli/core/flow, with TUI in cli/tui), server tests in `coder-workspace/tests/server/` by topic, named for the behaviour; a fix starts red.
 - `bun run emit` rewrites `docs/cli/` and the skills; commit them.
-- `bun test` in `../tests`, `npx tsc -p tsconfig.json --noEmit`, `bun run build`.
+- `bun test` in `coder-workspace/tests`, `npx tsc -p tsconfig.json --noEmit`, `bun run build`.

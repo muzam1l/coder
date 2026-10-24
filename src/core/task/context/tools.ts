@@ -27,7 +27,7 @@ const review: AsyncTool<ReviewInput> = {
   args: (input, cwd, author) => ({
     // A pull request's review compares its own base and posts on it.
     ...(input.pr !== undefined
-      ? { pr: input.pr, post: true, ...(author ? { author } : {}) }
+      ? { pr: input.pr, ...(author ? { post: true, author } : {}) }
       : { base: input.base ?? 'HEAD' }),
     ...(input.path?.length ? { path: input.path } : {}),
     ...(input.exclude?.length ? { exclude: input.exclude } : {}),
@@ -36,7 +36,13 @@ const review: AsyncTool<ReviewInput> = {
   }),
   render: async (result, runId) => {
     const { renderReviewMarkdown } = await import('../../../flow/builtin/review');
-    return renderReviewMarkdown({ ...(result as ReviewResult), runId });
+    const reviewed = result as ReviewResult;
+    const text = renderReviewMarkdown({ ...reviewed, runId });
+    if (reviewed.summary.url)
+      return `${text}\nThe review is on the pull request, so a reply repeating it adds nothing. Still answer anything else asked.\n`;
+    if (!reviewed.pr) return text;
+
+    return `${text}\nNot posted. To post it on the pull request as the user, escalate \`coder review --post --run ${runId}\`.\n`;
   },
 };
 
@@ -88,9 +94,12 @@ export const taskApp = defineApp({
     }),
     defineCommand({
       name: 'review',
-      description: `Review your changes with a separate read-only reviewer that checks each finding against the repository. One review at a time, ${review.limit} per turn.`,
+      description: `Review changes with a read-only reviewer. One at a time, ${review.limit} per turn.`,
       args: {
-        pr: arg(z.optional(z.number()), 'A pull request to review and post the review on.'),
+        pr: arg(
+          z.optional(z.number()),
+          'A pull request to review. Posts the review (summary + findings) and a check, so do not announce or repeat them.',
+        ),
         base: str('The ref to compare with; default HEAD, so only uncommitted changes.'),
         path: strList('Review only these paths, relative to the task directory.'),
         exclude: strList('Leave these paths out.'),

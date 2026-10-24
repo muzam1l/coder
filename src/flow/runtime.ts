@@ -19,6 +19,7 @@ import {
 } from '../core/dispatch';
 import { formatEngineSpec, loadTask } from '../core/state';
 import { steerTask } from '../core/task/actions';
+import type { ReviewLinks } from './builtin/review/post';
 import type {
   Access,
   TokenUsage,
@@ -139,7 +140,12 @@ export class Journal {
 /** Progress callbacks a foreground caller can attach to a run. */
 export interface FlowHooks {
   /** Fired once the run is armed, with a stop handle for a SIGINT handler. */
-  onStart?: (h: { runId: string; requestStop: () => void; runningIds: () => string[] }) => void;
+  onStart?: (h: {
+    runId: string;
+    requestStop: () => void;
+    runningIds: () => string[];
+    stopHooks: Set<() => Promise<void>>;
+  }) => void;
   onEvent?: (event: FlowEvent) => void;
   /** A cloud runner's credentials for one model, best first; none skips the model. Unset runs on the process's own logins. */
   onModel?: (model: ResolvedTaskOptions) => Promise<NodeJS.ProcessEnv[]>;
@@ -159,9 +165,12 @@ export interface RunContext {
   running: Set<string>;
   taskCount: number;
   stopping: boolean;
+  stopHooks: Set<() => Promise<void>>;
   hooks: FlowHooks;
   /** Caller-owned platform credential; in memory only, never written to flow.json. */
   integrationToken?: string;
+  checksToken?: string;
+  links?: ReviewLinks;
   connections?: { mcp: Record<string, McpServerSpec>; env: Record<string, string>; ids: string[] };
   access?: Access;
   /** The credential each of its tasks runs on, by task id, so a steer resumes on it. */
@@ -191,6 +200,15 @@ const G = globalThis as unknown as {
 export const ctxALS = (G.__coderFlowCtxALS ??= new AsyncLocalStorage<RunContext>());
 export const scopeALS = (G.__coderFlowScopeALS ??= new AsyncLocalStorage<Scope>());
 
+export function onRunStop(fn: () => Promise<void>): () => void {
+  const hooks = ctxALS.getStore()?.stopHooks;
+  hooks?.add(fn);
+
+  return () => {
+    hooks?.delete(fn);
+  };
+}
+
 export function currentScopeArgs(): unknown {
   return scopeALS.getStore()?.args;
 }
@@ -198,6 +216,14 @@ export function currentScopeArgs(): unknown {
 /** Transient platform credential supplied by an agent task. */
 export function currentIntegrationToken(): string | undefined {
   return ctxALS.getStore()?.integrationToken;
+}
+
+export function currentChecksToken(): string | undefined {
+  return ctxALS.getStore()?.checksToken;
+}
+
+export function currentReviewLinks(): ReviewLinks | undefined {
+  return ctxALS.getStore()?.links;
 }
 
 // Nesting level of the currently executing flow scope (0 = top-level).

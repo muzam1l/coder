@@ -897,7 +897,7 @@ async function turnConnections(
   granted: string[],
   reply?: ReplyEndpoint,
 ) {
-  const handles = await eventTokens(ctx, task);
+  const { tokens: handles } = await eventTokens(ctx, task);
   const resolved = await resolveConnections(ctx, { ...task, connections: granted }, handles);
   await taskConnectionSecrets(ctx, task.id, [
     ...resolved.secrets,
@@ -943,7 +943,7 @@ export async function runLocalTask(
     return enqueueLocalTask(ctx, { ...task, id: taskId ?? generateTaskId(), cwd }, { cwd });
   }
 
-  const handles = await eventTokens(ctx, task);
+  const { tokens: handles } = await eventTokens(ctx, task);
   const resolved = await resolveConnections(ctx, task, handles);
   await taskWarnings(ctx, taskId ?? task.id, resolved.warnings);
   await taskConnectionSecrets(ctx, taskId ?? task.id, [

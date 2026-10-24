@@ -34,13 +34,17 @@ export async function meRoute(
 
   const session = ctx.session!;
 
+  const organization =
+    session.organizations.find(candidate => candidate.id === session.organizationId) ?? null;
+
   return json({
     mode: serverMode(ctx),
     user: session.user,
-    organization:
-      session.organizations.find(candidate => candidate.id === session.organizationId) ?? null,
+    organization,
     organizations: session.organizations,
-    manageMembersUrl: `${ctx.auth.issuer}/auth/onboarding`,
+    ...(organization && {
+      manageMembersUrl: `${ctx.auth.issuer}/dash/${encodeURIComponent(organization.slug)}/members`,
+    }),
     server: serverInfo(ctx),
     operator: operator(ctx, session),
     ...(reconnect ? { reconnect } : {}),

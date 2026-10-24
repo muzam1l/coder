@@ -257,7 +257,7 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     settings: (
       slug: string,
       settings: Omit<AgentSettings, 'engine' | 'effort'>,
-    ): Promise<D['record']> =>
+    ): Promise<D['record'] & { warning?: string }> =>
       this.request(`/admin/agents/${encodeURIComponent(slug)}/settings`, {
         method: 'PATCH',
         body: JSON.stringify(settings),
@@ -614,9 +614,6 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     list: (repo: string): Promise<Array<{ number: number; title: string }>> =>
       this.request(queryPath('/admin/pulls', { repo })),
   };
-  review(body: TaskInput & { repo: string; pr: number; post?: boolean }): Promise<D['task']> {
-    return this.post('/admin/review', body);
-  }
   usage<Q extends UsageQuery = {}>(
     options: Q = {} as Q,
   ): Promise<

@@ -413,12 +413,13 @@ export async function requestChange(
 const approvalId = (now: number) =>
   `apr-${now.toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 
-/** Why a task may not act as `connection`'s owner, for the model; none once the owner approved it for this task. The first use asks them, once. `status` is the task as this request read it, `accounts` the owner's linked accounts when read already. */
+/** Why a task may not act as `connection`'s owner, for the model; none once the owner approved it for this task. The first use asks them, once, unless `ask` is off. `status` is the task as this request read it, `accounts` the owner's linked accounts when read already. */
 export async function actAsRefusal(
   ctx: ServerContext,
   status: TaskStatus,
   connection: Connection,
   accounts?: LinkedAccount[],
+  ask = true,
 ): Promise<string | undefined> {
   const owner = connection.owner!;
   const current = status.task;
@@ -449,6 +450,7 @@ export async function actAsRefusal(
   const now = (ctx.now ?? Date.now)();
   // One ask per open round, however many first uses race; a stop closes it, so the next use asks again.
   const first =
+    ask &&
     !asked &&
     (await ctx.store.create(
       'delivery',

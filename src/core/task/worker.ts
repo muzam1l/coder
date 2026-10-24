@@ -1,5 +1,4 @@
 /** The detached worker's turn engine: one engine turn for a task, then any follow-ups steered in meanwhile. */
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
@@ -34,7 +33,6 @@ import {
   turnHosts,
   resolveCodexModel,
   strictestAccess,
-  MACHINE_SANDBOX_ENV,
 } from '../config';
 import { detectWireApi } from '../models';
 import { resolveMcpServers } from '../dispatch';
@@ -409,12 +407,8 @@ export function executeTurnFor(task: Task) {
     try {
       const execute = current.engine === 'claude' ? executeClaudeTurn : executeCodexTurn;
 
-      return await withReadOnlyGit(
-        writes && process.env[MACHINE_SANDBOX_ENV] === '1' ? [cwd, ...(current.addDirs ?? [])] : [],
-        () =>
-          runConversationTurn(cwd, current, (next, controls) =>
-            execute(cwd, next, { ...options, ...controls, env }),
-          ),
+      return await runConversationTurn(cwd, current, (next, controls) =>
+        execute(cwd, next, { ...options, ...controls, env }),
       );
     } finally {
       await git.close();
@@ -438,18 +432,6 @@ export function scratchEnvironment(task: Pick<Task, 'id' | 'engine'>): Record<st
     GOCACHE: path.join(scratch, '.go-cache'),
     ...(task.engine === 'claude' ? { CLAUDE_CODE_TMPDIR: scratch } : {}),
   };
-}
-
-/** On a machine sandbox the engines run unsandboxed, so the checkouts' `.git` are made read-only around the turn: git writes stay in scratch. */
-async function withReadOnlyGit<T>(directories: string[], turn: () => Promise<T>): Promise<T> {
-  const gitDirs = directories.map(dir => path.join(dir, '.git')).filter(dir => fs.existsSync(dir));
-  if (!gitDirs.length) return turn();
-  execFileSync('chmod', ['-R', 'a-w', ...gitDirs]);
-  try {
-    return await turn();
-  } finally {
-    execFileSync('chmod', ['-R', 'u+w', ...gitDirs]);
-  }
 }
 
 /** A runner task's follow-up turn takes the connections its server resolves for it now. */

@@ -37,7 +37,7 @@ export default async function AgentSettingsPage({
     <Settle
       load={() =>
         Promise.all([agent, run, runners, catalog, connections]).then(
-          ([row, { shape, defaults }, rows, integrations, workspace]) => (
+          ([row, { shape }, rows, integrations, workspace]) => (
             <>
               {row.needsModel ? (
                 <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
@@ -46,7 +46,6 @@ export default async function AgentSettingsPage({
                 agent={row}
                 catalog={integrations}
                 shape={shape}
-                chain={defaults.chain}
                 runners={runnerOptions(rows)}
                 connections={workspace}
               />
