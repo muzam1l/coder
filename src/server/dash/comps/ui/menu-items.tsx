@@ -4,7 +4,7 @@ import type { ComponentChildren, JSX, Ref } from 'preact';
 import type { RoutePath } from '@wular/pnext';
 import { Link, type LinkProps } from '@wular/pnext/link';
 
-import { iCheck } from './icons';
+import { iCheck, iExternal } from './icons';
 import { Icon } from './icon';
 
 /** What a row shows around its label. */
@@ -40,6 +40,7 @@ export function MenuItem({
   sub,
   end,
   href,
+  external,
   type = 'button',
   disabled,
   danger,
@@ -49,6 +50,8 @@ export function MenuItem({
     title: ComponentChildren;
     /** A full page load: another site or a server endpoint; in-app pages use `MenuLink`. */
     href?: string;
+    /** Opens `href` in a new tab, marked with the external icon. */
+    external?: boolean;
     type?: 'button' | 'submit';
     /** Shown, never picked. */
     disabled?: boolean;
@@ -57,7 +60,7 @@ export function MenuItem({
   }) {
   const cls = classOf(sub ? 'rich' : false, danger && 'danger');
   const content = (
-    <Content icon={icon} sub={sub} end={end}>
+    <Content icon={icon} sub={sub} end={end ?? (external ? <Icon d={iExternal} /> : undefined)}>
       {title}
     </Content>
   );
@@ -70,7 +73,12 @@ export function MenuItem({
     );
   if (href)
     return (
-      <a {...(rest as JSX.AnchorHTMLAttributes<HTMLAnchorElement>)} class={cls} href={href}>
+      <a
+        {...(rest as JSX.AnchorHTMLAttributes<HTMLAnchorElement>)}
+        {...(external ? { target: '_blank', rel: 'noopener noreferrer' } : {})}
+        class={cls}
+        href={href}
+      >
         {content}
       </a>
     );

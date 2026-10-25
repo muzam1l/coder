@@ -24,6 +24,8 @@ export interface Facet<K extends string = string> {
   options: Option[];
   /** A fixed list, always in the menu with its default as a row; its chip is its pick alone. */
   inline?: boolean;
+  /** How many picks the menu lists before "More"; default 5. */
+  shown?: number;
   /** Each pick's icon: an icon path or a ready element. */
   icon?: (value: string) => string | ComponentChildren;
   /** Finds picks on the server once something is typed, at most `limit`. */
@@ -34,12 +36,12 @@ export interface Facet<K extends string = string> {
 const SHOWN = 5;
 
 /** The picks the menu lists for a facet: the first few, keeping the current pick in view. */
-export function inlineRows(picks: Option[], value: string) {
-  if (picks.length <= SHOWN) return picks;
-  const shown = picks.slice(0, SHOWN);
+export function inlineRows(picks: Option[], value: string, count = SHOWN) {
+  if (picks.length <= count) return picks;
+  const shown = picks.slice(0, count);
   const current = picks.find(([key]) => key === value);
 
-  return current && !shown.includes(current) ? [...shown.slice(0, SHOWN - 1), current] : shown;
+  return current && !shown.includes(current) ? [...shown.slice(0, count - 1), current] : shown;
 }
 
 /** Whether a facet's own list needs a find box. */
@@ -294,7 +296,7 @@ function FilterPanel<K extends string>({
         facets.map(facet => {
           const picks = facet.options.filter(([value]) => facet.inline || value);
           if (!picks.length) return null;
-          const shown = inlineRows(picks, values[facet.key]);
+          const shown = inlineRows(picks, values[facet.key], facet.shown);
 
           return (
             <Fragment key={facet.key}>

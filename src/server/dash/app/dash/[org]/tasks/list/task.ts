@@ -3,19 +3,16 @@ import { byListKey, listRank, promptTitle } from '@coder/core/task/view';
 import { replyRequired as turnReplyRequired } from '@coder/agent/event-json';
 
 /** A task page's tabs, the loading frame's too. */
-export const TASK_TABS = ['Conversation', 'Activity'];
+export const TASK_TABS = ['Conversation', 'Activity', 'Details'];
 
-/** Task statuses a list filters by. */
+/** Task statuses a list filters by; the filter menu lists the first three, outcomes behind More. */
 export const STATUSES: Array<[string, string]> = [
   ['', 'Recent'],
-  ['active', 'Active'],
   ['waiting', 'Needs approval'],
-  ['running', 'Running'],
-  ['queued', 'Queued'],
+  ['archived', 'Archived'],
   ['completed', 'Completed'],
   ['failed', 'Failed'],
   ['cancelled', 'Cancelled'],
-  ['archived', 'Archived'],
 ];
 
 /** The list request's filters; "archived" is its own switch, not a status. */
@@ -36,6 +33,24 @@ export const SOURCES: Array<[string, string]> = [
 
 export const sourceLabel = (value: string) =>
   (SOURCES.find(([key]) => key === value) ?? [value, value])[1];
+
+const STARTS: Record<string, string> = {
+  dashboard: 'Dashboard task',
+  cli: 'CLI task',
+  schedule: 'Scheduled task',
+};
+const EVENT_NAMES: Record<string, string> = { pull_request: 'Pull request', dm: 'DM' };
+
+/** What started a task, as "Pull request" or "Dashboard task", and who: its member, else the platform account. */
+export function taskOrigin(task: TaskRow) {
+  const type = task.task.event?.type;
+  const what = type
+    ? (EVENT_NAMES[type] ?? type[0]!.toUpperCase() + type.slice(1).replace(/_/g, ' '))
+    : (STARTS[task.task.source] ?? `${sourceLabel(task.task.source)} task`);
+  const by = task.task.context?.user?.name || task.task.event?.actor?.login;
+
+  return { what, by };
+}
 
 export const taskActive = (task: Pick<TaskRow, 'status'>) =>
   task.status === 'queued' || task.status === 'running' || task.status === 'waiting';

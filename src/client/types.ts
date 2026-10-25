@@ -21,8 +21,10 @@ export interface TaskRow {
     cwd?: string;
     access?: 'auto' | 'read-only';
     requestedBy?: string;
+    /** The task that started this one. */
+    parent?: string;
     /** The Coder account behind the event's actor, when they connected it. */
-    context?: { user?: { name: string } };
+    context?: { user?: { name: string; email?: string } };
     event?: {
       integration: string;
       type: string;

@@ -20,6 +20,19 @@
 .fact-dim {
   color: var(--dim);
 }
+.task-details {
+  padding: 16px;
+}
+.detail-id {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.detail-id .icon-btn {
+  width: 22px;
+  height: 22px;
+  margin-block: -4px;
+}
 .head.stuck .lead:has(.fact) {
   display: none;
 }

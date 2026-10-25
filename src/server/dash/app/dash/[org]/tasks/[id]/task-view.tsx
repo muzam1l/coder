@@ -2,7 +2,7 @@
 
 import './task-view.css';
 
-import { Fragment } from 'preact';
+import { Fragment, type ComponentChildren } from 'preact';
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks';
 import { useFollowEnd } from '@/utils/follow';
 
@@ -21,15 +21,17 @@ import { formatDate, formatDuration, reasonText } from '@/utils/format';
 import { Link } from '@wular/pnext/link';
 import { useSearchParams } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
-import type { Me, TaskLog, TaskRow, TaskTurn } from '@coder/client/types';
+import type { IntegrationInfo, Me, TaskLog, TaskRow, TaskTurn } from '@coder/client/types';
 import { iAgent, iClock, iDown, iFolder, iPlug, iRight, iTerminal } from '@/comps/ui/icons';
 import { Badge } from '@/comps/ui/badge';
 import { Button } from '@/comps/ui/button';
 import { Card, Loading } from '@/comps/ui/card';
 import { Collapse } from '@/comps/ui/collapse';
+import { CopyButton } from '@/comps/ui/copy';
 import { Icon } from '@/comps/ui/icon';
 import { Menu } from '@/comps/ui/menu';
 import { MenuRadio } from '@/comps/ui/menu-items';
+import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { Back, PageHead } from '@/comps/frame/page-head';
 import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
 import { ReadOnlyBadge, Status } from '@/app/dash/[org]/tasks/list/status';
@@ -39,6 +41,7 @@ import {
   sourceLabel,
   taskActive,
   taskModel,
+  taskOrigin,
   taskTitle,
   TASK_TABS,
 } from '@/app/dash/[org]/tasks/list/task';
@@ -48,7 +51,7 @@ import { Approval, ApprovalEntry, DecisionTurn, TaskActions, raisedIn } from './
 import { Activity, RunPreview, runSummary } from './activity';
 import { toastError, useTaskEvents, watchTask } from '@/comps/frame/task-toasts';
 
-type Tab = 'conversation' | 'activity';
+type Tab = 'conversation' | 'activity' | 'details';
 
 /** A fallback's model as people read it: the model part of its spec. */
 const modelOf = (spec: string) => spec.split('/')[1] ?? spec;
@@ -124,13 +127,85 @@ function TaskBack() {
   return <Back href="/dash/[org]/tasks" params={{ org }} label="Tasks" back={search.get('back')} />;
 }
 
-/** The task's one-row head: back, title, status, source and agent, its actions, and a muted line with created time, source, folder, and the agent with its model. */
-function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
+/** The Details tab: the task's id, who started it and how it ran. */
+function TaskDetails({ task, tz }: { task: TaskRow; tz: string }) {
+  const org = useOrg();
+  const { what } = taskOrigin(task);
+  const { id, event, context, parent, cwd } = task.task;
+  const rows: Array<[string, ComponentChildren]> = [
+    [
+      'ID',
+      <span class="detail-id">
+        <code>{id}</code>
+        <CopyButton value={id} label="Copy ID" />
+      </span>,
+    ],
+    [
+      'Requested by',
+      context?.user ? (
+        <>
+          {context.user.name}
+          {context.user.email ? <span class="fact-dim"> {context.user.email}</span> : null}
+        </>
+      ) : null,
+    ],
+    [
+      'Account',
+      event?.actor?.login ? `${event.actor.login} on ${sourceLabel(event.integration)}` : null,
+    ],
+    ['Started from', what],
+    ['Flow', task.task.flow && task.task.flow !== 'default' ? task.task.flow : null],
+    ['Agent', task.task.agent],
+    ['Model', taskModel(task)],
+    ['Credential', task.credential],
+    ['Access', task.task.access ?? 'auto'],
+    ['Folder', cwd],
+    [
+      'Parent',
+      parent ? (
+        <Link class="link" href="/dash/[org]/tasks/[id]" params={{ org, id: parent }}>
+          {parent}
+        </Link>
+      ) : null,
+    ],
+    ['Created', formatDate(task.createdAt, tz)],
+    ['Started', task.startedAt ? formatDate(task.startedAt, tz) : null],
+    ['Finished', task.finishedAt ? formatDate(task.finishedAt, tz) : null],
+    ['Attempts', task.attempts > 1 ? String(task.attempts) : null],
+  ];
+
+  return (
+    <Card>
+      <dl class="kv task-details">
+        {rows
+          .filter(([, value]) => value)
+          .map(([label, value]) => (
+            <Fragment key={label}>
+              <dt>{label}</dt>
+              <dd>{value}</dd>
+            </Fragment>
+          ))}
+      </dl>
+    </Card>
+  );
+}
+
+/** The task's one-row head: back, title, status, its actions, and a muted line with created time, what started it and who, folder, and the agent with its model. */
+function TaskHead({
+  task,
+  tz,
+  brand,
+}: {
+  task: TaskRow;
+  tz: string;
+  /** The source platform's brand art, when it has one. */
+  brand?: IntegrationInfo['brand'];
+}) {
   const org = useOrg();
   const live = taskActive(task);
   const model = taskModel(task);
   const source = task.task.event?.integration ?? task.task.source;
-  const kind = task.task.event?.type ?? (task.task.flow !== 'default' ? task.task.flow : undefined);
+  const { what, by } = taskOrigin(task);
 
   const title = useMemo(() => taskTitle(task).split('\n')[0], [task.task, task.turns]);
 
@@ -154,9 +229,9 @@ function TaskHead({ task, tz }: { task: TaskRow; tz: string }) {
               ? `, ran ${formatDuration(task.finishedAt - task.startedAt)}`
               : null}
           </span>
-          <span class="fact" title="Source">
-            <Icon d={task.task.event ? iPlug : iTerminal} />
-            {kind ? `${sourceLabel(source)} ${kind}` : sourceLabel(source)}
+          <span class="fact" title={sourceLabel(source)}>
+            {brand ? <BrandIcon brand={brand} /> : <Icon d={task.task.event ? iPlug : iTerminal} />}
+            {by ? `${what} by ${by}` : what}
           </span>
           {task.task.cwd ? (
             <span class="fact" title={task.task.cwd}>
@@ -207,10 +282,12 @@ export function TaskView({
   initial,
   tz: serverZone,
   me,
+  brand,
 }: {
   initial: TaskRow;
   tz: string;
   me: Me;
+  brand?: IntegrationInfo['brand'];
 }) {
   const tz = useZone(serverZone);
   const [task, setTask] = useState(initial);
@@ -495,7 +572,7 @@ export function TaskView({
 
   return (
     <>
-      <TaskHead task={task} tz={tz} />
+      <TaskHead task={task} tz={tz} brand={brand} />
       {task.fallbacks?.map((fallback, index) => (
         <p key={index} class="flash" role="status">
           {modelOf(fallback.model)} was unavailable. {fallback.detail} This task is using{' '}
@@ -522,6 +599,8 @@ export function TaskView({
       </nav>
       {tab === 'activity' ? (
         <Activity rows={rows} live={live} tz={tz} at={at} />
+      ) : tab === 'details' ? (
+        <TaskDetails task={task} tz={tz} />
       ) : (
         <>
           <Approval task={task} me={me} />

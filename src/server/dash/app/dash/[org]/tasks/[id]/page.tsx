@@ -26,14 +26,24 @@ export default async function TaskPage({
   const me = load(request)
     .me()
     .catch((): Me => ({}));
+  const catalog = load(request)
+    .integrations.list()
+    .catch(() => []);
   const tz = zoneOf(request);
 
   return (
     <Page>
       <Settle
         load={() =>
-          Promise.all([task, me]).then(
-            ([row, who]) => <TaskView initial={row} tz={tz} me={who} />,
+          Promise.all([task, me, catalog]).then(
+            ([row, who, integrations]) => (
+              <TaskView
+                initial={row}
+                tz={tz}
+                me={who}
+                brand={integrations.find(entry => entry.id === row.task.event?.integration)?.brand}
+              />
+            ),
             error => {
               if (error instanceof ClientError && error.status === 404) return <TaskMissing />;
               throw error;

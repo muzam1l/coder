@@ -1,24 +1,35 @@
 .tasks {
   table-layout: fixed;
-  /* the task column keeps about 240px; narrower, the table scrolls */
-  min-width: 944px;
+  /* the task column keeps about 320px; narrower, the table scrolls */
+  min-width: 1210px;
 }
-.tasks th:nth-child(2) {
+/* an agent's own list has no agent column */
+.tasks.scoped {
+  min-width: 1070px;
+}
+/* fits "needs approval" */
+.tasks th.status {
   width: 160px;
+}
+.tasks th.agent {
+  width: 140px;
 }
 .tasks .model {
-  width: 160px;
+  width: 140px;
 }
-.tasks th:nth-child(4) {
-  width: 120px;
+/* fits its header */
+.tasks th.when {
+  width: 124px;
 }
-/* fits "Not available" */
+/* fits "Not available", a started task with no run time */
 .tasks th.num {
   width: 136px;
 }
-.tasks th:nth-child(6) {
-  width: 128px;
+/* fits "Dashboard task" clear of the row menu */
+.tasks th:last-child {
+  width: 192px;
 }
+td.agent,
 td.model {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -44,7 +55,7 @@ td.model {
 .tasks td:first-child .sub {
   margin-top: 1px;
 }
-.tasks .sub .ic {
+.tasks :is(.sub, td.agent) .ic {
   width: 12px;
   height: 12px;
   margin-right: 5px;
@@ -69,9 +80,19 @@ td.model {
     container-type: scroll-state;
   }
   @container scroll-state(scrollable: inline-end) {
-    .tasks th:last-child,
-    .tasks td:last-child {
-      box-shadow: -8px 0 8px -8px light-dark(rgba(11, 12, 16, 0.25), rgba(0, 0, 0, 0.7));
+    .tasks th:last-child::before,
+    .tasks td:last-child::before {
+      content: '';
+      position: absolute;
+      inset-block: 0;
+      right: 100%;
+      width: 12px;
+      pointer-events: none;
+      background: linear-gradient(
+        to left,
+        light-dark(rgba(11, 12, 16, 0.1), rgba(0, 0, 0, 0.45)),
+        transparent
+      );
     }
   }
 }
@@ -81,6 +102,12 @@ td.model {
   }
   .tasks td {
     padding-block: 0;
+  }
+  .tasks td.agent {
+    display: none;
+  }
+  .tasks .by {
+    padding-left: 6px;
   }
   .tasks td:is(.when, .num) {
     order: 1;
@@ -118,10 +145,16 @@ td.model {
 .source .ic {
   color: var(--dim);
 }
+.tasks .by {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding-left: 22px;
+}
 /* a row's menu waits at its right edge, above the cover link, and shows on hover, focus or while open */
 .tasks th:last-child,
 .tasks td:last-child {
-  padding-right: 28px;
+  padding-right: 44px;
 }
 .row-acts {
   position: absolute;

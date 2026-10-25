@@ -8,7 +8,6 @@ import {
   iActivity,
   iAgent,
   iChart,
-  iExternal,
   iKey,
   iMonitor,
   iMoon,
@@ -169,12 +168,7 @@ function AccountMenu({ me, org }: { me: Me; org: string }) {
         />
       )}
       {me.manageMembersUrl ? (
-        <MenuItem
-          href={me.manageMembersUrl}
-          icon={iUsers}
-          title="Members"
-          end={<Icon d={iExternal} />}
-        />
+        <MenuItem href={me.manageMembersUrl} icon={iUsers} title="Members" external />
       ) : null}
       <hr />
       <MenuLink href="/dash/[org]/account" params={{ org }} icon={iUser}>

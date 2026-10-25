@@ -22,7 +22,6 @@ import { Segmented } from '@/comps/ui/segmented';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { Icon } from '@/comps/ui/icon';
 import { iAgent, iDots, iUser } from '@/comps/ui/icons';
-import { showToast } from '@/comps/frame/task-toasts';
 import { taskTitle } from '@/app/dash/[org]/tasks/list/task';
 
 /** Archive, Stop while it runs, and Delete behind the ⋯ menu; phones keep Archive in the menu too, away from Stop. */
@@ -82,14 +81,6 @@ export function TaskActions({ task, live }: { task: TaskRow; live: boolean }) {
       )}
       <Menu summary={<Icon d={iDots} />} button="icon" label="More actions">
         {live && !archived ? <MenuItem title="Archive" onClick={archive} /> : null}
-        <MenuItem
-          title="Copy task id"
-          onClick={() =>
-            void navigator.clipboard
-              .writeText(task.task.id)
-              .then(() => showToast('Copied', task.task.id))
-          }
-        />
         <MenuItem title="Delete" danger onClick={() => setConfirming(true)} />
       </Menu>
       <ConfirmDialog

@@ -2,7 +2,6 @@
 
 import './tasks-list.css';
 
-import { Fragment } from 'preact';
 import { dynamic } from '@wular/pnext/dynamic';
 import { useEffect, useRef, useState } from 'preact/hooks';
 
@@ -60,6 +59,7 @@ import {
   folderName,
   listFilters,
   sourceLabel,
+  taskOrigin,
 } from '@/app/dash/[org]/tasks/list/task';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
 import { useTaskEvents } from '@/comps/frame/task-toasts';
@@ -122,7 +122,7 @@ function TaskRowView({
   const elapsed =
     taskActive(task) && task.startedAt !== undefined ? now - task.startedAt : task.lastTurnMs;
   const source = task.task.event?.integration ?? task.task.source ?? 'dashboard';
-  const kind = task.task.event?.type ?? (task.task.flow === 'default' ? undefined : task.task.flow);
+  const { what, by } = taskOrigin(task);
 
   return (
     <tr>
@@ -135,34 +135,24 @@ function TaskRowView({
         >
           {taskTitle(task)}
         </Link>
-        <span class="sub">
-          {[
-            scoped ? null : (
-              <>
-                <Icon d={iAgent} />
-                {task.task.agent}
-              </>
-            ),
-            kind,
-            task.task.cwd ? (
-              <span title={task.task.cwd}>
-                <Icon d={iFolder} />
-                {folderName(task.task.cwd)}
-              </span>
-            ) : null,
-          ]
-            .filter(Boolean)
-            .map((part, index) => (
-              <Fragment key={index}>
-                {index ? ' · ' : null}
-                {part}
-              </Fragment>
-            ))}
-        </span>
+        {task.task.cwd ? (
+          <span class="sub">
+            <span title={task.task.cwd}>
+              <Icon d={iFolder} />
+              {folderName(task.task.cwd)}
+            </span>
+          </span>
+        ) : null}
       </td>
       <td>
         <Status status={task.status} approvals={task.approvals} />
       </td>
+      {scoped ? null : (
+        <td class="agent" title={task.task.agent}>
+          <Icon d={iAgent} />
+          {task.task.agent}
+        </td>
+      )}
       <td class="model" title={taskModel(task)}>
         {task.model ?? task.task.usage?.model ?? task.task.definition?.model}
       </td>
@@ -173,8 +163,9 @@ function TaskRowView({
       <td>
         <span class="source" title={sourceLabel(source)}>
           {brand ? <BrandIcon brand={brand} /> : <Icon d={sourceIcon(source)} />}
-          {sourceLabel(source)}
+          {what}
         </span>
+        {by ? <span class="sub by">by {by}</span> : null}
         <span class="row-acts">
           <RowActions task={task} onDone={onDone} />
         </span>
@@ -276,7 +267,7 @@ export function TasksList({
     agent: agent ?? values.agent,
   };
   const facets: Facet<Keys>[] = [
-    { key: 'status', label: 'Status', options: STATUSES, inline: true },
+    { key: 'status', label: 'Status', options: STATUSES, inline: true, shown: 3 },
     {
       key: 'source',
       label: 'Source',
@@ -511,11 +502,7 @@ export function TasksList({
         actions={
           counts ? (
             <>
-              {counts.active ? (
-                <Badge tone="acc" onClick={() => set('status', 'active')}>
-                  {formatCount(counts.active)} active
-                </Badge>
-              ) : null}
+              {counts.active ? <Badge tone="acc">{formatCount(counts.active)} active</Badge> : null}
               {counts.waiting ? (
                 <Badge tone="warn" onClick={() => set('status', 'waiting')}>
                   {formatCount(counts.waiting)} awaiting approval
@@ -527,13 +514,17 @@ export function TasksList({
       >
         {rows.length ? (
           <div class="table-scroll">
-            <table class="rows tasks stacked" aria-busy={list.stale}>
+            <table
+              class={agent ? 'rows tasks stacked scoped' : 'rows tasks stacked'}
+              aria-busy={list.stale}
+            >
               <thead>
                 <tr>
                   <th>Task</th>
-                  <th>Status</th>
+                  <th class="status">Status</th>
+                  {agent ? null : <th class="agent">Agent</th>}
                   <th class="model">Model</th>
-                  <th>Last activity</th>
+                  <th class="when">Last activity</th>
                   <th class="num">Duration</th>
                   <th>Source</th>
                 </tr>
