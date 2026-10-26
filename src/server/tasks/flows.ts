@@ -290,7 +290,7 @@ export async function hook(req: Request, base: ServerContext, id: string): Promi
   const { ctx, app } = owner;
   const credentials = decryptSecret(ctx.config, app.credentials);
   const bound = target.installation ? { ...target, id: target.installation } : undefined;
-  const own = integration.ownEvents?.(req, raw, app, credentials);
+  const own = integration.ownEvents?.(req, raw, app, credentials, found?.bound?.installation.self);
   if (own && 'invalid' in own) return new Response('Invalid signature', { status: 401 });
   if (own) return ownEvent(ctx, integration, app, credentials, own, (ctx.now ?? Date.now)(), bound);
   const chat = await chatFor(ctx, app, bound);

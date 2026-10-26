@@ -91,7 +91,7 @@ An integration gives an agent two things on a platform:
 | Linear | A Linear OAuth app, webhooks to `<PUBLIC_URL>/hooks/linear?app=<client id>` | `mention`, `issue`, `comment` | [Linear's MCP](https://linear.app/docs/mcp) on the app's token | The same, on the person's token |
 
 - **Slack:** `dm` takes every message in direct and group DMs, and `channel` every message in the agent's channels, up to Slack's 30,000 events per workspace per app per hour.
-- **Linear:** `mention` takes a comment naming `@<app>`, `issue` issues people create or change, and `comment` every other comment by a person; replies go in the asking comment's thread. All need Issues and Comments ticked in the app's webhook settings.
+- **Linear:** `mention` takes a comment naming `@<app>` or an issue delegated to the app, `issue` issues people create or change, and `comment` every other comment by a person; replies go in the asking comment's thread. All need Issues and Comments ticked in the app's webhook settings.
 - **Slack:** the app's Home tab shows the agent and how to use it, and links to this server's tasks and agents unfurl into a short card.
 - **Every platform:** an edited message counts like a new one, unless it already started or steered a turn. A message the agent must answer gets 👀 until the first reply.
 

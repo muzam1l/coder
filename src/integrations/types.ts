@@ -804,6 +804,7 @@ export interface Integration {
     raw: string,
     app: PlatformApp,
     credentials: unknown,
+    self?: string,
   ): OwnEvent | undefined;
   /** What core cannot read from a Chat SDK message, such as the actor's role; `undefined` drops it. */
   event?(

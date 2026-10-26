@@ -22,7 +22,7 @@ export const linear: Integration = {
   name: 'Linear',
   description: 'Issues and comments in a Linear workspace',
   installLabel: 'Connect Linear',
-  use: 'Mention @{handle} in a comment on an issue.',
+  use: 'Mention @{handle} in a comment on an issue, or delegate the issue to it.',
   sample: 'linear:2f1e6a1c-0000-4000-8000-000000000001:c:5b7d3c2a-0000-4000-8000-000000000002',
   item: thread => /^linear:[^:]+/.exec(thread)?.[0] ?? thread,
   prompt: [
@@ -31,7 +31,8 @@ export const linear: Integration = {
   ].join('\n'),
   events: {
     mention: {
-      description: 'Comment mentioning @<agent>; text has the mention stripped.',
+      description:
+        'Comment mentioning @<agent> (text has the mention stripped), or an issue delegated to it.',
       on: 'mention',
       addressed: true,
     },

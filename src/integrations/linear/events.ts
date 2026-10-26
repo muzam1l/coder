@@ -75,6 +75,7 @@ type Issue = {
   labels?: Array<{ id?: string; name?: string }>;
   priorityLabel?: string;
   assignee?: { name?: string } | null;
+  delegateId?: string | null;
   botActor?: unknown;
 };
 
@@ -112,16 +113,32 @@ function changes(issue: Issue, before: NonNullable<Webhook['updatedFrom']>): str
   ].filter((line): line is string => Boolean(line));
 }
 
-/** An Issue webhook as the `issue` event; only people's changes count, so the agent never answers itself. */
-function issueEvent(req: Request, body: Webhook, app: PlatformApp): PlatformEvent | undefined {
+/** An Issue webhook as the `issue` event, or `mention` when it delegates the issue to the app; only people's changes count, so the agent never answers itself. */
+function issueEvent(
+  req: Request,
+  body: Webhook,
+  app: PlatformApp,
+  self?: string,
+): PlatformEvent | undefined {
   const issue = body.data;
   if (body.type !== 'Issue' || body.actor?.type !== 'user' || !body.actor.id) return;
   if (!issue?.id || issue.botActor || !body.organizationId) return;
   const about = [issue.title, issue.description].filter(Boolean).join('\n\n');
-  const changed =
-    body.action === 'update' && body.updatedFrom ? changes(issue, body.updatedFrom) : [];
+  const delegated = Boolean(
+    self &&
+    issue.delegateId === self &&
+    (body.action === 'create' || (body.updatedFrom && 'delegateId' in body.updatedFrom)),
+  );
+  const before = body.action === 'update' ? body.updatedFrom : undefined;
+  const changed = before ? changes(issue, before) : [];
+  // A change carries the description only when it edited it, so an old ask there isn't repeated.
+  const edited = before && ('title' in before || 'description' in before);
   const text =
-    body.action === 'create' ? about : changed.length ? `${changed.join('\n')}\n\n${about}` : '';
+    delegated || body.action === 'create'
+      ? about
+      : changed.length
+        ? `${changed.join('\n')}\n\n${edited ? about : (issue.title ?? '')}`
+        : '';
   if (!text) return;
   const thread: SerializedThread = {
     _type: 'chat:Thread',
@@ -133,13 +150,15 @@ function issueEvent(req: Request, body: Webhook, app: PlatformApp): PlatformEven
 
   return {
     integration: 'linear',
-    type: 'issue',
+    type: delegated ? 'mention' : 'issue',
     appId: app.id,
     installationId: body.organizationId,
     deliveryId: req.headers.get('linear-delivery') ?? '',
     actor: { id: body.actor.id, ...(body.actor.name ? { login: body.actor.name } : {}) },
     text,
-    ...(body.action === 'create' && mentions(about, app.name) ? { mentioned: true as const } : {}),
+    ...(!delegated && body.action === 'create' && mentions(about, app.name)
+      ? { mentioned: true as const }
+      : {}),
     ...(issue.teamId ? { space: { kind: 'team' as const, id: issue.teamId } } : {}),
     chat: { thread },
   };
@@ -151,6 +170,7 @@ export function linearOwnEvents(
   raw: string,
   app: PlatformApp,
   credentials: unknown,
+  self?: string,
 ): OwnEvent | undefined {
   const body = JSON.parse(raw) as Webhook;
   if (body.type === 'Comment') return undefined;
@@ -163,7 +183,7 @@ export function linearOwnEvents(
       body.oauthClientId === app.id.slice('linear:'.length)
       ? { uninstalled: `${app.id}:${body.organizationId}` }
       : { invalid: true };
-  const event = issueEvent(req, body, app);
+  const event = issueEvent(req, body, app, self);
 
   return event ? { events: [event] } : { ack: true };
 }
