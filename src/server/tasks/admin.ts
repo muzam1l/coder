@@ -546,6 +546,10 @@ export async function archiveTask(
     { archivedAt: now, autoArchived: undefined },
     now,
   );
+  if (!ACTIVE_STATES.includes(status.status))
+    await taskRunner(ctx, status.task)
+      .then(runner => runner?.archive?.(taskId))
+      .catch(error => console.error(`coder server: engine threads of ${taskId} not archived`, error));
 
   return json({ ok: true });
 }

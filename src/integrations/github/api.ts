@@ -233,6 +233,24 @@ export async function githubRepository(
   };
 }
 
+/** Whether a GitHub user belongs to the organization (`GET /orgs/{org}/members/{username}`, 204), on a token with the app's members read. */
+export async function githubOrgMember(
+  org: string,
+  login: string,
+  members?: () => Promise<string | undefined>,
+  request?: Fetcher,
+): Promise<boolean> {
+  const token = await members?.();
+  if (!token) return false;
+
+  const response = await (
+    await octokit(token, request)
+  ).orgs
+    .checkMembershipForUser({ org, username: login })
+    .catch(() => undefined);
+  return (response?.status as number | undefined) === 204;
+}
+
 /** Whether a GitHub user can push to the repository. */
 export async function canWriteGithub(
   repo: string,

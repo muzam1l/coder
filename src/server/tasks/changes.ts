@@ -253,12 +253,16 @@ async function describe(
     return 'A task asks to act as a person only by using their connection.';
   if (change.kind === 'agent-settings' || change.kind === 'agent-version') {
     if (change.agent !== principal.agent) return 'A task changes only its own agent.';
-    if (change.kind === 'agent-settings')
+    if (change.kind === 'agent-settings') {
+      const { appendSystem: was, ...before } = change.before ?? {};
+      const { appendSystem: now, ...after } = change.settings;
+
       return {
         reason: `Change agent ${change.agent}'s settings.`,
-        actions: diffLines(change.before, change.settings),
+        actions: [...diffLines(before, after), ...textLines('appendSystem', was ?? '', now ?? '')],
         scopes: SCOPES[change.kind],
       };
+    }
     const [record, current] = await Promise.all([
       ctx.store.get('agent', change.agent),
       getVersion(ctx.store, change.agent),

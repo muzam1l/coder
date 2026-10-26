@@ -508,7 +508,7 @@ export interface TaskStatus {
   /** Derived for task rows returned by the server. */
   lastActivityAt?: number;
   lastTurnMs?: number;
-  /** This turn's working indicator was cleared. */
+  /** This turn's working indicator was cleared; false while an ask steered into it shows one. */
   typingEnded?: boolean;
   /** Derived for task rows returned by the server: its own pick, else its engine's default. */
   model?: string;

@@ -25,7 +25,6 @@ type User = {
   login?: string;
   type?: string;
   agent?: boolean;
-  author_association?: string;
 };
 type Repo = {
   full_name?: string;
@@ -41,6 +40,7 @@ type Pull = {
   body?: string | null;
   draft?: boolean;
   user?: User;
+  author_association?: string;
   head?: { repo?: { full_name?: string } | null };
 };
 type Issue = {
@@ -48,6 +48,7 @@ type Issue = {
   title?: string;
   body?: string | null;
   user?: User;
+  author_association?: string;
   pull_request?: unknown;
   comments?: number;
 };
@@ -91,7 +92,9 @@ function text(title?: string, body?: string | null): string {
 /** Whether `text` @-mentions the app by its slug. */
 const mentions = (text: string, slug: string) =>
   new RegExp(`(^|[^\\w-])@${slug}(?![\\w-])`, 'i').test(text);
-const MAINTAINERS = ['OWNER', 'MEMBER'];
+/** The issue's or pull request's `author_association`, when its author is the one acting; else unknown. */
+const association = (actor: User | undefined, item: Issue | Pull) =>
+  actor?.id !== undefined && actor.id === item.user?.id ? item.author_association : undefined;
 const COMMENT_EVENTS = ['issue_comment', 'pull_request_review_comment'];
 /** Webhooks the Chat SDK adapter verifies and handles. */
 const ADAPTER_EVENTS = [...COMMENT_EVENTS, 'ping'];
@@ -119,6 +122,7 @@ function event(
   type: string,
   input: {
     user?: User;
+    role?: string;
     body?: string;
     number?: number;
     kind?: 'pull' | 'issue';
@@ -129,7 +133,6 @@ function event(
   const repo = checkout(payload);
   const user = input.user ?? payload.sender;
   if (id === undefined || !repo || !input.number) return;
-  const role = user?.author_association;
   return {
     integration: 'github',
     type,
@@ -139,7 +142,7 @@ function event(
     actor: {
       id: String(user?.id ?? user?.login ?? ''),
       ...(user?.login ? { login: user.login } : {}),
-      ...(role ? { role } : {}),
+      ...(input.role ? { role: input.role } : {}),
       ...(agent(user) ? { agent: true } : {}),
     },
     text: input.body ?? '',
@@ -261,7 +264,6 @@ function parseGithubEvent(
       ) ||
       (action === 'review_requested' && requested !== `${credentials.slug}[bot]`.toLowerCase()) ||
       pr.draft ||
-      (action !== 'review_requested' && agent(pr.user)) ||
       !pr.number ||
       // A fork's pull request starts nothing.
       pr.head?.repo?.full_name !== payload.repository?.full_name
@@ -269,6 +271,7 @@ function parseGithubEvent(
       return [];
     const parsed = event(req, app, payload, 'pull_request', {
       user: payload.sender ?? pr.user,
+      role: association(payload.sender ?? pr.user, pr),
       body: text(pr.title, pr.body),
       number: pr.number,
       kind: 'pull',
@@ -287,6 +290,7 @@ function parseGithubEvent(
       return [];
     const parsed = event(req, app, payload, 'issue', {
       user: payload.sender ?? issue.user,
+      role: association(payload.sender ?? issue.user, issue),
       body: text(issue.title, issue.body),
       number: issue.number,
       slug: credentials.slug,
@@ -460,8 +464,7 @@ export function githubChatEvent(
   const role = (message.raw as { comment?: { author_association?: string } }).comment
     ?.author_association;
   return {
-    // Only the repository's owners and members address the agent directly.
-    type: type === 'mention' && !MAINTAINERS.includes(role ?? '') ? 'comment' : type,
+    type,
     actor: {
       id: message.author.userId,
       login: message.author.userName,

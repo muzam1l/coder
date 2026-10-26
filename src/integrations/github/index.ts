@@ -1,6 +1,7 @@
 import type { Integration } from '../types';
 import {
   canWriteGithub,
+  githubOrgMember,
   githubCommit,
   githubCommitAuthor,
   githubTree,
@@ -87,14 +88,20 @@ export const github: Integration = {
     get user() {
       return githubUserAuth;
     },
-    canWrite: async (event, token, request) =>
+    // Owners and organization members with write access, and bots on pull requests they opened from a branch of the repository; a role is the author's.
+    canWrite: async (event, token, request, members) =>
       Boolean(event.repo && event.actor.login) &&
-      canWriteGithub(
-        `${event.repo!.owner}/${event.repo!.name}`,
-        event.actor.login!,
-        token,
-        request,
-      ),
+      ((event.type === 'pull_request' && event.actor.agent === true && event.actor.role !== undefined) ||
+        ((event.actor.role
+          ? ['OWNER', 'MEMBER'].includes(event.actor.role)
+          : event.actor.login === event.repo!.owner ||
+            (await githubOrgMember(event.repo!.owner, event.actor.login!, members, request))) &&
+          canWriteGithub(
+            `${event.repo!.owner}/${event.repo!.name}`,
+            event.actor.login!,
+            token,
+            request,
+          ))),
     members: (space, token, request, linked) => githubMembers(space.id, token, request, linked),
     teamSpaces: githubTeamRepositories,
   },

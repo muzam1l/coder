@@ -41,6 +41,14 @@ export interface AgentUsageIntegration {
   allowedEvents?: string[];
 }
 
+/** Claude Code plugin source: repo, optional path, ref or sha. */
+export interface SkillSource {
+  repo: string;
+  path?: string;
+  ref?: string;
+  sha?: string;
+}
+
 /** How a repo RUNS an agent: one entry under `agents` in .coder/config.json, its `model` spec split. */
 export interface AgentUsage {
   engine?: string;
@@ -48,9 +56,15 @@ export interface AgentUsage {
   effort?: Effort;
   /** May only lower the definition's access. */
   access?: Access;
+  /** A registered runner's id or name, or the server's own; before the definition's. */
+  runner?: string;
+  /** Text after the agent's instructions, for each of its tasks. */
+  appendSystem?: string;
   integrations?: Record<string, AgentUsageIntegration>;
   /** Connections its tasks may use, by id; absent allows every connection the task is granted. */
   connections?: string[];
+  /** Repositories whose skills its tasks get, earlier first. */
+  skills?: SkillSource[];
   /** Off in this workspace; the other settings stay for when it is enabled again. */
   disabled?: boolean;
 }

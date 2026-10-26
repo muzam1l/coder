@@ -24,7 +24,7 @@ coder task approve <id> --deny --reason "<why>"  # the task reads why
 coder task approvals --denied                    # denied, still answerable
 ```
 
-In a conversation, anyone with write access answers: **[Approve]** or **[Deny]** on Slack, a select on Linear, `/approve <id>` or `/deny <id> <why>` on GitHub and Linear. Approved commands stay approved for the rest of the task. Only `auto` tasks ask.
+In a conversation, anyone who may start tasks there answers: **[Approve]** or **[Deny]** on Slack, a select on Linear, `/approve <id>` or `/deny <id> <why>` on GitHub and Linear. Approved commands stay approved for the rest of the task. Only `auto` tasks ask.
 
 ## Agents in a thread
 

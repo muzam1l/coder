@@ -3,6 +3,8 @@ import * as z from 'zod/mini';
 
 import {
   accessSchema,
+  agentNameSchema,
+  agentUsageSchema,
   mcpEntrySchema,
   modelSpecSchema,
   schemaIssues,
@@ -21,8 +23,6 @@ import type {
   AgentEventOptions,
   AgentUsage,
 } from './types';
-
-const slug = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
 
 const eventOptionsSchema = z.strictObject({
   match: z.optional(z.string().check(z.minLength(1))),
@@ -50,23 +50,11 @@ const agentDefinitionSchema = z.strictObject({
   runner: z.optional(z.string().check(z.minLength(1))),
   model: z.optional(modelSpecSchema),
   access: z.optional(accessSchema),
-  mcp: z.optional(z.record(slug, mcpEntrySchema)),
+  mcp: z.optional(z.record(agentNameSchema, mcpEntrySchema)),
   integrations: z._default(z.record(z.string(), definitionIntegrationSchema), {}),
 });
 
-const usageIntegrationSchema = z.strictObject({
-  allowedEvents: z.optional(z.array(z.string())),
-});
-
-const agentUsageSchema = z.strictObject({
-  connections: z.optional(z.array(z.string())),
-  model: z.optional(modelSpecSchema),
-  access: z.optional(accessSchema),
-  integrations: z.optional(z.record(z.string(), usageIntegrationSchema)),
-  disabled: z.optional(z.boolean()),
-});
-
-const agentsUsageSchema = z.record(slug, z.union([z.boolean(), agentUsageSchema]));
+const agentsUsageSchema = z.record(agentNameSchema, agentUsageSchema);
 
 /** A stored definition carries the repository marker from its last parse; it is derived again, never read. */
 function withoutMarkers(json: unknown): unknown {

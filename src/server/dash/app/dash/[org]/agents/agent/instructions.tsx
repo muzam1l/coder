@@ -3,8 +3,10 @@
 import './instructions.css';
 
 import { h, type ComponentChildren } from 'preact';
+import { useState } from 'preact/hooks';
 
 import { Collapse } from '@/comps/ui/collapse';
+import { Segmented } from '@/comps/ui/segmented';
 
 const INLINE =
   /`([^`\n]+)`|\*\*(.+?)\*\*|__(.+?)__|\*(\S(?:.*?\S)?)\*|(?<!\w)_(\S(?:.*?\S)?)_(?!\w)|\[([^\]\n]+)\]\(([^)\s]+)\)/g;
@@ -112,4 +114,57 @@ export function markdown(text: string) {
 /** An agent's instructions as markdown, collapsed with a Show more toggle when long. */
 export function Instructions({ text }: { text: string }) {
   return <Collapse class="body md">{markdown(text)}</Collapse>;
+}
+
+/** Markdown instructions to write, with a Write and Preview switch; `head` sits beside the switch. */
+export function InstructionsBox({
+  head,
+  name,
+  label,
+  value,
+  onChange,
+  placeholder,
+  maxLength,
+}: {
+  head: ComponentChildren;
+  name: string;
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder: string;
+  maxLength?: number;
+}) {
+  const [writing, setWriting] = useState('write');
+
+  return (
+    <>
+      <div class="instructions-head">
+        {head}
+        <Segmented
+          label={`${label} view`}
+          options={[
+            ['write', 'Write'],
+            ['preview', 'Preview'],
+          ]}
+          value={writing}
+          onChange={setWriting}
+        />
+      </div>
+      {writing === 'write' ? (
+        <textarea
+          name={name}
+          rows={10}
+          aria-label={label}
+          maxLength={maxLength}
+          placeholder={placeholder}
+          value={value}
+          onInput={event => onChange(event.currentTarget.value)}
+        />
+      ) : (
+        <div class="body md md-preview">
+          {value.trim() ? markdown(value) : <p class="muted">Nothing written yet.</p>}
+        </div>
+      )}
+    </>
+  );
 }

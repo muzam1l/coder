@@ -56,6 +56,7 @@ import {
   taskDirectories,
   type TurnResultEntry,
   resolveTaskDir,
+  resolveTasksDir,
   readTurnResults,
   watchTask,
   writeTask,
@@ -68,11 +69,13 @@ import {
   type Availability,
 } from '../../core/types';
 import { readFlowRecord } from '../../flow/runs';
+import { fetchSkills, linkSkills } from '../../runner/skills';
+import { SKILLS_HOME_ENV } from '../../core/engines/codex/app-server';
 import { stopRun, stopFlowTasks } from '../../flow/executor';
 import { applyTaskMessage } from '../../runner/task';
 import { readJsonFile, writeJsonFileAtomic } from '../../utils/fsx';
 import type { ServerContext } from '../context';
-import { eventTokens, taskDashboard } from './context';
+import { eventTokens, taskDashboard, taskSkills } from './context';
 import { connectionGrants } from '../connections/records';
 import { resolveConnections, taskConnectionSecrets } from '../connections/resolve';
 import { connectionEnvironment, narrowConnections } from '../../core/connections';
@@ -311,7 +314,7 @@ export async function startLocalTask(
   const route = await chooseRunner(ctx, {
     requestedBy: ctx.session?.user.id,
     runner: input.runner,
-    agent: version?.definition.runner,
+    agent: record?.settings?.runner ?? version?.definition.runner,
   }).catch((error: Error) => {
     throw new TaskInputError(error.message);
   });
@@ -348,18 +351,19 @@ export async function startLocalTask(
         undefined,
         narrowConnections(record?.settings?.connections, input.connections),
       ));
-    const resolved = await resolveConnections(
-      ctx,
+    const agentTask =
       saved?.task ??
-        ({
-          connections: granted,
-          access: input.access,
-          tools: {},
-          definition: version?.definition ?? { integrations: {} },
-          ...(record?.settings ? { usage: record.settings } : {}),
-        } as AgentTask),
-    );
+      ({
+        connections: granted,
+        access: input.access,
+        tools: {},
+        definition: version?.definition ?? { integrations: {} },
+        ...(record?.settings ? { usage: record.settings } : {}),
+      } as AgentTask);
+    const resolved = await resolveConnections(ctx, agentTask);
     const connected = connectionEnvironment(resolved.mcp, resolved.env);
+    const skillWarnings: string[] = [];
+    const skills = await localSkills(ctx, agentTask, taskId, cwd, skillWarnings);
     const agent =
       slug !== preferred
         ? await agentTaskOptions(
@@ -382,15 +386,15 @@ export async function startLocalTask(
         cwd,
         name: input.name,
         appendSystem: input.appendSystem,
-        addDirs: input.addDirs,
+        addDirs: skills ? [...(input.addDirs ?? []), skills.claude] : input.addDirs,
         engine: input.model ? undefined : agent?.engine,
         model: input.model ?? agent?.model,
         effort: input.model ? undefined : agent?.effort,
         access: agent?.access ?? input.access,
-        ...(agent
-          ? {
-              agentPrompt: {
-                developer: agent.developer,
+        agentPrompt: {
+          developer: agent?.developer ?? { appendSystem: record?.settings?.appendSystem },
+          ...(agent
+            ? {
                 access: agentAccess(
                   {
                     definition: version?.definition ?? { integrations: {} },
@@ -398,13 +402,15 @@ export async function startLocalTask(
                   },
                   saved?.task.access,
                 ),
-              },
-            }
-          : {}),
+              }
+            : {}),
+        },
         mcp: selectedMcp.mcp,
         mcpBindings: selectedMcp.mcpBindings,
-        mcpWarnings: [...(selectedMcp.warnings ?? []), ...resolved.warnings],
-        connectionEnv: connected.env,
+        mcpWarnings: [...(selectedMcp.warnings ?? []), ...resolved.warnings, ...skillWarnings],
+        connectionEnv: skills
+          ? { ...connected.env, [SKILLS_HOME_ENV]: skills.home }
+          : connected.env,
         connections: granted,
         nativeMcp: selectedMcp.nativeMcp,
         ...(agent ? { agentId: input.agent } : {}),
@@ -748,6 +754,8 @@ function watchCompletion(
                 saved.task.source === saved.task.event?.integration &&
                 answer.text &&
                 !answer.duplicate;
+              // Each turn's reply reads the task afresh, so a 👀 shown since the last one clears too.
+              replies = undefined;
               if (sending) await conversationReplies();
               const next = receipt.turns + 1;
               receipt = { ...receipt, posting: sending ? receipt.turns : undefined };
@@ -908,9 +916,39 @@ async function turnConnections(
 
   return {
     mcp: connected.mcp,
-    env: { ...connected.env, ...native.env },
+    env: {
+      ...connected.env,
+      ...native.env,
+      ...skillsHome(taskCwd(ctx, task) ?? ctx.local!.cwd, task.id),
+    },
     warnings: resolved.warnings,
   };
+}
+
+/** The agent's skill sources fetched and linked into the task's folder, as a runner does: Claude adds `claude`, Codex runs in `home`. */
+async function localSkills(
+  ctx: ServerContext,
+  task: AgentTask,
+  taskId: string,
+  cwd: string,
+  warnings: string[],
+  minted?: ReturnType<typeof eventTokens>,
+) {
+  const sources = await taskSkills(ctx, task, minted);
+  if (!sources) return undefined;
+  const root = path.join(resolveTasksDir(cwd), taskId);
+  const warn = (message: string) => warnings.push(message);
+
+  return linkSkills(sources, await fetchSkills(sources, root, 'local', warn), cwd, root, warn);
+}
+
+/** The Codex skills home a task's first turn linked, for the turns that resume it. */
+function skillsHome(cwd: string, taskId: string): Record<string, string> {
+  const skills = path.join(resolveTasksDir(cwd), taskId, 'skills');
+
+  return loadTask(cwd, taskId)?.addDirs?.includes(path.join(skills, 'claude'))
+    ? { [SKILLS_HOME_ENV]: path.join(skills, 'home') }
+    : {};
 }
 
 /** Run a server task as CLI tasks on this machine, as a runner would, and answer once the first one exists. */
@@ -943,7 +981,8 @@ export async function runLocalTask(
     return enqueueLocalTask(ctx, { ...task, id: taskId ?? generateTaskId(), cwd }, { cwd });
   }
 
-  const { tokens: handles } = await eventTokens(ctx, task);
+  const minted = eventTokens(ctx, task);
+  const { tokens: handles } = await minted;
   const resolved = await resolveConnections(ctx, task, handles);
   await taskWarnings(ctx, taskId ?? task.id, resolved.warnings);
   await taskConnectionSecrets(ctx, taskId ?? task.id, [
@@ -1004,10 +1043,18 @@ export async function runLocalTask(
       worker = spawnWorker(cwd, existing.id, {
         ...connectionEnvironment(resolved.mcp, resolved.env).env,
         ...nativeToolEnvironment(task, tokens, reply).env,
+        ...skillsHome(cwd, existing.id),
       });
     watchCompletion(ctx, existing.id, completion, worker);
     return row(cwd, existing);
   }
+
+  const skillWarnings: string[] = [];
+  const skills =
+    task.flow === 'default'
+      ? await localSkills(ctx, task, taskId ?? task.id, cwd, skillWarnings, minted)
+      : undefined;
+  await taskWarnings(ctx, taskId ?? task.id, skillWarnings);
 
   let started!: (id: string) => void;
   const first = new Promise<string>(resolve => (started = resolve));
@@ -1018,7 +1065,8 @@ export async function runLocalTask(
     cwd,
     agent: task.agent,
     flow: task.flow,
-    task,
+    task: skills ? { ...task, addDirs: [...(task.addDirs ?? []), skills.claude] } : task,
+    ...(skills ? { env: { [SKILLS_HOME_ENV]: skills.home } } : {}),
     taskId,
     toolEnvironment: { tokens },
     ...(reply ? { replyEndpoint: reply } : {}),

@@ -125,7 +125,7 @@ Workspaces come from Wular Auth, where members and roles are managed; the member
 
 From a terminal, `coder auth login` signs in with Wular Auth (`--device` shows a code to approve elsewhere) and keeps the session in `~/.coder/session.json`. Its tokens are issued for this server only. `--workspace <slug>` picks a workspace and `--server <url>` another instance. Servers must use HTTPS unless they are loopback, and the CLI confirms a new origin the first time it sees it (`--yes` acknowledges it in scripts).
 
-Anyone the platform lets write where they ask, such as a GitHub user with write access to the repository, starts and steers tasks. Installing an app connects the installer.
+Anyone the platform lets write where they ask starts and steers tasks: on GitHub an organization member with write access to the repository or a bot's pull request from a branch of it, on Slack and Linear a full member, never a guest. Installing an app connects the installer.
 
 ## Runners
 

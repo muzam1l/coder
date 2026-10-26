@@ -598,7 +598,13 @@ export interface IntegrationAuth {
   /** Linking by the app's user OAuth; without it, links go out privately as an ephemeral message. */
   user?: IntegrationUserAuth;
   /** Whether the event's actor may write where the event happened, checked with the platform. */
-  canWrite?(event: PlatformEvent, token: string, fetch?: typeof globalThis.fetch): Promise<boolean>;
+  canWrite?(
+    event: PlatformEvent,
+    token: string,
+    fetch?: typeof globalThis.fetch,
+    /** Mints a token for the app's member lookups, kept from tasks. */
+    members?: () => Promise<string | undefined>,
+  ): Promise<boolean>;
   /** The platform user ids of a private space's members, listed on the installation's token while an event of it is handled; absent where the app's permissions cannot list them. `linked` gives the workspace's linked ids with the logins known for them, for a platform that checks them one by one when the list is refused. */
   members?(
     space: Space,
@@ -813,7 +819,7 @@ export interface Integration {
 
 /** What a minted token may reach: the permissions its tools need, across its whole installation. */
 export interface TokenBound {
-  purpose?: 'checks';
+  purpose?: 'checks' | 'members' | 'contents';
   tools?: string[];
 }
 

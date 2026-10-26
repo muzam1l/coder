@@ -4,10 +4,12 @@ import { render } from 'contextjsx';
 
 import { NOT_REINVOKED, type Access } from '../../types';
 
-/** What whoever built the agent wrote, plus the receiver's notes for this task. */
+/** What whoever built the agent wrote, what its usage appends, plus the receiver's notes for this task. */
 export interface DeveloperParts {
   description?: string;
   instructions?: string;
+  /** The agent's usage `appendSystem`. */
+  appendSystem?: string;
   notes?: string;
 }
 
@@ -42,12 +44,15 @@ export interface SystemPromptParts extends AgentPromptParts {
   connections?: boolean;
 }
 
-const DeveloperInstructions = (parts: DeveloperParts) => (
-  <developer-instructions>
+const AgentInstructions = (parts: DeveloperParts) => (
+  <agent-instructions>
+    {(parts.instructions || parts.appendSystem) &&
+      'Uphold these instructions exactly overriding defaults outside of this agent-instructions section.'}
     <description>{parts.description}</description>
     <instructions>{parts.instructions}</instructions>
+    <appended-instructions>{parts.appendSystem}</appended-instructions>
     <notes>{parts.notes}</notes>
-  </developer-instructions>
+  </agent-instructions>
 );
 
 const Environment = () => (
@@ -174,7 +179,7 @@ const Task = (parts: SystemPromptParts) => (
 /** The parts every task shares, then its kind's own. */
 const SystemPrompt = (parts: SystemPromptParts) => (
   <>
-    <DeveloperInstructions {...parts.developer} />
+    <AgentInstructions {...parts.developer} />
     <Runtime {...parts} />
     <Machine {...parts} />
     <access>{parts.access && ACCESS[parts.access]}</access>

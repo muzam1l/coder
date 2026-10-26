@@ -172,6 +172,7 @@ export const TERMINAL_STATUSES: readonly TaskStatus[] = ['completed', 'failed', 
 export const ACTIVE_STATUSES: readonly TaskStatus[] = ['queued', 'running'];
 /** Logged when a resumed turn cannot load its engine conversation and starts a new one. */
 export const HISTORY_LOST = 'History lost, starting fresh';
+export const COMMIT_SHA = /^[0-9a-f]{40}$/;
 
 /** Task options after resolving CLI flags against config defaults. */
 export interface ResolvedTaskOptions {

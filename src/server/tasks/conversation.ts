@@ -416,6 +416,12 @@ async function steerRunning(
   return added;
 }
 
+/** A direct ask steered into the running turn: its 👀 clears at that turn's next post, failure or end, even a turn that started silent. */
+const typingShown = (ctx: ServerContext, status: TaskStatus, now: () => number) =>
+  ctx.queue.patchTask(ctx.organizationId, status.task.id, { typingEnded: false }, now(), {
+    generation: status.generation ?? 0,
+  });
+
 const noticeKey = (status: Pick<TaskStatus, 'task' | 'generation'>) =>
   `notice:${status.task.id}:${status.generation ?? 0}`;
 
@@ -560,6 +566,7 @@ export async function steerConversation(
     samePlace(status.task.event, event) &&
     (await steerRunning(ctx, status, eventPrompt([event], user), undefined, asker ?? null))
   ) {
+    if (event.mustReply) await typingShown(ctx, status, now);
     await forgetUnseen(ctx, event);
     await markSeen(ctx, event, status.task.id, now());
     return;
@@ -668,6 +675,8 @@ async function deliverBatch(
       const steered =
         here &&
         (await steerRunning(ctx, fresh, text, { key, owner, through: admission }, author ?? null));
+      if (steered && chunk.some(steer => steer.event.mustReply === true))
+        await typingShown(ctx, fresh, now);
       const accepted =
         steered ||
         (await resume(
@@ -699,15 +708,18 @@ async function deliverBatch(
   }
 }
 
-/** A reaction in a conversation whose task runs: gathered with the others for a while, then one steer; a stopped task is left alone. */
+/** A reaction in a conversation whose task runs, by someone `canWrite` lets steer it: gathered with the others for a while, then one steer; a stopped task is left alone. */
 export async function reactToConversation(
   ctx: ServerContext,
   event: AgentEvent,
   reaction: Reaction,
   now: () => number,
+  canWrite: () => Promise<boolean | null | undefined>,
 ): Promise<void> {
   const status = await conversationTask(ctx, event);
   if (!status || !ACTIVE_STATES.includes(status.status)) return;
+  const allowed = await canWrite();
+  if (allowed !== undefined && !allowed) return;
   const key = `reactions:${keyOf(ctx, event)}`;
   const owner = randomUUID();
   await ctx.store.appendBatch(key, owner, [{ ...reaction, admission: owner }], now(), BATCH_TTL_MS);

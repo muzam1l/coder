@@ -352,6 +352,8 @@ export async function execAgent(options: {
   replyEndpoint?: ReplyEndpoint;
   connections?: Record<string, McpServerSpec>;
   connectionEnv?: Record<string, string>;
+  /** Extra environment for the task's engine. */
+  env?: Record<string, string>;
   postToken?: string;
   onApproval?: (approval: unknown) => void | Promise<void>;
   /** Run as a listed CLI task started from here, instead of a runner's hidden engine task. */
@@ -464,7 +466,7 @@ export async function execAgent(options: {
                 mcpBindings: selectedMcp.mcpBindings,
                 mcpWarnings: selectedMcp.warnings,
                 nativeMcp: selectedMcp.nativeMcp,
-                connectionEnv: { ...connected.env, ...native.env },
+                connectionEnv: { ...connected.env, ...native.env, ...options.env },
                 connections: task.connections,
                 cwd,
                 agentId: task.agent,
@@ -604,7 +606,7 @@ export async function execAgent(options: {
       ...(options.postToken ? { integrationToken: options.postToken } : {}),
       connections: {
         mcp: { ...connected.mcp, ...native.mcp },
-        env: { ...connected.env, ...native.env },
+        env: { ...connected.env, ...native.env, ...options.env },
         ids: task.connections ?? [],
       },
     },
@@ -774,6 +776,7 @@ export function agentDeveloperInstructions(agent: Agent, context?: TaskContext):
   return {
     description: agent.definition.description,
     instructions: agentInstructions(agent),
+    appendSystem: agent.usage?.appendSystem,
     notes: context?.instructions,
   };
 }

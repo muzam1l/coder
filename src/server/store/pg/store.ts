@@ -459,7 +459,7 @@ export class DrizzleStore implements Store {
     const table = kind === 'app' ? app : kind === 'installation' ? install : runner;
     const allowed =
       kind === 'app'
-        ? ['name', 'agentsRepo', 'branch']
+        ? ['name', 'agentsRepo', 'branch', 'botId']
         : kind === 'installation'
           ? ['account', 'self', 'covers', 'repos', 'deletedAt', 'uninstalled']
           : ['name', 'config', 'lastSeen', 'updatedAt'];

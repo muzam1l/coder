@@ -11,6 +11,7 @@ import { useRouter } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
 import { Link } from '@wular/pnext/link';
 import { editableAgent, eventNames } from '@/api/types';
+import { COMMIT_SHA } from '@coder/core/types';
 import { ConfirmDialog } from '@/comps/ui/confirm';
 import type {
   AgentRow,
@@ -22,6 +23,8 @@ import type {
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { AgentToggle } from '@/app/dash/[org]/agents/agent/agent-toggle';
 import { Field } from '@/comps/ui/field';
+import { Combo } from '@/comps/ui/combo';
+import { InstructionsBox } from '@/app/dash/[org]/agents/agent/instructions';
 import { Button } from '@/comps/ui/button';
 import { Select, type Option } from '@/comps/ui/select';
 import { Search } from '@/comps/ui/toolbar';
@@ -65,6 +68,26 @@ export function AgentSettingsForm({
       : [settings.engine, settings.model, settings.effort].filter(Boolean).join('/'),
   );
   const [narrowed, setNarrowed] = useState(settings.connections ? 'some' : '');
+  const [skills, setSkills] = useState(() =>
+    (settings.skills ?? []).map((source, id) => ({
+      id,
+      repo: source.repo,
+      path: source.path ?? '',
+      ref: source.sha ?? source.ref ?? '',
+    })),
+  );
+  const editSkill = (id: number, change: Partial<(typeof skills)[number]>) =>
+    setSkills(rows => rows.map(row => (row.id === id ? { ...row, ...change } : row)));
+  const [repos, setRepos] = useState<string[]>();
+  const readRepos = () => {
+    if (repos) return;
+    setRepos([]);
+    void client.repositories
+      .list()
+      .then(rows => setRepos(rows.map(row => row.repo)))
+      .catch(reason => console.error('coder dashboard: repositories', reason));
+  };
+  const [appendSystem, setAppendSystem] = useState(settings.appendSystem ?? '');
   const declared = agent.definition?.integrations ?? {};
   const platforms = Object.keys(declared).sort();
   const own = agent.definition;
@@ -122,6 +145,21 @@ export function AgentSettingsForm({
       next.access = text('access') as AgentSettings['access'];
     if (model.trim()) next.model = model.trim();
     if (narrowed) next.connections = values.getAll('connection').map(String);
+    if (appendSystem.trim()) next.appendSystem = appendSystem.trim();
+    const sources = skills.flatMap(row => {
+      const [repo, path, ref] = [row.repo.trim(), row.path.trim(), row.ref.trim()];
+
+      if (!repo) return [];
+
+      return [
+        {
+          repo,
+          ...(path ? { path } : {}),
+          ...(ref ? (COMMIT_SHA.test(ref) ? { sha: ref } : { ref }) : {}),
+        },
+      ];
+    });
+    if (sources.length) next.skills = sources;
     for (const id of platforms) {
       const entry: NonNullable<AgentSettings['integrations']>[string] = {};
       const names = eventNames(declared[id]?.events);
@@ -194,7 +232,11 @@ export function AgentSettingsForm({
               />
             </Field>
             {runners.length > 1 ? (
-              <Field label="Runs on" group>
+              <Field
+                label="Runs on"
+                hint="the runner its tasks start on, before anyone's default"
+                group
+              >
                 <Select
                   name="runner"
                   label="Runs on"
@@ -247,6 +289,84 @@ export function AgentSettingsForm({
                 )}
               </div>
             ) : null}
+            <div class="field wide">
+              <span>
+                Skill repositories{' '}
+                <small>
+                  its tasks get the skill folders in each folder, else in .claude/skills and
+                  .agents/skills
+                </small>
+              </span>
+              <div class="skill-rows">
+                {skills.map(row => (
+                  <div key={row.id} class="skill-row">
+                    <Combo
+                      name="skill-repo"
+                      label="Repository"
+                      placeholder="acme/skills"
+                      options={repos ?? []}
+                      onOpen={readRepos}
+                      value={row.repo}
+                      onChange={repo => editSkill(row.id, { repo })}
+                    />
+                    <input
+                      aria-label="Folder"
+                      placeholder="plugins/acme/skills"
+                      value={row.path}
+                      onInput={event => editSkill(row.id, { path: event.currentTarget.value })}
+                    />
+                    <input
+                      aria-label="Branch, tag or commit"
+                      placeholder="main"
+                      value={row.ref}
+                      onInput={event => editSkill(row.id, { ref: event.currentTarget.value })}
+                    />
+                    <Button
+                      variant="secondary"
+                      onClick={() => setSkills(rows => rows.filter(other => other.id !== row.id))}
+                    >
+                      Remove
+                    </Button>
+                  </div>
+                ))}
+                <div>
+                  <Button
+                    variant="secondary"
+                    onClick={() =>
+                      setSkills(rows => [
+                        ...rows,
+                        {
+                          id: Math.max(-1, ...rows.map(row => row.id)) + 1,
+                          repo: '',
+                          path: '',
+                          ref: '',
+                        },
+                      ])
+                    }
+                  >
+                    Add repository
+                  </Button>
+                </div>
+              </div>
+            </div>
+            <div class="field wide">
+              <InstructionsBox
+                head={
+                  <span>
+                    Added instructions{' '}
+                    <small>
+                      text every task of this agent reads after its own instructions, up to 64 KB
+                    </small>
+                  </span>
+                }
+                name="appendSystem"
+                label="Added instructions"
+                maxLength={64 * 1024}
+                placeholder={'Markdown. Answer in English.\nLink every file you cite.'}
+                value={appendSystem}
+                onChange={setAppendSystem}
+              />
+            </div>
           </div>
         </section>
         {platforms.length ? (

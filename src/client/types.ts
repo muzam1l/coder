@@ -1,6 +1,7 @@
 import type { SerializedMessage, SerializedThread } from 'chat';
 import type { TaskLogEntry } from '../core/task/view';
 import type { Access, Approval } from '../core/types';
+import type { AgentUsage } from '../agent/types';
 import type {
   AppDrift,
   CreateStep,
@@ -84,18 +85,13 @@ export interface AgentDefinition {
 }
 
 /** Organization overrides for one agent (`AgentUsage` on the server). */
-export interface AgentSettings {
+export interface AgentSettings extends Pick<
+  AgentUsage,
+  'runner' | 'appendSystem' | 'access' | 'integrations' | 'connections' | 'skills' | 'disabled'
+> {
   engine?: string;
   model?: string;
   effort?: string;
-  /** A registered runner id; unset follows the requester's default. */
-  runner?: string;
-  access?: Access;
-  integrations?: Record<string, { allowedEvents?: string[] }>;
-  /** Connections its tasks may use, by id; absent allows every granted one. */
-  connections?: string[];
-  /** Off in this workspace: no platform events, no new tasks. */
-  disabled?: boolean;
 }
 
 export interface AgentRow {

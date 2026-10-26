@@ -567,6 +567,8 @@ function githubReuseKey(credentials: unknown, bound?: TokenBound): string {
 /** The narrowest token for a bound: the permissions its tools need, on every repository of the installation. */
 export function githubTokenScope(bound: TokenBound = {}): { permissions?: Record<string, string> } {
   if (bound.purpose === 'checks') return { permissions: { metadata: 'read', checks: 'write' } };
+  if (bound.purpose === 'members') return { permissions: { members: 'read' } };
+  if (bound.purpose === 'contents') return { permissions: { metadata: 'read', contents: 'read' } };
 
   return bound.tools ? { permissions: githubAppPermissions(bound.tools) } : {};
 }

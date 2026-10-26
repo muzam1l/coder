@@ -11,7 +11,7 @@ import { matchAgents, usageEntry, withMatches } from './definition';
 import { execAgent, taskFromEvent } from './exec';
 import { INTEGRATIONS } from '../integrations';
 import { init, loadAgents } from './load';
-import type { Agent, AgentEvent } from './types';
+import type { Agent, AgentEvent, SkillSource } from './types';
 
 /** Where an agent call runs: this repo's agents under `cwd`, or the server named by `server`. */
 type AgentOptions = { cwd?: string } & ServerOptions;
@@ -51,7 +51,12 @@ export const agents = {
     opts: AgentOptions & {
       model?: string;
       access?: string;
+      /** A runner's id or name; empty clears it. */
+      runner?: string;
+      /** Text after its instructions for each task; empty clears it. */
+      appendSystem?: string;
       connections?: string[];
+      skills?: SkillSource[];
       /** Platform to the events it answers there. */
       events?: Record<string, string[]>;
       instructions?: string;
@@ -63,17 +68,20 @@ export const agents = {
       throw new CoderError('invalid-option', 'Missing agent id.', {
         hint: 'Usage: coder agent settings <id> --model <name[/effort]|engine/model[/effort]>',
       });
-    const change: Record<string, unknown> = Object.fromEntries(
-      (['model', 'access'] as const).flatMap(key => (opts[key] ? [[key, opts[key]]] : [])),
-    );
+    const change: Record<string, unknown> = {};
+    if (opts.model) change.model = opts.model;
+    if (opts.access) change.access = opts.access;
+    if (opts.runner !== undefined) change.runner = opts.runner || undefined;
+    if (opts.appendSystem !== undefined) change.appendSystem = opts.appendSystem || undefined;
     if (opts.connections !== undefined) change.connections = opts.connections;
+    if (opts.skills !== undefined) change.skills = opts.skills.length ? opts.skills : undefined;
     const events = Object.entries(opts.events ?? {});
     const matches = opts.matches ?? {};
     const version = opts.instructions !== undefined || Object.keys(matches).length;
     if (!Object.keys(change).length && !events.length && !version)
       throw new CoderError(
         'invalid-option',
-        'Give --model, --access, --connections, --events, --instructions or --match.',
+        'Give --model, --access, --runner, --connections, --skills, --events, --instructions, --append-system or --match.',
       );
     const api = connect(opts);
     const record = await api.agents.get(id);

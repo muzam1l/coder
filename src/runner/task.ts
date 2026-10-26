@@ -73,6 +73,8 @@ import {
   withFileLock,
 } from '../utils/fsx';
 import { CLAUDE_PROJECT, taskHistory } from './history';
+import { fetchSkills, linkSkills, type RemoteSkill } from './skills';
+import { SKILLS_HOME_ENV } from '../core/engines/codex/app-server';
 import { claimCalls, driveAsyncTool, pendingCall } from '../core/task/async';
 
 const exec = promisify(execFile);
@@ -93,6 +95,7 @@ type RemoteTask = {
   config?: Partial<CoderConfig>;
   connections?: Record<string, McpServerSpec>;
   connectionEnv?: Record<string, string>;
+  skills?: RemoteSkill[];
 };
 
 /** The server and attempt token a runner process was started with. */
@@ -131,7 +134,7 @@ async function taskRequest<T>(
   return body as T;
 }
 
-function validRef(ref: string): boolean {
+export function validRef(ref: string): boolean {
   return (
     ref.length > 0 &&
     !ref.startsWith('-') &&
@@ -151,6 +154,7 @@ export async function checkout(
   token?: string,
   cache?: string,
   signal?: AbortSignal,
+  note: (message: string) => void = () => {},
 ): Promise<string> {
   const repo = task.event?.repo;
   const cwd = path.join(root, 'work');
@@ -170,29 +174,8 @@ export async function checkout(
   const hosts = INTEGRATIONS[task.event!.integration]?.repos?.cloneHosts ?? [];
   if (clone.protocol !== 'https:' || !hosts.includes(clone.hostname))
     throw new Error('Repository clone host does not match the integration');
-  await fs.mkdir(root, { recursive: true });
-  const credentialDir = await fs.mkdtemp(path.join(root, '.git-credential-'));
-  const tokenFile = path.join(credentialDir, 'token');
-  const askpass = path.join(credentialDir, 'askpass.sh');
-  if (token) {
-    await fs.writeFile(tokenFile, token, { mode: 0o600 });
-    await fs.writeFile(
-      askpass,
-      '#!/bin/sh\ncase "$1" in *Username*) printf x-access-token;; *) command cat "$CODER_GIT_TOKEN_FILE";; esac\n',
-      { mode: 0o700 },
-    );
-  }
-  const options = token
-    ? {
-        env: {
-          ...process.env,
-          GIT_ASKPASS: askpass,
-          CODER_GIT_TOKEN_FILE: tokenFile,
-          GIT_TERMINAL_PROMPT: '0',
-        },
-      }
-    : undefined;
-  try {
+  let snapshot: string | undefined;
+  await withGitToken(root, token, clone.hostname, async options => {
     const gitOptions = { ...options, signal, maxBuffer: 64 * 1024 * 1024 };
     if (cache) {
       await withCheckoutLock(cache, async () => {
@@ -219,9 +202,10 @@ export async function checkout(
         );
       });
     } else {
-      // A sandbox snapshot already holds the clone.
-      if (!(await present(path.join(cwd, '.git'))))
-        await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
+      // A sandbox snapshot already holds the clone, prepared at its commit.
+      if (await present(path.join(cwd, '.git')))
+        snapshot = (await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim();
+      else await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
       await exec(
         'git',
         ['-C', cwd, 'fetch', '--depth', '50', 'origin', repo.defaultBranch],
@@ -229,23 +213,132 @@ export async function checkout(
       );
       await exec('git', ['-C', cwd, 'checkout', '--detach', 'FETCH_HEAD'], gitOptions);
     }
+    const head = (await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout;
+    await fs.writeFile(baseFile(root), head);
+    if (head.trim() !== snapshot) await prepareCheckout(cwd, gitOptions, note, snapshot);
+  });
+  return cwd;
+}
+
+/** Readies a checkout to build and test: its submodules at depth 1 with the task's git credentials, then the dependencies of the root's and each first-level folder's lockfile. A checkout prepared at `since` is prepared again only when a lockfile or submodule changed. A failure is a warning. */
+async function prepareCheckout(
+  cwd: string,
+  options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal },
+  note: (message: string) => void,
+  since?: string,
+): Promise<void> {
+  if (since) {
+    const lines = (args: string[]) =>
+      exec('git', ['-C', cwd, ...args]).then(
+        ({ stdout }) => stdout.trim().split('\n'),
+        () => undefined,
+      );
+    const [changed, modules = []] = await Promise.all([
+      lines(['diff', '--name-only', since, 'HEAD']),
+      lines(['config', '-f', '.gitmodules', '--get-regexp', '\\.path$']),
+    ]);
+    const paths = modules.map(line => line.split(' ')[1]);
+    const locks = INSTALLS.map(([lock]) => lock);
+    const moved = (file: string) =>
+      file === '.gitmodules' || paths.includes(file) || locks.includes(path.basename(file));
+    if (changed && !changed.some(moved)) return;
+  }
+
+  // Only git gets the task's credentials; an install runs the repository's scripts.
+  const run = (failed: string, command: string, args: string[], dir = cwd) =>
+    exec(command, args, {
+      ...(command === 'git' ? options : { signal: options.signal }),
+      cwd: dir,
+      maxBuffer: 64 * 1024 * 1024,
+    }).catch(error => {
+      const [reason] = String(error.stderr || error.message)
+        .trim()
+        .split('\n');
+      console.error(`coder runner: ${failed}`, error);
+      note(`${failed} (${reason}).`);
+    });
+  const present = (file: string) => fs.stat(file).then(Boolean, () => false);
+
+  if (await present(path.join(cwd, '.gitmodules'))) {
+    // A snapshot's submodules keep their old URLs until synced.
+    await run('Submodule URLs were not synced', 'git', ['submodule', 'sync', '--recursive']);
+    await run('Submodules were not checked out', 'git', [
+      'submodule',
+      'update',
+      '--init',
+      '--recursive',
+      '--depth',
+      '1',
+    ]);
+  }
+
+  const folders = (await fs.readdir(cwd, { withFileTypes: true }))
+    .filter(
+      entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules',
+    )
+    .map(entry => entry.name);
+  for (const folder of ['', ...folders]) {
+    const dir = path.join(cwd, folder);
+    for (const [lock, command, args] of INSTALLS) {
+      if (!(await present(path.join(dir, lock)))) continue;
+      await run(
+        `Dependencies in ${folder || 'the repository root'} were not installed`,
+        command,
+        args,
+        dir,
+      );
+      break;
+    }
+  }
+}
+
+/** Runs git `work` with `token` answered, for `host` only, by an askpass script from a file under `root`, both removed after it. */
+export async function withGitToken<T>(
+  root: string,
+  token: string | undefined,
+  host: string,
+  work: (options?: { env: NodeJS.ProcessEnv }) => Promise<T>,
+): Promise<T> {
+  await fs.mkdir(root, { recursive: true });
+  const credentialDir = await fs.mkdtemp(path.join(root, '.git-credential-'));
+  const tokenFile = path.join(credentialDir, 'token');
+  const askpass = path.join(credentialDir, 'askpass.sh');
+  if (token) {
+    await fs.writeFile(tokenFile, token, { mode: 0o600 });
     await fs.writeFile(
-      baseFile(root),
-      (await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout,
+      askpass,
+      `#!/bin/sh\ncase "$1" in *"//${host}'"*|*"@${host}'"*) ;; *) exit 1;; esac\ncase "$1" in *Username*) printf x-access-token;; *) command cat "$CODER_GIT_TOKEN_FILE";; esac\n`,
+      { mode: 0o700 },
+    );
+  }
+  try {
+    return await work(
+      token
+        ? {
+            env: {
+              ...process.env,
+              GIT_ASKPASS: askpass,
+              CODER_GIT_TOKEN_FILE: tokenFile,
+              GIT_TERMINAL_PROMPT: '0',
+            },
+          }
+        : undefined,
     );
   } finally {
     await fs.rm(credentialDir, { recursive: true, force: true });
   }
-  return cwd;
 }
 
 /** Cache location shared by local runner processes. */
 export function checkoutCache(task: AgentTask): string | undefined {
   const repo = task.event?.repo;
-  if (!repo) return;
-  if (![repo.owner, repo.name].every(part => /^[\w.-]+$/.test(part) && !/^\.+$/.test(part)))
+  return repo && repositoryCache(repo.cloneUrl, repo.owner, repo.name);
+}
+
+export function repositoryCache(cloneUrl: string, owner: string, name: string): string {
+  if (![owner, name].every(part => /^[\w.-]+$/.test(part) && !/^\.+$/.test(part)))
     throw new Error('Invalid repository name');
-  return coderCache('checkouts', new URL(repo.cloneUrl).hostname, repo.owner, repo.name);
+  return coderCache('checkouts', new URL(cloneUrl).hostname, owner, name);
 }
 
 export async function withCheckoutLock<T>(cache: string, work: () => Promise<T>): Promise<T> {
@@ -453,18 +546,13 @@ const INSTALLS: Array<[string, string, string[]]> = [
   ['package-lock.json', 'npm', ['ci']],
 ];
 
-/** Clone a task's repository at its default branch and install dependencies, for a sandbox snapshot. */
+/** Clone a task's repository at its default branch, ready to build and test, for a sandbox snapshot. */
 export async function prepareRepo(id: string, root: string): Promise<{ sha: string }> {
   const auth = taskServer();
   const remote = await taskRequest<RemoteTask>(auth.server, auth.token, id);
   const event = remote.task.event;
   if (!event?.repo) throw new Error('The task has no repository');
   const cwd = await checkout(remote.task, root, remote.tokens[event.integration]);
-  for (const [lock, command, args] of INSTALLS) {
-    if (!(await fs.stat(path.join(cwd, lock)).catch(() => undefined))) continue;
-    await exec(command, args, { cwd, maxBuffer: 64 * 1024 * 1024 }).catch(() => {});
-    break;
-  }
   const sha = (await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim();
   console.log(`coder-snapshot ${sha}`);
   return { sha };
@@ -687,6 +775,7 @@ export async function runTask(id: string, root: string): Promise<unknown> {
     CODEX_HOME: process.env.CODEX_HOME,
     CLAUDE_CONFIG_DIR: process.env.CLAUDE_CONFIG_DIR,
   };
+  const notes: string[] = [];
   let history: ReturnType<typeof taskHistory> | undefined;
   let proxy: Awaited<ReturnType<typeof serveTaskServer>> | undefined;
   const timeout = new AbortController();
@@ -751,9 +840,10 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       processTiming('runner.history.done');
       return restored;
     })();
+    const note = (message: string) => notes.push(message);
     processTiming('runner.checkout.start');
     const prepared = Promise.race([
-      checkout(remote.task, root, eventToken, cache, timeout.signal),
+      checkout(remote.task, root, eventToken, cache, timeout.signal, note),
       new Promise<never>((_, reject) =>
         timeout.signal.addEventListener('abort', () => reject(timeout.signal.reason), {
           once: true,
@@ -764,10 +854,20 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       processTiming('runner.checkout.done');
       return value;
     });
+    const skills = remote.skills?.length
+      ? fetchSkills(remote.skills, root, remote.task.runner, note, timeout.signal)
+      : undefined;
     const [repository, restored] = await Promise.allSettled([prepared, setup]);
     if (repository.status === 'rejected') throw repository.reason;
     if (restored.status === 'rejected') throw restored.reason;
     timeout.signal.throwIfAborted();
+    // Claude adds the linked folder; Codex runs in a stand-in home that holds them.
+    const linked =
+      skills && (await linkSkills(remote.skills!, await skills, repository.value, root, note));
+    if (linked) {
+      remote.task = { ...remote.task, addDirs: [...(remote.task.addDirs ?? []), linked.claude] };
+      process.env[SKILLS_HOME_ENV] = linked.home;
+    }
     return await runCheckedOutTask(
       id,
       root,
@@ -780,6 +880,7 @@ export async function runTask(id: string, root: string): Promise<unknown> {
       beforeResult,
       reportResult,
       restored.value,
+      notes,
       async attempt => {
         if (attempt.credential === credentialId) return true;
         const selected = remote.engineCredentials?.find(row => row.id === attempt.credential);
@@ -821,6 +922,7 @@ export async function runTask(id: string, root: string): Promise<unknown> {
     delete process.env.CODER_MCP_CONNECTION_ENV;
     delete process.env.CODER_SERVER;
     delete process.env.CODER_DASHBOARD;
+    delete process.env[SKILLS_HOME_ENV];
   }
 }
 
@@ -836,6 +938,7 @@ async function runCheckedOutTask(
   beforeResult: () => Promise<void>,
   reportResult: (body: unknown) => Promise<void>,
   resumed: Awaited<ReturnType<ReturnType<typeof taskHistory>['restore']>> | undefined,
+  notes: string[],
   onModel: (attempt: ModelAttempt) => Promise<boolean>,
   onFlowModel: FlowHooks['onModel'],
 ): Promise<unknown> {
@@ -1052,6 +1155,8 @@ async function runCheckedOutTask(
       },
       async onTask(started, turn) {
         taskId = started;
+        for (const message of notes.splice(0))
+          appendTaskLog(cwd, started, { kind: 'warning', message });
         if (timeout.aborted) {
           const task = loadTask(cwd, started);
           if (task) await stopTask(cwd, task);

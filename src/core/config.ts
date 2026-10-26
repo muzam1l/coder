@@ -9,7 +9,7 @@ import path from 'node:path';
 import * as z from 'zod/mini';
 
 import { ACCESS, type Access } from '../integrations/types';
-import { DEFAULT_CONFIG } from './types';
+import { COMMIT_SHA, DEFAULT_CONFIG } from './types';
 import { coderHome, resolveWorkspaceRoot } from './state';
 import { markRepositoryMcp } from './mcp';
 
@@ -309,20 +309,30 @@ const networkSchema = z.strictObject({
   readOnlyTasks: z.optional(z.boolean()),
 });
 // Agent and flow names reach shell commands inside runners, so keep them to safe slugs.
-const agentNameSchema = z.string().check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
+export const agentNameSchema = z
+  .string()
+  .check(z.regex(/^[a-z0-9][a-z0-9_-]*$/i, 'agent or flow name'));
+const skillSourceSchema = z.strictObject({
+  repo: z.string().check(z.regex(/^[\w.-]+\/[\w.-]+$/, 'owner/name')),
+  path: z.optional(z.string().check(z.regex(/^(?!\/)(?!(.*\/)?\.\.?(\/|$))[^\\]+$/, 'a folder'))),
+  ref: z.optional(z.string().check(z.regex(/^(?!-)[\w./-]+$/, 'a branch or tag'))),
+  sha: z.optional(z.string().check(z.regex(COMMIT_SHA, 'a full 40-character commit'))),
+});
 // `agents` holds usage only: how this repo runs an agent. What an agent IS lives in
 // `.coder/agents/<id>/agent.json` (see src/agent/definition.ts).
-const agentUsageIntegrationSchema = z.strictObject({
-  allowedEvents: z.optional(z.array(z.string())),
-});
-const agentUsageSchema = z.union([
+export const agentUsageSchema = z.union([
   z.boolean(),
   z.strictObject({
     model: z.optional(modelSpecSchema),
     access: z.optional(accessSchema),
-    runner: z.optional(z.enum(['local', 'local-docker', 'vercel-sandbox', 'github-actions'])),
-    integrations: z.optional(z.record(z.string(), agentUsageIntegrationSchema)),
+    // A registered runner's id or name, or the server's own.
+    runner: z.optional(z.string().check(z.minLength(1))),
+    appendSystem: z.optional(z.string().check(z.maxLength(64 * 1024))),
+    integrations: z.optional(
+      z.record(z.string(), z.strictObject({ allowedEvents: z.optional(z.array(z.string())) })),
+    ),
     connections: z.optional(z.array(z.string())),
+    skills: z.optional(z.array(skillSourceSchema)),
     disabled: z.optional(z.boolean()),
   }),
 ]);

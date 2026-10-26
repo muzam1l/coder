@@ -144,6 +144,7 @@ export const integrationApp = pgTable(
     name: text().notNull(),
     agentsRepo: text(),
     branch: text(),
+    botId: bigint({ mode: 'number' }),
     /** Its sealed credentials, the shared app's row when it runs on them. */
     credentialsSecretId: secretId().notNull(),
     /** The server-level app whose credentials this app uses. Any account may install it, not only the one that owns it. */

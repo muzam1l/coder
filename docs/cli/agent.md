@@ -35,20 +35,23 @@ Describe one agent as it will run here, or its active version on a server. It li
 coder agent show coder  # what the built-in agent listens to and may do
 ```
 
-## `agent settings [id] [--model <model>] [--access <access>] [--connections <connections>] [--events <events>] [--instructions <instructions>] [--match <match>] [--server <server>] [--yes] [--json]`
+## `agent settings [id] [--model <model>] [--access <access>] [--runner <runner>] [--connections <connections>] [--skills <skills>] [--events <events>] [--instructions <instructions>] [--append-system <append-system>] [--match <match>] [--server <server>] [--yes] [--json]`
 
 change an agent's settings on your Coder server
 
-Set the model, access, connections or events of an agent in the
-saved workspace, or publish its next version with new instructions or matches.
+Set the model, access, runner, connections, skills, events or appended instructions of an
+agent in the saved workspace, or publish its next version with new instructions or matches.
 Settings you leave out stay as they are.
 
 - `<id>` the agent
 - `--model <model>` model name[/effort] or engine/model[/effort] (sol/low, claude/opus, codex/gpt-6.1-sol/high)
 - `--access <access>` read-only or auto, at most its definition
+- `--runner <runner>` the runner its tasks start on, by id or name; empty clears it
 - `--connections <connections>` the connections its tasks may use, by id
+- `--skills <skills>` repositories whose skills its tasks get, as owner/name[/path][@ref or commit]; empty clears them
 - `--events <events>` the events it answers on a platform
 - `--instructions <instructions>` its system prompt, published as its next version
+- `--append-system <append-system>` text every task reads after its instructions, up to 64 KB; empty clears it
 - `--match <match>` start tasks only for event text matching a regex, as event=regex pairs
 - `--server <server>` act on your Coder server, in the saved workspace
 - `--yes` connect to a server used for the first time without asking

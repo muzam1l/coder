@@ -29,6 +29,7 @@ import {
   dropped,
   linkedMember,
   recordFailure,
+  writeCheck,
   type Replies,
 } from './tasks/events';
 import {
@@ -330,7 +331,8 @@ export async function endTyping(
   const { task } = status;
   const event = task.event;
   if (status.typingEnded || !event?.chat || task.source !== event.integration) return;
-  if (!(task.context?.mustReply ?? event.mustReply)) return;
+  // `typingEnded: false` marks a 👀 of an ask steered into the running turn.
+  if (!(task.context?.mustReply ?? event.mustReply) && status.typingEnded !== false) return;
   const fence = { generation: status.generation ?? 0 };
   const now = (ctx.now ?? Date.now)();
   const patch = { typingEnded: true };
@@ -626,6 +628,10 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
       chat: { thread: stored(thread.toJSON()) },
       ...(target.account ? { account: target.account } : {}),
     };
+    const token = () =>
+      boundToken(ctx, app, credentials, target.id, {
+        tools: integration.tools.presets['read-only'],
+      });
     const work = reactToConversation(
       tenant,
       event,
@@ -635,6 +641,7 @@ export async function chatFor(ctx: ServerContext, app: AgentApp, target?: Target
         on: reaction.message?.text ?? reaction.messageId,
       },
       ctx.now ?? Date.now,
+      () => writeCheck(tenant, integration, event, token),
     );
     later(ctx, app, event, work);
   });

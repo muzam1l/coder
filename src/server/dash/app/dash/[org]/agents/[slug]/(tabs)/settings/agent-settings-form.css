@@ -158,15 +158,32 @@
     justify-content: flex-start;
   }
 }
-.fields > .picked {
+/* room between field groups; columns keep the shared gap */
+.vpanel .fields {
+  row-gap: 28px;
+}
+.fields > .picked,
+.fields > .wide {
   grid-column: 1 / -1;
+}
+.skill-rows {
+  display: grid;
+  gap: 8px;
+}
+.skill-row {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr) auto;
+  gap: 8px;
 }
 /* hints sit under their labels, and a row's selects line up */
 .vpanel .fields > .field {
   grid-row: span 2;
   grid-template-rows: subgrid;
 }
-.vpanel .fields > .field > span:first-child {
+.vpanel .fields > .field > span:first-child,
+.vpanel .fields .instructions-head > span {
+  display: flex;
+  font-weight: 500;
   flex-direction: column;
   gap: 2px;
 }

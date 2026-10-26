@@ -286,7 +286,7 @@ export async function createTask(
   const chosen = await chooseRunner(ctx, {
     requestedBy,
     runner: input.runner,
-    agent: version?.definition.runner,
+    agent: record?.settings?.runner ?? version?.definition.runner,
   }).catch((error: Error) => {
     throw new TaskInputError(error.message);
   });
@@ -408,11 +408,15 @@ async function turnRunner(
   ctx: ServerContext,
   task: AgentTask,
   starter: string | undefined,
+  agent: Agent,
 ): Promise<Pick<AgentTask, 'runner' | 'runnerId'>> {
   const stored = task.runnerId ? await ctx.store.get('runner', task.runnerId) : undefined;
   if (task.source !== task.event?.integration && (!stored || visibleRunner(stored, starter)))
     return { runner: task.runner, ...(task.runnerId ? { runnerId: task.runnerId } : {}) };
-  const chosen = await chooseRunner(ctx, { requestedBy: starter, agent: task.definition.runner });
+  const chosen = await chooseRunner(ctx, {
+    requestedBy: starter,
+    agent: agent.usage?.runner ?? agent.definition.runner,
+  });
 
   return { runnerId: undefined, ...chosen };
 }
@@ -468,7 +472,7 @@ export async function refreshedTask(
   const starter = turnStarter(task);
   const conversation = event && task.source === event.integration ? event : undefined;
   const [route, { models, first }, slug] = await Promise.all([
-    turnRunner(ctx, task, starter),
+    turnRunner(ctx, task, starter, agent),
     resolveModels(ctx, effectiveSettings({ ...agent, usage }), starter),
     conversation && organizationSlug(ctx),
   ]);

@@ -20,6 +20,8 @@ import { startChatBridge, type ChatBridge } from './chat-bridge';
 import type { AppServerClient } from './turn';
 
 export const BROKER_ENDPOINT_ENV = 'CODER_APP_SERVER_ENDPOINT';
+/** A home whose `.agents/skills` holds a task's linked skills, for Codex to run in. */
+export const SKILLS_HOME_ENV = 'CODER_SKILLS_HOME';
 export const BROKER_BUSY_RPC_CODE = -32001;
 // Broker-only frames: a one-line notice for the task log, the shared
 // app-server dying under a client, and a client asking for a fresh app-server.
@@ -460,7 +462,10 @@ export class CodexAppServerClient {
     options = { ...options, env: engineEnvironment(env) };
     const networkAccess = options.networkAccess ?? false;
     let brokerEndpoint = null;
-    if (!options.disableBroker && !options.nativeMcp) {
+    // A task's linked skills run its own app-server in their home; the shared broker runs in the machine's.
+    const skillsHome = env[SKILLS_HOME_ENV];
+    if (skillsHome) options = { ...options, env: { ...options.env, HOME: skillsHome } };
+    if (!options.disableBroker && !options.nativeMcp && !skillsHome) {
       brokerEndpoint = connectionKey
         ? null
         : (options.brokerEndpoint ??

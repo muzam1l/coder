@@ -41,6 +41,7 @@ import { findConnection } from '../connections/records';
 import { updateMetadata } from '../store';
 import { handleKey } from '../../agent/mcp';
 import { dashPath, organizationSlug } from '../auth/members';
+import type { RemoteSkill } from '../../runner/skills';
 
 /** Installation tokens are encrypted at rest; integrations see plaintext only in memory. */
 export function unsealed(ctx: ServerContext, installation: Installation): Installation {
@@ -286,7 +287,49 @@ export async function eventTokens(
   return { tokens, ...(checksToken ? { checksToken } : {}), ...(app ? { app } : {}) };
 }
 
-/** The task's default commit identity: the event app's bot when it holds that app's token, its user id read once and kept on the app. A member's identity comes only from a turn approved to act as them, never from the task's own user. */
+/** The agent's skill sources as its runner fetches them: the clone URL and, when a workspace installation covers the repository, its read-only token, the event's own reused. */
+export async function taskSkills(
+  ctx: ServerContext,
+  task: TaskStatus['task'],
+  minted?: ReturnType<typeof eventTokens>,
+): Promise<RemoteSkill[] | undefined> {
+  const sources = task.usage?.skills;
+  const integration = Object.values(ctx.integrations).find(entry => entry.repos);
+  const repos = integration?.repos;
+  if (!sources?.length || !integration || !repos) return undefined;
+
+  const event = task.event;
+  const installations = ctx.store.list('installation', { active: true });
+
+  return Promise.all(
+    sources.map(async source => {
+      const remote = { ...source, cloneUrl: `${repos.url(source.repo)}.git` };
+      const found = (await installations).find(
+        ({ value }) =>
+          value.integration === integration.id &&
+          value.repos?.some(name => name.toLowerCase() === source.repo.toLowerCase()),
+      )?.value;
+      if (!found) return remote;
+
+      const own = minted && event && found.id === `${event.appId}:${event.installationId}`;
+      const app = own ? undefined : await ctx.store.get('app', found.app);
+      const token = own
+        ? (await minted).tokens[event.integration]
+        : app &&
+          (await installationToken(
+            ctx,
+            integration,
+            found,
+            decryptSecret(ctx.config, app.credentials),
+            { purpose: 'contents' },
+          ).catch(tokenFailed(found.id)));
+
+      return token ? { ...remote, token } : remote;
+    }),
+  );
+}
+
+/** The task's default commit identity: the bot of the agent's app whose installation pushes, the event's app when it commits, else the agent's other app holding a token; its user id read once and kept on the app. A member's identity comes only from a turn approved to act as them, never from the task's own user. */
 export async function commitIdentity(
   ctx: ServerContext,
   task: TaskStatus['task'],
@@ -294,11 +337,23 @@ export async function commitIdentity(
   app?: AgentApp,
 ): Promise<{ name: string; email: string } | undefined> {
   const event = task.event;
-  const repos = event && ctx.integrations[event.integration]?.repos;
-  const token = event && tokens[event.integration];
-  if (!repos?.commitAuthor || !task.author || !token || !app) return undefined;
+  let token = app && event && tokens[event.integration];
+  if (!app || !ctx.integrations[app.integration]?.repos?.commitAuthor) {
+    const pushing = Object.keys(tokens).length
+      ? (await agentInstallations(ctx, task)).find(
+          row =>
+            ctx.integrations[row.integration]?.repos?.commitAuthor &&
+            tokens[handleKey(row.integration, row.account.login)],
+        )
+      : undefined;
+    token = pushing && tokens[handleKey(pushing.integration, pushing.account.login)];
+    app = pushing && (await ctx.store.get('app', pushing.app));
+  }
+  const integration = app && ctx.integrations[app.integration];
+  if (!app || !integration?.repos?.commitAuthor || !token) return undefined;
   try {
-    const bot = await repos.commitAuthor({ login: task.author, id: app.botId }, token, ctx.fetch);
+    const login = integration.author?.(app.name) ?? app.name;
+    const bot = await integration.repos.commitAuthor({ login, id: app.botId }, token, ctx.fetch);
     if (app.botId === undefined) await updateMetadata(ctx.store, 'app', app.id, { botId: bot.id });
 
     return { name: bot.name, email: bot.email };
@@ -336,16 +391,20 @@ export async function taskContext(
   connections: Record<string, McpServerSpec>;
   connectionEnv: Record<string, string>;
   connectionSecrets: string[];
+  skills?: RemoteSkill[];
 }> {
   const task = await withModels(ctx, status.task);
-  const [{ tokens, checksToken, app }, config, credential]: [
+  const minted = eventTokens(ctx, status.task);
+  const [{ tokens, checksToken, app }, config, credential, skills]: [
     Awaited<ReturnType<typeof eventTokens>>,
     Partial<CoderConfig>,
     EngineCredential,
+    RemoteSkill[] | undefined,
   ] = await Promise.all([
-    eventTokens(ctx, status.task),
+    minted,
     ctx.local ? {} : taskConfig(ctx.store),
     taskCredential(ctx, task),
+    taskSkills(ctx, task, minted),
   ]);
 
   let postToken: string | undefined;
@@ -412,6 +471,7 @@ export async function taskContext(
     ...Object.values(tokens),
     ...(postToken ? [postToken] : []),
     ...(checksToken ? [checksToken] : []),
+    ...(skills?.flatMap(skill => (skill.token ? [skill.token] : [])) ?? []),
     ...credentialSecrets(credential.env),
     ...(engineCredentials?.flatMap(row => credentialSecrets(row.credential.env)) ?? []),
   ]);
@@ -430,6 +490,7 @@ export async function taskContext(
     connections: resolved.mcp,
     connectionEnv,
     connectionSecrets,
+    ...(skills ? { skills } : {}),
   };
   if (task.runner !== 'vercel-sandbox') return common;
   const brokered = (credential: EngineCredential) => {

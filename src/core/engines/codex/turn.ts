@@ -6,6 +6,7 @@ import { processTiming } from '../../../utils/process';
 import { MACHINE_SANDBOX_ENV, resolveCustomModel } from '../../config';
 import type { McpServerSpec, ProgressUpdate, TokenUsage, TurnResult } from '../../types';
 import { HISTORY_LOST } from '../../types';
+import { promptTitle } from '../../task/view';
 import type { CodexAppServerClient } from './app-server';
 import { startCodexControlServer } from './control';
 import { isCodexSessionArchived, unarchiveCodexSession } from './sessions';
@@ -130,7 +131,7 @@ function shorten(text: unknown, limit = 72) {
 }
 
 export function buildTaskThreadName(prompt: string) {
-  const excerpt = shorten(prompt, 56);
+  const excerpt = shorten(promptTitle(prompt) ?? prompt, 56);
   return excerpt ? `${TASK_THREAD_PREFIX}: ${excerpt}` : TASK_THREAD_PREFIX;
 }
 

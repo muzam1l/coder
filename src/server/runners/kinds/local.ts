@@ -12,7 +12,11 @@ import type { Runner } from '..';
 import { INTEGRATIONS } from '../../../integrations';
 import type { InboxEntry, InboxAck } from '../../tasks/queue';
 import { checkoutCache, releaseCheckout, inboxSocket, sendInbox } from '../../../runner/task';
-import { assertValidId } from '../../../core/state';
+import { assertValidId, loadTask } from '../../../core/state';
+import { deleteTask } from '../../../core/task/actions';
+import { archiveCodexSession } from '../../../core/engines/codex/sessions';
+import { conversationIds } from '../../../core/engines/history';
+import { readJsonFile } from '../../../utils/fsx';
 
 type LocalHandle = { pid: number; dir: string; started: string };
 const exec = promisify(execFile);
@@ -62,6 +66,8 @@ export class LocalRunner implements Runner {
       env: {
         PATH: [path.join(dir, 'bin'), process.env.PATH ?? ''].join(path.delimiter),
         HOME: process.env.HOME ?? '',
+        // Claude Code finds its macOS keychain sign-in by user.
+        USER: process.env.USER ?? '',
         TMPDIR: process.env.TMPDIR ?? '',
         ...(process.env.CODER_HOME ? { CODER_HOME: process.env.CODER_HOME } : {}),
         ...env,
@@ -122,12 +128,23 @@ export class LocalRunner implements Runner {
       for (let wait = 0; wait < 100 && (await processIdentity(pid)) === started; wait++)
         await new Promise(resolve => setTimeout(resolve, 100));
     }
+    // Its engine sessions go with it, as a deleted CLI task's do.
+    const engine = engineTask(dir);
+    if (engine) deleteTask(engine.cwd, engine.task);
     // A worktree left registered is pruned by the cache's next checkout.
     await releaseCheckout(path.join(dir, 'work')).catch(error =>
       console.error('coder runner: checkout cleanup failed', error),
     );
     await fsp.rm(dir, { recursive: true, force: true });
     await fsp.rm(inboxSocket(dir), { force: true });
+  }
+
+  /** Archives a task's Codex threads. */
+  async archive(taskId: string): Promise<void> {
+    const engine = engineTask(this.taskDir(taskId));
+    if (!engine || engine.task.engine === 'claude') return;
+
+    await Promise.all(conversationIds(engine.task).map(id => archiveCodexSession(engine.cwd, id)));
   }
 
   private taskDir(taskId: string): string {
@@ -170,4 +187,13 @@ export function toolInstalls(): string[] {
   return Object.values(INTEGRATIONS).flatMap(integration =>
     integration.tools.install ? [`(${integration.tools.install})`] : [],
   );
+}
+
+/** The engine task a runner task's folder ran last. */
+function engineTask(dir: string) {
+  const started = readJsonFile<{ id?: string }>(path.join(dir, '.runner-task.json'));
+  const cwd = path.join(dir, 'work');
+  const task = started?.id ? loadTask(cwd, started.id) : null;
+
+  return task ? { cwd, task } : undefined;
 }

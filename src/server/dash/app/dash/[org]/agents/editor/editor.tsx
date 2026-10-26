@@ -31,10 +31,9 @@ import { showToast, toastError } from '@/comps/frame/task-toasts';
 import { Badge, Chip, Chips } from '@/comps/ui/badge';
 import { Button, LinkButton } from '@/comps/ui/button';
 import { Icon } from '@/comps/ui/icon';
-import { Segmented } from '@/comps/ui/segmented';
 import { Search } from '@/comps/ui/toolbar';
 import { ImportPicker } from './import-picker';
-import { markdown } from '@/app/dash/[org]/agents/agent/instructions';
+import { InstructionsBox } from '@/app/dash/[org]/agents/agent/instructions';
 import { ACCESS, NO_MODELS, chainChoice, specName } from '@/app/dash/[org]/settings/model-options';
 import { ModelPick } from '@/app/dash/[org]/settings/model-pick';
 import { ChainHint } from '@/app/dash/[org]/settings/chain-hint';
@@ -271,7 +270,6 @@ export function AgentEditor({
   const renamed = Object.entries(agent?.stale?.renamed ?? {});
   const [removed, setRemoved] = useState<string[]>([]);
   const unknown = (agent?.stale?.unknown ?? []).filter(key => !removed.includes(key));
-  const [writing, setWriting] = useState('write');
   const [query, setQuery] = useState('');
   const action = useAction({
     toast: creating ? 'Agent not created' : 'Not published',
@@ -617,38 +615,16 @@ export function AgentEditor({
           </section>
 
           <section id="agent-instructions" class="form-part">
-            <div class="part-head">
-              <h2>Instructions</h2>
-              <Segmented
-                label="Instructions view"
-                options={[
-                  ['write', 'Write'],
-                  ['preview', 'Preview'],
-                ]}
-                value={writing}
-                onChange={setWriting}
-              />
-            </div>
-            {writing === 'write' ? (
-              <textarea
-                name="systemPrompt"
-                rows={10}
-                aria-label="Instructions"
-                placeholder={
-                  'Markdown. The system prompt every task starts from.\nYou answer questions about acme/app from its source. Cite file paths.'
-                }
-                value={draft.systemPrompt}
-                onInput={event => set('systemPrompt', event.currentTarget.value)}
-              />
-            ) : (
-              <div class="body md md-preview">
-                {draft.systemPrompt.trim() ? (
-                  markdown(draft.systemPrompt)
-                ) : (
-                  <p class="muted">Nothing written yet.</p>
-                )}
-              </div>
-            )}
+            <InstructionsBox
+              head={<h2>Instructions</h2>}
+              name="systemPrompt"
+              label="Instructions"
+              placeholder={
+                'Markdown. The system prompt every task starts from.\nYou answer questions about acme/app from its source. Cite file paths.'
+              }
+              value={draft.systemPrompt}
+              onChange={value => set('systemPrompt', value)}
+            />
           </section>
 
           <section id="agent-platforms" class="form-part">

@@ -85,4 +85,6 @@ export interface Runner {
   push?(handle: string, entries: InboxEntry[]): Promise<InboxAck>;
   /** Delete a deleted task's work folder on runners that keep one across turns. */
   remove?(taskId: string, handle?: string): Promise<void>;
+  /** Archives the task's engine threads on this machine. */
+  archive?(taskId: string): Promise<void>;
 }

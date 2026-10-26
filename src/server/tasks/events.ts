@@ -13,7 +13,7 @@ import { dispatchStore } from '../store/primed';
 import { runLocalTask } from './local';
 import { syncLocalAgents } from '../store/local';
 import { credentialFix, failureText, modelAttempts, resolveModels } from '../settings/credentials';
-import { dispatchTokens } from './context';
+import { dispatchTokens, installationToken } from './context';
 import { chooseRunner } from '../runners/select';
 import {
   buildContext,
@@ -32,7 +32,7 @@ import {
 } from './conversation';
 import { eventPrompt } from '../../agent/context/turn';
 import { generateTaskId } from '../../core/state';
-import { ACTIVE_STATES, type PendingDelivery } from './queue';
+import type { PendingDelivery } from './queue';
 import { answerInConversation, openApprovals, readApprovalCommand } from './approvals';
 import { dashPath, organizationSlug } from '../auth/members';
 import { eventSpace, spaceKey, syncMembers } from './access';
@@ -97,17 +97,20 @@ export async function writeCheck(
   integration: Integration,
   event: AgentEvent,
   token: () => Promise<string | undefined>,
+  members?: () => Promise<string | undefined>,
 ): Promise<boolean | null | undefined> {
   if (!integration.auth.canWrite) return undefined;
 
-  return integration.auth.canWrite(event, (await token())!, ctx.fetch).catch((error: unknown) => {
-    console.error(
-      `coder server: ${integration.id} write check failed for ${event.appId} event ${event.deliveryId}`,
-      error,
-    );
+  return integration.auth
+    .canWrite(event, (await token())!, ctx.fetch, members)
+    .catch((error: unknown) => {
+      console.error(
+        `coder server: ${integration.id} write check failed for ${event.appId} event ${event.deliveryId}`,
+        error,
+      );
 
-    return null;
-  });
+      return null;
+    });
 }
 
 async function setupText(ctx: ServerContext, engine: string, slug?: string): Promise<string> {
@@ -407,7 +410,15 @@ async function claimed(
   }
 
   // Only someone the platform lets write where the event happened starts or steers a task; a failed check says so, so every prompt gets an answer.
-  const canWrite = await writeCheck(ctx, integration, event, token);
+  const members = () =>
+    installationToken(ctx, integration, installation, credentials, { purpose: 'members' }).catch(
+      (error: unknown) => {
+        console.error(`coder server: no members token for ${installation.id}`, error);
+
+        return undefined;
+      },
+    );
+  const canWrite = await writeCheck(ctx, integration, event, token, members);
   if (canWrite === null)
     return effect(async () => {
       await replies.post(ACCESS_UNCHECKED);
@@ -471,12 +482,8 @@ async function claimed(
   const moved = Boolean(
     current?.task.space && found && current.task.space !== spaceKey({ ...event, space: found }),
   );
-  // Only an ask that must be answered shows 👀; a running turn takes it while its own one still shows.
-  const turn = current && !moved && ACTIVE_STATES.includes(current.status) ? current : undefined;
-  if (
-    directAsk(integration, event) &&
-    (!turn || ((turn.task.context?.mustReply ?? turn.task.event?.mustReply) && !turn.typingEnded))
-  ) {
+  // Only an ask that must be answered shows 👀.
+  if (directAsk(integration, event)) {
     // Not awaited, so dispatch doesn't wait on it; the host still keeps it alive until it lands.
     const typing = replies
       .startTyping?.()
@@ -515,7 +522,7 @@ async function claimed(
   // The linked member whose message started the conversation is its starter: their turns run on their own credentials and runner first, anyone else's on the workspace's. Each turn adds its asker's own connections.
   const requestedBy = member?.id;
   const [route, { models, first }, context, grants, space] = await Promise.all([
-    chooseRunner(ctx, { requestedBy, agent: agent.definition.runner }),
+    chooseRunner(ctx, { requestedBy, agent: agent.usage?.runner ?? agent.definition.runner }),
     resolveModels(ctx, effectiveSettings(agent), requestedBy),
     buildContext(ctx, integration, event, member ?? null),
     connectionGrants(ctx, undefined, agent.usage?.connections),

@@ -71,6 +71,7 @@ A repo's `.coder/config.json` sets how it runs each agent under `agents`. No ent
 | `model` | Replace the definition's model |
 | `connections` | Narrow the connections; omit for all granted |
 | `access` | `read-only` lowers it |
+| `runner` | Start its tasks on this runner, by id or name |
 | `integrations.<id>.allowedEvents` | Cap the definition's events |
 | `disabled` | `true` disables it and keeps its settings |
 
@@ -80,7 +81,7 @@ Unknown ids, integrations, events and keys fail validation. Usage comes from the
 
 An integration gives an agent two things on a platform:
 
-- **Chat:** the agent's own app. Its events start tasks, one per issue, pull request or Slack thread, and each reply goes to the thread that asked. Anyone the platform lets write there can address it (on GitHub, write access to the repository).
+- **Chat:** the agent's own app. Its events start tasks, one per issue, pull request or Slack thread, and each reply goes to the thread that asked. Anyone the platform lets write there can address it: on GitHub an organization member with write access to the repository or a bot's pull request from a branch of it, on Slack and Linear a full member, never a guest.
 - **Platform tools:** each platform's MCP server, one per installation, outside the agent's sandbox, at the agent's access. Read-only exposes only the tools the server marks read-only. Who they act as: [Connections](../connections.md#workspace-or-personal).
 
 | Platform | App | Events | Workspace | Personal |

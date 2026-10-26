@@ -382,6 +382,8 @@ export function buildClaudeTurnArgs(
     : [];
   const settings = {
     ...base,
+    // Match Codex's 2% skill listing budget.
+    skillListingBudgetFraction: 0.02,
     ...(readOnlyHooks.length
       ? { hooks: { PreToolUse: [...(base.hooks?.PreToolUse ?? []), ...readOnlyHooks] } }
       : {}),
