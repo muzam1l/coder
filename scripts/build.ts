@@ -68,14 +68,13 @@ function writeAtomic(file: string, text: string) {
   renameSync(temp, file);
 }
 
-/** Move a finished CLI build into place, retaining only its predecessor's dropped files. */
+/** Keep dropped CLI files until dist is cleared: live processes may import any older chunk. */
 export function swapCli(stage: string, out: string, now = Date.now()): void {
   const ledgerFile = path.join(out, '.retired.json');
   const ledger = readLedger(ledgerFile);
   const kept: Record<string, number> = {};
   for (const file of moveInto(stage, out).filter(cliFile)) {
-    if (ledger[file] !== undefined) remove(out, file);
-    else kept[file] = now;
+    kept[file] = ledger[file] ?? now;
   }
   writeAtomic(ledgerFile, `${JSON.stringify(kept, null, 2)}\n`);
   writeAtomic(

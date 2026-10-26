@@ -136,3 +136,11 @@ Run all of Coder Cloud on your own infrastructure: one server, one Postgres data
 Everything else is at **[coder.wular.ai/docs](https://coder.wular.ai/docs)**.
 
 `coder --help` lists every command, and `coder docs [topic]` prints the bundled docs. `coder upgrade` keeps the CLI and host plugins current.
+
+## Building from source
+
+Use `bun install` and `bun run build` for a rebuild while `coder mcp` or other CLI processes are running. The build stages its output before swapping files into `dist`, and retains every superseded CLI chunk so existing processes can finish lazy imports across any number of rebuilds. Newly started processes use the latest build. Retired files are excluded from npm packages and the runner archive.
+
+Retained CLI chunks accumulate locally. To reclaim that space, stop all Coder processes using this checkout, remove `dist`, run `bun run build`, then reconnect your MCP host.
+
+Raw `bunx tsdown` and `bun run dev` (`tsdown --watch`) clean and write directly into `dist`; they do not provide this protection. Stop Coder processes before using them, and restart/reconnect MCP after the build finishes (after each watch rebuild). Restart the host session if it owns the MCP process. For a live MCP connection, use staged `bun run build` rebuilds instead.
