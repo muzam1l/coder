@@ -2,7 +2,7 @@ import '@/comps/ui/segmented.css';
 import '@/app/dash/[org]/usage/range-bar.css';
 import { formatCompact, formatCount, formatDuration, zoneOf } from '@/utils/format';
 import { daysIn, rangeFor } from '@/utils/range';
-import { load, orgOf } from '@/api/load';
+import { load, loadLimits, orgOf } from '@/api/load';
 import type { UsageAmount, UsagePage } from '@coder/client/types';
 import { Card } from '@/comps/ui/card';
 import { Page, PageHead } from '@/comps/frame/page-head';
@@ -13,6 +13,8 @@ import { TopAgents } from './top-agents';
 import { DayChart, type Series } from '@/app/dash/[org]/usage/day-chart';
 import { RangeBar } from '@/app/dash/[org]/usage/range-bar';
 import { METRIC_LABEL, type Metric } from '@/app/dash/[org]/usage/metric';
+import { MinutesNotice } from '@/app/dash/[org]/usage/minutes-notice';
+import { LimitsCard } from '@/app/dash/[org]/usage/limits-card';
 
 const SORT_METRIC: Record<string, Metric> = {
   tasks: 'tasks',
@@ -48,6 +50,7 @@ export default function UsagePage({ request }: { request?: Request }) {
     top: 4,
     sort: sort === 'name' ? 'tokens' : sort,
   });
+  const limits = loadLimits(request);
 
   return (
     <Page>
@@ -63,7 +66,7 @@ export default function UsagePage({ request }: { request?: Request }) {
       />
       <Settle
         load={() =>
-          Promise.all([first, days]).then(([page, chart]) => {
+          Promise.all([first, days, limits]).then(([page, chart, usageLimits]) => {
             const { summary, items } = page;
             const series = (chart.top ?? []).map((key, index): Series => ({
               key,
@@ -73,6 +76,8 @@ export default function UsagePage({ request }: { request?: Request }) {
             const shown = (key: keyof UsageAmount) => items.reduce((sum, row) => sum + row[key], 0);
             return (
               <>
+                <MinutesNotice org={orgOf(request)} limits={usageLimits} />
+                <LimitsCard limits={usageLimits} />
                 <Stats label="Totals">
                   <Stat label="Agents" value={formatCount(summary.agents)} />
                   <Stat label="Tasks" value={formatCount(summary.tasks)} />

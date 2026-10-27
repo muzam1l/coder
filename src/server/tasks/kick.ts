@@ -1,5 +1,5 @@
 import type { TaskStatus } from '../store/types';
-import { SERVER_LIMITS } from '../limits';
+import { checkCpuMinutes, CpuMinutesError, usageLimits } from './usage';
 import { scoped, type ServerContext } from '../context';
 import { loadedStore } from '../store/primed';
 import { firstModel, machineFirewall } from './context';
@@ -47,14 +47,14 @@ async function stop(
 async function fail(
   ctx: ServerContext,
   status: RunningTask,
-  error: string,
+  error: string | CpuMinutesError,
   fence: TaskFence = {},
 ): Promise<boolean> {
   const runner = status.handle ? await taskRunner(ctx, status.task) : undefined;
   const finished = await ctx.queue.finish(
     ctx.organizationId,
     status.task.id,
-    { status: 'failed', error },
+    { status: 'failed', error: error instanceof Error ? error.message : error },
     (ctx.now ?? Date.now)(),
     {
       attempts: status.attempts,
@@ -213,22 +213,73 @@ export function scheduleCancel(ctx: ServerContext, status: TaskStatus): void {
   else void work;
 }
 
+/** Reads once per organization for one kick run. */
+function perOrganization<T>(read: (organizationId: string) => Promise<T>) {
+  const known = new Map<string, Promise<T>>();
+  return (organizationId: string) => {
+    if (!known.has(organizationId)) known.set(organizationId, read(organizationId));
+    return known.get(organizationId)!;
+  };
+}
+
 async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Promise<void> {
   const now = ctx.now ?? Date.now;
-  const concurrentTasks = ctx.config.limits?.concurrentTasks ?? SERVER_LIMITS.concurrentTasks;
-  const maxTasks =
-    ctx.config.store === 'postgres'
-      ? ctx.config.maxTasks
-      : Math.min(concurrentTasks, ctx.config.maxTasks ?? concurrentTasks);
+  const maxTasks = ctx.config.maxTasks;
+  let logged = false;
+  const limitsOf = perOrganization(organizationId =>
+    deadline(usageLimits(scoped(ctx, organizationId)), 5_000, 'usage limits').catch(error => {
+      if (!logged) console.error('coder server: usage limits failed', error);
+      logged = true;
+      throw error;
+    }),
+  );
+  const usageOf = perOrganization(organizationId =>
+    scoped(ctx, organizationId).store.serverRunnerUsage(now()),
+  );
+  const remainingOf = async ({
+    organizationId,
+    status,
+  }: {
+    organizationId: string;
+    status: RunningTask;
+  }) =>
+    status.task.vcpus
+      ? checkCpuMinutes(
+          scoped(ctx, organizationId),
+          status.task,
+          await limitsOf(organizationId),
+          () => usageOf(organizationId),
+        )
+      : undefined;
+  const concurrentTasks =
+    ctx.usageLimits || ctx.config.usageLimits?.maxConcurrentTasks !== undefined
+      ? (organizationId: string) =>
+          // A workspace whose limits are unavailable runs no charged task this pass.
+          limitsOf(organizationId).then(
+            limits => limits.maxConcurrentTasks,
+            () => 0,
+          )
+      : undefined;
   {
     if (sweep && ctx.local)
       await Promise.all([sweepLocalQueue(ctx, ctx.local.cwd), syncLocalApprovals(ctx)]);
     else if (sweep)
       await Promise.all([ctx.queue.archiveStopped(undefined, now()), syncDuePosts(ctx)]);
     const running = await ctx.queue.running();
+    // Charged workspaces' limits load together, so hanging hooks share one deadline.
+    for (const { organizationId, status } of running)
+      if (status.task.vcpus) void limitsOf(organizationId).catch(() => {});
     let freed = 0;
     for (const claimed of running) {
       const taskCtx = scoped(ctx, claimed.organizationId);
+      try {
+        await remainingOf(claimed);
+      } catch (error) {
+        if (error instanceof CpuMinutesError) {
+          if (await fail(taskCtx, claimed.status, error).catch(() => false)) freed++;
+          continue;
+        }
+      }
       if (await inspect(taskCtx, claimed.status, now()).catch(() => false)) freed++;
     }
     if (maxTasks !== undefined && running.length - freed >= maxTasks) return;
@@ -264,6 +315,16 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
       claimed.loaded && orgCtx.store
         ? { ...orgCtx, store: loadedStore(orgCtx.store, status, claimed.loaded) }
         : orgCtx;
+    let timeoutMs = taskCtx.config.taskTimeoutMs + 60_000;
+    try {
+      const remaining = await remainingOf(claimed);
+      if (remaining !== undefined) timeoutMs = Math.min(timeoutMs, remaining + 60_000);
+    } catch (error) {
+      if (error instanceof CpuMinutesError) await fail(taskCtx, status, error);
+      else retries.push(claimed);
+      knownWork = claimed.more;
+      continue;
+    }
     if (await startQueuedLocalTask(taskCtx, status, claimed.token)) {
       knownWork = claimed.more;
       if (!claimed.more) break;
@@ -297,7 +358,7 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
         },
         firewall?.credential,
         {
-          timeoutMs: taskCtx.config.taskTimeoutMs + 60_000,
+          timeoutMs,
           waitUntil: taskCtx.waitUntil,
           ...(firewall ? { hosts: firewall.hosts, brokered: firewall.brokered } : {}),
         },

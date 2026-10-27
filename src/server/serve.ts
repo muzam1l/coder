@@ -31,7 +31,7 @@ function loopbackPort(publicUrl?: string): number | undefined {
 /** Serverless request handler with a lazily initialized, reused backend. */
 export function serverHandler(
   env: Record<string, string | undefined> = process.env,
-  host: 'node' | 'vercel' = env.VERCEL ? 'vercel' : 'node',
+  options: { host?: 'node' | 'vercel'; usageLimits?: ServerContext['usageLimits'] } = {},
 ): {
   (request: Request, waitUntil?: (work: Promise<unknown>) => void): Promise<Response>;
   scheduled(): Promise<void>;
@@ -43,7 +43,11 @@ export function serverHandler(
   let lastMaintenance: number | undefined;
 
   const getContext = () =>
-    (pending ??= createContext({ env, host }).catch(error => {
+    (pending ??= createContext({
+      env,
+      host: options.host ?? (env.VERCEL ? 'vercel' : 'node'),
+      ...(options.usageLimits ? { usageLimits: options.usageLimits } : {}),
+    }).catch(error => {
       pending = undefined;
       throw error;
     }));
@@ -123,7 +127,8 @@ export type ServeDetails = ServeResult & {
   store: 'memory' | 'postgres';
   mode: ServerMode;
   cacheMigration?: Promise<CacheMigration>;
-  maxTasks: number;
+  /** Unset is unlimited. */
+  maxTasks?: number;
   signIn?: string;
   mintedToken?: string;
   /** Where DATABASE_URL points. */
@@ -300,7 +305,7 @@ async function startServer(options: ServeOptions = {}): Promise<ServeDetails> {
     store: host.config.store,
     mode,
     ...(cacheMigration ? { cacheMigration } : {}),
-    maxTasks: host.config.maxTasks ?? host.config.limits?.concurrentTasks ?? 10,
+    ...(host.config.maxTasks !== undefined ? { maxTasks: host.config.maxTasks } : {}),
     ...(signIn ? { signIn } : {}),
     ...(host.mintedToken ? { mintedToken: host.mintedToken } : {}),
     ...(host.config.store === 'postgres' && given.DATABASE_URL

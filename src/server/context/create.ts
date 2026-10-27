@@ -23,6 +23,7 @@ interface ContextOptions {
   env?: Record<string, string | undefined>;
   host?: 'node' | 'vercel';
   runner?: RunnerKind;
+  usageLimits?: ServerContext['usageLimits'];
   /** Serve the CLI on this machine: its config, agents and tasks. */
   local?: ServerContext['local'];
 }
@@ -154,6 +155,7 @@ export async function createContext(options: ContextOptions = {}): Promise<Conte
         runners,
         store,
         queue: backend.queue,
+        ...(options.usageLimits ? { usageLimits: options.usageLimits } : {}),
         requestScopes,
         taskWatcher,
         logWatcher,

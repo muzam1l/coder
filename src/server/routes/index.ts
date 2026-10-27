@@ -3,17 +3,13 @@ import { dispatch } from './match';
 import { bodyLimit, limitBody, notFound, untilSent, withCookies } from './http';
 import { type ServerContext } from '../context';
 import { dashboard, DashboardHosts } from '../dash/serve';
-import { ServerLimits, admit, type Admitted } from '../limits';
+import { ServerLimits, admit, callback, refusedCallback, type Admitted } from '../limits';
 import { scheduleKick } from '../tasks/kick';
 import { scheduleInbox } from '../tasks/queue';
 import { routes } from './routes';
 import { LogWatcher, TaskWatcher } from '../tasks/stream';
 
-async function serve(
-  req: Request,
-  ctx: ServerContext,
-  admitted: Admitted,
-): Promise<Response> {
+async function serve(req: Request, ctx: ServerContext, admitted: Admitted): Promise<Response> {
   if (!localHostAllowed(req, ctx)) return notFound();
   const url = new URL(req.url);
   if (admitted.scope instanceof Response) return admitted.scope;
@@ -48,11 +44,14 @@ async function request(
   try {
     const ip = options.clientIp ?? 'unknown';
     const admitted = await admit(scope.req, scope.ctx, ip);
-    const response = withCookies(
+    const served = withCookies(
       admitted instanceof Response ? admitted : await serve(scope.req, scope.ctx, admitted),
       scope.cookies,
     );
-    const parts = new URL(req.url).pathname.split('/');
+    const pathname = new URL(req.url).pathname;
+    const response =
+      (served.status === 401 && callback(pathname) && refusedCallback(scope.ctx, ip)) || served;
+    const parts = pathname.split('/');
     const task = parts[1] === 'tasks';
     const adminTask = parts[1] === 'admin' && parts[2] === 'tasks';
     if (

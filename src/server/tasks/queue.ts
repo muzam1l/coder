@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import type { AgentTask, TaskContext, TaskSource } from '../../agent/types';
 import type { LinkedMember } from '../../integrations/types';
 import type { TaskLogLine, TaskStatus, Store, UsageRecord } from '../store/types';
+import { workspaceUsageKey } from '../store/types';
 import type { Loaded } from '../store/primed';
 import { scoped, type ServerContext } from '../context';
 import { taskRunner } from '../runners/select';
@@ -22,6 +23,7 @@ import { archiveDue } from '../../core/state';
 import { STOPPED_BY_USER, type Approval } from '../../core/types';
 import { ApprovalRefusedError, mergeApprovals, refusedAnswer } from '../../core/approvals';
 import type { Batch, Conversation } from './conversation';
+import { usageRecordOf } from './usage';
 
 export interface ClaimedTask {
   organizationId: string;
@@ -41,7 +43,7 @@ export type RunningTask = Pick<
   | 'startedAt'
   | 'cancelRequestedAt'
   | 'updatedAt'
-> & { task: Pick<AgentTask, 'id' | 'runner' | 'runnerId'> };
+> & { task: Pick<AgentTask, 'id' | 'runner' | 'runnerId' | 'vcpus'> };
 
 export function taskTimes(status: TaskStatus, now = Date.now()) {
   const active = status.status === 'running' || status.status === 'waiting';
@@ -209,6 +211,7 @@ export type TaskRefresh = Pick<AgentTask, 'prompt' | 'context'> &
       | 'models'
       | 'runner'
       | 'runnerId'
+      | 'vcpus'
       | 'failureReply'
       | 'notice'
     >
@@ -301,7 +304,7 @@ function sameSession(task: AgentTask, incoming: AgentTask): boolean {
 }
 
 export interface TaskQueue {
-  deleteTask(organizationId: string, id: string, fence: TaskFence): Promise<boolean>;
+  deleteTask(organizationId: string, id: string, fence: TaskFence, now?: number): Promise<boolean>;
   metrics(organizationId: string, since: number): Promise<TaskMetrics>;
   scheduler?: { running?: Promise<void>; waiting?: Promise<void> };
   inboxDelivery?: Map<string, { work?: Promise<void>; again?: boolean }>;
@@ -332,12 +335,12 @@ export interface TaskQueue {
     delivery?: { key: string; ttlMs: number },
     maxQueued?: number,
   ): Promise<boolean>;
-  /** The oldest queued task of any organization, now running, with what its start needs; `undefined` when the queue is empty. */
+  /** The oldest queued task of any organization, now running, with what its start needs; `undefined` when the queue is empty. `concurrentTasks` caps a workspace's tasks on the server's own runner. */
   claim(
     now: number,
     maxTasks?: number,
     knownWork?: boolean,
-    concurrentTasks?: number,
+    concurrentTasks?: (organizationId: string) => Promise<number | undefined>,
   ): Promise<(ClaimedTask & { token: string; more: boolean; loaded?: Loaded }) | undefined>;
   touch(
     organizationId: string,
@@ -497,7 +500,7 @@ export async function deleteTask(ctx: ServerContext, status: TaskStatus): Promis
     tokenHash: status.tokenHash ?? null,
     handle: status.handle ?? null,
   };
-  return ctx.queue.deleteTask(ctx.organizationId, id, fence);
+  return ctx.queue.deleteTask(ctx.organizationId, id, fence, (ctx.now ?? Date.now)());
 }
 
 /** The task with these admissions recorded in its context, a steer's or a consumed entry's. */
@@ -555,9 +558,8 @@ export async function readInbox(
 
 const DONE = new Set<TaskStatus['status']>(['completed', 'failed', 'cancelled']);
 
-/** Queue over a plain `Store` (memory, file): one process, so a promise chain is the lock. */
+/** Queue over a plain `Store`; its lock keeps task transitions and monthly charges together. */
 export class StoreQueue implements TaskQueue {
-  private lock: Promise<unknown> = Promise.resolve();
   /** Deleted task ids and when, for events streams. */
   private tombstones = new Map<string, Tombstone>();
   /** Private spaces' member lists, by space key. */
@@ -584,13 +586,42 @@ export class StoreQueue implements TaskQueue {
   }
 
   private serial<T>(work: () => Promise<T>): Promise<T> {
-    const next = this.lock.then(work, work);
-    this.lock = next.catch(() => {});
-    return next;
+    return this.store.withAppLock('task-queue', work);
   }
 
   private async read(id: string): Promise<TaskStatus | undefined> {
     return this.store.get('task', id);
+  }
+
+  /** Adds an attempt that ends without the runner's completion to its turn's usage; the CLI importer counts local tasks. */
+  private async addRunnerTime(current: TaskStatus, now: number): Promise<void> {
+    if (
+      !['running', 'waiting'].includes(current.status) ||
+      current.startedAt === undefined ||
+      current.handle?.startsWith('cli:')
+    )
+      return;
+    const key = `${current.task.id}:${current.generation ?? 0}`;
+    const record = usageRecordOf(current, now);
+    const usage = await this.store.get('usage', key);
+    await this.store.put('usage', key, {
+      ...(usage ?? record),
+      runnerElapsedMs: (usage?.runnerElapsedMs ?? 0) + record.runnerElapsedMs,
+      at: now,
+    });
+    await this.chargeCpuTime(current, record.runnerElapsedMs, now);
+  }
+
+  private async chargeCpuTime(current: TaskStatus, elapsed: number, now: number): Promise<void> {
+    const vcpus = current.task.vcpus;
+    if (elapsed <= 0 || !vcpus) return;
+    const key = workspaceUsageKey(now);
+    const usage = await this.store.get('snapshot', key);
+    const meters = usage && 'meters' in usage ? usage.meters : {};
+    const meter = `cpu:${current.task.runner}`;
+    await this.store.put('snapshot', key, {
+      meters: { ...meters, [meter]: (meters[meter] ?? 0) + elapsed * vcpus },
+    });
   }
 
   async enqueue(
@@ -755,19 +786,24 @@ export class StoreQueue implements TaskQueue {
   claim(
     now: number,
     maxTasks?: number,
+    _knownWork?: boolean,
+    concurrentTasks?: (organizationId: string) => Promise<number | undefined>,
   ): Promise<(ClaimedTask & { token: string; more: boolean }) | undefined> {
     return this.serial(async () => {
       const rows = (await this.store.list('task')).map(row => row.value);
-      if (
-        maxTasks !== undefined &&
-        rows.filter(row => ['running', 'waiting'].includes(row.status)).length >= maxTasks
-      )
-        return undefined;
+      const running = rows.filter(row => ['running', 'waiting'].includes(row.status)).length;
+      if (maxTasks !== undefined && running >= maxTasks) return undefined;
+      const limit = await concurrentTasks?.('default');
+      const charged = rows.filter(
+        row => ['running', 'waiting'].includes(row.status) && row.task.vcpus,
+      ).length;
+      const allowed = (row: TaskStatus, claimed = 0) =>
+        limit === undefined || !row.task.vcpus || charged + claimed < limit;
 
       const queued = rows
         .filter(status => status.status === 'queued')
         .sort((a, b) => a.createdAt - b.createdAt);
-      const next = queued[0];
+      const next = queued.find(row => allowed(row));
       if (!next) return undefined;
 
       const token = createTaskToken(next.task.id, 'default', next.attempts + 1);
@@ -788,9 +824,8 @@ export class StoreQueue implements TaskQueue {
         status,
         token: token.token,
         more:
-          queued.some(row => row !== next) &&
-          (maxTasks === undefined ||
-            rows.filter(row => ['running', 'waiting'].includes(row.status)).length + 1 < maxTasks),
+          queued.some(row => row !== next && allowed(row, next.task.vcpus ? 1 : 0)) &&
+          (maxTasks === undefined || running + 1 < maxTasks),
       };
     });
   }
@@ -927,10 +962,16 @@ export class StoreQueue implements TaskQueue {
     });
   }
 
-  deleteTask(_organizationId: string, id: string, fence: TaskFence): Promise<boolean> {
+  deleteTask(
+    _organizationId: string,
+    id: string,
+    fence: TaskFence,
+    now = Date.now(),
+  ): Promise<boolean> {
     return this.serial(async () => {
       const current = await this.read(id);
       if (!current || !this.allowed(current, fence)) return false;
+      await this.addRunnerTime(current, now);
       await this.store.delete('task', id);
       this.tombstone(
         id,
@@ -1002,7 +1043,13 @@ export class StoreQueue implements TaskQueue {
       )
         return false;
 
-      await this.store.put('usage', `${id}:${current.generation ?? 0}`, completion.usage);
+      const key = `${id}:${current.generation ?? 0}`;
+      const prior = await this.store.get('usage', key);
+      await this.store.put('usage', key, {
+        ...completion.usage,
+        runnerElapsedMs: (prior?.runnerElapsedMs ?? 0) + completion.usage.runnerElapsedMs,
+      });
+      await this.chargeCpuTime(current, completion.usage.runnerElapsedMs, now);
 
       for (const row of await this.store.list('inbox', { prefix: `${id}:` }))
         if (row.value.generation === (current.generation ?? 0))
@@ -1033,6 +1080,7 @@ export class StoreQueue implements TaskQueue {
       const current = await this.read(id);
       if (!current || !this.allowed(current, { ...fence, statuses: ['running', 'waiting'] }))
         return false;
+      await this.addRunnerTime(current, now);
       await this.store.put('task', id, {
         ...current,
         status: 'queued',
@@ -1059,6 +1107,7 @@ export class StoreQueue implements TaskQueue {
         !this.allowed(current, { ...fence, statuses: ['queued', 'running', 'waiting'] })
       )
         return false;
+      await this.addRunnerTime(current, now);
       await this.store.put('task', id, {
         ...current,
         ...outcome,
@@ -1393,6 +1442,8 @@ export class StoreQueue implements TaskQueue {
         {},
         ...applied.map(row => (row.value.value as { admissions?: object } | null)?.admissions),
       ) as NonNullable<TaskContext['admissions']>;
+      const now = Date.now();
+      if (cancelled) await this.addRunnerTime(current, now);
 
       const next: TaskStatus = {
         ...current,
@@ -1402,10 +1453,8 @@ export class StoreQueue implements TaskQueue {
         inboxAck: { generation: ack.generation, seq: Math.max(after, ack.seq) },
         ...(answers.length ? { answer: [...(current.answer ?? []), ...answers] } : {}),
         ...(approved ? { status: 'running', approval: undefined } : {}),
-        ...(cancelled
-          ? { status: 'cancelled', error: STOPPED_BY_USER, finishedAt: Date.now() }
-          : {}),
-        updatedAt: Date.now(),
+        ...(cancelled ? { status: 'cancelled', error: STOPPED_BY_USER, finishedAt: now } : {}),
+        updatedAt: now,
       };
       await this.store.put('task', id, next);
       for (const row of applied) await this.store.delete('inbox', row.id);

@@ -1,6 +1,7 @@
 /** Runner kinds live in kinds/, one file or folder each; this folder's root holds only what they share: this catalog, select.ts and package.ts. */
 import type { AgentTask, RunnerKind } from '../../agent/types';
 import type { InboxEntry, InboxAck } from '../tasks/queue';
+import type { ServerConfig } from '../context';
 import { DockerRunner, type DockerOptions } from './kinds/docker';
 import { GithubActionsRunner } from './kinds/github-actions';
 import { HttpRunner } from './kinds/http';
@@ -53,6 +54,13 @@ export function createRunner(
     secret: config.secret,
     ...(opts.fetch ? { fetch: opts.fetch } : {}),
   });
+}
+
+/** The vCPUs a task on the server's own runner holds: `vcpus` of a vercel-sandbox config, else 1. */
+export function serverVcpus(config: Pick<ServerConfig, 'runner' | 'runnerConfig'>): number {
+  const vcpus = config.runner === 'vercel-sandbox' ? config.runnerConfig?.vcpus : undefined;
+
+  return typeof vcpus === 'number' && Number.isInteger(vcpus) && vcpus > 0 ? vcpus : 1;
 }
 
 /** A failed runner check whose message the settings page shows. */

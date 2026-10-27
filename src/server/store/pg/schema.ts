@@ -94,6 +94,18 @@ export const workspace = pgTable('workspace', {
   config: jsonb().$type<StoredConfig>(),
 });
 
+/** A workspace's metered amount per UTC month (`YYYY-MM`); `cpu:<kind>` meters hold vCPU-milliseconds on the server's own runner. */
+export const workspaceUsage = pgTable(
+  'workspace_usage',
+  {
+    organizationId: text().notNull(),
+    month: text().notNull(),
+    meter: text().notNull(),
+    amount: bigint({ mode: 'number' }).notNull().default(0),
+  },
+  t => [primaryKey({ columns: [t.organizationId, t.month, t.meter] })],
+);
+
 /** An agent owned by an organization; its current version is the one events run. */
 export const agent = pgTable(
   'agent',
@@ -274,6 +286,7 @@ export const task = pgTable(
     definition: jsonb().$type<AgentDefinition>().notNull(),
     requestedBy: text(),
     runnerId: text(),
+    vcpus: integer(),
     engineSettings: jsonb().$type<TaskUsage>(),
     tools: jsonb().$type<Record<string, string[]>>().notNull(),
     context: jsonb().$type<TaskContext>(),
@@ -532,6 +545,7 @@ export const tables = {
   secret,
   platformLink,
   workspace,
+  workspaceUsage,
   agent,
   agentVersion,
   integrationApp,

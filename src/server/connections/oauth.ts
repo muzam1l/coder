@@ -11,6 +11,7 @@ import { decryptSecret, encryptSecret } from '../store/secrets';
 import type { Store } from '../store/types';
 import { json, notFound, redirect } from '../routes/http';
 import { workspaceAdmin } from '../routes/guards';
+import { publicFetch } from '../outbound';
 import { dashPath, memberOf, sessionSlug } from '../auth/members';
 
 export const MCP_CLIENT_PATH = '/connections/oauth/client.json';
@@ -109,7 +110,7 @@ export async function oauthResource(
   authenticate?: string,
 ) {
   const endpoint = discoveryUrl(ctx, url);
-  const fetcher = ctx.fetch ?? fetch;
+  const fetcher = publicFetch(ctx);
   if (authenticate === undefined) {
     const probe = await request(fetcher, endpoint.href);
     authenticate = probe.status === 401 ? (probe.headers.get('www-authenticate') ?? '') : '';
@@ -208,7 +209,7 @@ export async function authorizeUrl(
     (connection.owner && connection.owner !== user)
   )
     throw new Error('This connection cannot be authorized.');
-  const fetcher = ctx.fetch ?? fetch;
+  const fetcher = publicFetch(ctx);
   const { resource, params } = discovered ?? (await oauthResource(ctx, connection.endpoint.url))!;
   const issuer = resource.authorization_servers[0]!;
   const issuerUrl = discoveryUrl(ctx, issuer);
@@ -373,7 +374,7 @@ export async function oauthCallback(req: Request, ctx: ServerContext, url: URL):
     const current = await member.store.get('connection', claim.id);
     checkConnection(current, claim);
     await checkAttempt(member.store, claim.id, claim.attempt);
-    const fetcher = member.fetch ?? fetch;
+    const fetcher = publicFetch(member);
     const token = await tokens(
       fetcher,
       secret,

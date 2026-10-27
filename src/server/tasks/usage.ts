@@ -1,16 +1,92 @@
 import { type Params } from '../routes/match';
 import { builtinDefinitions, loadAgents } from '../../agent/load';
 import type { AgentTask } from '../../agent/types';
+import type { WorkspaceLimits } from '../../client/types';
 import { type ServerContext } from '../context';
+import { CoderError } from '../../core/dispatch';
+import { cpuMinutesUsed } from '../../core/errors';
 import { syncLocalUsage } from './local';
 import { json, decodeCursor, page, pageLimit, paged } from '../routes/http';
 import {
   type UsageRecord,
   type Store,
+  type TaskStatus,
   type UsageAmount,
   type UsageQuery,
   type UsageTotalRow,
 } from '../store/types';
+
+/** `cpuMinutes`: vCPU minutes a month on the server's own runner. */
+export interface UsageLimits {
+  cpuMinutes?: number;
+  maxConcurrentTasks?: number;
+  maxRunners?: number;
+  /** The host's name for the workspace's plan, shown beside its usage. */
+  plan?: string;
+}
+
+/** The workspace's limits: the host's answer, else `USAGE_LIMITS`; `{}` is none. */
+export async function usageLimits(ctx: ServerContext): Promise<UsageLimits> {
+  return ctx.usageLimits ? ctx.usageLimits(ctx.organizationId) : (ctx.config.usageLimits ?? {});
+}
+
+/** The plans page for this workspace, so it opens on the workspace's own plan. */
+export function plansUrl(ctx: ServerContext): string | undefined {
+  if (!ctx.config.plansUrl) return undefined;
+  const url = new URL(ctx.config.plansUrl);
+  url.searchParams.set('workspace', ctx.organizationId);
+
+  return url.href;
+}
+
+/** A refusal at a usage limit, with the plans link when the server has one. */
+export class UsageLimitError extends CoderError {
+  constructor(message: string, plansUrl?: string) {
+    super('server', [message, ...(plansUrl ? [`See plans at ${plansUrl}.`] : [])].join(' '), {
+      status: 403,
+    });
+  }
+}
+
+export class CpuMinutesError extends UsageLimitError {
+  constructor(limit: number, plansUrl?: string) {
+    super(cpuMinutesUsed(limit), plansUrl);
+  }
+}
+
+/** Refuses a charged task in an exhausted workspace and returns its remaining wall-clock milliseconds. */
+export async function checkCpuMinutes(
+  ctx: ServerContext,
+  task: Pick<AgentTask, 'vcpus'>,
+  limits?: UsageLimits,
+  usage = () => ctx.store.serverRunnerUsage((ctx.now ?? Date.now)()),
+): Promise<number | undefined> {
+  if (!task.vcpus) return undefined;
+  const limit = (limits ?? (await usageLimits(ctx))).cpuMinutes;
+  if (limit === undefined) return undefined;
+  const { cpuMs } = await usage();
+  if (cpuMs >= limit * 60_000) throw new CpuMinutesError(limit, plansUrl(ctx));
+
+  return (limit * 60_000 - cpuMs) / task.vcpus;
+}
+
+/** A turn's usage as the server knows it before the runner reports engine, model and tokens. */
+export function usageRecordOf(
+  status: Pick<TaskStatus, 'task' | 'startedAt'>,
+  now: number,
+): UsageRecord {
+  const event = status.task.event;
+
+  return {
+    ...(event ? { installationId: `${event.appId}:${event.installationId}` } : {}),
+    taskId: status.task.id,
+    agent: status.task.agent,
+    target: usageTarget(status.task),
+    credential: status.task.models?.[0]?.credential ?? 'unknown',
+    runnerElapsedMs: Math.max(0, now - (status.startedAt ?? now)),
+    at: now,
+  };
+}
 
 /** Where a task's usage is counted: its repository, its channel, or its source. */
 export function usageTarget(task: Pick<AgentTask, 'event' | 'source'>): string {
@@ -258,6 +334,43 @@ export async function readUsage(
   return json(
     installation ? usage.filter(entry => entry.value.installationId === installation) : usage,
   );
+}
+
+/** The workspace's limits with what it used; `undefined` when it has none. */
+export async function workspaceLimits(ctx: ServerContext): Promise<WorkspaceLimits | undefined> {
+  const limits = await usageLimits(ctx);
+  if (
+    limits.cpuMinutes === undefined &&
+    limits.maxConcurrentTasks === undefined &&
+    limits.maxRunners === undefined
+  )
+    return undefined;
+  const shown: WorkspaceLimits = {};
+  if (limits.cpuMinutes !== undefined || limits.maxConcurrentTasks !== undefined) {
+    const usage = await ctx.store.serverRunnerUsage((ctx.now ?? Date.now)());
+    if (limits.cpuMinutes !== undefined)
+      shown.cpuMinutes = { used: usage.cpuMs / 60_000, limit: limits.cpuMinutes };
+    if (limits.maxConcurrentTasks !== undefined)
+      shown.concurrentTasks = { used: usage.running, limit: limits.maxConcurrentTasks };
+  }
+  if (limits.maxRunners !== undefined)
+    shown.runners = { used: (await ctx.store.list('runner')).length, limit: limits.maxRunners };
+  const plans = plansUrl(ctx);
+  if (plans) shown.plansUrl = plans;
+  if (limits.plan) shown.plan = limits.plan;
+
+  return shown;
+}
+
+export async function readLimits(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+  url: URL,
+): Promise<Response> {
+  const limits = await workspaceLimits(ctx);
+
+  return json(limits ? { limits } : {});
 }
 
 export async function readUsageTotals(

@@ -78,7 +78,8 @@ export interface VercelSandboxOptions {
   now?: () => number;
 }
 
-type SandboxHandle = { sandbox: string; command: string };
+/** `build`: the snapshot build sandbox this task started, stopped with it. */
+type SandboxHandle = { sandbox: string; command: string; build?: string };
 const decode = (value: string) => decodeJson<SandboxHandle>(value);
 
 const REFRESH_MS = 15 * 60 * 1000;
@@ -498,7 +499,12 @@ export class VercelSandboxRunner implements Runner {
     if (started) {
       if (saved.build?.sandbox === started.sandbox && saved.build.command === started.command) {
         const work = (async () => {
-          await started.wait();
+          await started.wait().catch(async error => {
+            await this.withSandbox(started.sandbox, sandbox => this.stopSandbox(sandbox)).catch(
+              () => {},
+            );
+            throw error;
+          });
           await this.finalizeSnapshot(key, saved);
         })().catch(() => {});
         waitUntil?.(work);
@@ -592,50 +598,71 @@ export class VercelSandboxRunner implements Runner {
       ],
       env,
     });
-    for (let attempt = 0; ; attempt++) {
-      let key: string | undefined;
-      try {
-        key = this.snapshotKey(task);
-        const source = key
-          ? await this.snapshot(
-              key,
-              source => this.detached(source, command({ ...env, CODER_PREPARE: '1' })),
-              true,
-              options.waitUntil,
-            ).catch(error => {
-              if (error instanceof SandboxExpired) throw error;
-              console.error(`coder server: snapshot ${key} failed; starting without one`, error);
-              return undefined;
-            })
-          : undefined;
-        const machine = (source?: string) =>
-          this.detached(source, command({ ...env, CODER_INBOX_SOCKET: INBOX_SOCKET }), {
-            ...(policy ? { networkPolicy: policy } : {}),
-            ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}),
-          });
+    const extra = {
+      ...(policy ? { networkPolicy: policy } : {}),
+      ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}),
+    };
+    let build: string | undefined;
+    try {
+      for (let attempt = 0; ; attempt++) {
+        let key: string | undefined;
+        try {
+          key = this.snapshotKey(task);
+          const source = key
+            ? await this.snapshot(
+                key,
+                async source => {
+                  const started = await this.detached(
+                    source,
+                    command({ ...env, CODER_PREPARE: '1' }),
+                    extra,
+                  );
+                  build = started.sandbox;
+                  return started;
+                },
+                true,
+                options.waitUntil,
+              ).catch(error => {
+                if (error instanceof SandboxExpired) throw error;
+                console.error(`coder server: snapshot ${key} failed; starting without one`, error);
+                return undefined;
+              })
+            : undefined;
+          const machine = (source?: string) =>
+            this.detached(source, command({ ...env, CODER_INBOX_SOCKET: INBOX_SOCKET }), extra);
 
-        const handle = source
-          ? await machine(source).catch(error => {
-              if (error instanceof SandboxExpired) throw error;
-              console.error(`coder server: starting from snapshot ${source} failed`, error);
-              return machine();
-            })
-          : await machine();
+          const handle = source
+            ? await machine(source).catch(error => {
+                if (error instanceof SandboxExpired) throw error;
+                console.error(`coder server: starting from snapshot ${source} failed`, error);
+                return machine();
+              })
+            : await machine();
 
-        return encodeJson({ sandbox: handle.sandbox, command: handle.command });
-      } catch (error) {
-        if (!(error instanceof SandboxExpired)) throw error;
-        if (key && error.snapshotId && this.options.snapshots) {
-          const snapshotId = error.snapshotId;
-          await this.withSnapshotLock(key, async store => {
-            const state = await store.get(key!);
-            if (state?.snapshotId !== snapshotId) return;
-            const { snapshotId: expired, sha, checkedAt, failedAt, ...pending } = state;
-            await store.put(key!, pending);
+          return encodeJson({
+            sandbox: handle.sandbox,
+            command: handle.command,
+            ...(build ? { build } : {}),
           });
+        } catch (error) {
+          if (!(error instanceof SandboxExpired)) throw error;
+          if (key && error.snapshotId && this.options.snapshots) {
+            const snapshotId = error.snapshotId;
+            await this.withSnapshotLock(key, async store => {
+              const state = await store.get(key!);
+              if (state?.snapshotId !== snapshotId) return;
+              const { snapshotId: expired, sha, checkedAt, failedAt, ...pending } = state;
+              await store.put(key!, pending);
+            });
+          }
+          if (attempt === 2) throw error;
         }
-        if (attempt === 2) throw error;
       }
+    } catch (error) {
+      // Only a returned handle takes over the build this start began.
+      if (build)
+        await this.withSandbox(build, sandbox => this.stopSandbox(sandbox)).catch(() => {});
+      throw error;
     }
   }
 
@@ -673,11 +700,13 @@ export class VercelSandboxRunner implements Runner {
   }
 
   async stop(handle: string): Promise<void> {
-    const name = decode(handle).sandbox;
+    const { sandbox: name, build } = decode(handle);
     try {
       await (await this.sandbox(name)).stop();
     } finally {
       this.sandboxes.delete(name);
+      if (build)
+        await this.withSandbox(build, sandbox => this.stopSandbox(sandbox)).catch(() => {});
     }
   }
 }

@@ -29,10 +29,12 @@ Required variables carry a *.
 | `SERVER_NAME` | string | `Coder` | What the dashboard calls this server, in its sidebar server menu |
 | `REVIEW_ASSETS` | path or URL | unset | Themed images for posted pull request reviews (`sev-*` and `btn-*` SVGs, dark and light); a path resolves against `PUBLIC_URL`. Unset posts plain Markdown reviews |
 | `ISSUES_URL` | URL | `https://github.com/muzam1l/coder/issues/new` | Where the dashboard sends bug reports from its Report issue button |
-| `SERVER_LIMITS` | JSON | `{}` | Request rates and task slots ([Limits and monitoring](#limits-and-monitoring)) |
+| `SERVER_LIMITS` | JSON | `{}` | Request rates ([Limits and monitoring](#limits-and-monitoring)) |
+| `USAGE_LIMITS` | JSON | unset | Limits per workspace ([Usage limits](#usage-limits)) |
+| `PLANS_URL` | URL or path | unset | Where limit notices and refusals link for more usage; a path resolves against `PUBLIC_URL` |
 | `CLAUDE_SUBSCRIPTIONS` | `1` | off | Offer **[Sign in with Claude]** for personal credentials |
 | `CODEX_SUBSCRIPTIONS` | `1` | off | Offer **[Sign in with Codex]** for personal credentials |
-| `MAX_TASKS` | number | unset | Optional deployment-wide runner slot cap, in addition to `limits.concurrentTasks` |
+| `MAX_TASKS` | number | unset | Optional deployment-wide runner slot cap |
 | `MAX_QUEUED` | number | `1000` | Tasks a workspace may have waiting |
 | `TASK_TIMEOUT` | ms | `1800000` (30 minutes) | Longest a task may run |
 | `TASK_STALL` | ms | `300000` (5 minutes) | Silence before the runner is asked whether the task is still alive |
@@ -111,7 +113,7 @@ Manage them under **# Settings → (Credentials)** or with `coder credentials ad
 
 ## Tasks
 
-A task starts from the dashboard, `coder task run --server`, or a platform event. Its credential is the requester's own, then the workspace's; a shared platform conversation, such as a channel thread or a pull request, uses only the workspace's. Without one it is refused with a link that connects it. The server holds up to `limits.concurrentTasks` runner slots per workspace, including tasks waiting for a reply or approval. Set `MAX_TASKS` for an additional cap across all instances. `TASK_STALL`, `TASK_TIMEOUT` and `TASK_ATTEMPTS` bound each task.
+A task starts from the dashboard, `coder task run --server`, or a platform event. Its credential is the requester's own, then the workspace's; a shared platform conversation, such as a channel thread or a pull request, uses only the workspace's. Without one it is refused with a link that connects it. Each running task holds a runner slot, including tasks waiting for a reply or approval. `USAGE_LIMITS` caps a workspace's tasks on the server's own runner, and `MAX_TASKS` caps slots across all instances. `TASK_STALL`, `TASK_TIMEOUT` and `TASK_ATTEMPTS` bound each task.
 
 A task is a conversation: steer it or ask it a question while it runs, and continue it once it has finished. Its output streams over Server-Sent Events, and a repo task's result includes the diff of its changes. The CLI's task commands take `--server` to do the same as the dashboard. A repo's own `.coder/config.json` can only narrow the workspace's config.
 
@@ -172,6 +174,20 @@ Every runner sends the task's log to the server while it runs, and the dashboard
 
 The server only verifies, dedupes, and dispatches; agents run in the runner with one checkout, one short-lived platform token, and one engine credential. `access` is enforced by the engine sandbox, on `vercel-sandbox` by the machine and its firewall, `tools` by the app's permissions and the MCP allowlist. App credentials are encrypted at rest.
 
+## Usage limits
+
+`USAGE_LIMITS` is a JSON object of limits for each workspace. Each value is a positive integer; an unset key has no limit.
+
+| Key | Limit |
+| --- | --- |
+| `cpuMinutes` | CPU minutes a month (UTC) on the server's own runner; one is 1 vCPU for 1 minute. Tasks on a workspace's own runners never count |
+| `maxConcurrentTasks` | Running tasks on the server's own runner, including tasks waiting for a reply or approval |
+| `maxRunners` | Most runners a workspace registers, workspace and personal together |
+
+Once a workspace has used its CPU minutes, new tasks on the server's runner are refused and running ones stop. The dashboard shows notices at half and all of the minutes, linking to `PLANS_URL` when set. A host sets each workspace's limits with `server.handler(env, { usageLimits: organizationId => limits })`; its answer replaces `USAGE_LIMITS`, and `{}` means no limits.
+
+For example, `USAGE_LIMITS='{"cpuMinutes":300,"maxConcurrentTasks":10,"maxRunners":10}'`.
+
 ## Limits and monitoring
 
 `SERVER_LIMITS` is a JSON object stored under `limits` in the server config. Each value is a positive integer. Unset keys use these defaults.
@@ -183,9 +199,8 @@ The server only verifies, dedupes, and dispatches; agents run in the runner with
 | `limits.authPerMinute` | `20` | Sign-in, token and login requests per minute for each IP, on top of `ipPerMinute` |
 | `limits.registerPerMinute` | `10` | Runner registrations per minute for each IP; includes pairing and returning-runner heartbeats |
 | `limits.pairingPerMinute` | `5` | Pairing tokens per minute for each principal at `/admin/runners/pair` |
-| `limits.concurrentTasks` | `10` | Active task slots per workspace in cloud mode, or per server in local and memory modes |
 
-For example, `SERVER_LIMITS='{"principalPerMinute":300,"ipPerMinute":60,"authPerMinute":20,"registerPerMinute":10,"pairingPerMinute":5,"concurrentTasks":10}'` sets every default explicitly. All `/admin/*`, `/runners/*`, sign-in and pairing requests use the same token-bucket implementation. A bucket starts full and refills continuously over a minute. A refused request returns `429`, a readable JSON `error` and `Retry-After` in seconds. Buckets and counters belong to each server process and reset on restart; serverless instances keep their own buckets.
+For example, `SERVER_LIMITS='{"principalPerMinute":300,"ipPerMinute":60,"authPerMinute":20,"registerPerMinute":10,"pairingPerMinute":5}'` sets every default explicitly. All `/admin/*`, `/runners/*`, sign-in and pairing requests use the same token-bucket implementation. A bucket starts full and refills continuously over a minute. A refused request returns `429`, a readable JSON `error` and `Retry-After` in seconds. Buckets and counters belong to each server process and reset on restart; serverless instances keep their own buckets.
 
 Local hosts use the connection's peer IP. Vercel uses the IP supplied by its proxy. Other fetch hosts without a peer IP share one unauthenticated bucket; place an IP-aware limiter at their ingress. Client-supplied forwarding headers never select a bucket on a local host. Behind a reverse proxy, the peer bucket belongs to that proxy.
 

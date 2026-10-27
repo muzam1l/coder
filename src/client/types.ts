@@ -309,6 +309,8 @@ export interface TasksPage {
   counts?: TaskCounts;
   /** On the first page, when asked: the viewer's approval queue, tasks with an open approval they see. */
   pendingApprovals?: TaskRow[];
+  /** On the first page, when asked: the workspace's limits as `/admin/limits` reports them. */
+  limits?: WorkspaceLimits;
 }
 
 export type Reach = 'installed' | 'created' | 'none';
@@ -444,6 +446,8 @@ export interface TaskQuery extends PageQuery {
   counts?: boolean;
   /** On an admin's first page, also the changes waiting for an admin's approval. */
   approvals?: boolean;
+  /** On the first page, also the workspace's usage limits. */
+  limits?: boolean;
   agent?: string;
   source?: string;
   q?: string;
@@ -712,6 +716,15 @@ export interface AgentEvent {
     cloneUrl: string;
     defaultBranch: string;
   };
+}
+
+/** A workspace's usage limits with what it used, and where to see plans when the server links them. */
+export interface WorkspaceLimits {
+  cpuMinutes?: { used: number; limit: number };
+  concurrentTasks?: { used: number; limit: number };
+  runners?: { used: number; limit: number };
+  plansUrl?: string;
+  plan?: string;
 }
 
 export interface ClientTypes {

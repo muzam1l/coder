@@ -65,7 +65,18 @@ const schema = z.object({
           registerPerMinute: z.optional(z.number().check(z.int(), z.positive())),
           ipPerMinute: z.optional(z.number().check(z.int(), z.positive())),
           pairingPerMinute: z.optional(z.number().check(z.int(), z.positive())),
-          concurrentTasks: z.optional(z.number().check(z.int(), z.positive())),
+        }),
+      ),
+    ),
+  ),
+  USAGE_LIMITS: emptyAsUnset(
+    z.optional(
+      z.pipe(
+        jsonObject,
+        z.strictObject({
+          cpuMinutes: z.optional(z.number().check(z.int(), z.positive())),
+          maxConcurrentTasks: z.optional(z.number().check(z.int(), z.positive())),
+          maxRunners: z.optional(z.number().check(z.int(), z.positive())),
         }),
       ),
     ),
@@ -86,6 +97,7 @@ const schema = z.object({
   ),
   SERVER_NAME: z.optional(z.string().check(z.trim())),
   ISSUES_URL: emptyAsUnset(z.optional(url(() => true, 'must be a URL'))),
+  PLANS_URL: emptyAsUnset(z.optional(z.string().check(z.trim()))),
   REVIEW_ASSETS: emptyAsUnset(z.optional(z.string().check(z.trim()))),
   VERCEL_PROJECT_PRODUCTION_URL: z.optional(z.string()),
   VERCEL_URL: z.optional(z.string()),
@@ -131,6 +143,11 @@ export function loadServerConfig(
   const vercelUrl =
     host === 'vercel' ? (values.VERCEL_PROJECT_PRODUCTION_URL ?? values.VERCEL_URL) : undefined;
   const publicUrl = values.PUBLIC_URL ?? (vercelUrl ? `https://${vercelUrl}` : undefined);
+  if (values.PLANS_URL && !URL.canParse(values.PLANS_URL, publicUrl))
+    throw new CoderError(
+      'invalid-option',
+      'Invalid server configuration:PLANS_URL must be a URL, or a path when PUBLIC_URL is set',
+    );
   const wularUrl = store === 'postgres' ? parse(wularSchema, env).AUTH_WULAR_URL : undefined;
 
   return {
@@ -145,6 +162,7 @@ export function loadServerConfig(
     ...(publicUrl ? { publicUrl } : {}),
     ...(values.SERVER_NAME ? { name: values.SERVER_NAME } : {}),
     issuesUrl: values.ISSUES_URL ?? ISSUES_URL,
+    ...(values.PLANS_URL ? { plansUrl: new URL(values.PLANS_URL, publicUrl).href } : {}),
     ...(values.REVIEW_ASSETS ? { reviewAssets: values.REVIEW_ASSETS } : {}),
     ...(databaseUrl
       ? {
@@ -159,6 +177,7 @@ export function loadServerConfig(
     runnerConfig: values.RUNNER_CONFIG,
     maxTasks: values.MAX_TASKS,
     limits: values.SERVER_LIMITS,
+    usageLimits: values.USAGE_LIMITS,
     maxQueued: values.MAX_QUEUED,
     taskTimeoutMs: values.TASK_TIMEOUT,
     taskStallMs: values.TASK_STALL,

@@ -30,6 +30,10 @@ import type { RepoFile, RepoPush, SyncMarker } from '../agents/repo';
 /** A crashed batch sender releases its reservation after this lease. */
 export const BATCH_LEASE_MS = 30_000;
 
+/** The snapshot holding a plain store's metered amounts for the UTC month of `now`. */
+export const workspaceUsageKey = (now: number) =>
+  `workspace-usage:${new Date(now).toISOString().slice(0, 7)}`;
+
 export interface StoreRecords {
   agent: AgentRecord;
   agentversion: AgentVersionRecord;
@@ -39,6 +43,7 @@ export interface StoreRecords {
   login: EngineLogin;
   runner: RunnerRecord;
   snapshot:
+    | { meters: Record<string, number> }
     | { secret: string; expiresAt?: number }
     | { resolvedConnections: string; expiresAt?: number }
     | { deletedTasks: string[] }
@@ -401,6 +406,8 @@ export interface Store {
   /** Usage summed in the database; stores without it are summed from `list("usage")`. */
   usageTotals(query: UsageQuery): Promise<UsageTotalRow[]>;
   usageSummary(since: number, by?: UsageGroup): Promise<UsageTotals['totals']>;
+  /** Charged tasks in this workspace: vCPU-ms this UTC month (every `cpu:` meter plus running attempts times their `vcpus`) and how many run now. */
+  serverRunnerUsage(now: number): Promise<{ cpuMs: number; running: number }>;
 }
 
 export interface AgentPublication {

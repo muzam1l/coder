@@ -9,7 +9,6 @@ export interface LimitsConfig {
   authPerMinute?: number;
   registerPerMinute?: number;
   pairingPerMinute?: number;
-  concurrentTasks?: number;
 }
 
 /** Every server limit, per minute. Ordinary API traffic is generous; anything that mints or redeems a secret is tight. Config `limits` overrides any of them. */
@@ -24,8 +23,6 @@ export const SERVER_LIMITS = {
   registerPerMinute: 10,
   // Pairing tokens minted per principal: one per machine being added.
   pairingPerMinute: 5,
-  // Running tasks per workspace, or per local server.
-  concurrentTasks: 10,
 } as const;
 
 /** Which bucket a request charges besides its principal or IP. */
@@ -103,6 +100,13 @@ export async function admit(
         : undefined;
 
   return rateLimit(ctx, principal, ip, rule[1]) ?? { scope };
+}
+
+export const callback = (path: string) => path.startsWith('/tasks/') || path.startsWith('/logins/');
+
+/** Charges a refused task or login callback to its IP, which gets 429 once over its bucket; a valid callback is never charged. */
+export function refusedCallback(ctx: ServerContext, ip: string): Response | undefined {
+  return rateLimit(ctx, undefined, ip);
 }
 
 function rateLimit(

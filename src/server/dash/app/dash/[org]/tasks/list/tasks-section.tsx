@@ -41,6 +41,7 @@ export function loadTasks(request: Request, agent?: string) {
     summary: true,
     counts: true,
     approvals: !agent,
+    limits: !agent,
     ...listFilters(filters),
     agent: agent ?? filters.agent,
   });
@@ -86,6 +87,7 @@ export function TasksSection({
               agent={agent}
               head={head}
               missing={needs}
+              limits={page.limits}
               pendingApprovals={page.pendingApprovals}
               me={who}
               tz={tz}

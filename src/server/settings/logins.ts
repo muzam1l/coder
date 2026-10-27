@@ -27,16 +27,6 @@ export async function createLogin(
   if (!runner || runner.kind === 'github-actions')
     return json({ error: `Sign-in cannot run on the ${ctx.config.runner} runner.` }, 409);
 
-  const active = (await ctx.store.list('login')).find(
-    ({ value }) =>
-      value.owner === user &&
-      value.engine === engine &&
-      value.state !== 'done' &&
-      value.state !== 'failed' &&
-      value.expiresAt > now(ctx),
-  );
-  if (active) return json(view(active.id, active.value));
-
   const loginId = `login-${randomBytes(12).toString('base64url')}`;
   const token = createTaskToken(loginId, ctx.organizationId, 0);
   const login: EngineLogin = {
@@ -48,7 +38,22 @@ export async function createLogin(
     createdAt: now(ctx),
     expiresAt: now(ctx) + LOGIN_TTL_MS,
   };
-  await saveLogin(ctx, loginId, login);
+  const active = await ctx.store.withAppLock(
+    `login:${ctx.organizationId}:${user}:${engine}`,
+    async store => {
+      const active = (await store.list('login')).find(
+        ({ value }) =>
+          value.owner === user &&
+          value.engine === engine &&
+          value.state !== 'done' &&
+          value.state !== 'failed' &&
+          value.expiresAt > now(ctx),
+      );
+      if (!active) await saveLogin({ ...ctx, store }, loginId, login);
+      return active;
+    },
+  );
+  if (active) return json(view(active.id, active.value));
 
   let started: EngineLogin;
 

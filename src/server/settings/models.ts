@@ -20,6 +20,8 @@ import { probeEndpoint } from '../../core/models';
 import { credentialEnv, runsOnEach } from './credentials';
 import { ConfigError, shownConfig, body, change } from './config';
 import { json } from '../routes/http';
+import { workspaceAdmin } from '../routes/guards';
+import { publicFetch } from '../outbound';
 
 const MODEL_NAME = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -90,9 +92,9 @@ export async function probe(req: Request, ctx: ServerContext): Promise<Response>
   if (!baseUrl || !/^https?:\/\//.test(baseUrl) || !URL.canParse(baseUrl))
     return json({ error: 'An http or https base URL is required' }, 400);
 
-  // A saved key only goes to a preset host or one a custom model already sends that key to.
+  // A saved key only goes, for an admin, to a preset host or one a custom model already sends that key to.
   const saved =
-    !key && envKey && (await knownHost(ctx, baseUrl, envKey))
+    !key && envKey && workspaceAdmin(ctx) && (await knownHost(ctx, baseUrl, envKey))
       ? await credentialEnv(ctx, envKey)
       : undefined;
   const resolved = key || saved;
@@ -107,7 +109,7 @@ export async function probe(req: Request, ctx: ServerContext): Promise<Response>
 
   return json(
     await cache.get(cacheKey, () =>
-      probeEndpoint({ baseUrl }, { key: resolved, fetch: ctx.fetch }),
+      probeEndpoint({ baseUrl }, { key: resolved, fetch: publicFetch(ctx) }),
     ),
   );
 }

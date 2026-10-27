@@ -33,6 +33,7 @@ import {
   type TokenState,
   agentOrderKey,
   BATCH_LEASE_MS,
+  workspaceUsageKey,
   InstallationBoundError,
   postDue,
 } from './types';
@@ -495,6 +496,24 @@ export class MemoryStore implements Store {
   async usageTotals(query: UsageQuery) {
     const { sumUsageTotals } = await import('../tasks/usage');
     return sumUsageTotals(this, query);
+  }
+
+  async serverRunnerUsage(now: number) {
+    const running = (await this.list('task'))
+      .map(row => row.value)
+      .filter(row => row.task.vcpus && ['running', 'waiting'].includes(row.status));
+    const usage = await this.get('snapshot', workspaceUsageKey(now));
+    const charged = Object.entries(usage && 'meters' in usage ? usage.meters : {})
+      .filter(([meter]) => meter.startsWith('cpu:'))
+      .reduce((sum, [, amount]) => sum + amount, 0);
+    const active = running.reduce(
+      (sum, row) =>
+        sum +
+        (row.startedAt === undefined ? 0 : Math.max(0, now - row.startedAt) * row.task.vcpus!),
+      0,
+    );
+
+    return { cpuMs: charged + active, running: running.length };
   }
 
   async usageSummary(since: number, by?: import('../tasks/usage').UsageGroup) {

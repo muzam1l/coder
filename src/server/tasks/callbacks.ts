@@ -1,8 +1,8 @@
 import { type Params } from '../routes/match';
-import { usageTarget } from './usage';
+import { usageRecordOf } from './usage';
 import { type Approval } from '../../core/types';
 import { effectiveSettings } from '../../agent/definition';
-import { type TaskStatus, type TaskLogLine, type UsageRecord } from '../store/types';
+import { type TaskStatus, type TaskLogLine } from '../store/types';
 import { type ServerContext } from '../context';
 import { taskContext, taskEngineCredentials, uninstall } from './context';
 import { effectiveConfig, taskConfig } from '../settings/config';
@@ -301,21 +301,12 @@ export async function reportResult(
         ...(body.tokens !== undefined ? { tokens: body.tokens } : {}),
       },
       usage: {
-        ...(authorized.task.event
-          ? {
-              installationId: `${authorized.task.event.appId}:${authorized.task.event.installationId}`,
-            }
-          : {}),
-        taskId: id,
-        agent: authorized.task.agent,
-        target: usageTarget(authorized.task),
+        ...usageRecordOf(authorized, now),
         ...(engine ? { engine } : {}),
         ...(model ? { model } : {}),
-        credential: body.credential ?? authorized.task.models?.[0]?.credential ?? 'unknown',
-        runnerElapsedMs: Math.max(0, now - (authorized.startedAt ?? now)),
+        ...(body.credential ? { credential: body.credential } : {}),
         ...(body.tokens !== undefined ? { tokens: body.tokens } : {}),
-        at: now,
-      } satisfies UsageRecord,
+      },
     },
     now,
   );

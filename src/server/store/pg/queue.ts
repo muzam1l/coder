@@ -90,6 +90,7 @@ import {
   taskSecret,
   taskTombstone,
   workspace,
+  workspaceUsage,
 } from './schema';
 import { countTokens } from '../../tasks/usage';
 
@@ -128,6 +129,31 @@ function addTokens(previous: SQL, value: unknown): SQL {
 
   return sql`(case when jsonb_typeof(${previous}) = 'object' then ${previous} else '{}'::jsonb end || jsonb_build_object(${sql.join(fields, sql`, `)}))`;
 }
+
+/** The runner time of an attempt that ends without the runner's completion. */
+const runnerTime = (now: number) =>
+  sql`case when ${task.status} in ('running', 'waiting') and ${task.startedAt} is not null
+    then coalesce(${task.runnerMs}, 0) + greatest(0, ${now} - floor(extract(epoch from ${task.startedAt}) * 1000))::int
+    else ${task.runnerMs} end`;
+
+/** The fenced task locked as `prior`, with its attempt's ms not yet in `runner_ms`. */
+const priorAttempt = (
+  where: SQL | undefined,
+  now: number,
+  elapsed = sql`coalesce(${runnerTime(now)}, 0) - coalesce(${task.runnerMs}, 0)`,
+) =>
+  sql`prior as materialized (select id, organization_id, runner_kind, vcpus, ${elapsed} as elapsed from ${task} where ${where} for update)`;
+
+/** Charges a charged attempt its elapsed ms times its `vcpus` to the workspace's `cpu:<kind>` meter. */
+const chargeCpuUsage = (now: number, source = sql`finished`) => sql`charged as (
+  insert into ${workspaceUsage} (organization_id, month, meter, amount)
+  select prior.organization_id, ${new Date(now).toISOString().slice(0, 7)}, 'cpu:' || prior.runner_kind,
+    prior.elapsed::bigint * prior.vcpus
+  from prior join ${source} on ${source}.id = prior.id
+  where prior.vcpus is not null and prior.elapsed > 0
+  on conflict (organization_id, month, meter) do update
+    set amount = ${workspaceUsage.amount} + excluded.amount
+)`;
 
 /** `listRank` as SQL. */
 const rank = (status: SQLWrapper) =>
@@ -315,13 +341,13 @@ export class DrizzleQueue implements TaskQueue {
       } inserted as (
         insert into ${task} (organization_id, public_id, source, status, agent, flow, runner_kind, access,
           installation_id, event, audience, space, parent, connections, models, name, cwd, prompt, args, mcp, append_system, add_dirs, author, definition, requested_by,
-          runner_id, engine_settings, tools, context, files, failure_reply, notice, task_url, settings_url, attempts, created_at, updated_at)
+          runner_id, vcpus, engine_settings, tools, context, files, failure_reply, notice, task_url, settings_url, attempts, created_at, updated_at)
         select ${organizationId}, ${agentTask.id}, ${agentTask.source}, 'queued', ${agentTask.agent}, ${agentTask.flow}, ${agentTask.runner}, ${agentTask.access ?? null},
           ${event ? sql`coalesce((select id from ${install} where key = ${`${event.appId}:${event.installationId}`} and organization_id = ${organizationId}), 0)` : sql`null`},
           ${json(event)}, ${audience}, ${space ?? null}, ${agentTask.parent ?? null}, ${json(agentTask.connections)}, ${json(agentTask.models)},
           ${agentTask.name ?? null}, ${agentTask.cwd ?? null}, ${agentTask.prompt ?? null}, ${json(agentTask.args)}, ${json(agentTask.mcp)},
           ${agentTask.appendSystem ?? null}, ${json(agentTask.addDirs)}, ${agentTask.author ?? null}, ${json(agentTask.definition)},
-          ${agentTask.requestedBy ?? null}, ${agentTask.runnerId ?? null}, ${json(agentTask.usage)}, ${json(agentTask.tools)},
+          ${agentTask.requestedBy ?? null}, ${agentTask.runnerId ?? null}, ${agentTask.vcpus ?? null}, ${json(agentTask.usage)}, ${json(agentTask.tools)},
           ${json(agentTask.context)}, ${json(agentTask.files)}, ${agentTask.failureReply ?? null}, ${agentTask.notice ?? null}, ${agentTask.taskUrl ?? null}, ${agentTask.settingsUrl ?? null},
           0, ${stamp}::timestamptz, ${stamp}::timestamptz
         from capacity where allowed ${session ? sql`and ${session.create} and not exists (select 1 from target)` : sql``} ${delivery ? sql`and exists (select 1 from receipt)` : sql``}
@@ -374,17 +400,56 @@ export class DrizzleQueue implements TaskQueue {
     return row.inserted ? { taskId: agentTask.id } : row.steered ? { steered: true } : {};
   }
 
-  async claim(_now: number, maxTasks?: number, knownWork = false, concurrentTasks?: number) {
-    const available =
-      concurrentTasks === undefined
+  async claim(
+    _now: number,
+    maxTasks?: number,
+    knownWork = false,
+    concurrentTasks?: (organizationId: string) => Promise<number | undefined>,
+  ) {
+    const free =
+      maxTasks === undefined
         ? sql`true`
-        : sql`(select count(*) from ${task} active where active.organization_id = ${task.organizationId} and active.status in ('running', 'waiting')) < ${concurrentTasks}`;
-    if (!knownWork) {
+        : sql`(select count(*) from ${task} where status in ('running', 'waiting')) < ${maxTasks}`;
+    const charged = (organizationId: SQLWrapper) =>
+      sql`(select count(*) from ${task} active where active.organization_id = ${organizationId}
+        and active.status in ('running', 'waiting') and active.vcpus is not null)`;
+    let limits: Record<string, number | null> | undefined;
+    if (concurrentTasks) {
+      // Workspaces with charged tasks queued, with how many run, in the same read as readiness.
+      const [found] = await readQuery(this.db, () =>
+        rows<{ queued: Record<string, number> | null; own: boolean; free: boolean }>(
+          this.db,
+          sql`select (select jsonb_object_agg(organization_id, ${charged(sql`queued.organization_id`)})
+            from (select distinct organization_id from ${task} where status = 'queued' and vcpus is not null) queued) as queued,
+          exists (select 1 from ${task} where status = 'queued' and vcpus is null) as own, ${free} as free`,
+        ),
+      );
+      const queued = Object.entries(found?.queued ?? {});
+      const known = Object.fromEntries(
+        await Promise.all(
+          queued.map(async ([org]) => [org, (await concurrentTasks(org)) ?? null] as const),
+        ),
+      );
+      const open = queued.some(([org, running]) => {
+        const limit = known[org];
+        return limit === null || running < limit!;
+      });
+      if (!knownWork && !(found?.free && (found.own || open))) return undefined;
+      limits = known;
+    }
+    // Only charged tasks count and wait; a workspace missing from `limits` waits for the next claim, null is unlimited.
+    const map = sql`${JSON.stringify(limits ?? {})}::jsonb`;
+    const available = (claimed = sql`0`) =>
+      limits === undefined
+        ? sql`true`
+        : sql`(${task.vcpus} is null or (${map} -> ${task.organizationId} is not null
+          and ((${map} ->> ${task.organizationId}) is null
+            or ${charged(task.organizationId)} + ${claimed} < (${map} ->> ${task.organizationId})::int)))`;
+    if (!knownWork && !limits) {
       const [ready] = await readQuery(this.db, () =>
         rows<{ ready: boolean }>(
           this.db,
-          sql`select exists (select 1 from ${task} where status = 'queued' and ${available})
-        and ${maxTasks === undefined ? sql`true` : sql`(select count(*) from ${task} where status in ('running', 'waiting')) < ${maxTasks}`} as ready`,
+          sql`select exists (select 1 from ${task} where status = 'queued') and ${free} as ready`,
         ),
       );
       if (!ready?.ready) return undefined;
@@ -394,7 +459,7 @@ export class DrizzleQueue implements TaskQueue {
       to_json(public_id), to_json(organization_id), attempts + 1), 'UTF8'), 'base64'), E'\\n', ''), '='), '+/', '-_') || '.' || ${nonce}`;
     const statement = sql`with stamp as materialized (select date_trunc('milliseconds', clock_timestamp()) as at), picked as materialized (
       select id, ${bearer} as bearer from ${task} where status = 'queued'
-        and ${available}
+        and ${available()}
         ${maxTasks === undefined ? sql`` : sql`and (select count(*) from ${task} where status in ('running', 'waiting')) < ${maxTasks}`}
         order by created_at, id limit 1 for update
       ), claimed as (
@@ -403,7 +468,7 @@ export class DrizzleQueue implements TaskQueue {
           token_hash = translate(rtrim(encode(sha256(convert_to(picked.bearer, 'UTF8')), 'base64'), '='), '+/', '-_')
         from picked where ${task.id} = picked.id returning ${task}.*
       ) select to_jsonb(claimed) as record, exists (select 1 from ${task} where status = 'queued' and id <> claimed.id
-        and ${concurrentTasks === undefined ? sql`true` : sql`(select count(*) from ${task} active where active.organization_id = ${task.organizationId} and active.status in ('running', 'waiting')) + case when ${task.organizationId} = claimed.organization_id then 1 else 0 end < ${concurrentTasks}`})
+        and ${available(sql`case when ${task.organizationId} = claimed.organization_id and claimed.vcpus is not null then 1 else 0 end`)})
         and ${maxTasks === undefined ? sql`true` : sql`(select count(*) from ${task} where status in ('running', 'waiting')) + 1 < ${maxTasks}`} as more,
         ${credentialOf(sql`claimed`)} as credential, ${configOf(sql`claimed.organization_id`)} as config, ${runnerOf(sql`claimed`)} as runner
         from claimed`;
@@ -672,7 +737,7 @@ export class DrizzleQueue implements TaskQueue {
     now: number,
     fence: TaskFence = {},
   ): Promise<boolean> {
-    const [row] = await this.db
+    const statement = this.db
       .update(task)
       .set({
         status: 'queued',
@@ -680,10 +745,20 @@ export class DrizzleQueue implements TaskQueue {
         tokenHash: null,
         lastSeenAt: null,
         logsComplete: null,
+        runnerMs: runnerTime(now),
         updatedAt: new Date(now),
       })
-      .where(this.fence(organizationId, id, { ...fence, statuses: ['running', 'waiting'] }))
+      .where(sql`${task.id} in (select id from prior)`)
       .returning({ id: task.id });
+    const [row] = await rows<{ id: number }>(
+      this.db,
+      sql`
+      with ${priorAttempt(this.fence(organizationId, id, { ...fence, statuses: ['running', 'waiting'] }), now)},
+        finished as (${statement.getSQL()}), ${chargeCpuUsage(now)}
+      select id from finished
+    `,
+    );
+
     return Boolean(row);
   }
 
@@ -691,15 +766,20 @@ export class DrizzleQueue implements TaskQueue {
     return sql`select pg_advisory_xact_lock(3, hashtext(${`app:${organizationId}:connections:${id}`}))`;
   }
 
-  async deleteTask(organizationId: string, id: string, fence: TaskFence): Promise<boolean> {
+  async deleteTask(
+    organizationId: string,
+    id: string,
+    fence: TaskFence,
+    now = Date.now(),
+  ): Promise<boolean> {
     const [row] = await pipeline<{ deleted: number }>(
       this.db,
       [this.connectionLock(organizationId, id)],
       sql`
-      with gone as (
-        delete from ${task} where ${this.fence(organizationId, id, fence)}
+      with ${priorAttempt(this.fence(organizationId, id, fence), now)}, gone as (
+        delete from ${task} where ${task.id} in (select id from prior)
         returning id, organization_id, public_id, audience, requested_by, parent
-      ), marked as (
+      ), ${chargeCpuUsage(now, sql`gone`)}, marked as (
         insert into ${taskTombstone} (organization_id, public_id, audience, requested_by, parent, deleted_at)
         select organization_id, public_id, audience, requested_by, parent, clock_timestamp() from gone
       ), ${dropTaskSecrets(sql`select id from gone`)}
@@ -724,19 +804,19 @@ export class DrizzleQueue implements TaskQueue {
         result: outcome.result ?? null,
         error: outcome.error ?? null,
         tokens: outcome.tokens ?? null,
+        runnerMs: runnerTime(now),
         lastSeenAt: at,
         finishedAt: at,
         updatedAt: at,
       })
-      .where(
-        this.fence(organizationId, id, { ...fence, statuses: ['queued', 'running', 'waiting'] }),
-      )
+      .where(sql`${task.id} in (select id from prior)`)
       .returning({ id: task.id });
     const [row] = await pipeline<{ id: number }>(
       this.db,
       [this.connectionLock(organizationId, id)],
       sql`
-      with finished as (${statement.getSQL()}), ${dropTaskSecrets(sql`select id from finished`)}
+      with ${priorAttempt(this.fence(organizationId, id, { ...fence, statuses: ['queued', 'running', 'waiting'] }), now)},
+        finished as (${statement.getSQL()}), ${chargeCpuUsage(now)}, ${dropTaskSecrets(sql`select id from finished`)}
       select id from finished`,
     );
 
@@ -774,7 +854,9 @@ export class DrizzleQueue implements TaskQueue {
           ...('access' in next ? { access: next.access ?? null } : {}),
           ...(next.models ? { models: next.models } : {}),
           ...(next.runner ? { runnerKind: next.runner } : {}),
-          ...('runnerId' in next ? { runnerId: next.runnerId ?? null } : {}),
+          ...('runnerId' in next
+            ? { runnerId: next.runnerId ?? null, vcpus: next.vcpus ?? null }
+            : {}),
           ...('failureReply' in next ? { failureReply: next.failureReply ?? null } : {}),
           ...('notice' in next ? { notice: next.notice ?? null } : {}),
           status: 'queued',
@@ -834,15 +916,15 @@ export class DrizzleQueue implements TaskQueue {
       this.db,
       [this.connectionLock(organizationId, id)],
       sql`
-    with finished as (
+    with ${priorAttempt(this.fence(organizationId, id, { attempts: completion.attempts, tokenHash: completion.tokenHash, statuses: ['running', 'waiting'] }), now, sql`${record.runnerElapsedMs}::bigint`)}, finished as (
       update ${task} set status = ${outcome.status}, result = ${JSON.stringify(outcome.result ?? null)}::jsonb,
         error = ${outcome.error ?? null}, tokens = ${JSON.stringify(outcome.tokens ?? null)}::jsonb,
         engine = ${record.engine ?? null}, model = ${record.model ?? null}, credential = ${record.credential ?? null}, runner_ms = coalesce(runner_ms, 0) + ${record.runnerElapsedMs},
         token_count = coalesce(token_count, 0) + ${countTokens(record.tokens)}, usage_tokens = ${addTokens(sql`usage_tokens`, record.tokens)},
         last_seen_at = ${at}::timestamptz, finished_at = ${at}::timestamptz, updated_at = ${at}::timestamptz${context}
-      where ${this.fence(organizationId, id, { attempts: completion.attempts, tokenHash: completion.tokenHash, statuses: ['running', 'waiting'] })}
+      where ${task.id} in (select id from prior)
       returning id, generation
-    ), ${dropTaskSecrets(sql`select id from finished`)}, inbox as (delete from ${taskInbox} where (task_id, generation) in (select id, generation from finished))${known}
+    ), ${chargeCpuUsage(now)}, ${dropTaskSecrets(sql`select id from finished`)}, inbox as (delete from ${taskInbox} where (task_id, generation) in (select id, generation from finished))${known}
     select exists (select 1 from finished) as completed`,
     );
     return Boolean(row?.completed);
@@ -1458,6 +1540,7 @@ export class DrizzleQueue implements TaskQueue {
           publicId: task.publicId,
           runner: task.runnerKind,
           runnerId: task.runnerId,
+          vcpus: task.vcpus,
           status: task.status,
           attempts: task.attempts,
           generation: task.generation,
@@ -1472,11 +1555,16 @@ export class DrizzleQueue implements TaskQueue {
         .from(task)
         .where(inArray(task.status, ['running', 'waiting'])),
     );
-    return rows.map(({ organizationId, publicId, runner: kind, runnerId, ...row }) => ({
+    return rows.map(({ organizationId, publicId, runner: kind, runnerId, vcpus, ...row }) => ({
       organizationId,
       status: defined({
         ...row,
-        task: defined({ id: publicId, runner: kind as RunningTask['task']['runner'], runnerId }),
+        task: defined({
+          id: publicId,
+          runner: kind as RunningTask['task']['runner'],
+          runnerId,
+          vcpus,
+        }),
         lastSeenAt: row.lastSeenAt && ms(row.lastSeenAt),
         startedAt: row.startedAt && ms(row.startedAt),
         cancelRequestedAt: row.cancelRequestedAt && ms(row.cancelRequestedAt),
@@ -1667,15 +1755,18 @@ export class DrizzleQueue implements TaskQueue {
     fence: TaskFence,
   ): Promise<TaskStatus['status'] | undefined> {
     if (fence.generation !== undefined && fence.generation !== ack.generation) return undefined;
+    const now = Date.now();
+    const at = new Date(now).toISOString();
     const [row] = await pipeline<{ accepted: boolean; status: TaskStatus['status'] | null }>(
       this.db,
       [this.connectionLock(organizationId, id)],
       sql`
-    with current as (
-      select id from ${task} where ${this.fence(organizationId, id, { ...fence, generation: ack.generation, statuses: undefined })}
-        and inbox_seq >= ${ack.seq} and (status in ('running', 'waiting') or (status in ('completed', 'failed', 'cancelled') and inbox_ack >= ${ack.seq})) for update
-    ), applied as (
-      delete from ${taskInbox} where task_id in (select id from current) and generation = ${ack.generation} and seq <= ${ack.seq} returning seq, kind, value
+    with ${priorAttempt(
+      sql`${this.fence(organizationId, id, { ...fence, generation: ack.generation, statuses: undefined })}
+        and inbox_seq >= ${ack.seq} and (status in ('running', 'waiting') or (status in ('completed', 'failed', 'cancelled') and inbox_ack >= ${ack.seq}))`,
+      now,
+    )}, applied as (
+      delete from ${taskInbox} where task_id in (select id from prior) and generation = ${ack.generation} and seq <= ${ack.seq} returning seq, kind, value
     ), answers as (
       select jsonb_agg(a.value order by a.seq) as value from jsonb_to_recordset(${JSON.stringify(ack.answers ?? [])}::jsonb) a(seq int, value jsonb)
       where exists (select 1 from applied where applied.seq = a.seq and applied.kind = 'ask')
@@ -1684,13 +1775,17 @@ export class DrizzleQueue implements TaskQueue {
         status = case when exists(select 1 from applied where kind = 'cancel') then 'cancelled'
           when exists(select 1 from applied where kind = 'approve' and value->>'approvalId' = ${task.approval}->>'id') then 'running' else status end,
         approval = case when exists(select 1 from applied where kind = 'approve' and value->>'approvalId' = ${task.approval}->>'id') then null else approval end,
-        finished_at = case when exists(select 1 from applied where kind = 'cancel') then now() else finished_at end,
+        runner_ms = case when exists(select 1 from applied where kind = 'cancel') then ${runnerTime(now)} else runner_ms end,
+        finished_at = case when exists(select 1 from applied where kind = 'cancel') then ${at}::timestamptz else finished_at end,
         error = case when exists(select 1 from applied where kind = 'cancel') then ${STOPPED_BY_USER} else error end,
-        updated_at = now()
-      from answers where id in (select id from current) returning id, status
-    ), ${dropTaskSecrets(sql`select id from updated where status = 'cancelled'`)}
-    select exists (select 1 from current) as accepted, (select status from updated) as status`,
+        updated_at = ${at}::timestamptz
+      from answers where id in (select id from prior) returning id, status
+    ), finished as (
+      select id from updated where status = 'cancelled' and exists(select 1 from applied where kind = 'cancel')
+    ), ${chargeCpuUsage(now)}, ${dropTaskSecrets(sql`select id from updated where status = 'cancelled'`)}
+    select exists (select 1 from prior) as accepted, (select status from updated) as status`,
     );
+
     return row?.accepted ? (row.status ?? undefined) : undefined;
   }
 

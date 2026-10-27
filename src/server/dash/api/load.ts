@@ -1,6 +1,6 @@
 import { ServerClient, ClientError } from '@coder/client';
 import { CoderError } from '@coder/core/errors';
-import type { AgentRow, AppRow, StoredRow } from '@coder/client/types';
+import type { AgentRow, AppRow, StoredRow, WorkspaceLimits } from '@coder/client/types';
 import { NO_MODELS } from '@/app/dash/[org]/settings/model-options';
 
 export function encodeDefinition(definition: unknown): string {
@@ -93,4 +93,11 @@ export function loadRunDefaults(request: Request) {
     shape,
     defaults: { chain: shown?.effective.chain ?? [] },
   }));
+}
+
+/** The workspace's usage limits, when it has any. */
+export function loadLimits(request: Request): Promise<WorkspaceLimits | undefined> {
+  return load(request)
+    .limits()
+    .catch(() => undefined);
 }

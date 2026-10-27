@@ -13,8 +13,12 @@ import { decryptSecret, encryptSecret } from '../store/secrets';
 import { type CallbackContext } from './callbacks';
 
 const MAX_LOG_BYTES = 2 * 1024 * 1024;
+const MAX_LOG_LINES = 100_000;
 
 const logKey = (taskId: string, seq: number) => `${taskId}:${String(seq).padStart(6, '0')}`;
+
+/** A row's stored size, so empty lines still count. */
+const logSize = (row: Omit<TaskLogLine, 'seq'>) => Buffer.byteLength(JSON.stringify(row));
 
 /** A warning is written once per task; its marker outlives any task by a day. */
 const WARNING_TTL_MS = 24 * 60 * 60 * 1000;
@@ -48,7 +52,7 @@ export async function taskWarnings(
           cursor,
           bytes:
             (current.logBytes ?? 0) +
-            pending.reduce((size, line) => size + Buffer.byteLength(line), 0),
+            pending.reduce((size, line) => size + logSize({ at: now, level: 'sys', line }), 0),
         },
         now,
         {
@@ -98,9 +102,10 @@ function logBatch(
   let bytes = initialBytes;
   const rows: TaskLogLine[] = [];
   for (const entry of lines) {
-    const size = Buffer.byteLength(entry.line);
-    if (bytes + size > MAX_LOG_BYTES) break;
-    rows.push({ seq, at: entry.at ?? now, level: entry.level, line: entry.line });
+    const row = { at: entry.at ?? now, level: entry.level, line: entry.line };
+    const size = logSize(row);
+    if (seq >= MAX_LOG_LINES || bytes + size > MAX_LOG_BYTES) break;
+    rows.push({ seq, ...row });
     bytes += size;
     seq += 1;
   }

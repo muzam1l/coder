@@ -1,9 +1,9 @@
 /** Which runner a task runs on, and the instance behind a stored runner record. */
-import type { AgentTask, RunnerKind } from '../../agent/types';
+import type { AgentTask } from '../../agent/types';
 import type { RunnerRecord } from '../store/types';
 import type { ServerContext } from '../context';
 import { decryptSecret } from '../store/secrets';
-import { createRunner, type Runner } from '.';
+import { createRunner, serverVcpus, type Runner } from '.';
 import { runnerSnapshots } from './kinds/vercel-sandbox';
 
 export function visibleRunner(record: RunnerRecord, requestedBy?: string): boolean {
@@ -14,12 +14,19 @@ export function serverRunnerId(ctx: ServerContext): string {
   return ctx.local ? 'local' : 'default';
 }
 
+/** The server's own runner: charged per vCPU on a hosted server, never on a local one. */
+export function serverRunner(ctx: ServerContext): Pick<AgentTask, 'runner' | 'vcpus'> {
+  return ctx.local
+    ? { runner: ctx.config.runner }
+    : { runner: ctx.config.runner, vcpus: serverVcpus(ctx.config) };
+}
+
 export async function chooseRunner(
   ctx: ServerContext,
   options: { requestedBy?: string; runner?: string; agent?: string } = {},
-): Promise<{ runner: RunnerKind; runnerId?: string }> {
+): Promise<Pick<AgentTask, 'runner' | 'runnerId' | 'vcpus'>> {
   const named = options.runner ?? options.agent;
-  if (named === serverRunnerId(ctx)) return { runner: ctx.config.runner };
+  if (named === serverRunnerId(ctx)) return serverRunner(ctx);
   const rows = (
     await ctx.store.list('runner', {
       visibleTo: options.requestedBy,
@@ -36,7 +43,7 @@ export async function chooseRunner(
       rows.find(({ value }) => value.scope === 'workspace' && value.default));
   if (named && !found) throw new Error(`Unknown runner "${named}".`);
 
-  return found ? { runner: found.value.kind, runnerId: found.id } : { runner: ctx.config.runner };
+  return found ? { runner: found.value.kind, runnerId: found.id } : serverRunner(ctx);
 }
 
 export function recordRunner(ctx: ServerContext, record: RunnerRecord, id?: string): Runner {

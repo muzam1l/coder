@@ -46,7 +46,7 @@ You answer questions about acme/app from its source. Cite file paths.
 Then:
 1. **Get it to a server.** A local server reads the repo. A cloud server imports it from the dashboard, then on each push to the agents repo's branch once its GitHub App is installed there, as a new version. `coder agent push` uploads it without a repo.
 2. **Install it.** **# Agents → *agent* → (Platforms)** creates and installs its app on each platform. An app is private, or public where the platform allows it (GitHub, Linear). An install started on the platform signs the installer in to Coder, and binds to the app's workspace when they're a member.
-3. **Try it.** `coder agent run helper <event.json> --server --wait` fires one event. Without `--server` it runs offline, with platform tools off.
+3. **Try it.** `coder agent run helper <event.json> --server --wait` fires one event. On a signed-in server, the event acts as the sender's own linked account on that platform. Without `--server` it runs offline, with platform tools off.
 
 | Key | Values | Purpose |
 | --- | --- | --- |

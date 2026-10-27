@@ -8,6 +8,7 @@ import {
   contextGuard,
   createAllowed,
   credentialAllowed,
+  credentialGuard,
   dashboardAllowed,
   dashboardTokenAllowed,
   engineAllowed,
@@ -76,7 +77,7 @@ import { completeOAuth, meRoute, startOAuth } from '../auth/members';
 import { MCP_CLIENT_PATH, oauthCallback, oauthClientDocument } from '../connections/oauth';
 import { hook, listFlows, listPulls, runFlow } from '../tasks/flows';
 import { type ServerContext } from '../context';
-import { readUsage, readUsageTotals } from '../tasks/usage';
+import { readLimits, readUsage, readUsageTotals } from '../tasks/usage';
 import { checkFolder, cloneFolder, localFolders, pickFolder } from '../settings/folders';
 import { engineStatus } from '../tasks/local';
 import {
@@ -177,7 +178,7 @@ const callbacksRoutes = [
     route('POST', '/:id/heartbeat', heartbeat, { guard: inboxGuard }),
     route('POST', '/:id/logs', reportLogs, { guard: logsGuard }),
     route('POST', '/:id/result', reportResult, { guard: secretsGuard }),
-    route('POST', '/:id/credential', refreshCredential, { guard: secretsGuard }),
+    route('POST', '/:id/credential', refreshCredential, { guard: credentialGuard }),
     route('POST', '/:id/connection', taskConnection, { guard: taskGuard }),
     route('POST', '/:id/reply', sendReply, { guard: taskGuard }),
     route('POST', '/:id/react', sendReaction, { guard: taskGuard }),
@@ -232,6 +233,7 @@ const usageRoutes = [
   ),
   route('GET', '/usage', readUsage, { approvalPolicy: 'allow' }),
   route('GET', '/usage/totals', readUsageTotals, { approvalPolicy: 'allow' }),
+  route('GET', '/limits', readLimits, { approvalPolicy: 'allow' }),
 ];
 
 const foldersRoutes = group(
@@ -267,7 +269,9 @@ const appsRoutes = [
   ),
   route('POST', '/apps/create/:integration', adminCreateTransaction),
   route('GET', '/apps', listApps),
-  route('DELETE', '/apps/:id', removeApp),
+  route('DELETE', '/apps/:id', removeApp, {
+    guard: (req, ctx) => requireWorkspaceAdmin(ctx, 'Only an owner or admin can remove an app.'),
+  }),
   route('GET', '/apps/:id/drift', readDrift),
   route('POST', '/apps/:id/update', updateApp),
   route('GET', '/installations', listInstallations),
@@ -354,29 +358,36 @@ const tasksRoutes = [
   route('GET', '/events', taskEvents, { approvalPolicy: 'allow' }),
 ];
 
+const settingsAdmin = (req: Request, ctx: ServerContext) =>
+  requireWorkspaceAdmin(ctx, 'Only an owner or admin can change workspace settings.');
+
 const configRoutes = [
   route('GET', '/config', readConfig),
-  route('PATCH', '/config', patchConfiguration),
+  route('PATCH', '/config', patchConfiguration, { guard: settingsAdmin }),
 ];
 
 const modelsRoutes = [
   route('POST', '/models/probe', (req, ctx) => probe(req, ctx)),
   route('GET', '/models', listModels, { approvalPolicy: 'allow' }),
-  route('POST', '/models', createModel),
-  route('DELETE', '/models/:name', deleteModel),
+  route('POST', '/models', createModel, { guard: settingsAdmin }),
+  route('DELETE', '/models/:name', deleteModel, { guard: settingsAdmin }),
   route('PATCH', '/models/:name', updateModel, {
+    guard: settingsAdmin,
     approvalPolicy: 'ask',
     change: 'model-update',
   }),
   route('POST', '/models/:name/alias', aliasModel, {
+    guard: settingsAdmin,
     approvalPolicy: 'ask',
     change: 'model-alias',
   }),
   route('POST', '/models/:name/disable', disableModel, {
+    guard: settingsAdmin,
     approvalPolicy: 'ask',
     change: 'model-disable',
   }),
   route('POST', '/models/:name/enable', enableModel, {
+    guard: settingsAdmin,
     approvalPolicy: 'ask',
     change: 'model-enable',
   }),

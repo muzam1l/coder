@@ -21,6 +21,7 @@ import type { TaskStatus } from '../store/types';
 import type { Params } from '../routes/match';
 import { json } from '../routes/http';
 import { requireWorkspaceAdmin } from '../routes/guards';
+import { publicFetch } from '../outbound';
 import { encryptSecret, decryptSecret, decryptCredential } from '../store/secrets';
 import { authorizeUrl, oauthResource } from './oauth';
 import { sharedApps } from '../agents/apps';
@@ -45,6 +46,7 @@ export type ConnectionContext = Pick<
   | 'auth'
   | 'now'
   | 'fetch'
+  | 'local'
 >;
 
 /** How long an account's connect notice in a task is remembered, as long as its conversation. */
@@ -684,7 +686,7 @@ export async function addConnection(
         try {
           const client = await mcpClient(
             connectionMcp({ ...connection, access: 'auto' }, undefined),
-            ctx.fetch,
+            publicFetch(ctx),
             AbortSignal.timeout(5_000),
           );
           await client.initialize().finally(() => client.close());

@@ -114,6 +114,7 @@ export type {
 export type { ReviewResult, ReviewArgs };
 export type { Session };
 export type { LocalFolder, LocalFolders, ConnectionRow } from './client/types';
+export type { UsageLimits } from './server/tasks/usage';
 export type { ConnectionAddOptions, ConnectionOptions, DeclaredServer } from './core/connection';
 export type {
   RunnerKind,

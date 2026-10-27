@@ -17,6 +17,7 @@ import { decryptSecret, encryptSecret } from '../store/secrets';
 import { RunnerCheckError } from '../runners';
 import { recordRunner, serverRunnerId, taskRunner, visibleRunner } from '../runners/select';
 import { ACTIVE_STATES } from '../tasks/queue';
+import { plansUrl, usageLimits, UsageLimitError } from '../tasks/usage';
 import { workspaceAdmin } from '../routes/guards';
 import { json } from '../routes/http';
 import { safeEqual, sha256 } from '../../utils/crypto';
@@ -300,9 +301,14 @@ export async function createRunner(
       createdAt: now,
       updatedAt: now,
     };
-    await ctx.store.put('runner', id, record);
 
-    return json(await row(id, record));
+    return ctx.store.withAppLock(`runners:${ctx.organizationId}`, async store => {
+      const denied = await runnerLimit(ctx, store);
+      if (denied) return denied;
+      await store.put('runner', id, record);
+
+      return json(await row(id, record, store));
+    });
   }
 }
 
@@ -535,6 +541,19 @@ export interface PairingRecord {
   expiresAt: number;
 }
 
+async function runnerLimit(ctx: ServerContext, store: Store): Promise<Response | undefined> {
+  const limit = (await usageLimits(ctx)).maxRunners;
+  if (limit === undefined) return undefined;
+  const used = (await store.list('runner')).length;
+  if (used < limit) return undefined;
+  const refused = new UsageLimitError(
+    `This workspace has ${used} runners, its limit. Remove one to add another.`,
+    plansUrl(ctx),
+  );
+
+  return json({ error: refused.message }, refused.status);
+}
+
 export async function pairRunner(
   req: Request,
   ctx: ServerContext,
@@ -613,7 +632,11 @@ export async function registerRunner(
     if (input.token) {
       const key = `runner-pair:${sha256(input.token)}`;
       const pairing = await store.get<PairingRecord>('snapshot', key);
-      if (!pairing || pairing.expiresAt <= now || !(await store.take('snapshot', key)))
+      if (!pairing || pairing.expiresAt <= now)
+        return json({ error: 'Pairing token expired or already used' }, 401);
+      const denied = await runnerLimit(ctx, store);
+      if (denied) return denied;
+      if (!(await store.take('snapshot', key)))
         return json({ error: 'Pairing token expired or already used' }, 401);
       id = `rnr_${randomBytes(9).toString('base64url')}`;
       record = {

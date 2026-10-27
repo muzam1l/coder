@@ -58,3 +58,11 @@ export class CoderError extends Error {
     Object.assign(this, extra);
   }
 }
+
+/** What a workspace hears once its monthly CPU minutes are used. */
+export function cpuMinutesUsed(limit: number): string {
+  return [
+    `This workspace used its ${limit} CPU minutes this month.`,
+    'Add your own runner to keep going.',
+  ].join(' ');
+}

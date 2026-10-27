@@ -31,7 +31,7 @@ import { runLocalTask } from './local';
 import { credentialFix, failureText, modelAttempts, resolveModels } from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { dispatchTokens, installationToken } from './context';
-import { chooseRunner, visibleRunner } from '../runners/select';
+import { chooseRunner, serverRunner, visibleRunner } from '../runners/select';
 import {
   CoderError,
   ignoredAddDirs,
@@ -40,6 +40,7 @@ import {
 } from '../../core/dispatch';
 import { taskWarnings } from './logs';
 import { effectiveConfig, shownConfig } from '../settings/config';
+import { checkCpuMinutes } from './usage';
 
 export interface NewTask {
   cwd?: string;
@@ -353,6 +354,7 @@ export async function createTask(
         }
       : {}),
   };
+  await checkCpuMinutes(ctx, task);
   if (ctx.local && chosen.runner === 'local' && !chosen.runnerId) return runLocalTask(ctx, task);
   await ctx.queue.enqueue(ctx.organizationId, task, now, undefined, ctx.config.maxQueued ?? 1000);
   if (ignored) await taskWarnings(ctx, id, [ignored]);
@@ -409,7 +411,7 @@ async function turnRunner(
   task: AgentTask,
   starter: string | undefined,
   agent: Agent,
-): Promise<Pick<AgentTask, 'runner' | 'runnerId'>> {
+): Promise<Pick<AgentTask, 'runner' | 'runnerId' | 'vcpus'>> {
   const stored = task.runnerId ? await ctx.store.get('runner', task.runnerId) : undefined;
   if (task.source !== task.event?.integration && (!stored || visibleRunner(stored, starter)))
     return { runner: task.runner, ...(task.runnerId ? { runnerId: task.runnerId } : {}) };
@@ -418,7 +420,7 @@ async function turnRunner(
     agent: agent.usage?.runner ?? agent.definition.runner,
   });
 
-  return { runnerId: undefined, ...chosen };
+  return { runnerId: undefined, vcpus: undefined, ...chosen };
 }
 
 /** The agent as it is now, for a task's next turn: definition, usage, files and tools by the current access mode, the models the turn's asker may run it on, and its runner. A disabled agent fails the turn; one the store no longer holds keeps the task's snapshot. */
@@ -437,6 +439,7 @@ export async function refreshedTask(
       | 'models'
       | 'runner'
       | 'runnerId'
+      | 'vcpus'
       | 'failureReply'
       | 'notice'
     >
@@ -557,10 +560,13 @@ export async function continueTask(
     ...status.task,
     usage: { ...status.task.usage, pick },
   });
+  const runnerId = 'runnerId' in current ? current.runnerId : status.task.runnerId;
   const next: TaskStatus = {
     task: {
       ...status.task,
       ...current,
+      // A turn on no stored runner holds the server runner's vCPUs, whatever its record says.
+      ...(runnerId ? {} : { runnerId: undefined, vcpus: serverRunner(ctx).vcpus }),
       prompt: text,
       access: strictestAccess(access, current.access ?? status.task.access),
       context: {

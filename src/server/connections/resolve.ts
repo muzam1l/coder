@@ -26,6 +26,7 @@ import { connectionToolServer } from '../../agent/mcp';
 import { IntegrationError } from '../../integrations/types';
 import { OAuthRevoked, oauthAccessToken, type OAuthSecret } from './oauth';
 import { refreshFailure, tokenFingerprint } from '../../core/oauth';
+import { publicFetch } from '../outbound';
 import { createHash } from 'node:crypto';
 import type { Store, TaskStatus } from '../store/types';
 
@@ -221,9 +222,9 @@ const broken = (ctx: ConnectionContext) => ({
   reason: 'Needs reconnecting',
 });
 
-const timed = (ctx: ConnectionContext) =>
+const timed = (ctx: ConnectionContext, fetcher = ctx.fetch ?? fetch) =>
   ((input, init) =>
-    (ctx.fetch ?? fetch)(input, {
+    fetcher(input, {
       ...init,
       redirect: 'manual',
       signal: AbortSignal.timeout(5000),
@@ -258,7 +259,7 @@ function mcpToken(
       return await oauthAccessToken({
         secret,
         now: (ctx.now ?? Date.now)(),
-        fetch: timed(ctx),
+        fetch: timed(ctx, publicFetch(ctx)),
         force,
         save: async value => {
           secrets.push(

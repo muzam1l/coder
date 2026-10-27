@@ -18,6 +18,7 @@ export interface LoadedAgent {
 
 export interface ServerConfig {
   limits?: import('../limits').LimitsConfig;
+  usageLimits?: import('../tasks/usage').UsageLimits;
   runner: RunnerKind;
   /** `memory` is for local testing only; `postgres` is a real deployment with sign-in. */
   store: 'memory' | 'postgres';
@@ -33,6 +34,8 @@ export interface ServerConfig {
   name?: string;
   /** `ISSUES_URL`: where the dashboard sends bug reports. */
   issuesUrl: string;
+  /** `PLANS_URL`: where usage limit notices and refusals send for plans. */
+  plansUrl?: string;
   databaseUrl?: string;
   databasePool?: import('../store/pg/client').PoolOptions;
   /** Host-only runner configuration. */
@@ -231,6 +234,10 @@ export interface ServerContext {
   runners: Partial<Record<RunnerKind, Runner>>;
   store: Store;
   queue: TaskQueue;
+  /** The host's usage limits per workspace; without it `config.usageLimits` applies to every workspace. */
+  usageLimits?: (
+    organizationId: string,
+  ) => import('../tasks/usage').UsageLimits | Promise<import('../tasks/usage').UsageLimits>;
   /** Chat SDK state for every app; a context without one keeps it for the request only. */
   chatState?: StateAdapter;
   syncAgent?(slug: string): Promise<unknown>;

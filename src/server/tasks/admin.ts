@@ -75,6 +75,7 @@ import { syncApprovals } from './approvals';
 import { type Approval } from '../../core/types';
 import { awaitsApproval } from '../../core/task/view';
 import { viewer } from './access';
+import { CpuMinutesError, workspaceLimits } from './usage';
 
 export const DONE = new Set<TaskStatus['status']>(['completed', 'failed', 'cancelled']);
 
@@ -82,6 +83,7 @@ export const DONE = new Set<TaskStatus['status']>(['completed', 'failed', 'cance
 const APPROVAL_QUEUE_ROWS = 50;
 
 export function taskError(error: unknown): Response {
+  if (error instanceof CpuMinutesError) return json({ error: error.message }, error.status);
   if (error instanceof ConfigError) return json({ error: error.message }, 400);
   if (error instanceof TaskInputError)
     return json({ error: error.message, ...(error.fix ? { fix: error.fix } : {}) }, error.status);
@@ -549,7 +551,9 @@ export async function archiveTask(
   if (!ACTIVE_STATES.includes(status.status))
     await taskRunner(ctx, status.task)
       .then(runner => runner?.archive?.(taskId))
-      .catch(error => console.error(`coder server: engine threads of ${taskId} not archived`, error));
+      .catch(error =>
+        console.error(`coder server: engine threads of ${taskId} not archived`, error),
+      );
 
   return json({ ok: true });
 }
@@ -591,8 +595,31 @@ export async function eventTarget(
       404,
     );
 
+  // A signed-in sender acts only as their own linked account, whatever actor they post.
+  const account =
+    ctx.auth && ctx.session
+      ? (await ctx.auth.linkedAccounts?.(ctx.session.user.id, ctx.store))?.find(
+          entry => entry.platform === integration.id,
+        )
+      : undefined;
+  if (ctx.auth && !account)
+    return json(
+      {
+        error: `Link your ${integration.name} account in Coder to send ${integration.name} events.`,
+      },
+      403,
+    );
+
   const event: AgentEvent = {
     ...body.event,
+    ...(account
+      ? {
+          actor: {
+            id: account.platformUserId,
+            ...(account.login ? { login: account.login } : {}),
+          },
+        }
+      : {}),
     appId: app.id,
     installationId: installation.id.slice(app.id.length + 1),
     deliveryId: `admin-${(ctx.now ?? Date.now)()}-${randomUUID()}`,
@@ -762,6 +789,7 @@ export async function listTasks(
             .sort(listOrder)
             .slice(0, APPROVAL_QUEUE_ROWS)
         : [];
+    const limits = await listLimits(ctx, url, before);
 
     return json({
       ...result,
@@ -778,6 +806,7 @@ export async function listTasks(
           }
         : {}),
       ...(pending.length ? { pendingApprovals: shape(pending) } : {}),
+      ...(limits ? { limits } : {}),
     });
   }
   if (!paged(url)) {
@@ -804,7 +833,7 @@ export async function listTasks(
       : undefined;
   // The first page, when asked, also carries the viewer's approval queue: open approvals on the tasks they see.
   const approvals = url.searchParams.get('approvals') === '1' && !before && summary;
-  const [rows, counts, pending] = await Promise.all([
+  const [rows, counts, pending, limits] = await Promise.all([
     together
       ? together.items
       : ctx.queue.list(ctx.organizationId, {
@@ -829,6 +858,7 @@ export async function listTasks(
           limit: APPROVAL_QUEUE_ROWS,
         })
       : undefined,
+    listLimits(ctx, url, before),
   ]);
   const result = page(rows, limit, since === undefined ? listCursor : deltaCursor);
 
@@ -837,6 +867,17 @@ export async function listTasks(
     items: shape(result.items),
     ...(counts ? { counts } : {}),
     ...(pending?.length ? { pendingApprovals: shape(pending) } : {}),
+    ...(limits ? { limits } : {}),
+  });
+}
+
+/** A first page's workspace limits when asked; a failing limits hook leaves them out, not the list. */
+function listLimits(ctx: ServerContext, url: URL, before: unknown) {
+  if (url.searchParams.get('limits') !== '1' || before) return undefined;
+
+  return workspaceLimits(ctx).catch(error => {
+    console.error('coder server: usage limits failed', error);
+    return undefined;
   });
 }
 

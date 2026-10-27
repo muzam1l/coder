@@ -444,7 +444,15 @@ const lastRefresh = (authJson: string | undefined) => {
   }
 };
 
-/** A task's rotated Codex `auth.json`; kept only when its `last_refresh` is newer than the stored one. */
+const codexAccount = (authJson: string) => {
+  try {
+    return (JSON.parse(authJson) as { tokens?: { account_id?: string } }).tokens?.account_id;
+  } catch {
+    return undefined;
+  }
+};
+
+/** A task's rotated Codex `auth.json`; kept only for the same account and when its `last_refresh` is newer than the stored one. */
 export function writeBackCodexAuth(
   store: Store,
   config: Pick<ServerConfig, 'encryptionKey' | 'previousEncryptionKey'>,
@@ -454,7 +462,11 @@ export function writeBackCodexAuth(
   return store.withCredential('credential', id, async current => {
     if (!current) return;
     const { env } = decryptCredential(config, current);
-    if (!env.CODEX_AUTH_JSON || !(lastRefresh(authJson) > (lastRefresh(env.CODEX_AUTH_JSON) || 0)))
+    if (
+      !env.CODEX_AUTH_JSON ||
+      codexAccount(authJson) !== codexAccount(env.CODEX_AUTH_JSON) ||
+      !(lastRefresh(authJson) > (lastRefresh(env.CODEX_AUTH_JSON) || 0))
+    )
       return;
 
     return [

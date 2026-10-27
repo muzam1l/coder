@@ -2,6 +2,7 @@
 import { lookup } from 'node:dns/promises';
 import { request as httpsRequest } from 'node:https';
 import { isIP } from 'node:net';
+import type { ServerContext } from './context';
 
 export type Address = { address: string; family: number };
 
@@ -78,7 +79,7 @@ export async function publicAddress(hostname: string, resolver = lookup): Promis
   return addresses[0]!;
 }
 
-/** One HTTPS request connected to `address` only; redirects come back unfollowed, a body over `limit` bytes rejects. */
+/** One HTTPS request connected to `address` only, answered at its headers; redirects come back unfollowed, a body streaming past `limit` bytes errors. */
 export function pinnedRequest(
   url: URL,
   init: RequestInit,
@@ -100,25 +101,77 @@ export function pinnedRequest(
         },
       },
       res => {
-        const chunks: Buffer[] = [];
         let size = 0;
-        res.on('data', chunk => {
-          size += chunk.length;
-          if (size <= limit) return chunks.push(Buffer.from(chunk));
-          reject(new Error(`Response is over ${limit} bytes`));
-          req.destroy();
+        let done = false;
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            const fail = (error: Error) => {
+              if (done) return;
+              done = true;
+              controller.error(error);
+              req.destroy();
+            };
+            res.on('data', chunk => {
+              size += chunk.length;
+              if (size > limit) return fail(new Error(`Response is over ${limit} bytes`));
+              controller.enqueue(new Uint8Array(chunk));
+            });
+            res.on('error', fail);
+            res.on('end', () => {
+              if (!done) controller.close();
+              done = true;
+            });
+            res.on('close', () => fail(new Error('Response ended early')));
+          },
+          cancel() {
+            done = true;
+            req.destroy();
+          },
         });
-        res.on('error', reject);
-        res.on('end', () =>
-          resolve(
-            new Response(res.statusCode === 204 ? null : Buffer.concat(chunks), {
-              status: res.statusCode,
-            }),
-          ),
-        );
+        try {
+          const headers = new Headers();
+          for (let i = 0; i < res.rawHeaders.length; i += 2)
+            headers.append(res.rawHeaders[i]!, res.rawHeaders[i + 1]!);
+          const empty = [204, 205, 304].includes(res.statusCode!);
+          if (empty) void body.cancel();
+          resolve(new Response(empty ? null : body, { status: res.statusCode, headers }));
+        } catch (error) {
+          req.destroy();
+          reject(error);
+        }
       },
     );
     req.on('error', reject);
     req.end(init.body as string | undefined);
   });
+}
+
+/** `fetch` for server probes and discovery: a host override, any address on a local server, else HTTPS to a public address only, redirects unfollowed, bodies capped at `limit` bytes. */
+export function publicFetch(
+  ctx: Pick<ServerContext, 'fetch' | 'local'>,
+  limit = 4_000_000,
+): typeof fetch {
+  if (ctx.fetch) return ctx.fetch;
+  if (ctx.local) return fetch;
+
+  return (async (input: RequestInfo | URL, init: RequestInit = {}) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (url.protocol !== 'https:') throw new Error('Coder reaches other servers over HTTPS only');
+    const address = await publicAddress(url.hostname);
+    const body = request.body ? await request.text() : undefined;
+
+    return pinnedRequest(
+      url,
+      {
+        method: request.method,
+        headers: Object.fromEntries(request.headers),
+        body,
+        signal: init.signal,
+      },
+      address,
+      undefined,
+      limit,
+    );
+  }) as typeof fetch;
 }

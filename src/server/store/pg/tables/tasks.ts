@@ -55,6 +55,7 @@ export function tasks(s: DrizzleStore): Kind<TaskStatus> {
         definition: j.definition,
         requestedBy: j.requestedBy ?? null,
         runnerId: j.runnerId ?? null,
+        vcpus: j.vcpus ?? null,
         engineSettings: j.usage ?? null,
         tools: j.tools,
         context: j.context ?? null,

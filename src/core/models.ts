@@ -27,6 +27,7 @@ import { writeConfigFile } from './config';
 import { connect, type ServerOptions } from './remote';
 
 const RESERVED = new Set(['codex', 'claude', 'custom']);
+const MAX_LISTED = 1000;
 
 /**
  * Probe an OpenAI-compatible endpoint: GET <baseUrl>/models, bearer-authed
@@ -38,7 +39,13 @@ export async function probeEndpoint(
   options: { key?: string; fetch?: typeof fetch } = {},
 ): Promise<ProbeResult> {
   const key = 'key' in options ? options.key : entry.envKey ? process.env[entry.envKey] : undefined;
-  const request = options.fetch ?? fetch;
+  const fetcher = options.fetch ?? fetch;
+  const deadline = AbortSignal.timeout(15_000);
+  const request = ((url: string, init?: RequestInit) =>
+    fetcher(url, {
+      ...init,
+      signal: AbortSignal.any([deadline, AbortSignal.timeout(5_000)]),
+    })) as typeof fetch;
   // A bare host may serve the API under /v1; a 404 falls through to the next
   // candidate, and only an all-candidates 404 counts as "no /models route".
   const urls = endpointCandidates(entry.baseUrl, 'models');
@@ -47,7 +54,6 @@ export async function probeEndpoint(
     try {
       const response = await request(url, {
         headers: key ? { Authorization: `Bearer ${key}` } : {},
-        signal: AbortSignal.timeout(5_000),
       });
       if (!response.ok) {
         // No /models route is fine (not every gateway implements it); any other
@@ -69,15 +75,16 @@ export async function probeEndpoint(
         continue;
       }
       const body = (await response.json().catch(() => null)) as { data?: ListedModel[] } | null;
-      const ids = Array.isArray(body?.data)
-        ? body.data.map(m => m.id).filter((id): id is string => typeof id === 'string')
+      const rows = Array.isArray(body?.data) ? body.data.slice(0, MAX_LISTED) : null;
+      const ids = rows
+        ? rows.map(m => m.id).filter((id): id is string => typeof id === 'string')
         : null;
       if (!ids) {
         return { reachable: true, modelListed: null, models: null, detail: 'endpoint reachable' };
       }
 
       const listedWindows = Object.fromEntries(
-        body!.data!.flatMap(m => {
+        rows!.flatMap(m => {
           const tokens = tokenCount(m.context_window ?? m.context_length ?? m.max_model_len);
           return typeof m.id === 'string' && tokens ? [[m.id, tokens]] : [];
         }),
@@ -145,7 +152,6 @@ async function showContextWindows(
         ...(key ? { Authorization: `Bearer ${key}` } : {}),
       },
       body: JSON.stringify({ model }),
-      signal: AbortSignal.timeout(5_000),
     }).catch(() => null);
     const body = response?.ok
       ? ((await response.json().catch(() => null)) as {
@@ -161,7 +167,11 @@ async function showContextWindows(
   const firstWindow = first ? await show(first) : undefined;
   if (!firstWindow) return {};
 
-  const windows = await Promise.all(rest.map(async id => [id, await show(id)] as const));
+  const windows: Array<readonly [string, number | undefined]> = [];
+  for (let i = 0; i < rest.length; i += 4)
+    windows.push(
+      ...(await Promise.all(rest.slice(i, i + 4).map(async id => [id, await show(id)] as const))),
+    );
   return Object.fromEntries(
     [[first!, firstWindow] as const, ...windows].filter((pair): pair is readonly [string, number] =>
       Boolean(pair[1]),
@@ -200,8 +210,7 @@ function buildModelRows(config: CoderConfig) {
       const target = aliasTarget(entry, config);
       const builtins = builtinIds(target.engine);
       const concrete = (target.model && builtins[target.model]) ?? target.model;
-      const specOf = () =>
-        [target.engine, target.model, target.effort].filter(Boolean).join('/');
+      const specOf = () => [target.engine, target.model, target.effort].filter(Boolean).join('/');
       const replaces = isBuiltinAlias(name)
         ? name
         : Object.entries(builtins).find(([, id]) => id === concrete)?.[0];
@@ -493,7 +502,9 @@ function modelAliasCore(
   }
   // The spec as typed, with its engine; effort only when it named one.
   const typed = splitEngineSpec(spec);
-  const entry = [parsed.engine, typed.model ?? parsed.model, typed.effort].filter(Boolean).join('/');
+  const entry = [parsed.engine, typed.model ?? parsed.model, typed.effort]
+    .filter(Boolean)
+    .join('/');
   const targetFile = configTargetFile(cwd, opts.workspace);
   writeModels(targetFile, models => {
     models[name] = entry;

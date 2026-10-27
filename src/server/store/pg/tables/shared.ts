@@ -146,6 +146,7 @@ export function taskRecord(r: typeof task.$inferSelect): TaskStatus {
       space: r.space,
       parent: r.parent,
       runnerId: r.runnerId,
+      vcpus: r.vcpus,
       usage: r.engineSettings,
       tools: r.tools,
       context: r.context,

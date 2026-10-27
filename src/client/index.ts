@@ -43,6 +43,7 @@ import type {
   UsageQuery,
   UsageReport,
   UsagePage,
+  WorkspaceLimits,
   TaskInput,
   TaskLog,
 } from './types';
@@ -639,5 +640,10 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
   }
   usageRows(installation?: string): Promise<Array<StoredRow<D['usageRow']>>> {
     return this.request(queryPath('/admin/usage', { installation }));
+  }
+  async limits(): Promise<WorkspaceLimits | undefined> {
+    const response: { limits?: WorkspaceLimits } = await this.request('/admin/limits');
+
+    return response.limits;
   }
 }

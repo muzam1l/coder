@@ -316,7 +316,7 @@ function sampleEvent(integration: string, type: string, sample?: string): AgentE
     appId: `${integration}:sample`,
     installationId: 'sample',
     deliveryId: 'sample-1',
-    actor: { id: 'user-1', login: 'someone', role: 'member' },
+    actor: { id: 'user-1', login: 'someone' },
     text: 'Replace me with the text a real event would carry.',
     ...(sample
       ? {

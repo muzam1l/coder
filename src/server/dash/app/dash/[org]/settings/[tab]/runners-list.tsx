@@ -213,7 +213,7 @@ function AddRunner({
   const [scope, setScope] = useState(
     asked.get('scope') === 'workspace' && admin ? 'workspace' : personal ? 'personal' : 'workspace',
   );
-  const action = useAction();
+  const action = useAction({ toast: 'Not added' });
   const busy = Boolean(action.pending);
   const [paired, setPairing] = useState<RunnerPairing>();
   // A paired machine shows up in the list, through the events stream, once it calls home.

@@ -23,6 +23,7 @@ import { appChatState, LocalChatState } from './store/chat';
 import { decryptSecret } from './store/secrets';
 import { updateMetadata } from './store';
 import { installationToken, uninstall } from './tasks/context';
+import { UsageLimitError } from './tasks/usage';
 import {
   DELIVERY_TTL_MS,
   dispatchEvent,
@@ -155,7 +156,7 @@ async function hears(
   );
 }
 
-/** Dispatch after the platform has its answer: a failure is logged, kept for the agent's Usage page, and told to its thread when asked directly. */
+/** Dispatch after the platform has its answer: a failure is logged unless it is a usage limit refusal, kept for the agent's Usage page, and told to its thread when asked directly. */
 export function later(
   ctx: ServerContext,
   app: AgentApp,
@@ -164,7 +165,8 @@ export function later(
   replies?: Replies,
 ): void {
   const logged = work.catch(error => {
-    console.error(`coder server: dispatch failed for ${app.id} event ${event.deliveryId}`, error);
+    if (!(error instanceof UsageLimitError))
+      console.error(`coder server: dispatch failed for ${app.id} event ${event.deliveryId}`, error);
 
     return recordFailure(
       ctx,

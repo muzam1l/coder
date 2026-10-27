@@ -182,6 +182,8 @@ export interface AgentTask {
   runner: RunnerKind;
   /** Registered `http` runner the task routes to. */
   runnerId?: string;
+  /** vCPUs it holds on a hosted server's own runner, charged per millisecond; unset is never charged. */
+  vcpus?: number;
   /** Defaults to `auto`; at most its agent's and its parent's. */
   access?: Access;
   /** The platform event, or for a dashboard or CLI task on a repo, that repo through its install. */

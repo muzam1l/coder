@@ -33,6 +33,7 @@ import type {
   TaskEvent,
   TaskRow,
   TasksPage,
+  WorkspaceLimits,
 } from '@coder/client/types';
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { Button } from '@/comps/ui/button';
@@ -62,6 +63,7 @@ import {
   taskOrigin,
 } from '@/app/dash/[org]/tasks/list/task';
 import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
+import { MinutesNotice } from '@/app/dash/[org]/usage/minutes-notice';
 import { useTaskEvents } from '@/comps/frame/task-toasts';
 import { useOrg } from '@/comps/nav/org';
 
@@ -226,6 +228,7 @@ export function TasksList({
   agent,
   head,
   missing,
+  limits,
   pendingApprovals,
   me,
   tz: serverZone,
@@ -247,6 +250,8 @@ export function TasksList({
   me: Me;
   /** No credential can run a task yet. */
   missing?: boolean;
+  /** The workspace's usage limits, for the CPU minutes notice. */
+  limits?: WorkspaceLimits;
   tz: string;
   now: number;
 }) {
@@ -490,6 +495,7 @@ export function TasksList({
         <Filter name="tasks" facets={facets} values={values} onChange={set} />
       </Toolbar>
       {missing ? <NeedsCredential /> : null}
+      <MinutesNotice org={org} limits={limits} />
       {pendingApprovals?.length ? (
         <PendingApprovals
           rows={pendingApprovals.map(row => fresh.rows[row.task.id] ?? row)}

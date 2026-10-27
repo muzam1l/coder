@@ -226,18 +226,17 @@ async function authorizeTaskPrincipal(
   ctx: ServerContext,
   token: string,
 ): Promise<ServerContext | Response> {
-  const organization = claimedOrganization(token);
-  if (organization && ctx.scope) ctx = scoped(ctx, organization);
-  const principal = await taskPrincipal(ctx, token);
-  if (!principal)
+  const claimed = await claimedScope(ctx, taskClaims(token).task, token);
+  const principal = claimed && (await taskPrincipal(claimed, token));
+  if (!claimed || !principal)
     return json({ error: 'The task has ended.' }, 401, {
       'www-authenticate': 'Bearer error="invalid_token"',
     });
 
-  return { ...principalContext(ctx, principal), authorizedRequest: req };
+  return { ...principalContext(claimed, principal), authorizedRequest: req };
 }
 
-/** A task starts children only as its own children, never by posting a platform event; an event acts only as its own linked member and steers only a task its sender may steer. */
+/** A task starts children only as its own children, never by posting a platform event; an event acts only as the sender's own linked account, carries no trust the platform alone gives, and steers only a task its sender may steer. */
 export async function taskCreateAllowed(req: Request, ctx: ServerContext) {
   const body = await req
     .clone()
@@ -247,14 +246,12 @@ export async function taskCreateAllowed(req: Request, ctx: ServerContext) {
   if (!event) return ctx;
   if (ctx.taskPrincipal) return json({ error: 'A task starts only its own child tasks.' }, 403);
 
-  const actor = event.actor?.id;
-  if (ctx.auth && actor && event.integration) {
-    const linked = await ctx.auth.linkedUser(event.integration, actor);
-    if (linked && linked.id !== ctx.session?.user.id)
-      return json({ error: "The event's actor is linked to another member" }, 403);
-  }
+  const actor = event.actor;
+  if (actor?.agent !== undefined || actor?.role !== undefined)
+    return json({ error: "Only the platform sets an event actor's role." }, 403);
   const target = await eventTarget(ctx, body);
-  const steered = !(target instanceof Response) && (await conversationTask(ctx, target.event));
+  if (target instanceof Response) return target;
+  const steered = await conversationTask(ctx, target.event);
 
   return (steered && (await taskRefusal(ctx, steered, true))) || ctx;
 }
@@ -351,11 +348,11 @@ export async function inboxGuard(req: Request, ctx: ServerContext, params: Param
     !Number.isInteger(claims.attempt)
   )
     return new Response('Unauthorized', { status: 401 });
-  if (ctx.scope) ctx = scoped(ctx, claims.organization);
-  if (ctx.organizationId !== claims.organization)
+  const claimed = await claimedScope(ctx, id, token);
+  if (claimed?.organizationId !== claims.organization)
     return new Response('Unauthorized', { status: 401 });
 
-  return ctx;
+  return claimed;
 }
 
 export async function taskGuard(
@@ -368,9 +365,9 @@ export async function taskGuard(
 ) {
   const id = params.id!;
   const token = bearerToken(req);
-  // The organization the token claims; `authorizeTask` trusts it only once the hash matches a task there.
-  const organization = token && claimedOrganization(token);
-  if (organization && ctx.scope) ctx = scoped(ctx, organization);
+  const claimed = token ? await claimedScope(ctx, id, token) : ctx;
+  if (!claimed) return new Response('Unauthorized', { status: 401 });
+  ctx = claimed;
 
   const authorized = await authorizeTask(req, ctx, id!, allowCompleted, include);
   if (authorized instanceof Response) return authorized;
@@ -390,12 +387,26 @@ const loading =
   (req: Request, ctx: ServerContext, params: Params, url: URL) =>
     taskGuard(req, ctx, params, url, allowCompleted(req), include);
 export const secretsGuard = loading('secrets', req => req.method === 'POST');
+export const credentialGuard = loading('secrets', () => false);
 export const logsGuard = loading('secrets', () => true);
 export const contextGuard = loading('context', () => false);
 
 function claimedOrganization(token: string): string | undefined {
   const { organization } = taskClaims(token);
   return typeof organization === 'string' ? organization : undefined;
+}
+
+/** The context of the organization a task token claims, opened only once that task there holds the token. */
+async function claimedScope(
+  ctx: ServerContext,
+  task: string | undefined,
+  token: string,
+): Promise<ServerContext | undefined> {
+  const organization = claimedOrganization(token);
+  if (!organization || !ctx.scope || organization === ctx.organizationId) return ctx;
+  if (!task || (await ctx.taskOrganization?.(task, taskTokenHash(token))) !== organization) return;
+
+  return scoped(ctx, organization);
 }
 
 export async function loginGuard(req: Request, base: ServerContext, params: Params) {

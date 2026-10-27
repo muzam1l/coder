@@ -81,6 +81,7 @@ import {
   taskSecret,
   taskTombstone,
   workspace,
+  workspaceUsage,
 } from './schema';
 import type { RepoFile } from '../../agents/repo';
 import {
@@ -1505,6 +1506,31 @@ export class DrizzleStore implements Store {
     }
 
     return grouped;
+  }
+
+  async serverRunnerUsage(now: number): Promise<{ cpuMs: number; running: number }> {
+    const [row] = await readQuery(this.db, () =>
+      queryRows<{ cpuMs: number; running: number }>(
+        this.db,
+        sql`
+        with active as (
+          select ${task.startedAt} as started_at, ${task.vcpus} as vcpus from ${task}
+          where ${this.mine(task.organizationId)} and ${task.vcpus} is not null
+            and ${task.status} in ('running', 'waiting')
+        )
+        select (
+          coalesce((select sum(${workspaceUsage.amount}) from ${workspaceUsage}
+            where ${this.mine(workspaceUsage.organizationId)}
+              and ${workspaceUsage.month} = ${new Date(now).toISOString().slice(0, 7)}
+              and ${workspaceUsage.meter} like 'cpu:%'), 0)
+          + coalesce((select sum(greatest(0, ${now} - floor(extract(epoch from started_at) * 1000)) * vcpus)
+            from active where started_at is not null), 0)
+        )::float8 as "cpuMs", (select count(*) from active)::int as running
+      `,
+      ),
+    );
+
+    return { cpuMs: row?.cpuMs ?? 0, running: row?.running ?? 0 };
   }
 
   async usageTotals(query: UsageQuery): Promise<UsageTotalRow[]> {

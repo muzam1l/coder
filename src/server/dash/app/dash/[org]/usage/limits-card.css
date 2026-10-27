@@ -1,0 +1,29 @@
+.card:has(> .limits) {
+  margin-bottom: 12px;
+  border-top-color: color-mix(in srgb, var(--acc) 70%, transparent);
+}
+.body.limits {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 24px 56px;
+  padding: 8px 20px 24px;
+}
+.body.limits > div {
+  margin: 0;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  align-items: baseline;
+}
+.limits span {
+  color: var(--muted);
+}
+.limits strong {
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+.limits i {
+  grid-column: 1 / -1;
+  height: 6px;
+  background: linear-gradient(var(--tone), var(--tone)) 0 / var(--used) 100% no-repeat, var(--line);
+}

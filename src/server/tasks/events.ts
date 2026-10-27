@@ -9,6 +9,7 @@ import type { AgentApp, AgentEvent, AgentTask, Installation, TaskSource } from '
 import { forInstallation, type ServerContext } from '../context';
 import type { DispatchLoaded, FailedDelivery, Store, TaskStatus } from '../store/types';
 import { AgentLoadError } from '../../agent/load';
+import { checkCpuMinutes, CpuMinutesError } from './usage';
 import { dispatchStore } from '../store/primed';
 import { runLocalTask } from './local';
 import { syncLocalAgents } from '../store/local';
@@ -610,6 +611,7 @@ async function claimed(
     connections: grants,
     ...(Object.keys(context).length ? { context } : {}),
   };
+  await checkCpuMinutes(ctx, task);
   if (ctx.local && !event.repo && route.runner === 'local' && !route.runnerId) return local(task);
 
   // The queue steers an active task of the conversation itself, so two first messages at once make one task; the task's conversation, acknowledged messages and secrets land with it.
@@ -679,7 +681,7 @@ export async function recordFailure(
     await (
       await replies()
     ).post(
-      error instanceof AgentLoadError
+      error instanceof AgentLoadError || error instanceof CpuMinutesError
         ? error.message
         : `Coder could not handle this message. If you run this server, check its logs. Otherwise [report the problem](${ctx.config.issuesUrl}).`,
     );
