@@ -167,7 +167,7 @@ function SignIn({
               onError(reasonText(reason));
             })
       : undefined,
-    800,
+    2000,
     [login.id],
   );
 

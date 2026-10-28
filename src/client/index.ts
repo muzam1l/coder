@@ -434,10 +434,8 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       ),
     login: (engine: 'claude' | 'codex'): Promise<D['login']> =>
       this.post('/admin/logins', { engine }),
-    loginStatus: (id: string, state?: string): Promise<D['login']> =>
-      this.request(
-        `/admin/logins/${encodeURIComponent(id)}${state ? `?state=${encodeURIComponent(state)}` : ''}`,
-      ),
+    loginStatus: (id: string): Promise<D['login']> =>
+      this.request(`/admin/logins/${encodeURIComponent(id)}`),
     loginCode: (id: string, code: string): Promise<{ ok: true }> =>
       this.post(`/admin/logins/${encodeURIComponent(id)}`, { code }),
     cancelLogin: (id: string): Promise<{ ok: true }> =>
@@ -545,8 +543,8 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
       this.request(`/admin/installations/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   };
   readonly connections = {
-    list: (authorization?: string, wait?: string): Promise<ConnectionRow[]> =>
-      this.request(queryPath('/admin/connections', { authorization, wait })),
+    list: (authorization?: string): Promise<ConnectionRow[]> =>
+      this.request(queryPath('/admin/connections', { authorization })),
     /** `authorize` is where the browser goes next for an OAuth connection. */
     add: (body: ConnectionInput): Promise<ConnectionRow & { authorize?: string }> =>
       this.post('/admin/connections', body),

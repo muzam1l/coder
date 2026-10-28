@@ -197,7 +197,7 @@ function ServerMenu({ me, host }: { me?: Me; host: string }) {
   const memory = !me?.user;
   const local = me?.mode === 'local';
   const url = me?.server?.url ?? `https://${host}`;
-  const name = local ? 'Local server' : memory ? 'Memory server' : 'Cloud server';
+  const name = local ? 'Local server' : memory ? 'Memory server' : (me?.server?.name ?? 'Coder');
 
   return (
     <Menu
@@ -208,7 +208,7 @@ function ServerMenu({ me, host }: { me?: Me; host: string }) {
       summary={
         <>
           <i class={memory && !local ? 'dot' : 'dot ok'} />
-          <span class="grow" title={`${me?.server?.name ?? 'Coder'} · ${new URL(url).host}`}>
+          <span class="grow" title={new URL(url).host}>
             {name}
           </span>
           <Icon d={iUpdown} />

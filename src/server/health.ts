@@ -20,9 +20,10 @@ async function runners(ctx: ServerContext) {
 /** Probes poll this; a pass is reused for 5 s so the database sees one check per interval, a failure is rechecked at once. */
 export async function health(ctx: ServerContext): Promise<Response> {
   const now = (ctx.now ?? Date.now)();
-  const kept = ctx.healthyAt !== undefined && now - ctx.healthyAt < 5_000;
+  const limits = ctx.limits!;
+  const kept = limits.healthyAt !== undefined && now - limits.healthyAt < 5_000;
   const ok = kept || (await probe(ctx));
-  ctx.healthyAt = ok ? (kept ? ctx.healthyAt : now) : undefined;
+  limits.healthyAt = ok ? (kept ? limits.healthyAt : now) : undefined;
   return json({ ok }, ok ? 200 : 503, { 'cache-control': 'no-store' });
 }
 

@@ -12,7 +12,7 @@ import type {
   TaskRow,
   TaskState,
 } from '@coder/client/types';
-import { client } from '@/utils/client';
+import { client, presence } from '@/utils/client';
 import { Link } from '@wular/pnext/link';
 import { usePathname, useRouter } from '@wular/pnext/navigation/client';
 import { Status, STATUS_LABEL } from '@/app/dash/[org]/tasks/list/status';
@@ -54,6 +54,7 @@ const RESYNC_MS = 60_000;
 // Latest events a tab keeps, so a page that mounts later starts from them.
 const LATEST = 200;
 const POLL_MS = 5000;
+const NOTIFY_POLL_MS = 15_000;
 
 const read = (): Record<string, Watched> => {
   try {
@@ -193,6 +194,8 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
     };
     channel?.addEventListener('message', ({ data }: MessageEvent<Message>) => {
       if (!data.hello) return receive(data);
+      // A tab someone came back to takes the poll from one that only notifies.
+      if (!present && leading.current) return requeue();
       // A tab that just loaded: the next poll goes now, for it too.
       soon ??= setTimeout(() => {
         soon = undefined;
@@ -200,11 +203,11 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
         wake();
       }, 300);
     });
-    channel?.postMessage({ hello: true });
 
     const lead = async (signal: AbortSignal) => {
       leading.current = true;
       const resync = setInterval(() => {
+        if (!present) return;
         channel?.postMessage({ resync: true });
         receive({ resync: true });
       }, RESYNC_MS);
@@ -223,7 +226,7 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
         signal.addEventListener('abort', stop);
         const ids = asked.current;
         current.current = { key: [...ids].sort().join(','), abort: once };
-        let wait = POLL_MS;
+        let wait = present ? POLL_MS : NOTIFY_POLL_MS;
         try {
           const response = await client.tasks.events(ids, last, once.signal);
           // A server without the events stream: nothing to follow.
@@ -261,10 +264,11 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
       }
     };
 
-    // A hidden tab polls nothing, unless it notifies of a watched task still running.
+    // A tab nobody is at polls nothing, unless it notifies of a watched task still running.
+    let present: boolean | undefined;
     let turn: AbortController | undefined;
     const wanted = () =>
-      document.visibilityState !== 'hidden' ||
+      present ||
       (asked.current.length > 0 &&
         localStorage.getItem(NOTIFY) === '1' &&
         typeof Notification !== 'undefined' &&
@@ -286,15 +290,30 @@ function useEventsStream(ids: string[], leading: { current: boolean }, org: stri
           });
       else void lead(signal);
     };
-    const visibility = () => sync.current();
-    addEventListener('visibilitychange', visibility);
-    sync.current();
+    const requeue = () => {
+      turn?.abort();
+      turn = undefined;
+      wake();
+      sync.current();
+    };
+    const leave = presence(state => {
+      const now = state !== 'absent';
+      if (now === present) return;
+      present = now;
+      if (now) {
+        wake();
+        channel?.postMessage({ hello: true });
+      }
+      // With no tab to take over, the poll in flight finishes.
+      if (!now && leading.current && channel) requeue();
+      else sync.current();
+    });
     return () => {
       abort.abort();
       wake();
       clearTimeout(soon);
       channel?.close();
-      removeEventListener('visibilitychange', visibility);
+      leave();
       removeEventListener(REPLAY, replay);
       removeEventListener(COUNTS_REPLAY, replayCounts);
     };

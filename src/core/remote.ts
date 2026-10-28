@@ -3,6 +3,7 @@ import http from 'node:http';
 import path from 'node:path';
 import process from 'node:process';
 import { Readable } from 'node:stream';
+import { setTimeout as sleep } from 'node:timers/promises';
 import { folderFiles, loadAgents } from '../agent/load';
 import { CoderError } from './errors';
 import { ServerClient } from '../client';
@@ -254,7 +255,8 @@ export async function loginCredential(
   options.onStart?.(() => api.cancelLogin(login.id));
   const settle = async (done: (state: LoginView['state']) => boolean) => {
     while (!done(login.state)) {
-      login = await api.loginStatus(login.id, login.state);
+      await sleep(2000);
+      login = await api.loginStatus(login.id);
     }
   };
 

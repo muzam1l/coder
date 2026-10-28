@@ -64,8 +64,9 @@ export function serverHandler(
     const background = waitUntil
       ? (work: Promise<unknown>) => waitUntil(work)
       : (work: Promise<unknown>) => void work.catch(() => {});
-    const now = Date.now();
-    if (lastMaintenance === undefined || now - lastMaintenance >= SWEEP_MS) {
+    const maintenance = () => {
+      const now = Date.now();
+      if (lastMaintenance !== undefined && now - lastMaintenance < SWEEP_MS) return;
       lastMaintenance = now;
       background(
         server.defaultContext.store
@@ -78,17 +79,22 @@ export function serverHandler(
           .then(claimed => (claimed ? maintain(server) : undefined))
           .catch(error => console.error('coder server: maintenance failed', error)),
       );
-    }
+    };
     const requestContext = (organizationId: string): ServerContext => ({
       ...server.context(organizationId),
       waitUntil: background,
       scope: requestContext,
+      maintain: maintenance,
     });
     const context = requestContext(server.defaultContext.organizationId);
     const clientIp = env.VERCEL
       ? request.headers.get('x-forwarded-for')?.split(',', 1)[0]?.trim()
       : undefined;
-    return handleRequest(request, context, { clientIp });
+    const response = await handleRequest(request, context, { clientIp });
+
+    // Only people and verified webhooks start maintenance; probes and bots leave the database asleep.
+    if (response.ok && new URL(request.url).pathname.split('/')[1] === 'admin') maintenance();
+    return response;
   };
   return Object.assign(handler, {
     scheduled: async () => {

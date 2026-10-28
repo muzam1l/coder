@@ -2,6 +2,7 @@
 import path from 'node:path';
 import process from 'node:process';
 import { createHash } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import type { ConnectionInput, ConnectionRow } from '../client/types';
 import type { ServerConfig, ServerContext } from '../server/context';
@@ -139,9 +140,10 @@ async function signedIn(opts: ConnectionAddOptions, id: string, url: string, ret
   opts.onAuthorize!(authorize.href);
   const deadline = Date.now() + 600000;
   while (Date.now() < deadline) {
-    const row = (await client(opts).list(authorization, id)).find(row => row.id === id);
+    const row = (await client(opts).list(authorization)).find(row => row.id === id);
     if (!row) throw invalid('The connection was removed before sign-in finished.');
     if (row.status === 'connected') return named(row);
+    await sleep(2000);
   }
   throw invalid('Sign-in did not finish.', `Try again: coder connection reconnect ${retry}`);
 }

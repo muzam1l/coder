@@ -33,6 +33,8 @@ export class ServerLimits {
   private sweptAt: number;
   requests = 0;
   rejections = 0;
+  /** When `/health` last passed; reused for a few seconds. */
+  healthyAt?: number;
 
   constructor(now = Date.now()) {
     this.sweptAt = now;

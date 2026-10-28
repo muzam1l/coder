@@ -235,10 +235,6 @@ export interface StoreListOptions {
 }
 
 export interface Store {
-  watch(
-    kind: 'login' | 'delivery',
-    id: string,
-  ): Promise<ReturnType<typeof import('../../utils/fsx').watchChanges>>;
   localFlows?: Map<string, { stop(): Promise<void>; work: Promise<unknown> }>;
   completionWatches?: Map<string, { stopped: boolean; work: Promise<void> }>;
   handoffs?: Map<string, Promise<unknown>>;

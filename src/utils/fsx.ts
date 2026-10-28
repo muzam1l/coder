@@ -144,7 +144,7 @@ export function createJsonlTail(file: string, from = 0): () => string[] {
 }
 
 /** Directory watches survive atomic replacements; the latch also accepts process/store signals. */
-export function watchChanges(directory?: string, onChange?: (file: string | null) => void) {
+export function watchChanges(directory: string, onChange?: (file: string | null) => void) {
   let changed = false;
   let closed = false;
   const waiters = new Set<() => void>();
@@ -153,20 +153,17 @@ export function watchChanges(directory?: string, onChange?: (file: string | null
     for (const wake of [...waiters]) wake();
   };
   // Native watch registration can lag publications made in the same turn.
-  const initial = directory
-    ? setImmediate(() => {
-        notify();
-        onChange?.(null);
-      })
-    : undefined;
+  const initial = setImmediate(() => {
+    notify();
+    onChange?.(null);
+  });
   let watcher: fs.FSWatcher | undefined;
   try {
-    if (directory)
-      watcher = fs.watch(directory, { persistent: false }, (_event, file) => {
-        notify();
-        onChange?.(file);
-      });
-    watcher?.on('error', notify);
+    watcher = fs.watch(directory, { persistent: false }, (_event, file) => {
+      notify();
+      onChange?.(file);
+    });
+    watcher.on('error', notify);
   } catch {}
   return {
     notify,

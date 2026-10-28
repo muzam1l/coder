@@ -176,8 +176,6 @@ export interface AuthApi {
 
 export interface ServerContext {
   limits?: import('../limits').ServerLimits;
-  /** When `/health` last passed; reused for a few seconds. */
-  healthyAt?: number;
   databaseHealth?: () => Promise<void>;
   config: ServerConfig;
   settings?: ServerSettings;
@@ -259,6 +257,8 @@ export interface ServerContext {
   runnerTimeoutMs?: number;
   now?: () => number;
   waitUntil?: (work: Promise<unknown>) => void;
+  /** Starts the hosted handler's hourly maintenance. */
+  maintain?(): void;
 }
 
 export interface ServerSettings {

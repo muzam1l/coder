@@ -137,18 +137,13 @@ export function stateRows<K extends 'delivery' | 'login' | 'snapshot'>(
     },
     put: async (id, value, expiresAt) => {
       const expiry = kind === 'login' ? (expiresAt ?? s.at()) : expiresAt;
-      const query = s.db
+      await s.db
         .insert(t)
         .values({ key: prefix + id, value, expiresAt: expiry })
         .onConflictDoUpdate({
           target: t.key,
           set: { value, expiresAt: kind === 'login' && !expiresAt ? sql`${t.expiresAt}` : expiry },
         });
-      const notification =
-        kind === 'delivery' && id.startsWith('connection-authorized:')
-          ? s.notification(kind, id)
-          : undefined;
-      await (notification ? query.returning(notification) : query);
     },
     delete: async id => {
       await s.db.delete(t).where(eq(t.key, prefix + id));

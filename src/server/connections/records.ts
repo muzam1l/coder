@@ -812,22 +812,8 @@ export async function connectionAuthorization(ctx: ServerContext, id: string): P
 
 export async function listConnections(req: Request, ctx: ServerContext): Promise<Response> {
   const url = new URL(req.url);
-  const authorization = url.searchParams.get('authorization') ?? undefined;
-  const waiting = url.searchParams.get('wait');
-  if (!authorization || !waiting) return json(await connectionRows(ctx, authorization));
-  const changes = await ctx.store.watch('delivery', `connection-authorized:${authorization}`);
-  const deadline = Date.now() + 25000;
-  try {
-    for (;;) {
-      const rows = await connectionRows(ctx, authorization);
-      const row = rows.find(row => row.id === waiting);
-      if (!row || row.status === 'connected' || Date.now() >= deadline || req.signal.aborted)
-        return json(rows);
-      await changes.wait(Math.min(10000, deadline - Date.now()), req.signal);
-    }
-  } finally {
-    changes.close();
-  }
+
+  return json(await connectionRows(ctx, url.searchParams.get('authorization') ?? undefined));
 }
 
 export async function createConnection(req: Request, ctx: ServerContext): Promise<Response> {

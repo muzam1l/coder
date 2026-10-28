@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "description": "The runtime for agents, your rules, any model, everywhere.",
   "type": "module",
   "main": "./dist/sdk.js",

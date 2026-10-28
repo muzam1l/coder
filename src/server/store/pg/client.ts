@@ -305,15 +305,6 @@ export function connect(databaseUrl: string, options: PoolOptions = {}): Connect
     idle_timeout: options.idleTimeout ?? 240,
     onnotice: () => {},
   });
-  const direct = new URL(databaseUrl);
-  let listener: postgres.Sql | undefined;
-  if (direct.hostname.endsWith('.neon.tech') && direct.hostname.includes('-pooler.')) {
-    direct.hostname = direct.hostname.replace('-pooler.', '.');
-    raw.listen = (...args) => {
-      listener ??= postgres(direct.href, { max: 1, onnotice: () => {} });
-      return listener.listen(...args);
-    };
-  }
   const profile = new DatabaseProfile();
   const reads = new AsyncLocalStorage<boolean>();
   const bounds = new AsyncLocalStorage<number>();
@@ -329,7 +320,7 @@ export function connect(databaseUrl: string, options: PoolOptions = {}): Connect
     profile,
     statementTimeout: (ms, work) => bounds.run(ms, work),
     close: async () => {
-      await Promise.all([sql.end(), listener?.end()]);
+      await sql.end();
     },
   };
 }

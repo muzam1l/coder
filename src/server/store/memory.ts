@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto';
-import { watchChanges } from '../../utils/fsx';
 
 import type { Batch, Unseen, Conversation, ConversationState } from '../tasks/conversation';
 import { SINCE_LIMIT } from '../../agent/context/turn';
@@ -242,21 +241,6 @@ export function availableBatch(current: Batch): Batch {
 }
 
 export class MemoryStore implements Store {
-  private readonly recordEvents = new EventTarget();
-
-  async watch(kind: 'login' | 'delivery', id: string) {
-    const key = `${kind}:${id}`;
-    const changes = watchChanges();
-    this.recordEvents.addEventListener(key, changes.notify);
-    return {
-      ...changes,
-      close: () => {
-        this.recordEvents.removeEventListener(key, changes.notify);
-        changes.close();
-      },
-    };
-  }
-
   private readonly appUpdates = new Map<string, Promise<unknown>>();
   private readonly values = new Map<StoreKind, Map<string, Entry>>();
   private configUpdate?: Promise<unknown>;
@@ -583,7 +567,6 @@ export class MemoryStore implements Store {
     const next = { ...current, ...fields };
     if (next.input === null) delete next.input;
     entry!.value = next;
-    this.recordEvents.dispatchEvent(new Event(`login:${id}`));
     return next as EngineLogin;
   }
 
@@ -625,8 +608,6 @@ export class MemoryStore implements Store {
             : value,
       expiresAt,
     });
-    if (kind === 'delivery' || kind === 'login')
-      this.recordEvents.dispatchEvent(new Event(`${kind}:${id}`));
     this.changed(kind);
   }
 
@@ -695,7 +676,6 @@ export class MemoryStore implements Store {
 
   async delete(kind: StoreKind, id: string): Promise<void> {
     this.bucket(kind).delete(id);
-    if (kind === 'login') this.recordEvents.dispatchEvent(new Event(`login:${id}`));
     this.changed(kind);
     for (const child of kind === 'task'
       ? (['history', 'tasklog'] as const)

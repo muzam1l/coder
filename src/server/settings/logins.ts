@@ -96,27 +96,10 @@ export async function readLogin(
   url: URL,
 ): Promise<Response> {
   const id = params.id ?? '';
-  if (!url.searchParams.has('state')) {
-    const login = id && !id.includes('/') ? await own(ctx, id) : undefined;
-    return login
-      ? json(view(id, login))
-      : json({ error: 'This sign-in is gone. Start again.' }, 404);
-  }
-  const changes = await ctx.store.watch('login', id);
-  try {
-    let login = id && !id.includes('/') ? await own(ctx, id) : undefined;
-    if (!login) return json({ error: 'This sign-in is gone. Start again.' }, 404);
-    const state = url.searchParams.get('state');
-    const deadline = Date.now() + 25000;
-    while (state && login.state === state && Date.now() < deadline && !req.signal.aborted) {
-      await changes.wait(Math.min(10000, deadline - Date.now()), req.signal);
-      login = await own(ctx, id);
-      if (!login) return json({ error: 'This sign-in is gone. Start again.' }, 404);
-    }
-    return json(view(id, login));
-  } finally {
-    changes.close();
-  }
+  const login = id && !id.includes('/') ? await own(ctx, id) : undefined;
+  return login
+    ? json(view(id, login))
+    : json({ error: 'This sign-in is gone. Start again.' }, 404);
 }
 
 export async function answerLogin(
@@ -249,34 +232,17 @@ export async function takeLoginInput(
   url: URL,
 ): Promise<Response> {
   const id = params.id!;
-  const changes = await ctx.store.watch('login', id);
-  const deadline = Date.now() + 25000;
-  try {
-    for (;;) {
-      if (req.signal.aborted) return json({});
-      const login = await ctx.store.get('login', id);
-      if (!login || login.tokenHash !== ctx.callbackLogin!.tokenHash)
-        return new Response('Unauthorized', { status: 401 });
-      if (login.input) {
-        const updated = await ctx.store.patchLogin(
-          id,
-          { input: null },
-          { input: login.input, tokenHash: login.tokenHash },
-        );
-        return json(updated ? { code: decryptSecret<string>(ctx.config, login.input) } : {});
-      }
-      if (
-        login.state === 'verifying' ||
-        login.state === 'done' ||
-        login.state === 'failed' ||
-        Date.now() >= deadline
-      )
-        return json({});
-      await changes.wait(Math.min(10000, deadline - Date.now()), req.signal);
-    }
-  } finally {
-    changes.close();
-  }
+  const login = await ctx.store.get('login', id);
+  if (!login || login.tokenHash !== ctx.callbackLogin!.tokenHash)
+    return new Response('Unauthorized', { status: 401 });
+  if (!login.input) return json({});
+
+  const updated = await ctx.store.patchLogin(
+    id,
+    { input: null },
+    { input: login.input, tokenHash: login.tokenHash },
+  );
+  return json(updated ? { code: decryptSecret<string>(ctx.config, login.input) } : {});
 }
 
 export async function readLoginEngine(

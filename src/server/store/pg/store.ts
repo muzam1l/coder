@@ -1,7 +1,5 @@
 /** `Store` over the server tables: today's string ids live in key columns, the bodies in typed columns. */
-import { createHash, randomUUID } from 'node:crypto';
-import { watchChanges } from '../../../utils/fsx';
-import type postgres from 'postgres';
+import { randomUUID } from 'node:crypto';
 
 import {
   and,
@@ -159,36 +157,6 @@ import {
 import { BATCH_LEASE_MS } from '../types';
 
 export class DrizzleStore implements Store {
-  private recordChannel(kind: string, id: string) {
-    return `record_${createHash('sha256')
-      .update(JSON.stringify([this.organizationId, kind, id]))
-      .digest('hex')
-      .slice(0, 48)}`;
-  }
-
-  notification(kind: string, id: string) {
-    return this.notifications
-      ? { notified: sql`pg_notify(${this.recordChannel(kind, id)}, '')` }
-      : undefined;
-  }
-
-  async watch(kind: 'login' | 'delivery', id: string) {
-    const changes = watchChanges();
-    const client = (this.db as Db & { $client?: postgres.Sql }).$client;
-    const listening = client?.listen
-      ? await client
-          .listen(this.recordChannel(kind, id), changes.notify, changes.notify)
-          .catch(() => undefined)
-      : undefined;
-    return {
-      ...changes,
-      close() {
-        void listening?.unlisten().catch(() => {});
-        changes.close();
-      },
-    };
-  }
-
   publishAgent: NonNullable<Store['publishAgent']> = (record, version, expected) =>
     publishAgent(this, record, version, expected);
   private readonly kinds: { [K in StoreKind]: Kind<StoreRecords[K]> };
@@ -200,9 +168,6 @@ export class DrizzleStore implements Store {
     readonly encryption: Pick<ServerConfig, 'encryptionKey' | 'previousEncryptionKey'> = {},
     /** The advisory locks the enclosing transaction holds; absent outside one. */
     private readonly locks?: Set<string>,
-    private readonly notifications = Boolean(
-      (db as Db & { $client?: postgres.Sql }).$client?.unsafe,
-    ),
   ) {
     this.kinds = {
       agent: agents(this),
@@ -519,7 +484,6 @@ export class DrizzleStore implements Store {
           this.now,
           this.encryption,
           new Set([key]),
-          this.notifications,
         ),
       );
     });
@@ -626,10 +590,7 @@ export class DrizzleStore implements Store {
           ),
         ),
       )
-      .returning({
-        value: sql<EngineLogin>`${chatState.value}`,
-        ...this.notification('login', id),
-      });
+      .returning({ value: sql<EngineLogin>`${chatState.value}` });
     return row?.value;
   }
 
@@ -905,14 +866,6 @@ export class DrizzleStore implements Store {
   }
 
   async delete(kind: StoreKind, id: string): Promise<void> {
-    const notification = kind === 'login' ? this.notification(kind, id) : undefined;
-    if (notification) {
-      await this.db
-        .delete(chatState)
-        .where(eq(chatState.key, stateKey(this.organizationId, kind, id)))
-        .returning(notification);
-      return;
-    }
     await this.kind(kind, id).delete(id);
   }
 

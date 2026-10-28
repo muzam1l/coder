@@ -16,7 +16,7 @@ import {
   eventMessages,
   type EventMessage,
 } from '@coder/core/task/view';
-import { client } from '@/utils/client';
+import { client, usePresent } from '@/utils/client';
 import { formatDate, formatDuration, reasonText } from '@/utils/format';
 import { Link } from '@wular/pnext/link';
 import { useSearchParams } from '@wular/pnext/navigation/client';
@@ -342,23 +342,7 @@ export function TaskView({
     if (live && replies) input.current?.focus();
   }, []);
 
-  const [visible, setVisible] = useState(true);
-  const [focused, setFocused] = useState(true);
-  useEffect(() => {
-    const sync = () => {
-      setVisible(document.visibilityState === 'visible');
-      setFocused(document.hasFocus());
-    };
-    sync();
-    addEventListener('visibilitychange', sync);
-    addEventListener('focus', sync);
-    addEventListener('blur', sync);
-    return () => {
-      removeEventListener('visibilitychange', sync);
-      removeEventListener('focus', sync);
-      removeEventListener('blur', sync);
-    };
-  }, []);
+  const presence = usePresent();
 
   // Logs stream from when the task runs until the stream ends them, which waits for logs still arriving.
   const [streaming, setStreaming] = useState(live || !caughtUp);
@@ -441,9 +425,9 @@ export function TaskView({
     catchUp,
   );
 
-  // Logs poll every second while the page has focus, every 5 s while only visible, and not while hidden.
+  // Logs poll every 2 s while the page has focus, every 5 s for a minute after it loses focus, and not while nobody is there.
   useEffect(() => {
-    if (!streaming || !visible) return;
+    if (!streaming || presence === 'absent') return;
     const abort = new AbortController();
     const follow = async () => {
       while (!abort.signal.aborted) {
@@ -466,12 +450,12 @@ export function TaskView({
           if (abort.signal.aborted) return;
           console.error('coder dashboard: task stream', reason);
         }
-        await new Promise(done => setTimeout(done, focused ? 1000 : 5000));
+        await new Promise(done => setTimeout(done, presence === 'focused' ? 2000 : 5000));
       }
     };
     void follow();
     return () => abort.abort();
-  }, [streaming, visible, focused, round, follows]);
+  }, [streaming, presence, round, follows]);
 
   const turns = task.turns ?? [
     {

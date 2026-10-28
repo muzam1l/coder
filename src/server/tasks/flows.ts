@@ -292,7 +292,10 @@ export async function hook(req: Request, base: ServerContext, id: string): Promi
   const bound = target.installation ? { ...target, id: target.installation } : undefined;
   const own = integration.ownEvents?.(req, raw, app, credentials, found?.bound?.installation.self);
   if (own && 'invalid' in own) return new Response('Invalid signature', { status: 401 });
-  if (own) return ownEvent(ctx, integration, app, credentials, own, (ctx.now ?? Date.now)(), bound);
+  if (own) {
+    ctx.maintain?.();
+    return ownEvent(ctx, integration, app, credentials, own, (ctx.now ?? Date.now)(), bound);
+  }
   const chat = await chatFor(ctx, app, bound);
   const webhook = chat.webhooks[integration.id]!;
   // Coder claims each delivery by installation and conversation; Chat's own check knows only the message id.
@@ -300,7 +303,9 @@ export async function hook(req: Request, base: ServerContext, id: string): Promi
     deduplicate: false,
     // Handler failures reach the catch below instead of only Chat's own log.
     propagateHandlerErrors: true,
+    // Chat SDK hands over work only after it verified the delivery.
     waitUntil: pending => {
+      ctx.maintain?.();
       const logged = pending.catch(error => {
         console.error(`coder server: webhook work failed for ${app.id}`, error);
 

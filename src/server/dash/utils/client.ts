@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef } from 'preact/hooks';
+import { useEffect, useRef, useState } from 'preact/hooks';
 
 import { ServerClient } from '@coder/client';
 
@@ -29,24 +29,86 @@ export async function signOut(): Promise<void> {
   location.href = url ?? '/?signed_out=1';
 }
 
-/** Runs `work` every `ms` once the last run settles, skipping while the tab is hidden; returns its stop. */
+const AWAY_MS = 60_000;
+const IDLE_MS = 10 * 60_000;
+const INPUT = ['focus', 'blur', 'pointerdown', 'pointermove', 'keydown', 'wheel'];
+
+type Presence = 'focused' | 'present' | 'absent';
+
+/** Tells `change` whether someone is at this tab: shown, with input in the last 10 minutes while focused or the last minute while not; returns its stop. */
+export function presence(change: (presence: Presence) => void): () => void {
+  let input = Date.now();
+  let state: Presence | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const check = () => {
+    const focused = document.hasFocus();
+    const remaining = (focused ? IDLE_MS : AWAY_MS) - (Date.now() - input);
+    const next =
+      document.visibilityState === 'hidden' || remaining <= 0
+        ? 'absent'
+        : focused
+          ? 'focused'
+          : 'present';
+    clearTimeout(timer);
+    if (next !== 'absent') timer = setTimeout(check, remaining);
+    if (next !== state) change((state = next));
+  };
+  const touch = () => {
+    input = Date.now();
+    check();
+  };
+  for (const type of INPUT) addEventListener(type, touch, { passive: true });
+  addEventListener('visibilitychange', check);
+  check();
+
+  return () => {
+    clearTimeout(timer);
+    for (const type of INPUT) removeEventListener(type, touch);
+    removeEventListener('visibilitychange', check);
+  };
+}
+
+/** Whether someone is at this tab, as `presence` tells. */
+export function usePresent(): Presence {
+  const [state, setState] = useState<Presence>('focused');
+  useEffect(() => presence(setState), []);
+
+  return state;
+}
+
+/** Runs `work` every `ms` once the last run settles while someone is at the tab, and at once when they are back; returns its stop. */
 function poll(work: () => Promise<unknown>, ms: number): () => void {
-  let timer: ReturnType<typeof setTimeout>;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   let stopped = false;
+  let present = false;
+  let running = false;
+  let back = false;
   const next = () => {
-    if (!stopped) timer = setTimeout(run, ms);
+    if (!stopped && present) timer = setTimeout(run, ms);
   };
   const run = () => {
-    if (document.visibilityState === 'hidden') return next();
+    running = true;
     void work()
       .catch(reason => console.error('coder dashboard: poll', reason))
-      .finally(next);
+      .finally(() => {
+        running = false;
+        next();
+      });
   };
-  next();
+  const leave = presence(state => {
+    const now = state !== 'absent';
+    if (now !== present) {
+      present = now;
+      clearTimeout(timer);
+      if (now && !running) (back ? run : next)();
+    }
+    back = true;
+  });
 
   return () => {
     stopped = true;
     clearTimeout(timer);
+    leave();
   };
 }
 

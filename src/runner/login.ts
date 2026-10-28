@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import process from 'node:process';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 import { taskServer } from './task';
 
@@ -241,6 +242,7 @@ export async function runLogin(id: string, root: string): Promise<void> {
         }, 20000).unref();
         return;
       }
+      await sleep(2000);
     }
   };
   const read = (chunk: string) => {
