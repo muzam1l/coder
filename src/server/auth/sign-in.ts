@@ -24,7 +24,7 @@ import { DrizzleStore } from '../store/pg/store';
 import { platformLink, secret, workspace } from '../store/pg/schema';
 import { addSecret, dropSecrets, setSecret } from '../store/pg/tables/shared';
 import { sameOriginProof } from '../routes/guards';
-import { forbidden, notFound, safeReturnPath } from '../routes/http';
+import { forbidden, notFound, safeReturnPath, signInPrompt } from '../routes/http';
 import { CALLBACK_PATH, SCOPE, WEB_CLIENT_PATH } from './metadata';
 
 /** Prefix of Coder's cookies, so another app on the host never collides. */
@@ -322,8 +322,8 @@ export async function createSessionAuth(db: Db, config: ServerConfig): Promise<S
     const wular = await configuration().catch(() => undefined);
     if (!wular) return Response.redirect(`${publicUrl}/login?error=unavailable`, 302);
     const operator = url.searchParams.get('operator') === '1';
-    // Signing in again, possibly as someone else, as from another workspace's link.
-    const again = url.searchParams.get('prompt') === 'login';
+    // Signing in again, possibly as someone else, or picking or creating a workspace in Wular Auth.
+    const prompt = signInPrompt(url);
     const flow: Flow = {
       verifier: oidc.randomPKCECodeVerifier(),
       state: oidc.randomState(),
@@ -334,8 +334,14 @@ export async function createSessionAuth(db: Db, config: ServerConfig): Promise<S
     const target = oidc.buildAuthorizationUrl(wular, {
       redirect_uri: redirectUri,
       // Operator mode re-authenticates and takes only the identity, so no refresh token exists for it.
-      ...(operator ? { scope: 'openid', prompt: 'login' } : { scope: SCOPE }),
-      ...(again ? { prompt: 'login' } : {}),
+      ...(operator
+        ? { scope: 'openid', prompt: 'login' }
+        : {
+            scope: SCOPE,
+            ...(prompt && { prompt }),
+            // Wular Auth links it when a new workspace hits the account's limit.
+            ...(prompt === 'select_account' && config.plansUrl && { plans_url: config.plansUrl }),
+          }),
       code_challenge: await oidc.calculatePKCECodeChallenge(flow.verifier),
       code_challenge_method: 'S256',
       state: flow.state,

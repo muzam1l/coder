@@ -14,7 +14,7 @@ import {
 import { type ServerContext } from '../context';
 import { INTEGRATIONS } from '../../integrations';
 import { sameToken, serverMode } from '../routes/guards';
-import { notFound, redirect, safeReturnPath } from '../routes/http';
+import { notFound, redirect, safeReturnPath, signInPrompt } from '../routes/http';
 
 declare global {
   var __coder: { handle(request: Request): Promise<Response> } | undefined;
@@ -338,8 +338,9 @@ export async function toSignIn(
   ctx: ServerContext,
   url: URL,
   back: string | null,
+  prompt?: string,
 ): Promise<Response> {
-  const signIn = `/api/auth/sign-in?return=${encodeURIComponent(safeReturnPath(back, url.origin))}`;
+  const signIn = `/api/auth/sign-in?${new URLSearchParams({ return: safeReturnPath(back, url.origin), ...(prompt && { prompt }) })}`;
   const publicUrl = ctx.config.publicUrl;
   // The flow cookie belongs on PUBLIC_URL's host, where Wular sends the callback.
   if (publicUrl && new URL(requestOrigin(req, url)).host !== new URL(publicUrl).host)
@@ -358,7 +359,7 @@ export async function signIn(
   if (!ctx.auth) return redirect('/dash');
   // Straight to Wular unless the visitor just signed out or a sign-in failed.
   if (!url.searchParams.has('signed_out') && !url.searchParams.has('error'))
-    return toSignIn(req, ctx, url, url.searchParams.get('return'));
+    return toSignIn(req, ctx, url, url.searchParams.get('return'), signInPrompt(url));
 
   return loginPage(req, ctx);
 }

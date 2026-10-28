@@ -725,6 +725,7 @@ export interface WorkspaceLimits {
   runners?: { used: number; limit: number };
   plansUrl?: string;
   plan?: string;
+  upgrade?: { label: string; variant?: 'primary' | 'ghost' };
 }
 
 export interface ClientTypes {

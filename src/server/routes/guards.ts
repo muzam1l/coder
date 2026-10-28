@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { redirect, json, forbidden, toLogin, notFound, decodeParam } from './http';
+import { redirect, json, forbidden, toLogin, notFound, decodeParam, signInPrompt } from './http';
 import { dashboard, dashPage, toSignIn } from '../dash/serve';
 import { registration } from '../settings/runners';
 import { authorizeTask } from '../tasks/callbacks';
@@ -571,7 +571,10 @@ export async function pageSession(req: Request, ctx: ServerContext, params: Para
 }
 export async function signInAllowed(req: Request, ctx: ServerContext, params: Params, url: URL) {
   if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return ctx;
-  return ctx.auth && (await signedIn(req, ctx))?.session ? redirect('/dash') : ctx;
+  // A prompt signs in again from a session, as for a new workspace.
+  return ctx.auth && !signInPrompt(url) && (await signedIn(req, ctx))?.session
+    ? redirect('/dash')
+    : ctx;
 }
 export async function dashboardAllowed(req: Request, ctx: ServerContext, params: Params, url: URL) {
   if (!['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method)) return ctx;

@@ -167,6 +167,13 @@ function AccountMenu({ me, org }: { me: Me; org: string }) {
           }
         />
       )}
+      {me.mode === 'local' || tokenMode ? null : (
+        <MenuItem
+          href={`/login?${new URLSearchParams({ prompt: 'select_account', return: '/dash' })}`}
+          icon={iPlus}
+          title="New workspace"
+        />
+      )}
       {me.manageMembersUrl ? (
         <MenuItem href={me.manageMembersUrl} icon={iUsers} title="Members" external />
       ) : null}

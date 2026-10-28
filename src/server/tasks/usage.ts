@@ -23,6 +23,8 @@ export interface UsageLimits {
   maxRunners?: number;
   /** The host's name for the workspace's plan, shown beside its usage. */
   plan?: string;
+  /** The plans link's label and look; a primary "Upgrade" without it. */
+  upgrade?: { label: string; variant?: 'primary' | 'ghost' };
 }
 
 /** The workspace's limits: the host's answer, else `USAGE_LIMITS`; `{}` is none. */
@@ -358,6 +360,7 @@ export async function workspaceLimits(ctx: ServerContext): Promise<WorkspaceLimi
   const plans = plansUrl(ctx);
   if (plans) shown.plansUrl = plans;
   if (limits.plan) shown.plan = limits.plan;
+  if (limits.upgrade) shown.upgrade = limits.upgrade;
 
   return shown;
 }

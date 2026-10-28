@@ -54,6 +54,12 @@ export const notAllowed = () => new Response('Method not allowed', { status: 405
 export const toLogin = (url: URL) =>
   redirect(`/login?return=${encodeURIComponent(`${url.pathname}${url.search}`)}`);
 
+/** The OIDC prompt a sign-in passes on to Wular Auth; any other value is dropped. */
+export function signInPrompt(url: URL): 'login' | 'select_account' | undefined {
+  const prompt = url.searchParams.get('prompt');
+  return prompt === 'login' || prompt === 'select_account' ? prompt : undefined;
+}
+
 export function safeReturnPath(candidate: string | null, origin: string): string {
   const value = candidate ?? '/dash';
   try {

@@ -16,15 +16,15 @@ const meter = ({ used, limit }: { used: number; limit: number }) => {
 /** This month's usage against the workspace's limits, with its plan and the way to more; the range above does not apply. */
 export function LimitsCard({ limits }: { limits?: WorkspaceLimits }) {
   if (!limits?.cpuMinutes && !limits?.runners) return null;
-  const { cpuMinutes, runners, plan, plansUrl } = limits;
+  const { cpuMinutes, runners, plan, plansUrl, upgrade = { label: 'Upgrade' } } = limits;
 
   return (
     <Card
       title={plan ? `${plan} plan` : 'Limits'}
       actions={
         plansUrl ? (
-          <Button href={plansUrl} size="sm">
-            Upgrade
+          <Button href={plansUrl} variant={upgrade.variant} size="sm">
+            {upgrade.label}
           </Button>
         ) : null
       }
