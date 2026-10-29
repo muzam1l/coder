@@ -170,9 +170,7 @@ function AgentHead({
             ) : undefined
           }
         />
-      ) : !agent.local &&
-        Object.keys(agent.definition?.integrations ?? {}).length &&
-        !agent.installations?.length ? (
+      ) : agent.source === 'builtin' && !agent.local && !agent.installations?.length ? (
         <NeedsPlatform agent={agent} />
       ) : null}
     </>
