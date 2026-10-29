@@ -7,7 +7,7 @@ import { reachOf, type Step } from './platform-state';
 import { Badge } from '@/comps/ui/badge';
 import { LinkButton } from '@/comps/ui/button';
 import { InfoTip } from '@/comps/ui/menu';
-import { PlatformActions } from './platform-actions';
+import { NoOptions, PlatformActions } from './platform-actions';
 
 const REACH_BADGE: Record<Reach, { tone?: 'ok' | 'warn'; label: string }> = {
   installed: { tone: 'ok', label: 'installed' },
@@ -26,6 +26,7 @@ export function PlatformStep({
   unreachable,
   failed,
   quiet,
+  split,
 }: {
   step: Step;
   info?: IntegrationInfo;
@@ -40,6 +41,8 @@ export function PlatformStep({
   failed?: Parameters<typeof PlatformActions>[0]['failed'];
   /** No installed badge, where the row already shows the installed accounts. */
   quiet?: boolean;
+  /** Another row's button in the same list is a split one; this row's keeps that shape. */
+  split?: boolean;
 }) {
   const { id } = step;
   const name = info?.name ?? id;
@@ -64,14 +67,17 @@ export function PlatformStep({
       <span class="plat-step">
         <Badge>{REACH_BADGE.none.label}</Badge>
         {operator ? (
-          <LinkButton
-            size="sm"
-            href="/dash/[org]/operator"
-            params={{ org }}
-            search={{ setup: id }}
-          >
-            Set up shared app
-          </LinkButton>
+          <span class="split">
+            <LinkButton
+              size="sm"
+              href="/dash/[org]/operator"
+              params={{ org }}
+              search={{ setup: id }}
+            >
+              Set up shared app
+            </LinkButton>
+            {split ? <NoOptions /> : null}
+          </span>
         ) : (
           <InfoTip label={`Why ${name} is not set up`}>
             <p>This server has no shared {name} app yet. Ask whoever runs this server to add one.</p>
@@ -101,6 +107,7 @@ export function PlatformStep({
         publicApps={info.publicApps}
         organizationApps={info.organizationApps}
         shared={shared}
+        split={split}
         failed={failed}
       />
     </span>

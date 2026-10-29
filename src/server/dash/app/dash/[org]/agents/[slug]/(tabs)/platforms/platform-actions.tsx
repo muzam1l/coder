@@ -871,10 +871,18 @@ export function CreateButton(options: CreateOptions) {
   );
 }
 
+/** A caret with no options, so a button keeps the split shape its neighbours' buttons have. */
+export const NoOptions = () => (
+  <Button size="sm" class="split-more" disabled aria-label="No more options">
+    <Icon d={iDown} />
+  </Button>
+);
+
 /** The one next step for a platform; the row menu installs again and ends at each app's page, which lists its installs. */
 export function PlatformActions({
   apps,
   installed,
+  split,
   reinstall,
   shared = false,
   failed,
@@ -889,6 +897,8 @@ export function PlatformActions({
   reinstall?: string;
   /** The apps are this server's shared ones, installed but never created here. */
   shared?: boolean;
+  /** Another row's button in the same list is a split one; Create app keeps that shape. */
+  split?: boolean;
   /** The platform's last setup failed, on `app` when it was an install; `title` and `text` say how, else it was unexpected. */
   failed?: { name: string; app?: string; issues?: string; title?: string; text?: string };
 }) {
@@ -914,9 +924,12 @@ export function PlatformActions({
   if (!apps.length)
     return (
       <>
-        <Button size="sm" loading={leaving} onClick={start}>
-          {create && !create.fields.length ? create.submit : 'Create app'}
-        </Button>
+        <span class="split">
+          <Button size="sm" loading={leaving} onClick={start}>
+            {create && !create.fields.length ? create.submit : 'Create app'}
+          </Button>
+          {split ? <NoOptions /> : null}
+        </span>
         {dialogs}
         {failure}
       </>

@@ -33,7 +33,6 @@ import {
 } from '@/app/dash/[org]/setup/outcome';
 import { ConnectionsLine, Lead } from './loading';
 import { Notice } from '@/comps/ui/notice';
-import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
 import { CredentialsLink } from '@/comps/nav/back';
 
 const PlatformStep = dynamic(() => import('./platform-step').then(m => m.PlatformStep));
@@ -100,6 +99,9 @@ function Platforms({
   const order = [...ids].sort((a, b) => position(a) - position(b));
 
   const builtin = agent.source === 'builtin';
+  const steps = order.map(id => stepOf(id, apps, installations, createUrl(agent, apps, id)));
+  // Install has a caret, so every row's main button keeps one.
+  const split = steps.some(step => step.apps.length && !step.live.length);
 
   return (
     <Card title="Handles" count={order.filter(id => catalog.some(entry => entry.id === id)).length}>
@@ -116,7 +118,7 @@ function Platforms({
             </tr>
           </thead>
           <tbody>
-            {order.map(id => {
+            {order.map((id, index) => {
               const info = catalog.find(entry => entry.id === id);
               const own = apps.filter(app => app.integration === id);
               const installs = installations.filter(entry => own.some(app => app.id === entry.app));
@@ -187,12 +189,13 @@ function Platforms({
                   </td>
                   <td class="acts">
                     <PlatformStep
-                      step={stepOf(id, apps, installations, createUrl(agent, apps, id))}
+                      step={steps[index]!}
                       info={info}
                       org={org}
                       agent={agent.id}
                       builtin={builtin}
                       operator={operator}
+                      split={split}
                       unreachable={catalog.some(entry => entry.unreachable)}
                       failed={
                         failed?.platform === id
@@ -301,12 +304,6 @@ export default async function AgentPlatformsPage({
 
               return (
                 <>
-                  {row.needsModel ? (
-                    <NeedsCredential
-                      reason="Agents need a model credential to run."
-                      label={row.name}
-                    />
-                  ) : null}
                   {outcome && !inRow ? (
                     <OutcomeDialog
                       ok={succeeded(outcome)}

@@ -48,6 +48,8 @@ export interface CredentialSummary {
   /** The first five characters of the secret, followed by four bullets. */
   masked: string;
   account?: CredentialAccount;
+  /** An API key no model reads, so no task uses it. */
+  unread?: true;
 }
 
 type CredentialRow = { id: string; value: StoredCredential };
@@ -640,8 +642,11 @@ export async function failureText(
   return `There was a problem with your connected model. If you have access to it, [Check the model](${await credentialFix(ctx, engine, slug)}).`;
 }
 
+/** A key's variable name as tasks read it. */
+const VARIABLE = /^[A-Z_][A-Z0-9_]*$/;
+
 const credentialSchema = z.object({
-  env: z.record(z.string().check(z.regex(/^[A-Z_][A-Z0-9_]*$/)), z.string().check(z.minLength(1))),
+  env: z.record(z.string().check(z.regex(VARIABLE)), z.string().check(z.minLength(1))),
   workspace: z.optional(z.boolean()),
   noCheck: z.optional(z.boolean()),
 });
@@ -670,10 +675,20 @@ export async function listCredentials(
     const ids = records.map(({ id }) => ({ id }));
     return json(paged(url) ? page(ids, limit, row => row.id) : ids);
   }
-  const rows = (
-    await visibleCredentials(ctx.store, user, paged(url) ? undefined : pageLimit(url, 200))
-  )
+  const [visible, shown] = await Promise.all([
+    visibleCredentials(ctx.store, user, paged(url) ? undefined : pageLimit(url, 200)),
+    shownConfig(ctx),
+  ]);
+  // The engines read their own keys, each custom model the one it names.
+  const read = new Set<string>([
+    ...Object.values(ENGINE_KEYS),
+    ...Object.values(effectiveConfig(ctx, shown).models ?? {}).flatMap(
+      entry => (isEndpointModel(entry) && entry.envKey) || [],
+    ),
+  ]);
+  const rows = visible
     .map(row => credentialSummary(ctx.config, row.id, row.value))
+    .map(row => (row.subscription || read.has(row.name) ? row : { ...row, unread: true as const }))
     .sort((a, b) => compare(key(a), key(b)));
   if (!paged(url)) return json(rows.slice(0, pageLimit(url, 200)));
 
@@ -699,6 +714,15 @@ export async function createCredential(
 
   const body = await req.json().catch(() => undefined);
   const parsed = credentialSchema.safeParse(body);
+  const wrong =
+    body?.env &&
+    typeof body.env === 'object' &&
+    Object.keys(body.env).find(name => !VARIABLE.test(name));
+  if (wrong)
+    return json(
+      { error: `${wrong} is not a variable name: use A-Z, 0-9 and _, like OPENROUTER_API_KEY.` },
+      400,
+    );
   if (!parsed.success || Object.keys(parsed.data.env).length !== 1)
     return json({ error: 'Invalid credential' }, 400);
 

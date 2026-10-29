@@ -9,8 +9,8 @@ import { Card, Empty } from '@/comps/ui/card';
 import { Settle } from '@/comps/frame/stream';
 import { editableAgent } from '@/api/types';
 import { LIST_PAGE } from '@/utils/paged';
-import { modelSource } from '@/app/dash/[org]/settings/model-options';
-import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
+import { modelSource, ownModel } from '@/app/dash/[org]/settings/model-options';
+import { ChainLink } from '@/app/dash/[org]/settings/chain-hint';
 
 const VersionsList = dynamic(() => import('./versions-list').then(m => m.VersionsList), {
   load: 'visible',
@@ -58,14 +58,14 @@ function OverviewBody({
           </div>
           <div>
             <dt>Model</dt>
-            <dd>{modelSource(agent)}</dd>
+            <dd>
+              {ownModel(agent) ? (
+                modelSource(agent)
+              ) : (
+                <ChainLink org={org}>Default chain</ChainLink>
+              )}
+            </dd>
           </div>
-          {agent.runsOn ? (
-            <div>
-              <dt>Runs on</dt>
-              <dd>{agent.runsOn}</dd>
-            </div>
-          ) : null}
           {agent.local ? (
             agent.commit && (
               <div>
@@ -143,17 +143,7 @@ export default async function AgentPage({
     <Settle
       load={() =>
         Promise.all([agent, versions]).then(([row, history]) => (
-          <>
-            {row.needsModel ? (
-              <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
-            ) : null}
-            <OverviewBody
-              agent={row}
-              org={orgOf(request)}
-              history={history}
-              tz={tz}
-            />
-          </>
+          <OverviewBody agent={row} org={orgOf(request)} history={history} tz={tz} />
         ))
       }
     />

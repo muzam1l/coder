@@ -65,14 +65,14 @@ export function specName(spec: string, builtin: ModelsShape['builtin']): string 
 /** An unset setting's label, naming what it resolves to; the engine picks when nothing sets it. */
 export const defaultLabel = (value?: string) => `Default (${value || "engine's own"})`;
 
-/** The model an agent runs first and where it comes from: set here, its agent.json, or the workspace chain. */
+/** The agent picks its own model, here or in agent.json, ahead of the default chain. */
+export const ownModel = (agent: AgentRow) =>
+  !!(agent.settings?.engine || agent.settings?.model || agent.definition?.model);
+
+/** An agent's own model and where it is set: here or in its agent.json. */
 export const modelSource = (agent: AgentRow) =>
   `${agent.model ?? agent.settings?.model ?? agent.definition?.model ?? 'Default'}, ${
-    agent.settings?.engine || agent.settings?.model
-      ? 'set here'
-      : agent.definition?.model
-        ? 'from agent.json'
-        : 'workspace default'
+    agent.settings?.engine || agent.settings?.model ? 'set here' : 'from agent.json'
   }`;
 
 const isEffort = (part: string) => EFFORTS.some(([effort]) => effort === part);

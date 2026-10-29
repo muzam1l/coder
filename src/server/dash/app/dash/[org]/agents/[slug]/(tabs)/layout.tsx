@@ -14,6 +14,10 @@ import { editableAgent, isAdmin } from '@/api/types';
 import { LoadingHero, Hero } from '@/app/dash/[org]/agents/agent/hero';
 import { loadAgent } from '@/api/load';
 import { loadTasks } from '@/app/dash/[org]/tasks/list/tasks-section';
+import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
+import { NeedsPlatform } from '@/app/dash/[org]/agents/agent/needs-platform';
+import { ChainLink } from '@/app/dash/[org]/settings/chain-hint';
+import { ownModel } from '@/app/dash/[org]/settings/model-options';
 
 const NewTaskButton = dynamic(() =>
   import('@/app/dash/[org]/tasks/composer').then(m => m.NewTaskButton),
@@ -152,7 +156,25 @@ function AgentHead({
           count: counts[href],
         }))}
       />
-      {agent.problems?.length ? <NotRunning agent={agent} org={org} admin={isAdmin(me)} /> : null}
+      {/* One setup step at a time, on every tab. */}
+      {agent.problems?.length ? (
+        <NotRunning agent={agent} org={org} admin={isAdmin(me)} />
+      ) : agent.needsModel ? (
+        <NeedsCredential
+          label={agent.name}
+          reason={
+            ownModel(agent) ? (
+              <>
+                No credential runs {agent.model} or the <ChainLink org={org} />.
+              </>
+            ) : undefined
+          }
+        />
+      ) : !agent.local &&
+        Object.keys(agent.definition?.integrations ?? {}).length &&
+        !agent.installations?.length ? (
+        <NeedsPlatform agent={agent} />
+      ) : null}
     </>
   );
 }

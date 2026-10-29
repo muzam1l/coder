@@ -121,6 +121,13 @@ textarea {
   color: var(--acc);
   border-bottom: 1px solid currentColor;
 }
+/* a link's trailing icon, sized to its text */
+.link > .ic {
+  width: 0.85em;
+  height: 0.85em;
+  margin-left: 0.3em;
+  vertical-align: -0.05em;
+}
 :focus-visible {
   outline: 2px solid var(--acc);
   outline-offset: 2px;
@@ -255,6 +262,10 @@ main {
   flex-direction: column;
   gap: 20px;
 }
+/* a tab shows once its header is in, so the header's notices never push it down */
+.page:has(.tabs[aria-hidden='true']) > .tab-body {
+  visibility: hidden;
+}
 .settings-body {
   gap: 36px;
 }
@@ -343,21 +354,21 @@ h1 {
   padding: 12px 16px;
   border: 1px solid var(--line);
 }
-.notice .ic {
+.notice > .ic {
   color: var(--dim);
 }
 .notice.warning {
   border-color: var(--warn);
   background: var(--warnbg);
 }
-.notice.warning .ic {
+.notice.warning > .ic {
   color: var(--warn);
 }
 .notice.error {
   border-color: var(--bad);
   background: var(--badbg);
 }
-.notice.error .ic {
+.notice.error > .ic {
   color: var(--bad);
 }
 /* a one-line notice, as beside the composer or in a form */
@@ -366,6 +377,10 @@ h1 {
   gap: 10px;
   padding: 8px 8px 8px 14px;
   font-size: 12px;
+}
+/* a button for the page already open, kept so the notice keeps its height */
+.notice .btn[aria-hidden='true'] {
+  visibility: hidden;
 }
 .notice.slim .grow {
   overflow: hidden;

@@ -4,7 +4,6 @@ import { load } from '@/api/load';
 import { Settle } from '@/comps/frame/stream';
 import { loadAgent, loadRunDefaults } from '@/api/load';
 import { runnerOptions } from '@/app/dash/[org]/tasks/composer-data';
-import { NeedsCredential } from '@/app/dash/[org]/tasks/composer';
 
 const AgentSettingsForm = dynamic(() =>
   import('./agent-settings-form').then(m => m.AgentSettingsForm),
@@ -38,18 +37,13 @@ export default async function AgentSettingsPage({
       load={() =>
         Promise.all([agent, run, runners, catalog, connections]).then(
           ([row, { shape }, rows, integrations, workspace]) => (
-            <>
-              {row.needsModel ? (
-                <NeedsCredential reason="Agents need a model credential to run." label={row.name} />
-              ) : null}
-              <AgentSettingsForm
-                agent={row}
-                catalog={integrations}
-                shape={shape}
-                runners={runnerOptions(rows)}
-                connections={workspace}
-              />
-            </>
+            <AgentSettingsForm
+              agent={row}
+              catalog={integrations}
+              shape={shape}
+              runners={runnerOptions(rows)}
+              connections={workspace}
+            />
           ),
         )
       }

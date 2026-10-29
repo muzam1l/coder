@@ -1,6 +1,6 @@
 {
   "name": "@wular/coder",
-  "version": "0.5.10",
+  "version": "0.5.11",
   "description": "The runtime for agents, your rules, any model, everywhere.",
   "homepage": "https://coder.wular.ai",
   "repository": {

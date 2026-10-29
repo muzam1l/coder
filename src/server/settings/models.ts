@@ -18,7 +18,7 @@ import {
 } from '../../core/config';
 import { probeEndpoint } from '../../core/models';
 import { credentialEnv, runsOnEach } from './credentials';
-import { ConfigError, shownConfig, body, change } from './config';
+import { ConfigError, shownConfig, effectiveConfig, body, change } from './config';
 import { json } from '../routes/http';
 import { workspaceAdmin } from '../routes/guards';
 import { publicFetch } from '../outbound';
@@ -133,7 +133,11 @@ export async function listModels(
 ): Promise<Response> {
   const shown = await shownConfig(ctx);
 
-  return json({ ...modelList(shown), runsOn: await runsOnEach(ctx, shown) });
+  return json({
+    ...modelList(shown),
+    chain: effectiveConfig(ctx, shown).chain,
+    runsOn: await runsOnEach(ctx, shown),
+  });
 }
 
 export async function createModel(

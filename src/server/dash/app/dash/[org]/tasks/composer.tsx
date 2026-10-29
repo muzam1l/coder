@@ -2,7 +2,7 @@
 
 import './composer.css';
 
-import { Fragment } from 'preact';
+import { Fragment, type ComponentChildren } from 'preact';
 import { useEffect, useId, useLayoutEffect, useRef, useState } from 'preact/hooks';
 
 import type { LocalFolder, LocalFolders } from '@coder/client/types';
@@ -11,6 +11,7 @@ import { toastFailure, useAction } from '@/utils/action';
 import { iAlert, iPlus, iRight, iSliders, iSteer, iX } from '@/comps/ui/icons';
 import { useRouter, useSearchParams } from '@wular/pnext/navigation/client';
 import { useOrg } from '@/comps/nav/org';
+import { ChainLink } from '@/app/dash/[org]/settings/chain-hint';
 import { Loading } from '@/comps/ui/card';
 import { Button, IconButton } from '@/comps/ui/button';
 import { reasonText } from '@/utils/format';
@@ -241,11 +242,19 @@ const stepped = (
 };
 
 /** A credential link that comes back here with the draft kept. */
-export function NeedsCredential({ reason, label }: { reason?: string; label?: string }) {
+export function NeedsCredential({ reason, label }: { reason?: ComponentChildren; label?: string }) {
+  const org = useOrg();
+
   return (
     <Notice tone="warning" slim>
       <Icon d={iAlert} />
-      <span class="grow">{reason || 'Tasks need a model credential to run.'}</span>
+      <span class="grow">
+        {reason ?? (
+          <>
+            No credential runs the <ChainLink org={org} />.
+          </>
+        )}
+      </span>
       <CredentialsLink variant="outline" size="sm" label={label}>
         Add credential
       </CredentialsLink>
@@ -665,7 +674,7 @@ function Composer({
           <ModelChoices
             groups={lists.models}
             first={{
-              label: `Default: ${defaults.chain.map(spec => specName(spec, defaults.builtin)).join(', then ')}`,
+              label: 'Default chain',
               efforts: true,
             }}
             model={choice.model}

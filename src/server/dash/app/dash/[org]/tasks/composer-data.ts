@@ -52,12 +52,14 @@ export const runnerOptions = (
   ];
 };
 
-/** No credential can run a task yet; a local server runs on the machine's own sign-ins. */
+/** No credential runs any model of the default chain for the viewer; a local server runs on the machine's own sign-ins. */
 export const credentialMissing = (api: ServerClient) =>
-  Promise.all([
-    api.credentials.list({ cursor: '', limit: 1, fields: 'id' }).catch(() => undefined),
-    api.me().catch(() => undefined),
-  ]).then(([credentials, me]) => credentials?.items.length === 0 && !(me && localServer(me)));
+  Promise.all([api.models.list().catch(() => undefined), api.me().catch(() => undefined)]).then(
+    ([models, me]) =>
+      !!models?.chain?.length &&
+      models.chain.every(spec => models.runsOn?.[spec]?.includes('no credential')) &&
+      !(me && localServer(me)),
+  );
 
 /** What the composer offers and falls back to, read in one request. */
 export async function loadComposer(api: ServerClient) {

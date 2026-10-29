@@ -51,11 +51,11 @@
   white-space: nowrap;
   vertical-align: top;
 }
-.plat .acts .btn {
+.plat .acts .btn:not(.split-more) {
   min-width: 92px;
   justify-content: center;
 }
-.plat .acts .menu {
+.plat .acts .menu:not(.split > *) {
   display: inline-block;
   margin-left: 4px;
 }
@@ -119,10 +119,11 @@
   display: flex;
   margin-left: 0;
 }
-.split-more {
+.split .btn.split-more {
   min-width: 0;
   padding: 0 7px;
 }
+.split > .btn + .split-more,
 .split > .btn + .menu .split-more {
   border-left-color: rgba(255, 255, 255, 0.3);
 }

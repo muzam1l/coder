@@ -246,6 +246,8 @@ export interface CredentialRow {
   createdAt?: number;
   masked: string;
   account?: { email?: string; plan?: string };
+  /** An API key no model reads, so no task uses it. */
+  unread?: true;
 }
 
 /** Each engine CLI's own login on this machine. */
@@ -548,6 +550,8 @@ export type ModelsShape = {
   /** Built-in aliases, name -> model spec. */
   builtin: Record<string, string>;
   models: Record<string, ModelEntry>;
+  /** The default chain, in the order tasks try it. */
+  chain?: string[];
   /** Where each chain model and the review model run for the caller, by spec. */
   runsOn?: Record<string, string>;
 };

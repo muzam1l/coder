@@ -13,7 +13,7 @@ import { Card, Loading } from '@/comps/ui/card';
 import { Modal } from '@/comps/ui/modal';
 import { reasonText } from '@/utils/format';
 import { Badge } from '@/comps/ui/badge';
-import { Button } from '@/comps/ui/button';
+import { Button, LinkButton } from '@/comps/ui/button';
 import { CopyButton } from '@/comps/ui/copy';
 import { Icon } from '@/comps/ui/icon';
 import { MenuItem } from '@/comps/ui/menu-items';
@@ -41,6 +41,13 @@ const KEYS = [
   ...ENGINES.map(engine => engine.key),
   ...CUSTOM_PROVIDERS.flatMap(provider => provider.envKey || []),
 ];
+
+/** The provider preset that reads `name`, as the add-model form's `base-url`. */
+const providerOf = (name: string) => {
+  const provider = CUSTOM_PROVIDERS.find(entry => entry.envKey === name);
+
+  return provider ? { 'base-url': provider.baseUrl } : {};
+};
 
 /** The first known variable with no key saved yet, so the form never starts on one that exists. */
 const unsaved = (keys: CredentialRow[], saved?: string) =>
@@ -584,7 +591,25 @@ export function CredentialsList({
                   <Row
                     key={`${row.scope}/${row.name}`}
                     title={row.name}
-                    badges={<Badge>{row.scope}</Badge>}
+                    badges={
+                      <>
+                        <Badge>{row.scope}</Badge>
+                        {row.unread ? <Badge tone="warn">no model reads it</Badge> : null}
+                      </>
+                    }
+                    actions={
+                      row.unread ? (
+                        <LinkButton
+                          variant="outline"
+                          size="sm"
+                          href="/dash/[org]/settings/[tab]"
+                          params={{ org, tab: 'models' }}
+                          search={{ add: '', 'env-key': row.name, ...providerOf(row.name) }}
+                        >
+                          Add model
+                        </LinkButton>
+                      ) : undefined
+                    }
                     sub={row.masked}
                     remove={
                       row.scope === 'personal' || admin

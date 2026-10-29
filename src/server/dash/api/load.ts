@@ -77,7 +77,12 @@ export function loadAgent(request: Request, slug: string) {
   const content =
     path === `/dash/${encodeURIComponent(orgOf(request))}/agents/${encodeURIComponent(slug)}` ||
     path.endsWith('/edit');
-  return load(request).agents.get(slug, { versions: false, content, handles: true });
+  return load(request).agents.get(slug, {
+    versions: false,
+    content,
+    handles: true,
+    installations: true,
+  });
 }
 
 /** The workspace's models, and the chain an agent runs when it sets no model. */
