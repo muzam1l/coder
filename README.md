@@ -6,27 +6,40 @@
 
 </div>
 
-Coder turns any model into an agent you own. One runtime and one set of rules, with full control of every task, whether it runs in your local harness, from your own code, or always on in Coder Cloud.
+Coder turns any model into an agent you own: an always-on teammate in Slack, GitHub, Linear and your other apps. It does the work and replies in the same thread. Run it in [Coder Cloud](https://coder.wular.ai), or hand it tasks right from your local harness.
 
 ## Why Coder
 
-- **Any harness, any model.** Claude Code, Codex or any other harness, running any model from your subscriptions, an API endpoint, or your own machine. Pick per task.
-- **Clean context.** Your conversation stays about intent. The work happens in subagents, and only the result comes back.
-- **Fast dispatch.** Handoffs are instant, and light enough to run many agents at once.
-- **Fully controlled.** One permission model across every engine, live visibility into every task, and steering mid-run.
 - **Always on.** Your agents run in the cloud, connected to GitHub, Slack and any other app, each task in its own workspace with only the access you grant.
+- **In your harness too.** Hand tasks off to subagents from Claude Code, Codex or another harness. Your conversation stays about intent, and only the result comes back.
 - **Your agents, your team.** Build agents with their own instructions, events and tools, and share them, with their credentials, across your workspace.
-- **Flows and SDK.** Orchestrate whole waves of tasks from one TypeScript file, or drive everything from your own code.
 - **Built-in review.** Review any diff with a read-only agent that checks every finding against your repo.
+- **Any model.** Claude, Codex or any other model, from your subscriptions, an API endpoint, or your own machine. Pick per task.
+- **Fully controlled.** One permission model across every engine, live visibility into every task, and steering mid-run.
+- **Flows and SDK.** Orchestrate whole waves of tasks from one TypeScript file, or drive everything from your own code.
 
 ## Get started
 
 | I want to                                                                          | Start with                                      |
 | ---------------------------------------------------------------------------------- | ----------------------------------------------- |
-| Hand tasks off from Claude Code, Codex or another harness                          | [In your local harness](#in-your-local-harness) |
 | Run my agents always on in the cloud, connected to GitHub, Slack and any other app | [Coder Cloud](#coder-cloud)                     |
+| Hand tasks off from Claude Code, Codex or another harness                          | [In your local harness](#in-your-local-harness) |
 | Script tasks, reviews and flows from code                                          | [From code](#from-code)                         |
-| Run it on my own servers                                                           | [Self-host](#self-host)                         |
+
+## Coder Cloud
+
+Your agents, always on at **[coder.wular.ai](https://coder.wular.ai)**. Connect GitHub, Slack or any other app, and they work right inside it. No download, no setup:
+
+1. **Sign in** at [coder.wular.ai](https://coder.wular.ai).
+2. **Connect a platform**: GitHub, Slack, Linear or any other app in the catalog.
+3. **Mention `@coder`** in an issue, pull request or thread. It does the work and replies in the same thread.
+
+- **Your agents.** Instructions, events and tools, set in the dashboard or in `.coder/agents/` in your repo.
+- **Every app, one dashboard.** GitHub, Slack and the rest of the integration catalog.
+- **Scoped access.** Each task gets a fresh workspace and a platform token limited to that task.
+- **A built-in agent.** `coder` answers questions, reviews pull requests, and opens them for requested changes.
+
+[Dashboard](docs/dash.md) · [Agents](docs/agents/index.md)
 
 ## In your local harness
 
@@ -73,17 +86,6 @@ coder dash
 
 [Models](docs/models.md) · [Configuration](docs/config.md) · [Approvals](docs/approvals.md) · [Connections](docs/connections.md)
 
-## Coder Cloud
-
-Your agents, always on at **[coder.wular.ai](https://coder.wular.ai)** or [on your own servers](#self-host). Connect GitHub, Slack or any other app, and they work right inside it.
-
-- **Your agents.** Instructions, events and tools, set in the dashboard or in `.coder/agents/` in your repo.
-- **Every app, one dashboard.** GitHub, Slack and the rest of the integration catalog.
-- **Scoped access.** Each task gets a fresh workspace and a platform token limited to that task.
-- **A built-in agent.** `coder` answers questions, reviews pull requests, and opens them for requested changes.
-
-[Dashboard](docs/dash.md) · [Agents](docs/agents/index.md)
-
 ## From code
 
 Your host drives tasks itself, but everything is scriptable:
@@ -124,12 +126,6 @@ export default await pipeline(
 ```
 
 [CLI](docs/cli/index.md) · [Flows](docs/flows.md) · [Review](docs/review.md) · [SDK](docs/sdk.md)
-
-## Self-host
-
-Run all of Coder Cloud on your own infrastructure: one server, one Postgres database, and your tasks running wherever you choose, from Docker and Vercel Sandbox to GitHub Actions or a teammate's machine. Deploy it in one click on Vercel or anywhere Bun runs.
-
-[Self-hosting](docs/self-host.md) · [Vercel template](src/server/deploy/vercel/README.md)
 
 ## Docs
 
