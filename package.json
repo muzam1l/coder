@@ -1,7 +1,12 @@
 {
   "name": "@wular/coder",
-  "version": "0.5.9",
+  "version": "0.5.10",
   "description": "The runtime for agents, your rules, any model, everywhere.",
+  "homepage": "https://coder.wular.ai",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muzam1l/coder.git"
+  },
   "type": "module",
   "main": "./dist/sdk.js",
   "types": "./dist/sdk.d.ts",
