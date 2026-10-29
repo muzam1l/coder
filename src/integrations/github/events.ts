@@ -18,7 +18,7 @@ import type {
   WebhookTarget,
 } from '../types';
 import { GITHUB_PRESETS, routed } from './api';
-import type { GithubAppCredentials } from './app';
+import { githubApp, type GithubAppCredentials } from './app';
 
 type User = {
   id?: number | string;
@@ -38,15 +38,18 @@ type Pull = {
   number?: number;
   title?: string;
   body?: string | null;
+  html_url?: string;
   draft?: boolean;
   user?: User;
   author_association?: string;
   head?: { repo?: { full_name?: string } | null };
+  base?: { repo?: unknown };
 };
 type Issue = {
   number?: number;
   title?: string;
   body?: string | null;
+  html_url?: string;
   user?: User;
   author_association?: string;
   pull_request?: unknown;
@@ -89,6 +92,33 @@ function agent(user?: User): boolean {
 function text(title?: string, body?: string | null): string {
   return [title, body].filter((part): part is string => Boolean(part)).join('\n\n');
 }
+/** The webhook without the repository, organization, installation and sender it repeats, a pull request's head and base repositories too. */
+function raw(body: unknown) {
+  const {
+    repository: _repo,
+    organization: _org,
+    installation: _install,
+    sender: _sender,
+    enterprise: _enterprise,
+    ...rest
+  } = body as Payload & { enterprise?: unknown };
+  if (!rest.pull_request) return rest;
+  const {
+    head: { repo: _head, ...head } = {},
+    base: { repo: _base, ...base } = {},
+    ...pr
+  } = rest.pull_request;
+
+  return { ...rest, pull_request: { ...pr, head, base } };
+}
+/** What each pull request action did, as a line after the actor's name. */
+const PULL_TITLES: Record<string, (number: number) => string> = {
+  opened: number => `opened #${number}`,
+  synchronize: number => `pushed to #${number}`,
+  reopened: number => `reopened #${number}`,
+  ready_for_review: number => `marked #${number} ready for review`,
+  review_requested: number => `requested a review on #${number}`,
+};
 /** Whether `text` @-mentions the app by its slug. */
 const mentions = (text: string, slug: string) =>
   new RegExp(`(^|[^\\w-])@${slug}(?![\\w-])`, 'i').test(text);
@@ -126,6 +156,8 @@ function event(
     body?: string;
     number?: number;
     kind?: 'pull' | 'issue';
+    title: string;
+    url?: string;
     slug: string;
   },
 ): PlatformEvent | undefined {
@@ -144,9 +176,14 @@ function event(
       ...(user?.login ? { login: user.login } : {}),
       ...(input.role ? { role: input.role } : {}),
       ...(agent(user) ? { agent: true } : {}),
+      ...(user?.login ? { url: githubApp.accountUrl!({ login: user.login }) } : {}),
     },
     text: input.body ?? '',
     ...(mentions(input.body ?? '', input.slug) ? { mentioned: true as const } : {}),
+    ...(payload.action ? { action: payload.action } : {}),
+    title: input.title,
+    payload: raw(payload),
+    ...(input.url ? { url: input.url } : {}),
     repo,
     space: repoSpace(payload)!,
     chat: {
@@ -272,9 +309,12 @@ function parseGithubEvent(
     const parsed = event(req, app, payload, 'pull_request', {
       user: payload.sender ?? pr.user,
       role: association(payload.sender ?? pr.user, pr),
-      body: text(pr.title, pr.body),
+      // Only opening it writes its description; every other action changes something else.
+      ...(action === 'opened' ? { body: text(pr.title, pr.body) } : {}),
       number: pr.number,
       kind: 'pull',
+      title: PULL_TITLES[action]!(pr.number),
+      ...(pr.html_url ? { url: pr.html_url } : {}),
       slug: credentials.slug,
     });
     return parsed ? [parsed] : [];
@@ -288,11 +328,14 @@ function parseGithubEvent(
       !issue.number
     )
       return [];
+    const opened = payload.action === 'opened';
     const parsed = event(req, app, payload, 'issue', {
       user: payload.sender ?? issue.user,
       role: association(payload.sender ?? issue.user, issue),
-      body: text(issue.title, issue.body),
+      ...(opened ? { body: text(issue.title, issue.body) } : {}),
       number: issue.number,
+      title: `${opened ? 'opened' : 'edited'} #${issue.number}`,
+      ...(issue.html_url ? { url: issue.html_url } : {}),
       slug: credentials.slug,
     });
     return parsed ? [parsed] : [];
@@ -460,27 +503,22 @@ export function githubChatEvent(
   type: string,
   _thread: Thread,
   message: Message,
-): Pick<PlatformEvent, 'type' | 'actor'> {
-  const role = (message.raw as { comment?: { author_association?: string } }).comment
-    ?.author_association;
+): Pick<PlatformEvent, 'type' | 'actor' | 'url'> {
+  const comment = (message.raw as { comment?: { author_association?: string; html_url?: string } })
+    .comment;
+  const role = comment?.author_association;
   return {
     type,
     actor: {
       id: message.author.userId,
       login: message.author.userName,
       ...(role ? { role } : {}),
+      ...(message.author.userName
+        ? { url: githubApp.accountUrl!({ login: message.author.userName }) }
+        : {}),
     },
+    ...(comment?.html_url ? { url: comment.html_url } : {}),
   };
-}
-
-/** The issue, pull request or review thread page of an event's Chat SDK thread. */
-export function githubThreadUrl(event: PlatformEvent): string | undefined {
-  const thread = /^github:([^:]+):(issue:)?(\d+)(?::rc:(\d+))?(?::|$)/.exec(
-    event.chat?.thread.id ?? '',
-  );
-  return thread
-    ? `https://github.com/${thread[1]}/${thread[2] ? 'issues' : 'pull'}/${thread[3]}${thread[4] ? `#discussion_r${thread[4]}` : ''}`
-    : undefined;
 }
 
 const TYPING_TTL_MS = 24 * 60 * 60 * 1000;

@@ -174,7 +174,6 @@ export async function checkout(
   const hosts = INTEGRATIONS[task.event!.integration]?.repos?.cloneHosts ?? [];
   if (clone.protocol !== 'https:' || !hosts.includes(clone.hostname))
     throw new Error('Repository clone host does not match the integration');
-  let snapshot: string | undefined;
   await withGitToken(root, token, clone.hostname, async options => {
     const gitOptions = { ...options, signal, maxBuffer: 64 * 1024 * 1024 };
     if (cache) {
@@ -202,10 +201,8 @@ export async function checkout(
         );
       });
     } else {
-      // A sandbox snapshot already holds the clone, prepared at its commit.
-      if (await present(path.join(cwd, '.git')))
-        snapshot = (await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim();
-      else await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
+      if (!(await present(path.join(cwd, '.git'))))
+        await exec('git', ['clone', '--depth', '50', repo.cloneUrl, cwd], gitOptions);
       await exec(
         'git',
         ['-C', cwd, 'fetch', '--depth', '50', 'origin', repo.defaultBranch],
@@ -215,40 +212,21 @@ export async function checkout(
     }
     const head = (await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout;
     await fs.writeFile(baseFile(root), head);
-    if (head.trim() !== snapshot) await prepareCheckout(cwd, gitOptions, note, snapshot);
+    await prepareCheckout(cwd, gitOptions, note);
   });
   return cwd;
 }
 
-/** Readies a checkout to build and test: its submodules at depth 1 with the task's git credentials, then the dependencies of the root's and each first-level folder's lockfile. A checkout prepared at `since` is prepared again only when a lockfile or submodule changed. A failure is a warning. */
+/** Syncs submodules with the task's git credentials; failures are warnings. */
 async function prepareCheckout(
   cwd: string,
   options: { env?: NodeJS.ProcessEnv; signal?: AbortSignal },
   note: (message: string) => void,
-  since?: string,
 ): Promise<void> {
-  if (since) {
-    const lines = (args: string[]) =>
-      exec('git', ['-C', cwd, ...args]).then(
-        ({ stdout }) => stdout.trim().split('\n'),
-        () => undefined,
-      );
-    const [changed, modules = []] = await Promise.all([
-      lines(['diff', '--name-only', since, 'HEAD']),
-      lines(['config', '-f', '.gitmodules', '--get-regexp', '\\.path$']),
-    ]);
-    const paths = modules.map(line => line.split(' ')[1]);
-    const locks = INSTALLS.map(([lock]) => lock);
-    const moved = (file: string) =>
-      file === '.gitmodules' || paths.includes(file) || locks.includes(path.basename(file));
-    if (changed && !changed.some(moved)) return;
-  }
-
-  // Only git gets the task's credentials; an install runs the repository's scripts.
-  const run = (failed: string, command: string, args: string[], dir = cwd) =>
-    exec(command, args, {
-      ...(command === 'git' ? options : { signal: options.signal }),
-      cwd: dir,
+  const run = (failed: string, args: string[]) =>
+    exec('git', args, {
+      ...options,
+      cwd,
       maxBuffer: 64 * 1024 * 1024,
     }).catch(error => {
       const [reason] = String(error.stderr || error.message)
@@ -261,8 +239,8 @@ async function prepareCheckout(
 
   if (await present(path.join(cwd, '.gitmodules'))) {
     // A snapshot's submodules keep their old URLs until synced.
-    await run('Submodule URLs were not synced', 'git', ['submodule', 'sync', '--recursive']);
-    await run('Submodules were not checked out', 'git', [
+    await run('Submodule URLs were not synced', ['submodule', 'sync', '--recursive']);
+    await run('Submodules were not checked out', [
       'submodule',
       'update',
       '--init',
@@ -270,25 +248,6 @@ async function prepareCheckout(
       '--depth',
       '1',
     ]);
-  }
-
-  const folders = (await fs.readdir(cwd, { withFileTypes: true }))
-    .filter(
-      entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules',
-    )
-    .map(entry => entry.name);
-  for (const folder of ['', ...folders]) {
-    const dir = path.join(cwd, folder);
-    for (const [lock, command, args] of INSTALLS) {
-      if (!(await present(path.join(dir, lock)))) continue;
-      await run(
-        `Dependencies in ${folder || 'the repository root'} were not installed`,
-        command,
-        args,
-        dir,
-      );
-      break;
-    }
   }
 }
 
@@ -547,15 +506,50 @@ const INSTALLS: Array<[string, string, string[]]> = [
 ];
 
 /** Clone a task's repository at its default branch, ready to build and test, for a sandbox snapshot. */
-export async function prepareRepo(id: string, root: string): Promise<{ sha: string }> {
+export async function prepareRepo(id: string, root: string): Promise<void> {
   const auth = taskServer();
   const remote = await taskRequest<RemoteTask>(auth.server, auth.token, id);
   const event = remote.task.event;
   if (!event?.repo) throw new Error('The task has no repository');
   const cwd = await checkout(remote.task, root, remote.tokens[event.integration]);
-  const sha = (await exec('git', ['-C', cwd, 'rev-parse', 'HEAD'])).stdout.trim();
-  console.log(`coder-snapshot ${sha}`);
-  return { sha };
+  const folders = (await fs.readdir(cwd, { withFileTypes: true }))
+    .filter(
+      entry => entry.isDirectory() && !entry.name.startsWith('.') && entry.name !== 'node_modules',
+    )
+    .map(entry => entry.name);
+  const caches = new Set([
+    path.join(os.homedir(), '.npm', '_cacache'),
+    process.env.BUN_INSTALL_CACHE_DIR ?? path.join(os.homedir(), '.bun', 'install', 'cache'),
+  ]);
+  for (const folder of ['', ...folders]) {
+    const dir = path.join(cwd, folder);
+    for (const [lock, command, args] of INSTALLS) {
+      if (!(await fs.stat(path.join(dir, lock)).catch(() => undefined))) continue;
+      await exec(command, args, { cwd: dir, maxBuffer: 64 * 1024 * 1024 }).catch(error => {
+        console.error(
+          `coder runner: Dependencies in ${folder || 'the repository root'} were not installed`,
+          error,
+        );
+      });
+      const query =
+        lock === 'yarn.lock'
+          ? ['yarn', 'cache', 'dir']
+          : lock === 'pnpm-lock.yaml'
+            ? ['pnpm', 'store', 'path']
+            : undefined;
+      if (query) {
+        const cache = await exec('npx', ['--no-install', ...query], { cwd: dir }).then(
+          ({ stdout }) => stdout.trim(),
+          () => undefined,
+        );
+        if (cache && path.isAbsolute(cache)) caches.add(cache);
+      }
+      break;
+    }
+  }
+  await Promise.all(
+    [...caches].map(cache => fs.rm(cache, { recursive: true, force: true }).catch(() => {})),
+  );
 }
 
 export function startInboxControl(

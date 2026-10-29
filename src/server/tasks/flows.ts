@@ -19,7 +19,7 @@ import {
   type Target,
 } from '../chat';
 import { dropTokens, uninstall } from './context';
-import { recordFailure } from './events';
+import { checkedLinks, recordFailure } from './events';
 import { clickedApproval } from './approvals';
 import { membersChanged, spaceChanged } from './access';
 import { updateMetadata } from '../store';
@@ -250,7 +250,7 @@ async function ownEvent(
   }
 
   // Verified; dispatch runs after the response.
-  for (const event of own.events)
+  for (const event of own.events.map(each => checkedLinks(integration, each)))
     later(
       ctx,
       app,

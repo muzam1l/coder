@@ -20,6 +20,7 @@ import {
   type TaskResult,
 } from '../core/dispatch';
 import { EMPTY_MESSAGE, EMPTY_MESSAGE_NOTICE, SKIPPED } from '../core/task/view';
+import { postedMarkdown } from '../core/task/posted';
 import {
   watchTask,
   appendTaskLog,
@@ -224,7 +225,7 @@ export async function postReply(
   const thread = prepared ?? (await eventThread(integration, event, token, author));
   // Send Markdown through the platform adapter.
   const asker = notice && (event.chat?.message?.author.userId || event.actor.id);
-  const messages = await withNotice(thread, text, notice, asker, text =>
+  const messages = await withNotice(thread, await postedMarkdown(text), notice, asker, text =>
     postReplyParts(thread, text, integration.replyLimit, event.chat?.message?.id),
   );
 

@@ -1017,7 +1017,7 @@ export class DrizzleQueue implements TaskQueue {
           access: task.access,
           requestedBy: task.requestedBy,
           event:
-            sql`case when ${task.event} is not null then jsonb_strip_nulls(jsonb_build_object('integration', ${task.event}->>'integration', 'type', ${task.event}->>'type', 'text', ${task.event}->>'text', 'actor', ${task.event}->'actor')) end`.as(
+            sql`case when ${task.event} is not null then jsonb_strip_nulls(jsonb_build_object('integration', ${task.event}->>'integration', 'type', ${task.event}->>'type', 'text', ${task.event}->>'text', 'title', ${task.event}->>'title', 'url', ${task.event}->>'url', 'actor', ${task.event}->'actor')) end`.as(
               'event',
             ),
           // Who asked, the open approvals the queue answers, and the first turn's prompt that titles the task.

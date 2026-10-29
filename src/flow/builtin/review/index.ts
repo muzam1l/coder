@@ -21,6 +21,7 @@ import { CoderError, task } from '@wular/coder/flow';
 
 import { INTEGRATIONS } from '../../../integrations';
 import type { PullRequestReviews, ReviewTarget } from '../../../integrations/types';
+import { postedMarkdown } from '../../../core/task/posted';
 import { DEFAULT_SERVER } from '../../../client/auth/session';
 import { postReview, reviewCheckSummary, type ReviewLinks } from './post';
 import { loadConfig } from '../../../core/config';
@@ -313,6 +314,61 @@ export function fetchEnvironment(token: string, url?: string): Record<string, st
     [`GIT_CONFIG_KEY_${count}`]: `http.${origin}/.extraheader`,
     [`GIT_CONFIG_VALUE_${count}`]: `AUTHORIZATION: basic ${basic}`,
   };
+}
+
+/** A detached worktree of the checkout at `sha`, removed on `close`. */
+function headWorktree(exec: ReviewExec, sha: string): { dir: string; close(): void } {
+  const dir = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'coder-review-head-')));
+  exec('git', ['worktree', 'add', '--detach', '--quiet', dir, sha]);
+
+  return {
+    dir,
+    close() {
+      try {
+        exec('git', ['worktree', 'remove', '--force', dir]);
+      } catch {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  };
+}
+
+/** Checks out each submodule at `prefixes` in the worktree at `dir`, one commit deep, parents first, with the task's git credentials as checkout uses them; a failure is a warning. */
+async function headSubmodules(
+  dir: string,
+  prefixes: string[],
+  token: string | undefined,
+  warnings: string[],
+): Promise<void> {
+  const { withGitToken } = await import('../../../runner/task');
+  const host = INTEGRATIONS[REVIEW_PLATFORM]!.repos!.cloneHosts[0]!;
+  await withGitToken(path.dirname(dir), token, host, async options => {
+    for (const prefix of [...prefixes].sort((a, b) => a.length - b.length)) {
+      const parent =
+        prefixes
+          .filter(p => p !== prefix && prefix.startsWith(p))
+          .sort()
+          .at(-1) ?? '';
+      try {
+        reviewCli(path.join(dir, parent), options?.env)('git', [
+          'submodule',
+          'update',
+          '--init',
+          '--depth',
+          '1',
+          '--',
+          prefix.slice(parent.length, -1),
+        ]);
+      } catch (error) {
+        const reason = String((error as { stderr?: string }).stderr || error)
+          .trim()
+          .split('\n')[0];
+        warnings.push(
+          `Submodule ${prefix.slice(0, -1)} was not checked out at the head (${reason}).`,
+        );
+      }
+    }
+  });
 }
 
 /** A credentialed fetch that reads none of the checkout's config: it runs in a temporary bare repository holding the checkout's refs and writes into the checkout's object store, so the checkout reads the fetched commits. */
@@ -642,8 +698,13 @@ export default async function review(
                 : 'no issues'
           }`,
           summary: reviewCheckSummary(
-            result.title,
-            result.findings,
+            await postedMarkdown(result.title),
+            await Promise.all(
+              result.findings.map(async finding => ({
+                ...finding,
+                summary: await postedMarkdown(finding.summary),
+              })),
+            ),
             result.summary.url!,
             currentReviewLinks()?.task,
           ),
@@ -816,7 +877,15 @@ async function reviewChange(
           });
       }),
     ),
-    title: z.string().describe('A headline for this review, under 200 characters, or empty.'),
+    title: z
+      .string()
+      .refine(
+        title => /^[^\n]{1,80}$/.test(title.trim()),
+        'Write the title as one line of 1 to 80 characters',
+      )
+      .describe(
+        'The verdict in one line of at most 80 characters, such as "No defects found" or "2 bugs: …".',
+      ),
     body: z
       .string()
       .describe(
@@ -839,6 +908,18 @@ async function reviewChange(
     .slice(1)
     .filter(r => [...ranges.keys()].some(file => file.startsWith(r.prefix)))
     .map(r => ({ prefix: r.prefix, command: command(r) }));
+  // The reviewer reads the files at the reviewed head: a checkout elsewhere, such as a task's default branch, lends a detached worktree.
+  const atHead =
+    !worktree && exec('git', ['rev-parse', 'HEAD']).trim() !== headSha
+      ? headWorktree(exec, headSha)
+      : undefined;
+  if (atHead && nested.length)
+    await headSubmodules(
+      atHead.dir,
+      nested.map(r => r.prefix),
+      services.integrationToken ?? currentIntegrationToken(),
+      warnings,
+    );
   const reviewed = await (services.reviewTask ?? task)(
     reviewPrompt({
       from,
@@ -848,8 +929,13 @@ async function reviewChange(
       files,
       prior: pr?.prior,
     }),
-    { ...common, name: 'Review', returns: Findings },
-  );
+    {
+      ...common,
+      ...(atHead ? { cwd: path.join(atHead.dir, path.relative(root, here)) } : {}),
+      name: 'Review',
+      returns: Findings,
+    },
+  ).finally(() => atHead?.close());
 
   const lines = new Map<string, string[]>();
   const byPrefix = [...repos].sort((x, y) => y.prefix.length - x.prefix.length);
@@ -916,7 +1002,7 @@ async function reviewChange(
 
 export type ReviewExec = (command: string, args: string[], input?: string) => string;
 
-export function reviewCli(cwd = process.cwd(), env: Record<string, string> = {}): ReviewExec {
+export function reviewCli(cwd = process.cwd(), env: NodeJS.ProcessEnv = {}): ReviewExec {
   return (command, args, input) =>
     execFileSync(command, args, {
       cwd,

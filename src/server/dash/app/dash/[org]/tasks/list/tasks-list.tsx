@@ -35,6 +35,7 @@ import type {
   TasksPage,
   WorkspaceLimits,
 } from '@coder/client/types';
+import { PlatformLink } from '@/comps/ui/platform-link';
 import { BrandIcon } from '@/app/dash/[org]/agents/agent/agent-pills';
 import { Button } from '@/comps/ui/button';
 import { Card, Empty } from '@/comps/ui/card';
@@ -103,6 +104,7 @@ function ago(value: number | undefined, now: number, tz: string) {
 function TaskRowView({
   task,
   brand,
+  hosts,
   back,
   scoped,
   tz,
@@ -112,6 +114,8 @@ function TaskRowView({
   task: TaskRow;
   /** The source platform's brand art, when it has one. */
   brand?: IntegrationInfo['brand'];
+  /** The source platform's link hosts. */
+  hosts?: readonly string[];
   onDone: (what: RowAction) => void;
   /** The list to return to, when it is not the plain Tasks page. */
   back?: string;
@@ -165,7 +169,9 @@ function TaskRowView({
       <td>
         <span class="source" title={sourceLabel(source)}>
           {brand ? <BrandIcon brand={brand} /> : <Icon d={sourceIcon(source)} />}
-          {what}
+          <PlatformLink href={task.task.event?.url} hosts={hosts}>
+            {what}
+          </PlatformLink>
         </span>
         {by ? <span class="sub by">by {by}</span> : null}
         <span class="row-acts">
@@ -223,6 +229,7 @@ export function TasksList({
   first,
   platforms,
   brands = {},
+  linkHosts = {},
   agents = [],
   filters,
   agent,
@@ -239,6 +246,8 @@ export function TasksList({
   platforms: [string, string][];
   /** Each platform's brand art, as the Agents page shows it. */
   brands?: Record<string, IntegrationInfo['brand']>;
+  /** Each platform's link hosts. */
+  linkHosts?: Record<string, readonly string[]>;
   /** The first agents, for the agent filter before typing. */
   agents?: [string, string][];
   filters: Record<Keys, string>;
@@ -541,6 +550,7 @@ export function TasksList({
                     key={task.task.id}
                     task={task}
                     brand={brands[task.task.event?.integration ?? task.task.source]}
+                    hosts={linkHosts[task.task.event?.integration ?? '']}
                     back={back}
                     scoped={Boolean(agent)}
                     tz={tz}

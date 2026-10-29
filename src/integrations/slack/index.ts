@@ -11,13 +11,7 @@ import {
   slackToolServer,
 } from './api';
 import { slackApp, slackToken, slackUserAuth, slackWays } from './app';
-import {
-  slackAdapter,
-  slackChatEvent,
-  slackOwnEvents,
-  slackTarget,
-  slackThreadUrl,
-} from './events';
+import { slackAdapter, slackChatEvent, slackOwnEvents, slackTarget } from './events';
 
 /** The four-colour Slack mark, for full colour display. */
 const SLACK_MARK =
@@ -72,6 +66,7 @@ export const slack: Integration = {
     installHosts: ['github.com', 'release-assets.githubusercontent.com'],
   },
   hosts: ['slack.com', '*.slack.com'],
+  linkHosts: ['slack.com'],
   get app() {
     return slackApp;
   },
@@ -82,7 +77,6 @@ export const slack: Integration = {
     edit: async (place, ts, draft) => (await import('./views')).editMessage(place, ts, draft),
     direct: async (ctx, user, page) => (await import('./views')).directMessage(ctx, user, page),
   },
-  link: slackThreadUrl,
   ownEvents: slackOwnEvents,
   adapter: slackAdapter,
   event: slackChatEvent,

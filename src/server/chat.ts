@@ -5,6 +5,7 @@ import type { Chat, Message, SerializedMessage, SerializedThread, Thread } from 
 
 import { definitionEvents, eventOptions } from '../agent/definition';
 import { postReplyParts, reactToMessage, withNotice } from '../agent/exec';
+import { postedMarkdown } from '../core/task/posted';
 import { type AgentApp, type AgentEvent } from '../agent/types';
 import type { TaskStatus } from './store/types';
 import { agentWithVersion } from './agents/records';
@@ -25,6 +26,7 @@ import { updateMetadata } from './store';
 import { installationToken, uninstall } from './tasks/context';
 import { UsageLimitError } from './tasks/usage';
 import {
+  checkedLinks,
   DELIVERY_TTL_MS,
   dispatchEvent,
   dropped,
@@ -261,7 +263,7 @@ function threadReplies(
   };
   // Where the platform answers one message, the reply goes to the one that raised the event, not the thread's newest.
   const post = async (text: string, notice?: string) => {
-    const sent = await withNotice(thread, text, notice, asker, text =>
+    const sent = await withNotice(thread, await postedMarkdown(text), notice, asker, text =>
       postReplyParts(thread, text, limit, message),
     ).catch(async error => {
       await failed?.(error);
@@ -376,7 +378,7 @@ function chatEvent(
   // Agents never wake agents; Chat already drops the app's own messages.
   if (!type || message.author.isBot === true) return;
   const extra: Partial<AgentEvent> | undefined = integration.event
-    ? integration.event(type, thread, message, app)
+    ? integration.event(type, thread, message, app, target.account ?? target.id)
     : {};
   if (!extra) return;
   // A mention's text loses the address; anything else keeps its words.
@@ -386,7 +388,7 @@ function chatEvent(
     : (address ??
       unmentioned(message.text, [app.name, ...(target.self ? [target.self] : [])]) ??
       message.text);
-  return {
+  return checkedLinks(integration, {
     integration: integration.id,
     type,
     appId: app.id,
@@ -406,7 +408,7 @@ function chatEvent(
     ...(target.account ? { account: target.account } : {}),
     ...(target.repo ? { repo: target.repo } : {}),
     ...extra,
-  };
+  });
 }
 
 /** A message the app does not take, in a conversation with a task: kept for the agent's next turn under `since`. */

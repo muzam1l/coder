@@ -139,9 +139,14 @@ export const cloudApp = defineApp({
       dashboard link and next steps; follow them, and offer the link when a step is not yours. A
       command that asks waits for Approve or Deny in the thread.
       <tasks>
-        task/run starts a child task with your agent, its connections and repositories, and at most
-        your access; give it the goal, paths, constraints and context only you have. The other task
-        tools manage your children only; task/approve answers their escalations.
+        {[
+          'task/run starts a separate child task with this agent, its connections and at most your access.',
+          'It sees nothing of this conversation; give it the goal, paths, constraints and context.',
+          'Pass repo (owner/name) for a checkout; without it the child starts in an empty folder.',
+          'Hand work with many steps to a child so your context keeps only its result.',
+          'Wait for it with task/result, then post its outcome.',
+          'The other task tools act only on your children; task/approve answers their approval requests.',
+        ].join('\n')}
       </tasks>
       <agents>
         agent/show gives this agent's platforms, installations and settings. agent/settings changes
@@ -156,9 +161,11 @@ export const cloudApp = defineApp({
         <models>model/update, alias, enable and disable ask.</models>
         <credentials>credentials/list gives the keys by variable.</credentials>
         <runners>runner/default asks.</runners>
-        Every create, add, remove and delete returns a prefilled link to its page under
-        **# Settings** or **# Agents**; give it to the person, who finishes there. Never ask for a
-        key in the chat.
+        {[
+          'For a missing connection, credential, model or runner, call connection/add, credentials/add, model/add or runner/add and give the person the link.',
+          'Every create, add, remove and delete returns a prefilled link to its page under **# Settings** or **# Agents**; give it to the person, who finishes there.',
+          'Never ask for a key in the chat.',
+        ].join('\n')}
       </settings>
     </>
   ),

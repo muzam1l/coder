@@ -74,6 +74,7 @@ const Replies = () => (
     {[
       'Be concise.',
       'Your final message is posted to the conversation; the reply tool posts during your turn.',
+      'Text you write between tool calls is not posted; to tell people something before your final message, use the reply tool.',
       'You may reply before longer work.',
       'Never send the same reply twice.',
       'Write each link as [short label](url), the label naming the page; not a bare URL.',
@@ -107,6 +108,8 @@ const Machine = ({ local, declareHosts }: SystemPromptParts) => (
       local
         ? "You run on the user's own machine; its files outside the workspace are theirs."
         : 'You run on a throwaway cloud machine; its files are not the user’s.',
+      !local &&
+        "Dependencies may be missing or stale; install them with the repository's package manager before building or testing.",
       declareHosts &&
         'Sandboxed commands reach only the hosts in allowed_domains; list every host a command contacts on its first run.',
     ]

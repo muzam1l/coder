@@ -324,35 +324,71 @@ export const byId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 export const byListKey = (a: ListKey, b: ListKey) =>
   a.rank - b.rank || b.createdAt - a.createdAt || byId(b.id, a.id);
 
-export type EventMessage = { author: string; text: string; reaction?: boolean };
+/** A turn's entry: a message someone wrote, or a change or reaction with its raw `payload`, as one line. */
+export type EventMessage = {
+  author: string;
+  text: string;
+  url?: string;
+  /** The author's profile page. */
+  authorUrl?: string;
+  payload?: unknown;
+};
+
+// A platform that knows no name repeats the raw id, which shows as nothing.
+const authorName = (author: { id: string; handle?: string; name?: string }) =>
+  [author.handle, author.name].find(name => name && name !== author.id) ?? '';
 
 /** A platform turn's messages from its `<event>` prompt; undefined for any other prompt. */
 export function eventMessages(prompt?: string): EventMessage[] | undefined {
   return eventJsons(prompt)?.flatMap(json => {
     if (json.reactions)
-      return json.reactions.map(({ emoji, by }) => ({
-        author: by.join(', '),
-        text: `reacted ${emoji}`,
-        reaction: true,
+      return json.reactions.map(reaction => ({
+        author: reaction.by.join(', '),
+        text: `reacted ${reaction.emoji}`,
+        payload: reaction,
       }));
 
-    return (json.messages ?? (json.message ? [json.message] : [])).map(({ text, author }) => ({
-      // A platform that knows no name repeats the raw id, which shows as nothing.
-      author: [author.handle, author.name].find(name => name && name !== author.id) ?? '',
-      text: text || (json.event ?? ''),
-    }));
+    return (json.messages ?? (json.message ? [json.message] : json.by ? [json] : [])).map(
+      (entry): EventMessage => {
+        const person = 'by' in entry ? entry.by : 'author' in entry ? entry.author : undefined;
+        const links = {
+          ...(entry.url ? { url: entry.url } : {}),
+          ...(person?.url ? { authorUrl: person.url } : {}),
+        };
+        if (!('author' in entry))
+          return {
+            author: person ? authorName(person) : '',
+            text: entry.title ?? entry.action ?? entry.event ?? json.event ?? '',
+            ...links,
+            payload: entry.payload ?? null,
+          };
+
+        return {
+          author: authorName(entry.author),
+          text: entry.text || (json.event ?? ''),
+          ...links,
+        };
+      },
+    );
   });
 }
 
-/** A prompt as a title: a platform prompt by its event text, else its first message. */
-export function promptTitle(prompt?: string, eventText?: string): string | undefined {
+/** A prompt as a title: a platform prompt by its event's text, else its first message, else the change that started it with who made it. */
+export function promptTitle(
+  prompt?: string,
+  event?: { text?: string; title?: string; actor?: { login?: string } },
+): string | undefined {
   const text = prompt?.trim();
   if (text && !eventMessages(text)) return text;
+  const entries = eventMessages(text);
+  const change = event?.title
+    ? { author: event.actor?.login ?? '', text: event.title }
+    : entries?.[0];
 
   return (
-    eventText?.trim() ||
-    eventMessages(text)
-      ?.find(message => !message.reaction)
-      ?.text.trim()
+    event?.text?.trim() ||
+    entries?.find(entry => entry.payload === undefined)?.text.trim() ||
+    (change && `${change.author} ${change.text}`.trim()) ||
+    undefined
   );
 }

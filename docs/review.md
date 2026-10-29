@@ -46,9 +46,9 @@ The command exits `0` when the review completes, even with findings, `1` when th
 
 ## Posted review
 
-One GitHub review per run: the reviewer's title and body, then the findings list headed `Reviewed b34340e: 3 issues` (the compare range on a rerun), each title linked to its inline thread at `file:12` or `file:12-20`. Basic output uses bold severity words and a small Markdown footer linking coder cloud (or coder cli) and the task when present. Inline comments put the bold severity between the title and failure. The CLI and self-hosted servers use basic output, with no images. With nothing found, `Nothing to report.`
+One GitHub review per run: the reviewer's title and body, then the findings list headed `Reviewed b34340e: 3 issues` (the compare range on a rerun), each title linked to its inline thread at `file:12` or `file:12-20`. Basic output uses bold severity words and a small Markdown footer linking coder cloud (or coder cli) and the task when present. Inline comments put the bold severity between the title and failure. The CLI and self-hosted servers use basic output, with no images. With nothing found, the title says so, such as `No defects found`.
 
-Reviews post plain Markdown: bold severity words and a `Posted by` line. A server with `REVIEW_ASSETS` set ([Self-host](self-host.md)) shows themed severity pills and buttons from that path or URL instead. coder.wular.ai sets it to the SVGs its site serves.
+Reviews post plain Markdown: bold severity words and a `Reviewed by` line. A server with `REVIEW_ASSETS` set ([Self-host](self-host.md)) shows themed severity pills and buttons from that path or URL instead. coder.wular.ai sets it to the SVGs its site serves.
 
 - A rerun reviews only commits since the last posted review, and never posts a finding twice. After a force-push it says so.
 - The reviewer sees up to 100 earlier findings on the pull request with their state, never reply text. Only a resolved thread settles one.

@@ -8,14 +8,33 @@ import type { AgentEvent, TaskContext } from '../types';
 /** `since` holds at most this many messages; past that the agent is told how many more there are. */
 export const SINCE_LIMIT = 50;
 
+/** Whether someone wrote the event: a chat message, or the description of what they opened. */
+const written = (event: AgentEvent) => Boolean(event.chat?.message || event.text);
+
+/** An event's actor with the page the platform gave. */
+const actorJson = ({ actor }: AgentEvent) => ({
+  id: actor.id,
+  ...(actor.login ? { handle: actor.login } : {}),
+  ...(actor.url ? { url: actor.url } : {}),
+});
+
+/** A change nobody wrote, as the platform sent it: its verb, the integration's line, who and its object. */
+function changeJson(event: AgentEvent) {
+  return {
+    event: event.type,
+    ...(event.action ? { action: event.action } : {}),
+    ...(event.title ? { title: event.title } : {}),
+    by: actorJson(event),
+    ...(event.url ? { url: event.url } : {}),
+    ...(event.payload !== undefined ? { payload: event.payload } : {}),
+  };
+}
+
 /** One message as the event JSON carries it: id, thread, position, text with the address removed, author, time. */
 function messageJson(event: AgentEvent) {
   const message = event.chat?.message;
   if (!message)
-    return {
-      text: event.text,
-      author: { id: event.actor.id, ...(event.actor.login ? { handle: event.actor.login } : {}) },
-    };
+    return { text: event.text, author: actorJson(event), ...(event.url ? { url: event.url } : {}) };
   const { author, metadata } = message;
 
   return {
@@ -29,7 +48,9 @@ function messageJson(event: AgentEvent) {
       handle: author.userName,
       name: author.fullName,
       ...(author.isBot ? { bot: true } : {}),
+      ...(event.actor.url ? { url: event.actor.url } : {}),
     },
+    ...(event.url ? { url: event.url } : {}),
     sentAt: metadata.dateSent,
     ...(metadata.edited ? { edited: true } : {}),
     ...(message.attachments.length
@@ -47,7 +68,7 @@ function messageJson(event: AgentEvent) {
   };
 }
 
-/** The JSON of one turn: the newest event names the conversation, every event in the turn is a message. */
+/** The JSON of one turn: the newest event names the conversation; each event in it is a message, or a change when nobody wrote it. */
 export function eventJson(
   events: AgentEvent[],
   user?: TaskContext['user'],
@@ -83,9 +104,11 @@ export function eventJson(
           },
         }
       : {}),
-    ...(events.length === 1
-      ? { message: messageJson(event) }
-      : { messages: events.map(messageJson) }),
+    ...(events.length > 1
+      ? { messages: events.map(each => (written(each) ? messageJson(each) : changeJson(each))) }
+      : written(event)
+        ? { message: messageJson(event) }
+        : { ...changeJson(event), event: event.type }),
     ...(since.length ? { since } : {}),
     ...(more ? { more } : {}),
     ...(user ? { requester: { name: user.name } } : {}),

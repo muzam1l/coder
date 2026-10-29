@@ -82,6 +82,7 @@ export function TasksSection({
               first={page}
               platforms={integrations.map((entry): [string, string] => [entry.id, entry.name])}
               brands={Object.fromEntries(integrations.map(entry => [entry.id, entry.brand]))}
+              linkHosts={Object.fromEntries(integrations.map(entry => [entry.id, entry.linkHosts]))}
               agents={ids}
               filters={filters}
               agent={agent}

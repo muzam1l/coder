@@ -122,6 +122,8 @@ function summarizeTask(status: TaskStatus) {
               integration: event.integration,
               type: event.type,
               text: event.text,
+              ...(event.title ? { title: event.title } : {}),
+              ...(event.url ? { url: event.url } : {}),
               actor: event.actor,
             },
           }

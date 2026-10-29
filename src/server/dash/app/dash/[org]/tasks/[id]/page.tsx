@@ -41,7 +41,7 @@ export default async function TaskPage({
                 initial={row}
                 tz={tz}
                 me={who}
-                brand={integrations.find(entry => entry.id === row.task.event?.integration)?.brand}
+                integration={integrations.find(entry => entry.id === row.task.event?.integration)}
               />
             ),
             error => {

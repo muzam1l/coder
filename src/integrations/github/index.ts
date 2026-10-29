@@ -26,7 +26,6 @@ import {
   githubPullRequest,
   githubTarget,
   githubThread,
-  githubThreadUrl,
 } from './events';
 import { githubReviews } from './review';
 
@@ -78,6 +77,7 @@ export const github: Integration = {
     installHosts: ['github.com', 'release-assets.githubusercontent.com'],
   },
   hosts: ['github.com', 'api.github.com', 'codeload.github.com'],
+  linkHosts: ['github.com'],
   collapsed: (summary, markdown) =>
     `<details><summary>${summary}</summary>\n\n${markdown}\n\n</details>`,
   get app() {
@@ -124,7 +124,6 @@ export const github: Integration = {
   },
   target: githubTarget,
   adapter: githubAdapter,
-  link: githubThreadUrl,
   ownEvents: githubOwnEvents,
   event: githubChatEvent,
 };

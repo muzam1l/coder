@@ -318,26 +318,28 @@ export function slackOwnEvents(
     : { invalid: true };
 }
 
-/** Chat SDK routes a 1:1 DM as a mention, and DMs and channels share its message route. */
+/** Chat SDK routes a 1:1 DM as a mention, and DMs and channels share its message route; a message links its channel, as Slack has no message page without an API call. */
 export function slackChatEvent(
   type: string,
   thread: Thread,
   message: Message,
-): Pick<PlatformEvent, 'type' | 'actor'> {
-  const channelType = (message.raw as { channel_type?: string }).channel_type;
+  _app: PlatformApp,
+  team: string,
+): Pick<PlatformEvent, 'type' | 'actor' | 'url'> {
+  const { channel_type: channelType, channel } = message.raw as {
+    channel_type?: string;
+    channel?: string;
+  };
   return {
     type: thread.isDM ? 'dm' : type === 'mention' ? type : messageEvent(channelType),
     actor: {
       id: message.author.userId,
       ...(message.author.userName ? { login: message.author.userName } : {}),
     },
+    ...(channel
+      ? { url: `https://slack.com/app_redirect?${new URLSearchParams({ team, channel })}` }
+      : {}),
   };
-}
-
-/** The archive page of an event's Chat SDK thread. */
-export function slackThreadUrl(event: PlatformEvent): string | undefined {
-  const thread = /^slack:([^:]+):(\d+)\.(\d+)$/.exec(event.chat?.thread.id ?? '');
-  return thread ? `https://slack.com/archives/${thread[1]}/p${thread[2]}${thread[3]}` : undefined;
 }
 
 const TYPING_TTL_MS = 24 * 60 * 60 * 1000;

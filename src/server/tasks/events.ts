@@ -5,6 +5,7 @@ import { dispatchFilePrefixes } from '../agents/repo';
 import { randomUUID } from 'node:crypto';
 import { effectiveSettings, matchAgent, agentAccess } from '../../agent/definition';
 import type { Integration } from '../../integrations/types';
+import { linkUrl } from '../../utils/url';
 import type { AgentApp, AgentEvent, AgentTask, Installation, TaskSource } from '../../agent/types';
 import { forInstallation, type ServerContext } from '../context';
 import type { DispatchLoaded, FailedDelivery, Store, TaskStatus } from '../store/types';
@@ -56,6 +57,20 @@ export interface Replies {
   startTyping?(): Promise<void>;
   /** Clears what `startTyping` showed where a reply does not. */
   endTyping?(): Promise<void>;
+}
+
+/** The event with only the item, message and actor links its integration's pages allow, checked before it is stored. */
+export function checkedLinks<T extends AgentEvent>(integration: Integration, event: T): T {
+  const url = linkUrl(event.url, integration.linkHosts);
+  const actor = linkUrl(event.actor.url, integration.linkHosts);
+  const { url: _url, ...rest } = event;
+  const { url: _actor, ...who } = event.actor;
+
+  return {
+    ...rest,
+    ...(url ? { url } : {}),
+    actor: { ...who, ...(actor ? { url: actor } : {}) },
+  } as T;
 }
 
 /** Installs are bound from the dashboard; an unbound or removed one runs nothing. */
@@ -375,8 +390,8 @@ async function claimed(
   const tokens = dispatchTokens(ctx, integration, installation, event, credentials);
   const token = async () => (await tokens(event.integration))!.token();
 
-  // An approval answer in a task's conversation goes to that task, never to the agent; a bare one only while one approval is open.
-  const answer = event.chat ? readApprovalCommand(event.text) : undefined;
+  // An approval answer in a task's conversation goes to that task, never to the agent; a bare one only while one approval is open. Only a chat message answers.
+  const answer = event.chat?.message ? readApprovalCommand(event.text) : undefined;
   const asked = answer && (await conversationState(ctx, event)).status;
   if (answer && asked && (answer.id || (await openApprovals(ctx, asked.task.id)).length === 1))
     return effect(() =>
@@ -653,7 +668,7 @@ export async function recordFailure(
 ): Promise<void> {
   const integration = ctx.integrations[app.integration];
   const repo = event?.repo && `${event.repo.owner}/${event.repo.name}`;
-  const url = event && (integration?.link?.(event) ?? (repo && integration?.repos?.url(repo)));
+  const url = event && (event.url ?? (repo && integration?.repos?.url(repo)));
   let first = false;
   try {
     const tenant =

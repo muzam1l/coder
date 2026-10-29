@@ -1,11 +1,22 @@
 /** The event JSON in task prompts, free of dependencies so the dashboard imports it. */
-type EventAuthor = { id: string; handle?: string; name?: string };
+type EventAuthor = { id: string; handle?: string; name?: string; url?: string };
 
-type EventJson = {
+type EventMessageJson = { id?: string; text?: string; author: EventAuthor; url?: string };
+
+/** A change nobody wrote, with its actor as `by`. */
+type EventChangeJson = {
   event?: string;
+  action?: string;
+  title?: string;
+  by?: EventAuthor;
+  url?: string;
+  payload?: unknown;
+};
+
+type EventJson = EventChangeJson & {
   mustReply?: boolean;
-  message?: { id?: string; text?: string; author: EventAuthor };
-  messages?: Array<{ id?: string; text?: string; author: EventAuthor }>;
+  message?: EventMessageJson;
+  messages?: Array<EventMessageJson | (EventChangeJson & { id?: undefined })>;
   reactions?: Array<{ emoji: string; by: string[] }>;
 };
 

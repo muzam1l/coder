@@ -1134,7 +1134,7 @@ export async function list(
               remoteTask(row),
               remoteApprovals(row).filter(approval => !approval.answered).length,
               iso(row.lastActivityAt ?? row.updatedAt),
-              promptTitle(row.turns?.[0]?.prompt ?? row.task.prompt, row.task.event?.text),
+              promptTitle(row.turns?.[0]?.prompt ?? row.task.prompt, row.task.event),
             ),
           );
       next = page.next;

@@ -41,12 +41,14 @@ const STARTS: Record<string, string> = {
 };
 const EVENT_NAMES: Record<string, string> = { pull_request: 'Pull request', dm: 'DM' };
 
-/** What started a task, as "Pull request" or "Dashboard task", and who: its member, else the platform account. */
+/** What started a task, as its event's title, "Pull request" or "Dashboard task", and who: its member, else the platform account. */
 export function taskOrigin(task: TaskRow) {
   const type = task.task.event?.type;
-  const what = type
-    ? (EVENT_NAMES[type] ?? type[0]!.toUpperCase() + type.slice(1).replace(/_/g, ' '))
-    : (STARTS[task.task.source] ?? `${sourceLabel(task.task.source)} task`);
+  const what =
+    task.task.event?.title ??
+    (type
+      ? (EVENT_NAMES[type] ?? type[0]!.toUpperCase() + type.slice(1).replace(/_/g, ' '))
+      : (STARTS[task.task.source] ?? `${sourceLabel(task.task.source)} task`));
   const by = task.task.context?.user?.name || task.task.event?.actor?.login;
 
   return { what, by };
@@ -106,7 +108,7 @@ export const replyRequired = (task: TaskRow, prompt: string) =>
 /** A platform task is titled by its first message; dashboard and CLI tasks by their prompt. */
 export function taskTitle(task: TaskRow) {
   // The first turn's prompt: a follow-up or a decision never retitles the task.
-  const first = promptTitle(task.turns?.[0]?.prompt ?? task.task.prompt, task.task.event?.text);
+  const first = promptTitle(task.turns?.[0]?.prompt ?? task.task.prompt, task.task.event);
 
   return (
     task.task.name?.trim() || first || `${task.task.event?.type ?? 'task'} on ${task.task.agent}`

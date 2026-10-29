@@ -30,7 +30,10 @@ export interface TaskRow {
       integration: string;
       type: string;
       text?: string;
-      actor?: { id: string; login?: string };
+      title?: string;
+      url?: string;
+      payload?: unknown;
+      actor?: { id: string; login?: string; url?: string };
       mustReply?: boolean;
       thread?: { number?: number };
     };
@@ -174,6 +177,8 @@ export interface IntegrationInfo {
   unreachable?: true;
   /** How apps are brought up to date: Coder pushes them, reads what to change on the platform, or lists values to confirm by hand. */
   appUpdate?: 'push' | 'drift' | 'confirm';
+  /** Hosts of the platform's pages a task may link. */
+  linkHosts: readonly string[];
 }
 
 /** An app Coder cannot push, checked against what its agent needs now: every line, the changed ones marked. */
@@ -705,9 +710,13 @@ export interface AgentEvent {
   appId: string;
   installationId: string;
   deliveryId: string;
-  actor: { id: string; login?: string; role?: string; agent?: boolean };
-  /** Human text attached to the event: mention body, comment, PR title + body. */
+  actor: { id: string; login?: string; role?: string; agent?: boolean; url?: string };
+  /** What the actor wrote: a message, a comment, or the description of what they opened. */
   text: string;
+  action?: string;
+  title?: string;
+  url?: string;
+  payload?: unknown;
   /** The Chat SDK thread and message it happened in, without raw platform payloads; replies go to this thread. */
   chat?: { thread: SerializedThread; message?: SerializedMessage };
   repo?: {

@@ -22,9 +22,18 @@ export interface PlatformEvent {
   appId: string;
   installationId: string;
   deliveryId: string;
-  actor: { id: string; login?: string; role?: string; agent?: boolean };
-  /** Human text attached to the event: mention body, comment, PR title + body. */
+  /** `url`: the actor's profile page, when the payload carries one. */
+  actor: { id: string; login?: string; role?: string; agent?: boolean; url?: string };
+  /** What the actor wrote in this event: a message, a comment, or the description of an opened issue or pull request; empty for any other change. */
   text: string;
+  /** The platform's own verb for a webhook that is not a chat message, such as `ready_for_review`. */
+  action?: string;
+  /** One line the integration writes for such a webhook, such as "marked #20 ready for review". */
+  title?: string;
+  /** The webhook's raw object, without the repository, organization, installation and sender it repeats. */
+  payload?: unknown;
+  /** The platform page of the item or message, when the webhook carries it. */
+  url?: string;
   /** The text @-mentions the app, on an event with no chat message to say so (an opened GitHub issue). */
   mentioned?: true;
   /** The platform account it happened in (Slack team, GitHub org), for an installation that covers several. */
@@ -785,13 +794,13 @@ export interface Integration {
   readonly repos?: Repositories;
   /** Hosts a task's machine reaches for it: clones, API calls and its tool server. */
   readonly hosts: readonly string[];
+  /** HTTPS hosts of the platform's own pages a stored event or message may link. */
+  readonly linkHosts: readonly string[];
   /** A webhook's target, or the answer to a handshake that names no app (Slack URL verification). */
   target(req: Request, raw: string): WebhookTarget | Response | undefined;
   /** The app's Chat SDK adapter, built per request; every secret is passed explicitly, never read from the environment. */
   adapter(ctx: AdapterContext): Promise<Adapter>;
   requestFetch?(request: typeof fetch, installation?: string): typeof fetch;
-  /** The platform page of the thread or issue an event came from. */
-  link?(event: PlatformEvent): string | undefined;
   /** Messages with buttons, where the platform has them. */
   readonly messages?: IntegrationMessages;
   /** Markdown that shows `markdown` collapsed under `summary`, for text-only posts; absent where the platform has none, so it shows in full. */
@@ -806,15 +815,16 @@ export interface Integration {
     credentials: unknown,
     self?: string,
   ): OwnEvent | undefined;
-  /** What core cannot read from a Chat SDK message, such as the actor's role; `undefined` drops it. */
+  /** What core cannot read from a Chat SDK message, such as the actor's role or the message's page; `account` is the platform account it happened in. `undefined` drops it. */
   event?(
     type: string,
     thread: Thread,
     message: Message,
     app: PlatformApp,
+    account: string,
   ):
     | (Pick<PlatformEvent, 'type' | 'actor'> &
-        Partial<Pick<PlatformEvent, 'text'>>)
+        Partial<Pick<PlatformEvent, 'text' | 'url'>>)
     | undefined;
 }
 

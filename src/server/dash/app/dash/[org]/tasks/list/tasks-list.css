@@ -142,6 +142,11 @@ td.model {
   gap: 6px;
   white-space: nowrap;
 }
+/* the source's own link sits above the row's cover link */
+.source .link {
+  position: relative;
+  z-index: 1;
+}
 .source .ic {
   color: var(--dim);
 }

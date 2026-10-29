@@ -46,6 +46,8 @@ import {
   TASK_TABS,
 } from '@/app/dash/[org]/tasks/list/task';
 import { useAction } from '@/utils/action';
+import { PlatformLink } from '@/comps/ui/platform-link';
+import { linkUrl } from '@coder/utils/url';
 import { useZone } from '@/app/zone';
 import { Approval, ApprovalEntry, DecisionTurn, TaskActions, raisedIn } from './task-actions';
 import { Activity, RunPreview, runSummary } from './activity';
@@ -65,17 +67,23 @@ function messageOf(value: unknown, fallback: string): string {
   return fallback;
 }
 
-/** Who made a turn and what they said: a platform turn's messages, else its prompt. */
+/** Who made a turn and what they said: a platform turn's messages, else the change or message that started it, else its prompt. */
 function turnMessages(task: TaskRow, prompt: string, first: boolean): EventMessage[] {
   const { event } = task.task;
+  const started = first && event?.actor && (prompt === event.text || (!prompt && event.title));
+  const links = {
+    ...(event?.url ? { url: event.url } : {}),
+    ...(event?.actor?.url ? { authorUrl: event.actor.url } : {}),
+  };
 
   return (
     eventMessages(prompt) ??
-    (first && event?.actor && prompt === event.text
+    (started
       ? [
           {
-            author: event.actor.login !== event.actor.id ? (event.actor.login ?? '') : '',
-            text: prompt,
+            author: event.actor!.login !== event.actor!.id ? (event.actor!.login ?? '') : '',
+            ...(prompt ? { text: prompt } : { text: event.title!, payload: event.payload ?? null }),
+            ...links,
           },
         ]
       : [{ author: 'Prompt', text: prompt }])
@@ -128,7 +136,15 @@ function TaskBack() {
 }
 
 /** The Details tab: the task's id, who started it and how it ran. */
-function TaskDetails({ task, tz }: { task: TaskRow; tz: string }) {
+function TaskDetails({
+  task,
+  tz,
+  hosts,
+}: {
+  task: TaskRow;
+  tz: string;
+  hosts?: readonly string[];
+}) {
   const org = useOrg();
   const { what } = taskOrigin(task);
   const { id, event, context, parent, cwd } = task.task;
@@ -151,9 +167,21 @@ function TaskDetails({ task, tz }: { task: TaskRow; tz: string }) {
     ],
     [
       'Account',
-      event?.actor?.login ? `${event.actor.login} on ${sourceLabel(event.integration)}` : null,
+      event?.actor?.login ? (
+        <>
+          <PlatformLink href={event.actor.url} hosts={hosts}>
+            {event.actor.login}
+          </PlatformLink>{' '}
+          on {sourceLabel(event.integration)}
+        </>
+      ) : null,
     ],
-    ['Started from', what],
+    [
+      'Started from',
+      <PlatformLink href={task.task.event?.url} hosts={hosts}>
+        {what}
+      </PlatformLink>,
+    ],
     ['Flow', task.task.flow && task.task.flow !== 'default' ? task.task.flow : null],
     ['Agent', task.task.agent],
     ['Model', taskModel(task)],
@@ -194,13 +222,15 @@ function TaskDetails({ task, tz }: { task: TaskRow; tz: string }) {
 function TaskHead({
   task,
   tz,
-  brand,
+  integration,
 }: {
   task: TaskRow;
   tz: string;
-  /** The source platform's brand art, when it has one. */
-  brand?: IntegrationInfo['brand'];
+  /** The source platform, when the task came from one. */
+  integration?: IntegrationInfo;
 }) {
+  const brand = integration?.brand;
+  const hosts = integration?.linkHosts;
   const org = useOrg();
   const live = taskActive(task);
   const model = taskModel(task);
@@ -231,7 +261,17 @@ function TaskHead({
           </span>
           <span class="fact" title={sourceLabel(source)}>
             {brand ? <BrandIcon brand={brand} /> : <Icon d={task.task.event ? iPlug : iTerminal} />}
-            {by ? `${what} by ${by}` : what}
+            <PlatformLink href={task.task.event?.url} hosts={hosts}>
+              {what}
+            </PlatformLink>
+            {by ? (
+              <>
+                {' by '}
+                <PlatformLink href={task.task.event?.actor?.url} hosts={hosts}>
+                  {by}
+                </PlatformLink>
+              </>
+            ) : null}
           </span>
           {task.task.cwd ? (
             <span class="fact" title={task.task.cwd}>
@@ -282,12 +322,13 @@ export function TaskView({
   initial,
   tz: serverZone,
   me,
-  brand,
+  integration,
 }: {
   initial: TaskRow;
   tz: string;
   me: Me;
-  brand?: IntegrationInfo['brand'];
+  /** The source platform, when the task came from one. */
+  integration?: IntegrationInfo;
 }) {
   const tz = useZone(serverZone);
   const [task, setTask] = useState(initial);
@@ -321,6 +362,9 @@ export function TaskView({
   const asker = useAction({ toast: 'Not sent' });
   const sending = Boolean(sender.pending);
   const live = taskActive(task);
+  const hosts = integration?.linkHosts;
+  // A message's own page shows only when it passes the platform's link check.
+  const messagePage = (url?: string) => hosts && linkUrl(url, hosts);
   const replies = task.task.flow === 'default';
   const rows = useDisplayRows(lines);
   useEffect(() => watchTask(task.task.id, task.status, taskTitle(task)), [task.status]);
@@ -556,7 +600,7 @@ export function TaskView({
 
   return (
     <>
-      <TaskHead task={task} tz={tz} brand={brand} />
+      <TaskHead task={task} tz={tz} integration={integration} />
       {task.fallbacks?.map((fallback, index) => (
         <p key={index} class="flash" role="status">
           {modelOf(fallback.model)} was unavailable. {fallback.detail} This task is using{' '}
@@ -584,7 +628,7 @@ export function TaskView({
       {tab === 'activity' ? (
         <Activity rows={rows} live={live} tz={tz} at={at} />
       ) : tab === 'details' ? (
-        <TaskDetails task={task} tz={tz} />
+        <TaskDetails task={task} tz={tz} hosts={integration?.linkHosts} />
       ) : (
         <>
           <Approval task={task} me={me} />
@@ -603,12 +647,45 @@ export function TaskView({
               return (
                 <Fragment key={index}>
                   {decision ? <DecisionTurn approval={decision} /> : null}
-                  {(decision ? [] : parsed[index]!.messages).map((message, index) => (
-                    <div key={`p${index}`} class="turn prompt">
-                      {message.author ? <p class="who">{message.author}</p> : null}
-                      <Collapse class="prose">{message.text}</Collapse>
-                    </div>
-                  ))}
+                  {(decision ? [] : parsed[index]!.messages).map((message, at) =>
+                    message.payload === undefined ? (
+                      <div key={`p${at}`} class="turn prompt">
+                        {message.author || messagePage(message.url) ? (
+                          <p class="who">
+                            <PlatformLink href={message.authorUrl} hosts={hosts}>
+                              {message.author}
+                            </PlatformLink>
+                            {messagePage(message.url) ? (
+                              <>
+                                {message.author ? ' · ' : null}
+                                <PlatformLink href={message.url} hosts={hosts}>
+                                  Open in {integration?.name}
+                                </PlatformLink>
+                              </>
+                            ) : null}
+                          </p>
+                        ) : null}
+                        <Collapse class="prose">{message.text}</Collapse>
+                      </div>
+                    ) : (
+                      <details key={`p${at}`} class="turn change">
+                        <summary>
+                          <span>
+                            <PlatformLink href={message.authorUrl} hosts={hosts}>
+                              {message.author}
+                            </PlatformLink>{' '}
+                            <PlatformLink href={message.url} hosts={hosts}>
+                              {message.text}
+                            </PlatformLink>
+                          </span>
+                          {index === 0 ? (
+                            <span class="fact-dim">{formatDate(task.createdAt, tz, true)}</span>
+                          ) : null}
+                        </summary>
+                        <pre class="body json">{JSON.stringify(message.payload, null, 2)}</pre>
+                      </details>
+                    ),
+                  )}
                   {last
                     ? (task.answer ?? []).slice(0, knownAnswers.current).map((answer, index) => (
                         <div key={`a${index}`} class="turn answer">

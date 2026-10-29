@@ -127,6 +127,30 @@ pre.json {
   margin: 8px auto 0;
 }
 
+/* a change nobody wrote is one line, its raw JSON folded under it */
+.turn.change {
+  padding: 8px 16px;
+  border-left-color: var(--line2);
+  font-size: 13px;
+}
+.turn.change > summary {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+.turn.change > summary::-webkit-details-marker {
+  display: none;
+}
+.turn.change > pre {
+  margin-top: 8px;
+  max-height: 320px;
+  overflow: auto;
+  font-size: 12px;
+}
+
 /* activity: one line per event, long ones open in place */
 .act-list {
   position: relative;

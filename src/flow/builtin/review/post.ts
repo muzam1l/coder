@@ -1,5 +1,6 @@
 /** How a pull request review reads where it is posted: its body, inline comments and check summary. */
 import type { PullRequestReviews, ReviewTarget } from '../../../integrations/types';
+import { postedMarkdown } from '../../../core/task/posted';
 
 /** A finding as posted: a changed line, its severity, a short title (`summary`) and how it fails. */
 export interface ReviewFinding {
@@ -45,26 +46,11 @@ const picture = (images: string, name: string, alt: string) =>
 
 const capital = (word: string) => word[0]!.toUpperCase() + word.slice(1);
 
-/** Breaks every tag, link, image, autolink, reference definition, character reference and mention in model text, code spans included. */
-const neutral = (text: string) =>
-  text
-    .replace(/<([A-Za-z/!?])/g, '<\u200b$1')
-    .replace(/\]\(/g, ']\u200b(')
-    .replace(/\]:/g, ']\u200b:')
-    .replace(/!\[/g, '!\u200b[')
-    .replace(/&([#A-Za-z])/g, '&\u200b$1')
-    .replace(/@([\w-])/g, '@\u200b$1')
-    .replace(/(https?):\/\//gi, '$1\u200b://')
-    .replace(/www\./gi, 'www\u200b.');
-
-/** Model-written markdown: it adds no HTML, link, image or mention. */
-const guarded = (text: string) => neutral(text.trim());
-
 const PUNCTUATION = /[!-/:-@[-`{-~]/;
 
 /** A model-written title on one line, read as CommonMark does: code spans stay, every other bracket, backtick and stray backslash is escaped, so it cannot leave its own link. */
 const oneLine = (text: string) => {
-  const line = neutral(text.replace(/\s+/g, ' ').trim());
+  const line = text.replace(/\s+/g, ' ').trim();
   let label = '';
   for (let at = 0; at < line.length;) {
     const char = line[at]!;
@@ -105,7 +91,7 @@ export function reviewCheckSummary(
   task?: string,
 ): string {
   const heading = oneLine(title);
-  const lines = [heading.length > 200 ? `${heading.slice(0, 199)}…` : heading];
+  const lines = [heading.length > 80 ? `${heading.slice(0, 79)}…` : heading];
   const link = `[View the review](${url})${task ? ` · [View task](${task})` : ''}`;
   let length = lines[0]!.length + 1 + link.length;
   for (const [index, finding] of findings.entries()) {
@@ -133,10 +119,10 @@ const range = (target: Pick<ReviewTarget, 'repo' | 'headSha' | 'since'>) =>
 
 function footer(links: ReviewLinks): string {
   if (links.images === undefined)
-    return `<sub>Posted by [coder ${links.from}](${links.coder})${links.task ? ` · [View task](${links.task})` : ''}</sub>`;
+    return `<sub>Reviewed by [coder ${links.from}](${links.coder})${links.task ? ` · [View task](${links.task})` : ''}</sub>`;
 
   return [
-    `<a href="${links.coder}">${picture(links.images, `btn-${links.from}`, `Posted by coder ${links.from}`)}</a>`,
+    `<a href="${links.coder}">${picture(links.images, `btn-${links.from}`, `Reviewed by coder ${links.from}`)}</a>`,
     ...(links.task
       ? [`<a href="${links.task}">${picture(links.images, 'btn-task', 'View task')}</a>`]
       : []),
@@ -147,7 +133,7 @@ function footer(links: ReviewLinks): string {
 export function reviewBody(review: ReviewPost, threads: Map<string, string> = new Map()): string {
   const { target, findings, links } = review;
   const title = review.title?.replace(/\s+/g, ' ').trim() ?? '';
-  const heading = title.length > 200 ? `${title.slice(0, 199)}…` : title;
+  const heading = title.length > 80 ? `${title.slice(0, 79)}…` : title;
   const reviewed = `Reviewed ${range(target)}`;
   const threadOf = (finding: ReviewFinding) =>
     finding.inline === false ? undefined : threads.get(finding.fingerprint);
@@ -157,9 +143,7 @@ export function reviewBody(review: ReviewPost, threads: Map<string, string> = ne
     // A linked title leads to the full path and the failure in its thread; one without a thread shows both here.
     const heading = thread ? `[${label}](${thread})` : label;
     const file = thread ? finding.file.split('/').pop() : finding.file;
-    const failure = thread
-      ? ''
-      : `\n\n  ${guarded(finding.failure_scenario).replace(/\n/g, '\n  ')}`;
+    const failure = thread ? '' : `\n\n  ${finding.failure_scenario.trim().replace(/\n/g, '\n  ')}`;
 
     return `- ${links.images === undefined ? `**${capital(finding.severity)}**` : picture(links.images, `sev-${finding.severity}`, capital(finding.severity))} ${heading} <sub>${codeSpan(`${file}:${finding.start_line ? `${finding.start_line}-` : ''}${finding.line}`)}</sub>${failure}`;
   });
@@ -175,8 +159,8 @@ export function reviewBody(review: ReviewPost, threads: Map<string, string> = ne
     : '';
 
   return [
-    oneLine(heading) || (!review.body.trim() && !findings.length ? 'Nothing to report.' : ''),
-    guarded(review.body),
+    oneLine(heading),
+    review.body.trim(),
     target.forcePushed && target.since
       ? `> [!WARNING]\n> The branch no longer contains <code>${target.since.slice(0, 7)}</code> after a force-push. This review covers lines changed since it.`
       : '',
@@ -195,7 +179,7 @@ export function inlineComment(finding: ReviewFinding, images?: string): string {
     images === undefined
       ? `**${capital(finding.severity)}**`
       : picture(images, `sev-${finding.severity}`, capital(finding.severity)),
-    guarded(finding.failure_scenario),
+    finding.failure_scenario.trim(),
     `<!-- coder-review:fp=${finding.fingerprint} -->`,
   ].join('\n\n');
 }
@@ -209,6 +193,19 @@ export async function postReview(
   stopped: () => boolean = () => false,
 ): Promise<{ url: string; posted: number }> {
   const { target } = review;
+  // Model text loads no image or HTML wherever it posts.
+  review = {
+    ...review,
+    title: await postedMarkdown(review.title),
+    body: await postedMarkdown(review.body),
+    findings: await Promise.all(
+      review.findings.map(async finding => ({
+        ...finding,
+        summary: await postedMarkdown(finding.summary),
+        failure_scenario: await postedMarkdown(finding.failure_scenario),
+      })),
+    ),
+  };
   const threads = await platform.threads(target, token, request);
   // A run stopped while reading the threads posts nothing.
   if (stopped()) throw new Error('The review was stopped before posting.');

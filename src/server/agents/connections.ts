@@ -358,6 +358,7 @@ export async function integrationCatalog(ctx: ServerContext, url: URL): Promise<
           id: integration.id,
           name: integration.name,
           brand: integration.brand,
+          linkHosts: integration.linkHosts,
           description: integration.description,
           installLabel: integration.installLabel ?? `Connect ${integration.id}`,
           ...(use ? { use } : {}),

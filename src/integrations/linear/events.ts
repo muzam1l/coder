@@ -7,7 +7,9 @@ import type {
   AdapterPostableMessage,
   ChatInstance,
   EmojiValue,
+  Message,
   SerializedThread,
+  Thread,
   WebhookOptions,
 } from 'chat';
 
@@ -68,6 +70,7 @@ export function linearTarget(req: Request, raw: string): WebhookTarget | undefin
 
 type Issue = {
   id?: string;
+  identifier?: string;
   title?: string;
   description?: string | null;
   teamId?: string;
@@ -85,8 +88,10 @@ type Webhook = {
   action?: string;
   organizationId?: string;
   oauthClientId?: string;
-  actor?: { id?: string; type?: string; name?: string } | null;
+  actor?: { id?: string; type?: string; name?: string; url?: string } | null;
   data?: Issue;
+  /** The page of the issue. */
+  url?: string;
   /** An update's previous values, a key for each property it changed. */
   updatedFrom?: Record<string, unknown> & { labelIds?: string[] };
 };
@@ -97,19 +102,20 @@ const mentions = (text: string, name: string) =>
     text,
   );
 
-/** What an issue update changed that an agent acts on, a line each; removed labels and reordering are not. */
+/** What an issue update changed that an agent acts on, as lines after the actor's name; removed labels and reordering are not. */
 function changes(issue: Issue, before: NonNullable<Webhook['updatedFrom']>): string[] {
   const added = (issue.labels ?? []).filter(
     label => before.labelIds && label.id && !before.labelIds.includes(label.id),
   );
+  const id = issue.identifier ?? 'the issue';
 
   return [
-    'stateId' in before && issue.state?.name && `Moved to ${issue.state.name}`,
-    added.length > 0 && `Labeled ${added.map(label => label.name).join(', ')}`,
-    'priority' in before && issue.priorityLabel && `Priority ${issue.priorityLabel}`,
+    'stateId' in before && issue.state?.name && `moved ${id} to ${issue.state.name}`,
+    added.length > 0 && `labeled ${id} ${added.map(label => label.name).join(', ')}`,
+    'priority' in before && issue.priorityLabel && `set ${id} to ${issue.priorityLabel} priority`,
     'assigneeId' in before &&
-      (issue.assignee?.name ? `Assigned to ${issue.assignee.name}` : 'Unassigned'),
-    ('title' in before || 'description' in before) && 'Edited',
+      (issue.assignee?.name ? `assigned ${id} to ${issue.assignee.name}` : `unassigned ${id}`),
+    ('title' in before || 'description' in before) && `edited ${id}`,
   ].filter((line): line is string => Boolean(line));
 }
 
@@ -129,17 +135,12 @@ function issueEvent(
     issue.delegateId === self &&
     (body.action === 'create' || (body.updatedFrom && 'delegateId' in body.updatedFrom)),
   );
+  const created = body.action === 'create';
   const before = body.action === 'update' ? body.updatedFrom : undefined;
   const changed = before ? changes(issue, before) : [];
-  // A change carries the description only when it edited it, so an old ask there isn't repeated.
-  const edited = before && ('title' in before || 'description' in before);
-  const text =
-    delegated || body.action === 'create'
-      ? about
-      : changed.length
-        ? `${changed.join('\n')}\n\n${edited ? about : (issue.title ?? '')}`
-        : '';
-  if (!text) return;
+  if (!created && !delegated && !changed.length) return;
+  const id = issue.identifier ?? 'the issue';
+  const { actor: _actor, organizationId: _organization, ...payload } = body;
   const thread: SerializedThread = {
     _type: 'chat:Thread',
     adapterName: 'linear',
@@ -154,13 +155,39 @@ function issueEvent(
     appId: app.id,
     installationId: body.organizationId,
     deliveryId: req.headers.get('linear-delivery') ?? '',
-    actor: { id: body.actor.id, ...(body.actor.name ? { login: body.actor.name } : {}) },
-    text,
-    ...(!delegated && body.action === 'create' && mentions(about, app.name)
-      ? { mentioned: true as const }
-      : {}),
+    actor: {
+      id: body.actor.id,
+      ...(body.actor.name ? { login: body.actor.name } : {}),
+      ...(body.actor.url ? { url: body.actor.url } : {}),
+    },
+    // Only creating it writes its description; a change or delegation carries none.
+    text: created ? about : '',
+    ...(!delegated && created && mentions(about, app.name) ? { mentioned: true as const } : {}),
+    ...(body.action ? { action: body.action } : {}),
+    title: delegated ? `delegated ${id}` : created ? `created ${id}` : changed.join(', '),
+    payload,
+    ...(body.url ? { url: body.url } : {}),
     ...(issue.teamId ? { space: { kind: 'team' as const, id: issue.teamId } } : {}),
     chat: { thread },
+  };
+}
+
+/** A comment's page and its author's profile, which the adapter's message keeps in its raw comment. */
+export function linearChatEvent(
+  type: string,
+  _thread: Thread,
+  message: Message,
+): Pick<PlatformEvent, 'type' | 'actor' | 'url'> {
+  const { comment } = message.raw as { comment?: { url?: string; user?: { url?: string } } };
+
+  return {
+    type,
+    actor: {
+      id: message.author.userId,
+      ...(message.author.userName ? { login: message.author.userName } : {}),
+      ...(comment?.user?.url ? { url: comment.user.url } : {}),
+    },
+    ...(comment?.url ? { url: comment.url } : {}),
   };
 }
 
@@ -262,6 +289,16 @@ export async function linearAdapter(ctx: AdapterContext): Promise<Adapter> {
             'gi',
           );
         const body = mention ? data.body.replace(mention, `@${this.userName}`) : data.body;
+        // The raw comment keeps the author's profile page for `linearChatEvent`.
+        const author = {
+          type: 'user' as const,
+          id: user.id,
+          displayName: /\/profiles\/([^/?#]+)/.exec(user.url)?.[1] ?? '',
+          fullName: user.name,
+          email: user.email,
+          avatarUrl: user.avatarUrl ?? undefined,
+          url: user.url,
+        };
         const message = this.parseMessage({
           kind: 'comment',
           organizationId: payload.organizationId,
@@ -273,14 +310,7 @@ export async function linearAdapter(ctx: AdapterContext): Promise<Adapter> {
             createdAt: data.createdAt,
             updatedAt: data.updatedAt,
             url: payload.url ?? undefined,
-            user: {
-              type: 'user',
-              id: user.id,
-              displayName: /\/profiles\/([^/?#]+)/.exec(user.url)?.[1] ?? '',
-              fullName: user.name,
-              email: user.email,
-              avatarUrl: user.avatarUrl ?? undefined,
-            },
+            user: author,
           },
         });
         const threadId = this.encodeThreadId({ issueId, commentId: data.parentId || data.id });
