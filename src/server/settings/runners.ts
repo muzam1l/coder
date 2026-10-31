@@ -15,7 +15,15 @@ import { randomBytes } from 'node:crypto';
 import { type RunnerRecord, type Store } from '../store/types';
 import { decryptSecret, encryptSecret } from '../store/secrets';
 import { RunnerCheckError } from '../runners';
-import { recordRunner, serverRunnerId, taskRunner, visibleRunner } from '../runners/select';
+import {
+  githubRepos,
+  githubRepoToken,
+  recordRunner,
+  runnerAccess,
+  serverRunnerId,
+  taskRunner,
+  visibleRunner,
+} from '../runners/select';
 import { ACTIVE_STATES } from '../tasks/queue';
 import { plansUrl, usageLimits, UsageLimitError } from '../tasks/usage';
 import { workspaceAdmin } from '../routes/guards';
@@ -24,8 +32,18 @@ import { safeEqual, sha256 } from '../../utils/crypto';
 import { checkHttp, HttpRunner, validateHttpConfig } from '../runners/kinds/http';
 import { RUNNER_IMAGE } from '../runners/package';
 import { checkDocker, validateDockerConfig } from '../runners/kinds/docker';
-import { checkGithubActions, validateGithubActionsConfig } from '../runners/kinds/github-actions';
-import { checkVercelSandbox } from '../runners/kinds/vercel-sandbox';
+import {
+  checkGithubActions,
+  ensureWorkflow,
+  validateGithubActionsConfig,
+  WORKFLOW_FILE,
+} from '../runners/kinds/github-actions';
+import {
+  checkVercelSandbox,
+  DEFAULT_PROJECT,
+  resolveVercelScope,
+  vercelOptions,
+} from '../runners/kinds/vercel-sandbox';
 
 function dockerAvailable(): boolean {
   return (process.env.PATH ?? '').split(path.delimiter).some(dir => {
@@ -42,17 +60,8 @@ function dockerAvailable(): boolean {
 function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
   const local = Boolean(ctx.local);
   const docker = local && dockerAvailable();
+  const admin = workspaceAdmin(ctx);
   return [
-    {
-      kind: 'local',
-      name: local ? 'Another machine' : 'Your machine',
-      description: local
-        ? 'Pair another computer; it runs tasks with its own logins.'
-        : 'Run tasks with your own machine and logins.',
-      connect: 'pair',
-      fields: [],
-      available: true,
-    },
     {
       kind: 'local-docker',
       name: 'Docker on the server',
@@ -80,28 +89,31 @@ function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
       name: 'Vercel Sandbox',
       description: 'Run tasks in an isolated sandbox.',
       connect: 'fields',
-      help: 'Each task gets a fresh Vercel Sandbox. Create an access token at vercel.com/account/tokens with Sandbox access for the team that pays for it.',
+      help: 'Each task runs in a fresh Vercel Sandbox, billed to your Vercel team. Create a token scoped to that team, then pick its team and project here.',
+      link: 'https://vercel.com/account/tokens',
       fields: [
         {
           key: 'token',
           label: 'Access token',
           placeholder: 'vcp_…',
-          hint: 'with Sandbox access',
+          hint: 'scoped to a team',
           secret: true,
         },
         {
           key: 'team',
           label: 'Team',
-          placeholder: 'team_…',
-          hint: 'VERCEL_TEAM_ID if empty',
+          placeholder: 'Your default team',
+          hint: 'your default if empty',
           optional: true,
+          listed: true,
         },
         {
           key: 'projectId',
           label: 'Project',
-          placeholder: 'prj_…',
-          hint: 'VERCEL_PROJECT_ID if empty',
+          placeholder: DEFAULT_PROJECT,
+          hint: 'created in that team if missing',
           optional: true,
+          listed: true,
         },
         {
           key: 'region',
@@ -118,28 +130,29 @@ function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
       name: 'GitHub Actions',
       description: 'Run tasks through a repository workflow.',
       connect: 'fields',
-      help: 'Each task starts a workflow run in a repository you choose. Save coder server workflow as .github/workflows/coder-agent.yml. It runs coder agent run --task; the token needs Actions read and write on that repository.',
+      help: 'Each task starts a workflow run in a repository GitHub is connected to (Settings → Connections). Coder adds the workflow file there and keeps it current.',
       fields: [
-        { key: 'repo', label: 'Repository', placeholder: 'acme/runners', hint: 'owner/name' },
+        {
+          key: 'repo',
+          label: 'Repository',
+          placeholder: 'acme/runners',
+          hint: 'owner/name',
+          listed: true,
+        },
         {
           key: 'workflow',
           label: 'Workflow file',
-          placeholder: 'coder-agent.yml',
-          hint: 'in .github/workflows',
+          placeholder: WORKFLOW_FILE,
+          hint: 'added or updated on save',
+          optional: true,
         },
         {
           key: 'token',
           label: 'Token',
           placeholder: 'github_pat_…',
-          hint: 'Actions read and write',
+          hint: admin ? 'if GitHub isn’t connected there' : 'Actions, Contents, Workflows write',
           secret: true,
-        },
-        {
-          key: 'ref',
-          label: 'Branch',
-          placeholder: 'main',
-          hint: 'default branch if empty',
-          optional: true,
+          optional: admin,
         },
       ],
       available: true,
@@ -149,7 +162,7 @@ function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
       name: 'HTTP runner',
       description: 'Connect a runner at a public HTTPS address.',
       connect: 'fields',
-      help: 'A machine already running coder runner serve. Copy the address and secret it printed; pairing from the Another machine or Your machine option does this for you.',
+      help: 'A server that speaks the runner protocol at a public HTTPS address and checks this secret on every request. For a computer running coder runner serve, use Your machine.',
       fields: [
         {
           key: 'url',
@@ -160,11 +173,22 @@ function runnerCatalog(ctx: ServerContext): RunnerSpec[] {
         {
           key: 'secret',
           label: 'Secret',
-          placeholder: 'printed by coder runner serve',
+          placeholder: 'the secret that server checks',
           hint: '32 characters or more',
           secret: true,
         },
       ],
+      available: true,
+    },
+    {
+      kind: 'local',
+      name: local ? 'Another machine' : 'Your machine',
+      description: local
+        ? 'Pair another computer; it runs tasks with its own logins.'
+        : 'Run tasks with your own machine and logins.',
+      connect: 'pair',
+      help: 'Tasks run code on that computer with its files and its Claude and Codex logins, not your CPU minutes. Pair only a computer you trust them with; it must stay on, with its tunnel open.',
+      fields: [],
       available: true,
     },
   ];
@@ -182,6 +206,10 @@ const addSchema = z.strictObject({
   scope,
   config,
 });
+
+const optionsSchema = z.strictObject({ kind: addSchema.shape.kind, config });
+
+const APP_ONLY_ADMIN = 'Only a workspace admin can use the GitHub connection. Add a token instead.';
 
 const updateSchema = z.strictObject({
   name: z.optional(name),
@@ -290,6 +318,32 @@ export async function createRunner(
       return json({ error: (error as Error).message }, 400);
     }
 
+    // Adding reached the account when it resolved a Vercel team or checked a workflow file.
+    let reached = parsed.data.kind === 'github-actions';
+    if (parsed.data.kind === 'vercel-sandbox')
+      try {
+        const resolved = await resolveVercelScope(parsed.data.config, ctx.fetch ?? fetch);
+        if (resolved) Object.assign(parsed.data.config, resolved);
+        reached = Boolean(resolved);
+      } catch (error) {
+        return json({ error: (error as Error).message }, 400);
+      }
+
+    // The workspace's GitHub connection commits and dispatches with admin-granted permissions.
+    if (parsed.data.kind === 'github-actions' && !parsed.data.config.token && !workspaceAdmin(ctx))
+      return json({ error: APP_ONLY_ADMIN }, 403);
+    if (parsed.data.kind === 'github-actions')
+      try {
+        const values = parsed.data.config;
+        await ensureWorkflow(
+          values,
+          values.token || (await githubRepoToken(ctx, values.repo!, 'workflows')),
+          ctx.fetch ?? fetch,
+        );
+      } catch (error) {
+        return json({ error: (error as Error).message }, 400);
+      }
+
     const fields = splitConfig(parsed.data.kind, parsed.data.config, ctx);
     const id = `rnr_${randomBytes(9).toString('base64url')}`;
     const record: RunnerRecord = {
@@ -300,6 +354,7 @@ export async function createRunner(
       default: false,
       createdAt: now,
       updatedAt: now,
+      ...(reached ? { lastSeen: now } : {}),
     };
 
     return ctx.store.withAppLock(`runners:${ctx.organizationId}`, async store => {
@@ -312,6 +367,31 @@ export async function createRunner(
   }
 }
 
+/** The choices a kind's listed fields offer for what its other fields reach, like a token's teams. */
+export async function runnerOptions(
+  req: Request,
+  ctx: ServerContext,
+  params: Params,
+  url: URL,
+): Promise<Response> {
+  const parsed = optionsSchema.safeParse(await req.json().catch(() => undefined));
+  if (!parsed.success) return json({ error: 'Invalid runner' }, 400);
+  if (!ctx.session?.user && !workspaceAdmin(ctx)) return json({ error: 'Sign in first.' }, 403);
+  const { kind, config: values } = parsed.data;
+
+  try {
+    if (kind === 'github-actions')
+      return json({ repo: workspaceAdmin(ctx) ? await githubRepos(ctx) : [] });
+    return json(
+      kind === 'vercel-sandbox' && values.token
+        ? await vercelOptions(values, ctx.fetch ?? fetch)
+        : {},
+    );
+  } catch (error) {
+    return json({ error: (error as Error).message }, 400);
+  }
+}
+
 export async function checkRunner(
   req: Request,
   ctx: ServerContext,
@@ -319,20 +399,13 @@ export async function checkRunner(
   url: URL,
 ): Promise<Response> {
   const id = params.id!;
-  const { user } = runnerContext(ctx);
   if (id === serverRunnerId(ctx)) {
     return json(await testRunner(ctx));
   }
 
   const access = (existing?: RunnerRecord) => {
-    if (
-      !existing ||
-      !visibleRunner(existing, user) ||
-      (!ctx.local && (existing.kind === 'local' || existing.kind === 'local-docker'))
-    )
-      return json({ error: 'Unknown runner' }, 404);
-    if (existing.scope === 'workspace' && !workspaceAdmin(ctx))
-      return json({ error: 'Only a workspace owner or admin can change this runner.' }, 403);
+    const denied = runnerAccess(ctx, existing, 'change');
+    return denied && json({ error: denied.error }, denied.status);
   };
   const existing = await ctx.store.get('runner', id);
   const denied = access(existing);
@@ -380,7 +453,7 @@ export async function updateRunner(
   url: URL,
 ): Promise<Response> {
   const id = params.id!;
-  const { user, now, rows, row } = runnerContext(ctx);
+  const { now, rows, row } = runnerContext(ctx);
   if (id === serverRunnerId(ctx)) {
     if (workspaceAdmin(ctx)) {
       const parsed = updateSchema.safeParse(await req.json().catch(() => undefined));
@@ -410,14 +483,8 @@ export async function updateRunner(
   }
 
   const access = (existing?: RunnerRecord) => {
-    if (
-      !existing ||
-      !visibleRunner(existing, user) ||
-      (!ctx.local && (existing.kind === 'local' || existing.kind === 'local-docker'))
-    )
-      return json({ error: 'Unknown runner' }, 404);
-    if (existing.scope === 'workspace' && !workspaceAdmin(ctx))
-      return json({ error: 'Only a workspace owner or admin can change this runner.' }, 403);
+    const denied = runnerAccess(ctx, existing, 'change');
+    return denied && json({ error: denied.error }, denied.status);
   };
 
   return ctx.store.withAppLock(`runners:${ctx.organizationId}`, async store => {
@@ -445,6 +512,8 @@ export async function updateRunner(
         } catch (error) {
           return json({ error: (error as Error).message }, 400);
         }
+        if (existing.kind === 'github-actions' && !merged.token && !workspaceAdmin(ctx))
+          return json({ error: APP_ONLY_ADMIN }, 403);
         fields = splitConfig(existing.kind, merged, ctx);
       }
       if (parsed.data.default) await clearDefaults(store, id, existing, now);
@@ -470,20 +539,13 @@ export async function deleteRunner(
   url: URL,
 ): Promise<Response> {
   const id = params.id!;
-  const { user } = runnerContext(ctx);
   if (id === serverRunnerId(ctx)) {
     return json({ error: 'The server default cannot be renamed or removed.' }, 403);
   }
 
   const access = (existing?: RunnerRecord) => {
-    if (
-      !existing ||
-      !visibleRunner(existing, user) ||
-      (!ctx.local && (existing.kind === 'local' || existing.kind === 'local-docker'))
-    )
-      return json({ error: 'Unknown runner' }, 404);
-    if (existing.scope === 'workspace' && !workspaceAdmin(ctx))
-      return json({ error: 'Only a workspace owner or admin can change this runner.' }, 403);
+    const denied = runnerAccess(ctx, existing, 'change');
+    return denied && json({ error: denied.error }, denied.status);
   };
 
   return ctx.store.withAppLock(`runners:${ctx.organizationId}`, async store => {
@@ -585,7 +647,7 @@ export async function pairRunner(
   return json({
     token,
     expiresAt,
-    command: `coder runner serve --url ${address} --token ${token}`,
+    command: `coder runner serve --url ${address} --token ${token} --runner-url <tunnel address>`,
   });
 }
 
@@ -766,12 +828,16 @@ export async function testRunner(ctx: ServerContext, record?: RunnerRecord): Pro
           if (!ctx.local) throw new RunnerCheckError('Docker runners require a local server');
           return checkDocker(ctx.runnerExec ?? execFile, controller.signal);
         }
+        const token =
+          kind === 'github-actions' && !config.token
+            ? await githubRepoToken(ctx, String(config.repo), 'actions')
+            : config.token;
         const request = async (url: string) => {
           const response = await (ctx.fetch ?? fetch)(url, {
             signal: controller.signal,
             redirect: 'manual',
             headers: {
-              authorization: `Bearer ${config.token}`,
+              authorization: `Bearer ${token}`,
               accept: 'application/json',
               'user-agent': 'coder',
             },
@@ -781,6 +847,8 @@ export async function testRunner(ctx: ServerContext, record?: RunnerRecord): Pro
           return response;
         };
         if (kind === 'github-actions') return checkGithubActions(config, request);
+        // Without a token the SDK signs in with the deployment's OIDC token, which the REST API rejects.
+        if (!config.token) return 'Runs with this deployment’s Vercel sign-in';
         return checkVercelSandbox(config, request);
       })(),
     ]);

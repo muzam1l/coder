@@ -28,10 +28,17 @@ import type { ServerContext } from '../context';
 import { turnStarter, type TaskPrincipal } from './access';
 import { syncLocalAgents } from '../store/local';
 import { runLocalTask } from './local';
-import { credentialFix, failureText, modelAttempts, resolveModels } from '../settings/credentials';
+import {
+  credentialFix,
+  failureText,
+  modelAttempts,
+  resolveModels,
+  type ModelRun,
+} from '../settings/credentials';
 import { decryptSecret } from '../store/secrets';
 import { dispatchTokens, installationToken } from './context';
-import { chooseRunner, serverRunner, visibleRunner } from '../runners/select';
+import { chooseRunner, runnerTrust, serverRunner, visibleRunner } from '../runners/select';
+import { credentialOwners, NO_GRANTED_CREDENTIAL, taskGrants } from './grants';
 import {
   CoderError,
   ignoredAddDirs,
@@ -296,8 +303,12 @@ export async function createTask(
   const pick = (await taskPick(ctx, input.model)) ?? parentTask?.usage?.pick;
   const agent = toAgent(record, version, pick, ctx.integrations);
   const { models, first } = await resolveModels(ctx, effectiveSettings(agent), requestedBy);
-  const attempts = modelAttempts(models, chosen.runner === 'http');
-  if (!attempts.length) throw await noCredential(ctx, models, first.engine);
+  const attempts = modelAttempts(
+    models,
+    chosen.runner === 'http',
+    credentialOwners(taskGrants(chosen), requestedBy),
+  );
+  if (!attempts.length) throw await noCredential(ctx, models, first.engine, undefined, chosen);
 
   const id = `${now.toString(36)}-${randomBytes(4).toString('hex')}`;
   const repo = input.repo ? await repoEvent(ctx, id, input, requestedBy) : undefined;
@@ -382,11 +393,15 @@ export function taskTurns(status: TaskStatus): TaskTurn[] {
 /** Refuses a turn no listed model runs: in a starter's thread, another member's turn without a workspace credential points at the starter. */
 async function noCredential(
   ctx: ServerContext,
-  models: Array<{ model: string }>,
+  models: ModelRun[],
   engine: string,
   task?: Pick<AgentTask, 'requestedBy' | 'event' | 'source'>,
+  route?: Pick<AgentTask, 'trust' | 'runnerId'>,
 ): Promise<TaskInputError> {
   const fix = await credentialFix(ctx, engine);
+  // Credentials exist, but none the task's runner is granted.
+  if (route && !taskGrants(route).workspaceCredentials && modelAttempts(models).length)
+    return new TaskInputError(NO_GRANTED_CREDENTIAL, 409, fix);
   const actor = task?.event?.actor;
   if (task?.requestedBy && actor && task.source === task.event?.integration) {
     const starter = `@${actor.login ?? actor.id}`;
@@ -411,10 +426,15 @@ async function turnRunner(
   task: AgentTask,
   starter: string | undefined,
   agent: Agent,
-): Promise<Pick<AgentTask, 'runner' | 'runnerId' | 'vcpus'>> {
+): Promise<Pick<AgentTask, 'runner' | 'runnerId' | 'vcpus' | 'trust'>> {
   const stored = task.runnerId ? await ctx.store.get('runner', task.runnerId) : undefined;
   if (task.source !== task.event?.integration && (!stored || visibleRunner(stored, starter)))
-    return { runner: task.runner, ...(task.runnerId ? { runnerId: task.runnerId } : {}) };
+    return {
+      runner: task.runner,
+      ...(task.runnerId ? { runnerId: task.runnerId } : {}),
+      // Trust is fixed at admission; only a task admitted before it existed derives it now.
+      trust: task.trust ?? runnerTrust(stored),
+    };
   const chosen = await chooseRunner(ctx, {
     requestedBy: starter,
     agent: agent.usage?.runner ?? agent.definition.runner,
@@ -479,7 +499,11 @@ export async function refreshedTask(
     resolveModels(ctx, effectiveSettings({ ...agent, usage }), starter),
     conversation && organizationSlug(ctx),
   ]);
-  const attempts = modelAttempts(models, route.runner === 'http');
+  const attempts = modelAttempts(
+    models,
+    route.runner === 'http',
+    credentialOwners(taskGrants(route), starter),
+  );
   // The turn's asker, when the account names no member, hears how it could run on a member's own subscription.
   const actor = conversation?.chat?.message?.author.userId || conversation?.actor.id;
   const connect =
@@ -495,7 +519,7 @@ export async function refreshedTask(
   if (!attempts.length)
     throw connect
       ? new TaskInputError(connect.failure, 409, connect.url)
-      : await noCredential(ctx, models, first.engine, task);
+      : await noCredential(ctx, models, first.engine, task, route);
 
   return {
     definition: agent.definition,

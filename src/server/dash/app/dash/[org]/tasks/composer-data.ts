@@ -17,12 +17,17 @@ export const CHOICE: Choice = {
   runner: '',
 };
 
-/** No agent picked yet, or one this workspace no longer runs, falls back to the server's default agent, else the first. */
-export function usableAgent(choice: Choice, lists: Pick<Lists, 'agents' | 'defaultAgent'>): Choice {
+/** No agent picked yet, or one this workspace no longer runs, falls back to the server's default agent, else the first; a runner no longer offered, or now the default, falls back to the default. */
+export function usableChoice(
+  choice: Choice,
+  lists: Pick<Lists, 'agents' | 'defaultAgent' | 'runners'>,
+): Choice {
   const ids = lists.agents.map(([id]) => id);
-  if (!ids.length || ids.includes(choice.agent)) return choice;
+  const agent =
+    !ids.length || ids.includes(choice.agent) ? choice.agent : (lists.defaultAgent ?? ids[0]!);
+  const runner = lists.runners.some(([id]) => id === choice.runner) ? choice.runner : '';
 
-  return { ...choice, agent: lists.defaultAgent ?? ids[0]! };
+  return agent === choice.agent && runner === choice.runner ? choice : { ...choice, agent, runner };
 }
 
 /** The composer's last choice, from its cookie. */

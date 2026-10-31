@@ -559,7 +559,7 @@ input[type='radio']:enabled {
 .add-grid {
   display: flex;
   flex-wrap: wrap;
-  align-items: flex-end;
+  align-items: flex-start;
   gap: 14px;
 }
 .add-grid > .field {

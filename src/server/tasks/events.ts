@@ -17,6 +17,7 @@ import { syncLocalAgents } from '../store/local';
 import { credentialFix, failureText, modelAttempts, resolveModels } from '../settings/credentials';
 import { dispatchTokens, installationToken } from './context';
 import { chooseRunner } from '../runners/select';
+import { credentialOwners, taskGrants } from './grants';
 import {
   buildContext,
   conversationKey,
@@ -544,7 +545,11 @@ async function claimed(
     connectionGrants(ctx, undefined, agent.usage?.connections),
     found ?? eventSpace(ctx, integration, event, token),
   ]);
-  const attempts = modelAttempts(models, route.runner === 'http');
+  const attempts = modelAttempts(
+    models,
+    route.runner === 'http',
+    credentialOwners(taskGrants(route), requestedBy),
+  );
   const engine = first.engine;
   const id = `${event.deliveryId}-${agent.id}`;
   // An account that names no member hears how its turns could run on a member's own subscription.

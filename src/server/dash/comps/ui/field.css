@@ -16,10 +16,18 @@
   color: var(--muted);
   font-size: 11.5px;
 }
+.field-req {
+  margin-left: 4px;
+  font-style: normal;
+  color: var(--bad);
+}
 .field .seg-btns {
   width: max-content;
   max-width: 100%;
 }
 .field .seg-btns > button {
   height: 36px;
+}
+.secret {
+  -webkit-text-security: disc;
 }

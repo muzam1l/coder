@@ -6,6 +6,7 @@ import {
   slackMembers,
   slackSpace,
   slackUninstalled,
+  slackInstalled,
   SLACK_MCP_SERVER_INSTALL,
   SLACK_PRESETS,
   slackToolServer,
@@ -82,6 +83,7 @@ export const slack: Integration = {
   event: slackChatEvent,
   requestFetch: slackFetch,
   isUninstalled: slackUninstalled,
+  installed: slackInstalled,
   conversation: slackConversation,
   auth: {
     canWrite: canWriteSlack,

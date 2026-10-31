@@ -52,7 +52,9 @@ export function AdvancedList({ first, admin }: { first: ConfigShape; admin: bool
             autocomplete="off"
             spellcheck={false}
           />
-        ) : null}
+        ) : hosts.length ? null : (
+          <span class="muted">None yet. Only admins add hosts.</span>
+        )}
       </div>
       <label class="hosts-switch">
         <input

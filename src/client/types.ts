@@ -495,6 +495,10 @@ export interface RunnerSpec {
   connect: 'pair' | 'fields';
   /** One or two sentences on what this kind needs and where to get it. */
   help?: string;
+  /** A command to run first, shown with a copy button. */
+  command?: string;
+  /** The page that issues this kind's token. */
+  link?: string;
   fields: Array<{
     key: string;
     label: string;
@@ -502,6 +506,8 @@ export interface RunnerSpec {
     placeholder?: string;
     optional?: boolean;
     hint?: string;
+    /** Picked from what the other fields reach, like a token's teams; empty keeps the placeholder's default. */
+    listed?: boolean;
   }>;
   available: boolean;
   reason?: string;

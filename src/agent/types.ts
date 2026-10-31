@@ -10,6 +10,9 @@ import type {
 
 export type { RunnerKind } from '../client/types';
 
+/** Who operates a runner's machine: the workspace (the built-in runner, a workspace-scope record), a member (their personal Vercel, Actions or local runner) or a third party (a personal `http` runner, paired machines included, reached by a shared secret). */
+export type RunnerTrust = 'workspace' | 'member' | 'external';
+
 /** Event value in a definition map: `true`, or options. */
 export interface AgentEventOptions {
   /** Regex the event text must match (e.g. keywords on Slack `message`). */
@@ -182,6 +185,8 @@ export interface AgentTask {
   runner: RunnerKind;
   /** Registered `http` runner the task routes to. */
   runnerId?: string;
+  /** Who operates the runner's machine, fixed at admission; decides what the task receives (see `tasks/grants.ts`). */
+  trust?: RunnerTrust;
   /** vCPUs it holds on a hosted server's own runner, charged per millisecond; unset is never charged. */
   vcpus?: number;
   /** Defaults to `auto`; at most its agent's and its parent's. */

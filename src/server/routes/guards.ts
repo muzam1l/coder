@@ -256,14 +256,19 @@ export async function taskCreateAllowed(req: Request, ctx: ServerContext) {
   return (steered && (await taskRefusal(ctx, steered, true))) || ctx;
 }
 
-/** Whether a task's call on a `confirm` route waits for a person: always, except its own agent's engine, model and effort. */
+/** Whether a task's call on a `confirm` route waits for a person: always, except its own agent's engine, model and effort from a runner the workspace operates. */
 async function needsConfirm(
   req: Request,
   ctx: ServerContext,
   kind: ChangeKind,
   params: Params,
 ): Promise<boolean> {
-  if (kind !== 'agent-settings' || params.slug !== ctx.taskPrincipal?.agent) return true;
+  if (
+    kind !== 'agent-settings' ||
+    params.slug !== ctx.taskPrincipal?.agent ||
+    ctx.taskPrincipal?.trust !== 'workspace'
+  )
+    return true;
   const body = await req
     .clone()
     .json()

@@ -56,10 +56,10 @@ Environment:
 
 print the GitHub Actions workflow for RUNNER=github-actions
 
-Print the workflow the github-actions runner dispatches. Save it as .github/workflows/coder-agent.yml in every repo the agent runs on, and set RUNNER=github-actions on the server.
+Print the workflow the github-actions runner dispatches. Save it as .github/workflows/coder-runner.yml in every repo the agent runs on, and set RUNNER=github-actions on the server.
 
 ```sh
-coder server workflow > .github/workflows/coder-agent.yml  # add it to a repo
+coder server workflow > .github/workflows/coder-runner.yml  # add it to a repo
 ```
 
 ## server app

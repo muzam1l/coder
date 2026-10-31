@@ -7,7 +7,7 @@ import { client } from '@/utils/client';
 import { useAction } from '@/utils/action';
 import { Loading } from '@/comps/ui/card';
 import { reasonText } from '@/utils/format';
-import { Field } from '@/comps/ui/field';
+import { Field, SecretInput } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { Icon } from '@/comps/ui/icon';
@@ -437,12 +437,10 @@ function useMcp({
       {asksKey ? (
         <div class="add-grid">
           <Field label="API key" hint={url ? undefined : 'optional'}>
-            <input
+            <SecretInput
               key={server?.name}
               name="key"
-              type="password"
               placeholder="acme_live_4f9a…"
-              autocomplete="off"
               required={!!url}
             />
           </Field>

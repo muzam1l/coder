@@ -138,7 +138,7 @@ What members and admins do with runners, such as pairing their own machine and c
 | Runner | Field | Default | Purpose |
 | --- | --- | --- | --- |
 | `local` |  |  | none |
-| `local-docker` | `image` | `ghcr.io/muzam1l/coder-runner:latest` | Image the task runs in |
+| `local-docker` | `image` | the runner image, pinned by digest | Image the task runs in |
 |  | `memory` | `4g` | `--memory` |
 |  | `cpus` | `2` | `--cpus` |
 |  | `pidsLimit` | `512` | `--pids-limit` |
@@ -152,21 +152,20 @@ What members and admins do with runners, such as pairing their own machine and c
 |  | `vcpus` | `1` | Sandbox size |
 | `github-actions` | `token` (required) |  | GitHub token that may dispatch the workflow and read its status |
 |  | `repo` | the event's repository | `owner/name` holding the workflow |
-|  | `workflow` | `coder-agent.yml` | Workflow file to dispatch (`coder server workflow` prints it) |
-|  | `ref` | the repository's default branch | Branch to dispatch on |
+|  | `workflow` | `coder-runner.yml` | Workflow file to dispatch (`coder server workflow` prints it) |
 | `http` | `url` (required) |  | The controller's base URL; it implements `POST /start`, `POST /messages/<handle>`, `GET /status/<handle>`, `POST /stop/<handle>` |
-|  | `secret` (required) |  | Shared secret that signs every request over body, timestamp, and nonce |
+|  | `secret` (required) |  | Shared secret that signs every request over method, path, body, timestamp, and nonce |
 |  | `headers` | `{}` | Extra headers sent with every request |
 
 `local-docker` and `github-actions` run in the runner image, which holds the engines and tools. A custom `image` needs `node`, `bun`, `git`, `curl`, `tar`, `claude`, `codex` and `github-mcp-server`.
 
-`local-docker`, `vercel-sandbox` and `github-actions` download this server's built runner from its public, immutable `/runner/<hash>.tgz` URL. Repository snapshots are specific to that build.
+`local-docker`, `vercel-sandbox` and `github-actions` download this server's built runner from its public, immutable `/runner/<hash>.tgz` URL and check it against that hash. Repository snapshots are specific to that build.
 
 On `vercel-sandbox` each task uses the universal image's engines without their own sandbox, and its machine stops when the task ends. Repository snapshots hold the checkout and its installed dependencies. The default is 1 CPU and 2 GB memory; `vcpus` selects a larger machine.
 
-Access-token authentication needs a token, team ID and project ID. **# Settings → (Runners)** accepts the IDs directly, or the adapter app can supply `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`. The firewall injects engine API keys into provider requests, and the task sees a placeholder. Below `auto`, a task's machine reaches only this server, its engine, integrations, connections, MCP servers and `network.allowedHosts`.
+Access-token authentication needs a token, team and project. **# Settings → (Runners)** lists the token's teams and projects; an empty team is the account's default team, and an empty project is `vercel-sandbox-default-project`, created when missing. For the server's own runner the adapter app can supply `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`. The firewall injects engine API keys into provider requests, and the task sees a placeholder. Below `auto`, a task's machine reaches only this server, its engine, integrations, connections, MCP servers and `network.allowedHosts`.
 
-For GitHub Actions, save the output of `coder server workflow` as `.github/workflows/coder-agent.yml` on the workflow repository's default branch. Save it again after each Coder upgrade. It accepts `task`, `server`, `token`, `mode` and `tarball`, names each run `Coder agent <task ID>`, and runs the task in the runner image with the callback URL and attempt token in the environment. The workflow token needs repository Actions read and write; a classic token for a private repository needs `repo`. A result returns through the authenticated task callback. No result artifact is required.
+For GitHub Actions, adding the runner commits `.github/workflows/coder-runner.yml`; `coder server workflow` prints the same file. Each run, named `Coder runner <task ID>`, runs in the dispatched `image`, checks the runner package against `hash`, then trades `claim`, a one-time code valid for 10 minutes, for the task's token, proving with its GitHub OIDC token that it is the dispatched run. A dispatch refused with HTTP 422 means the file is out of date. Anyone with write access to the repository can change what a run does. The token needs Actions read and write; a classic token for a private repository needs `repo`.
 
 Every runner sends the task's log to the server while it runs, and the dashboard shows the stored log.
 

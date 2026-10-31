@@ -4,9 +4,10 @@ import process from 'node:process';
 import type { AgentTask } from '../../../agent/types';
 import { RunnerCheckError, type Runner } from '..';
 import { runProcess } from './local';
-import { RUNNER_IMAGE, runnerTarball, startCommand, SETUP_FAILED } from '../package';
+import { RUNNER_IMAGE, startCommand, SETUP_FAILED } from '../package';
 import { INBOX_COMMAND, INBOX_SOCKET } from '../../../runner/task';
 import type { InboxEntry, InboxAck } from '../../tasks/queue';
+import { startEnv } from '../../../runner/protocol';
 
 export interface DockerOptions {
   image?: string;
@@ -24,9 +25,9 @@ export function buildDockerArgs(
 ): { args: string[]; env: Record<string, string> } {
   const name = `coder-${task.id.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 48)}-${Date.now()}`;
   env = {
-    ...env,
+    ...startEnv(env),
+    CODER_INBOX_SOCKET: INBOX_SOCKET,
     CODER_RUNNER_IMAGE: options.image ?? RUNNER_IMAGE,
-    CODER_RUNNER_TARBALL_URL: runnerTarball(env.CODER_SERVER!),
   };
   const envArgs = Object.keys(env).flatMap(key => ['-e', key]);
   return {
@@ -65,7 +66,7 @@ export class DockerRunner implements Runner {
   constructor(private readonly options: DockerOptions = {}) {}
 
   async start(task: AgentTask, env: Record<string, string>): Promise<string> {
-    const built = buildDockerArgs(task, { ...env, CODER_INBOX_SOCKET: INBOX_SOCKET }, this.options);
+    const built = buildDockerArgs(task, env, this.options);
     const result = await runProcess('docker', built.args, {
       PATH: process.env.PATH ?? '',
       ...built.env,

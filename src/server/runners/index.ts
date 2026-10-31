@@ -86,8 +86,12 @@ export interface Runner {
       hosts?: string[];
       /** Variables of `credential` the machine's firewall injects by host, so their values never enter it. */
       brokered?: BrokerRule[];
+      /** A one-time code the machine trades at the server for `env.CODER_TASK_TOKEN`, for transports whose start others read. */
+      claim?: () => Promise<string>;
     },
   ): Promise<string>;
+  /** Whether `token` proves its holder is the machine `handle` started, for transports whose start others read. */
+  verifyJob?(handle: string, token: string, audience: string): Promise<boolean>;
   status(handle: string): Promise<RunnerStatus>;
   stop(handle: string): Promise<void>;
   push?(handle: string, entries: InboxEntry[]): Promise<InboxAck>;

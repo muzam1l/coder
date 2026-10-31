@@ -35,7 +35,7 @@ import {
 import { ModelChoices, placeBeside } from '@/app/dash/[org]/settings/model-pick';
 import { folderName } from '@/app/dash/[org]/tasks/list/task';
 import { watchTask } from '@/comps/frame/task-toasts';
-import { CHOICE, PLACEHOLDER, loadComposer, savedChoice, usableAgent } from './composer-data';
+import { CHOICE, PLACEHOLDER, loadComposer, savedChoice, usableChoice } from './composer-data';
 import { Notice } from '@/comps/ui/notice';
 import { CredentialsLink } from '@/comps/nav/back';
 
@@ -280,7 +280,7 @@ function Composer({
 }) {
   const nav = useRouter();
   const org = useOrg();
-  const [choice, setChoice] = useState(() => usableAgent({ ...CHOICE, ...initial }, data));
+  const [choice, setChoice] = useState(() => usableChoice({ ...CHOICE, ...initial }, data));
   const [lists, setLists] = useState(data);
   const flowsRepo = useRef<string>();
   const [busy, setBusy] = useState(false);

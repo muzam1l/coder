@@ -163,6 +163,22 @@ export function slackUninstalled(error: unknown): boolean {
   return ['invalid_auth', 'account_inactive', 'token_revoked'].includes(code ?? '');
 }
 
+/** `auth.test` on the installation's token: false only when Slack answers that the token is gone. */
+export async function slackInstalled(
+  token: string,
+  request: typeof fetch = fetch,
+): Promise<boolean> {
+  const response = await request('https://slack.com/api/auth.test', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}` },
+    redirect: 'error',
+    signal: AbortSignal.timeout(5000),
+  });
+  const body = (await response.json()) as { ok?: boolean; error?: string };
+
+  return body.ok === true || !slackUninstalled({ data: body });
+}
+
 interface Reply {
   ts?: string;
   text?: string;

@@ -25,6 +25,8 @@ import {
 import { isEndpointModel, splitEngineSpec } from '../../core/config';
 import { modelList, resolveTaskOptions } from '../../core/dispatch';
 import { turnStarter } from './access';
+import { connectionGranted, credentialOwners, NO_GRANTED_CREDENTIAL, taskGrants } from './grants';
+import type { ModelAttempt } from '../../agent/types';
 import {
   resolvedTaskConnections,
   connectionSecretValues,
@@ -225,6 +227,7 @@ export async function eventTokens(
   const event = task.event;
   if (!event && !task.parent) return { tokens };
 
+  const grants = taskGrants(task);
   let installation: Installation | undefined;
   if (event) {
     const integration = ctx.integrations[event.integration];
@@ -244,23 +247,32 @@ export async function eventTokens(
       installation,
       decryptSecret(ctx.config, app.credentials),
       {
-        tools: task.tools[event.integration] ?? [],
+        tools:
+          grants.eventToken === 'tools'
+            ? (task.tools[event.integration] ?? [])
+            : integration.tools.presets['read-only'],
       },
       ctx.config.taskTimeoutMs,
     );
-    if (integration.repos?.reviews && integration.repos.pullRequest(event) !== undefined)
+    if (
+      grants.checks &&
+      integration.repos?.reviews &&
+      integration.repos.pullRequest(event) !== undefined
+    )
       checksToken = await installationToken(
         ctx,
         integration,
         installation,
         decryptSecret(ctx.config, app.credentials),
-        { purpose: 'checks' },
+        { purpose: 'checks', ...(event.repo ? { repository: event.repo.name } : {}) },
         ctx.config.taskTimeoutMs,
       ).catch(tokenFailed(installation.id));
   }
-  const others = (await agentInstallations(ctx, task)).filter(
-    other => other.id !== installation?.id && other.integration in task.tools,
-  );
+  const others = grants.otherInstallations
+    ? (await agentInstallations(ctx, task)).filter(
+        other => other.id !== installation?.id && other.integration in task.tools,
+      )
+    : [];
   const apps = new Map(
     (await ctx.store.getApps([...new Set(others.map(other => other.app))])).map(row => [
       row.id,
@@ -287,6 +299,21 @@ export async function eventTokens(
   return { tokens, ...(checksToken ? { checksToken } : {}), ...(app ? { app } : {}) };
 }
 
+/** The active installations of `integration` whose repositories include `repo`. */
+export function repoInstallations(
+  rows: Array<{ value: Installation }>,
+  integration: string,
+  repo: string,
+): Installation[] {
+  return rows
+    .map(({ value }) => value)
+    .filter(
+      value =>
+        value.integration === integration &&
+        value.repos?.some(name => name.toLowerCase() === repo.toLowerCase()),
+    );
+}
+
 /** The agent's skill sources as its runner fetches them: the clone URL and, when a workspace installation covers the repository, its read-only token, the event's own reused. */
 export async function taskSkills(
   ctx: ServerContext,
@@ -304,14 +331,11 @@ export async function taskSkills(
   return Promise.all(
     sources.map(async source => {
       const remote = { ...source, cloneUrl: `${repos.url(source.repo)}.git` };
-      const found = (await installations).find(
-        ({ value }) =>
-          value.integration === integration.id &&
-          value.repos?.some(name => name.toLowerCase() === source.repo.toLowerCase()),
-      )?.value;
+      const [found] = repoInstallations(await installations, integration.id, source.repo);
       if (!found) return remote;
 
       const own = minted && event && found.id === `${event.appId}:${event.installationId}`;
+      if (!own && !taskGrants(task).otherInstallations) return remote;
       const app = own ? undefined : await ctx.store.get('app', found.app);
       const token = own
         ? (await minted).tokens[event.integration]
@@ -437,8 +461,12 @@ export async function taskContext(
   const gitAuthor = await commitIdentity(ctx, task, tokens, app);
 
   const { actAsRefusal } = await import('./changes');
-  const resolved = await resolvedTaskConnections(ctx, status, tokens, connection =>
-    actAsRefusal(ctx, status, connection),
+  const resolved = await resolvedTaskConnections(
+    ctx,
+    status,
+    tokens,
+    connection => actAsRefusal(ctx, status, connection),
+    taskGrants(task),
   );
   const dashboard = await taskDashboard(ctx, workspace);
   // A path resolves against this server's public URL; an absolute URL stays as it is.
@@ -535,12 +563,18 @@ function credentialEngine(id: string): EngineCredential['engine'] {
   return name === 'codex' || name === 'OPENAI_API_KEY' ? 'codex' : 'custom';
 }
 
-/** The task with the attempts its turn runs: those frozen at admission, else the ones its asker may run now. */
+/** The task with the attempts its turn runs: those frozen at admission, else the ones its asker may run now; only on credentials its runner is granted. */
 async function withModels(ctx: ServerContext, task: TaskStatus['task']) {
-  if (task.models) return task;
+  const owners = credentialOwners(taskGrants(task), turnStarter(task));
+  const granted = (attempt: ModelAttempt) =>
+    !attempt.credential || owners.includes(parseCredentialId(attempt.credential).owner);
+  if (task.models) return { ...task, models: task.models.filter(granted) };
   const { models } = await resolveModels(ctx, effectiveSettings(task), turnStarter(task));
 
-  return { ...task, models: modelAttempts(models, Boolean(task.runnerId || ctx.local)) };
+  return {
+    ...task,
+    models: modelAttempts(models, Boolean(task.runnerId || ctx.local), owners),
+  };
 }
 
 /** The credential a task's turn starts on: its first attempt's; one without runs on a member's own runner or a local server's logins. */
@@ -549,6 +583,7 @@ export async function taskCredential(
   task: TaskStatus['task'],
 ): Promise<EngineCredential> {
   const [first] = (await withModels(ctx, task)).models ?? [];
+  if (!first && !taskGrants(task).workspaceCredentials) throw new Error(NO_GRANTED_CREDENTIAL);
   const engine = (
     first ? splitEngineSpec(first.model).engine : 'claude'
   ) as EngineCredential['engine'];
@@ -559,7 +594,7 @@ export async function taskCredential(
   return { engine, env: {} };
 }
 
-/** Every credential a turn may switch to, best first: the starter's own on their turn, then the workspace's, for each model its list, its review model and its flow steps reach. */
+/** Every credential a turn may switch to, best first: the starter's own on their turn, then the workspace's where the runner is granted them, for each model its list, its review model and its flow steps reach. */
 export async function taskEngineCredentials(
   ctx: ServerContext,
   task: TaskStatus['task'],
@@ -580,18 +615,14 @@ export async function taskEngineCredentials(
   ];
   const names = [...new Set(options.flatMap(each => credentialNames(each, config)))];
   const starter = turnStarter(task);
-  const listed = await ctx.store.listCredentials({ owner: task.requestedBy });
+  const grants = taskGrants(task);
+  const owners = credentialOwners(grants, starter);
+  const listed = (await ctx.store.listCredentials({ owner: task.requestedBy })).filter(row =>
+    owners.includes(row.value.owner),
+  );
   const frozen = new Set(models?.flatMap(attempt => attempt.credential ?? []));
-  const picked = pickCredentials(listed, names, starter);
-  const rows = [
-    ...listed.filter(
-      row =>
-        frozen.has(row.id) &&
-        !picked.includes(row) &&
-        (!row.value.owner || row.value.owner === starter),
-    ),
-    ...picked,
-  ];
+  const picked = pickCredentials(listed, names, starter, grants);
+  const rows = [...listed.filter(row => frozen.has(row.id) && !picked.includes(row)), ...picked];
 
   return rows.map(row => ({
     id: row.id,

@@ -2,11 +2,16 @@
 import { randomBytes } from 'node:crypto';
 
 import type { Access } from '../../core/config';
-import type { AgentEvent, AgentTask, AgentUsage } from '../../agent/types';
+import type { AgentEvent, AgentTask, AgentUsage, RunnerTrust } from '../../agent/types';
+import { taskTrust } from './grants';
 import type { Integration, MembersChange, SpaceChange, TokenBound } from '../../integrations/types';
-import type { ServerContext, SessionInfo } from '../context';
+import { scoped, type ServerContext, type SessionInfo } from '../context';
 import { installationToken } from './context';
 import { workspaceAdmin } from '../routes/guards';
+import { json } from '../routes/http';
+import type { Params } from '../routes/match';
+import { decryptSecret, encryptSecret } from '../store/secrets';
+import { taskRunner } from '../runners/select';
 import { decodeJson, encodeJson, sha256 } from '../../utils/crypto';
 
 /** A task attempt's bearer token: base64url claims, a dot, then random bytes; only its hash is stored. */
@@ -30,10 +35,62 @@ export function createTaskToken(
 
 export function taskClaims(token: string): TaskClaims {
   try {
-    return decodeJson(token.slice(0, token.indexOf('.')));
+    const claims = decodeJson<TaskClaims | null>(token.slice(0, token.indexOf('.')));
+
+    return claims && typeof claims === 'object' ? claims : {};
   } catch {
     return {};
   }
+}
+
+/** How long a start's claim code waits for its machine to trade it. */
+const CLAIM_TTL_MS = 10 * 60_000;
+const claimKey = (claim: string) => `task-claim:${sha256(claim)}`;
+
+/** A code shaped like a task token, with no attempt, that its machine trades once for `token`, so the token never travels where others read it. */
+export async function createClaim(ctx: ServerContext, token: string): Promise<string> {
+  const { task, organization } = taskClaims(token);
+  const claim = `${encodeJson({ task, organization })}.${randomBytes(32).toString('base64url')}`;
+  const expiresAt = (ctx.now ?? Date.now)() + CLAIM_TTL_MS;
+  await ctx.store.put(
+    'snapshot',
+    claimKey(claim),
+    { secret: encryptSecret(ctx.config, token), expiresAt },
+    { ttlMs: CLAIM_TTL_MS },
+  );
+
+  return claim;
+}
+
+/** `POST /tasks/:id/claim`: the attempt token a claim code of that task holds, the first time only, for the machine its runner started. */
+export async function redeemClaim(req: Request, base: ServerContext, params: Params) {
+  const { claim, identity } = ((await req.json().catch(() => undefined)) ?? {}) as {
+    claim?: unknown;
+    identity?: unknown;
+  };
+  const { task, organization } = typeof claim === 'string' ? taskClaims(claim) : {};
+  if (
+    typeof claim !== 'string' ||
+    typeof identity !== 'string' ||
+    typeof task !== 'string' ||
+    task !== params.id ||
+    typeof organization !== 'string'
+  )
+    return new Response('Unauthorized', { status: 401 });
+  const ctx = scoped(base, organization);
+  const status = await ctx.store.get('task', task);
+  if (!status) return new Response('Unauthorized', { status: 401 });
+  // The handle lands once the dispatch returns, so the machine asks again.
+  if (!status.handle) return new Response('Not started yet', { status: 409 });
+  const runner = await taskRunner(ctx, status.task);
+  const audience = (ctx.config.publicUrl ?? '').replace(/\/+$/, '');
+  if (!(await runner?.verifyJob?.(status.handle, identity, audience)))
+    return new Response('Unauthorized', { status: 401 });
+  const held = await ctx.store.take('snapshot', claimKey(claim));
+  if (!held || !('secret' in held) || (held.expiresAt ?? 0) <= (ctx.now ?? Date.now)())
+    return new Response('Unauthorized', { status: 401 });
+
+  return json({ token: decryptSecret<string>(ctx.config, held.secret) });
 }
 
 /** Whether a bearer is shaped like a task attempt token, whatever its validity. */
@@ -64,6 +121,8 @@ export interface TaskPrincipal {
   connections: string[];
   /** What its children show to. */
   audience: string;
+  /** Who operates its runner; shared state changes from anything but workspace trust wait for a person. */
+  trust: RunnerTrust;
   space?: string;
 }
 
@@ -96,6 +155,7 @@ export async function taskPrincipal(
     access: task.access ?? 'auto',
     connections: task.connections ?? [],
     audience,
+    trust: taskTrust(task),
     ...(space ? { space } : {}),
   };
 }

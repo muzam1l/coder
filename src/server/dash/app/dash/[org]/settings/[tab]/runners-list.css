@@ -41,27 +41,23 @@
   padding: 0 6px;
   font-weight: 600;
 }
-.runner-add {
-  display: grid;
-  gap: 12px;
-  padding: 12px 16px;
-  border-top: 1px solid var(--line);
-}
-.runner-pick {
-  display: flex;
-  flex-wrap: wrap;
+.runner-title {
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
-.runner-pick > input {
-  flex: 1 1 180px;
+.add-modal .runner-form .add-grid > .field {
+  flex: 1 1 260px;
 }
-.runner-pick .pop-item:disabled {
-  opacity: 0.5;
+.runner-form .field > .select {
+  width: 100%;
+}
+/* one rhythm: every block of the dialog, pairing steps included, sits 20px apart */
+.add-form.runner-form {
+  gap: 20px;
 }
 .runner-pair {
-  display: grid;
-  gap: 10px;
+  display: contents;
 }
 .runner-wait {
   display: flex;
@@ -73,12 +69,31 @@
 .runner-wait > .loading {
   justify-content: flex-start;
 }
-.runner-pair code {
+.runner-step-head {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+.runner-step-head > p {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
   font-size: 12px;
+  color: var(--muted);
+}
+.runner-step-head > .select {
+  flex: none;
 }
 .runner-step {
   display: grid;
-  gap: 8px;
+  gap: 10px;
+}
+/* a closed details still holds a hidden content row in a grid, so it lays out as a block */
+details.runner-step {
+  display: block;
+}
+details.runner-step[open] > summary {
+  margin-bottom: 10px;
 }
 .runner-step > p,
 .runner-step > summary {
@@ -89,7 +104,7 @@
 .runner-step > summary {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
   width: fit-content;
   cursor: pointer;
   list-style: none;
@@ -112,39 +127,22 @@
 .runner-step > summary:hover {
   color: var(--fg);
 }
-
-@media (max-width: 760px) {
-  .runner-pick > * {
-    flex: 1 1 100%;
-  }
-  .runner-pick > .runner-foot {
-    justify-content: flex-start;
-  }
-}
-.runner-help {
-  flex: 1 1 100%;
-  margin: 0;
-}
-.runner-pick > .add-grid {
-  flex: 1 1 100%;
-}
-.runner-foot {
+.runner-link {
   display: flex;
-  flex: 1 1 100%;
   align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  padding-top: 6px;
+  gap: 6px;
 }
-.runner-pick .add-grid > .field {
-  flex: 1 1 200px;
+.settings .row-acts {
+  opacity: 0;
+  transition: opacity 0.12s;
 }
-.runner-pick .field > span:first-child {
-  display: grid;
-  gap: 2px;
+.settings tr:is(:hover, :focus-within) .row-acts,
+.row-acts:has(.pop:popover-open) {
+  opacity: 1;
 }
-.runner-pick .field small {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+/* without hover, as on phones, the menu stays in sight */
+@media (hover: none) {
+  .settings .row-acts {
+    opacity: 1;
+  }
 }

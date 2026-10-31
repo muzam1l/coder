@@ -19,6 +19,7 @@ import { Icon } from '@/comps/ui/icon';
 import { MenuItem } from '@/comps/ui/menu-items';
 import { Select } from '@/comps/ui/select';
 import { Combo } from '@/comps/ui/combo';
+import { SecretInput } from '@/comps/ui/field';
 import { Row, replaceTitle, useReplace } from './list';
 import { useOrg } from '@/comps/nav/org';
 import { isAdmin } from '@/api/types';
@@ -110,13 +111,11 @@ function KeyForm({
         value={name}
         onChange={setName}
       />
-      <input
-        type="password"
+      <SecretInput
         name="key"
-        autocomplete="off"
         aria-label="API key"
         placeholder="API key"
-        ref={input}
+        inputRef={input}
         aria-busy={Boolean(action.pending)}
         required
       />
@@ -556,13 +555,11 @@ export function CredentialsList({
                     );
                   }}
                 >
-                  <input
-                    type="password"
+                  <SecretInput
                     name="token"
-                    autocomplete="off"
                     aria-label="Your claude setup-token"
                     placeholder="Paste a claude setup-token"
-                    ref={input => input?.focus()}
+                    inputRef={input => input?.focus()}
                     required
                   />
                   <Button type="submit" loading={action.pending === 'token'}>

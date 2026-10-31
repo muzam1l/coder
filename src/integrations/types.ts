@@ -769,6 +769,8 @@ export interface Integration {
   readonly use?: string | ((events: string[], here?: boolean) => string | undefined);
   /** An outbound call proved the installation's token revoked. */
   isUninstalled?(error: unknown): boolean;
+  /** Asks the platform whether the installation's token still works, for a revocation a runner only claims. */
+  installed?(token: string, fetch?: typeof globalThis.fetch): Promise<boolean>;
   /** What one account an installation covers is called, such as a Slack workspace of an org install. */
   readonly covered?: string;
   /** Apps may live under an organization instead of the creator's own account. */
@@ -828,10 +830,12 @@ export interface Integration {
     | undefined;
 }
 
-/** What a minted token may reach: the permissions its tools need, across its whole installation. */
+/** What a minted token may reach: the permissions its tools need, across its installation or one repository. */
 export interface TokenBound {
-  purpose?: 'checks' | 'members' | 'contents';
+  purpose?: 'checks' | 'members' | 'contents' | 'actions' | 'workflows';
   tools?: string[];
+  /** Narrows the token to this repository of the installation, by name. */
+  repository?: string;
 }
 
 export interface PullRequestSummary {

@@ -20,9 +20,21 @@ A runner is the machine a task runs on, with its own engine logins. Manage them 
 ## Personal or workspace
 
 - **Personal:** runs only its owner's tasks. Any member adds one.
-- **Workspace:** runs every member's tasks. Only owners and admins add one.
+- **Workspace:** runs every member's tasks. Only owners and admins add one. Only a workspace runner, or the server default, can be an agent's runner.
 
 Each scope has one default, set with `coder runner default <id>` or **[Make default]**.
+
+## Trust levels
+
+What a task's machine receives depends on who operates it, fixed when the task is admitted.
+
+| Level | Runners | Engine credentials | Connections | Platform tokens | Codex sign-in refresh |
+| --- | --- | --- | --- | --- | --- |
+| Workspace | Server default, every workspace runner | The asker's own, then the workspace's | The asker's own and the workspace's | The event's installation at the task's tools, the agent's other installations, skill repositories | Any credential the task received |
+| Member | Personal Vercel Sandbox, GitHub Actions, Docker | The asker's own only | The asker's own only | The event's installation, read-only | The asker's own only |
+| External | Personal HTTP runner, a paired machine included | The asker's own only, else the machine's own logins | The asker's own only | The event's installation, read-only | None |
+
+On a member or external runner, a task fails when its asker has no credential of their own for its model.
 
 ## A member's own machine
 
@@ -31,7 +43,7 @@ Each scope has one default, set with `coder runner default <id>` or **[Make defa
 - **Signed in** (`coder auth login`): `coder runner serve --url <tunnel address>`.
 - **Paired from the dashboard:** **# Settings → (Runners) → [Add runner] → Your machine** shows a one-use token valid for 15 minutes. Then `coder runner serve --url <server> --token <token> --runner-url <tunnel address>`.
 
-Each start registers the current tunnel address, so a changing address is fine. The runner calls home every minute and shows offline after five without one. `--workspace` (owners and admins) makes it run every member's tasks. A task's work folder stays across turns and goes when the task is deleted.
+Each start registers the current tunnel address, so a changing address is fine. The runner calls home every minute and shows offline after five without one. `--workspace` (owners and admins) makes it run every member's tasks, with that machine's logins and files. A task's work folder stays across turns and goes when the task is deleted.
 
 ## Which runner a task uses
 
@@ -41,9 +53,9 @@ Each start registers the current tunnel address, so a changing address is fine. 
 4. The workspace default.
 5. The server default.
 
-A member's machine and an HTTP runner can use their machine's own engine logins. Every other kind needs an engine credential under **# Settings → (Credentials)**.
+A member's machine and an HTTP runner can use their machine's own engine logins. Every other kind needs an engine credential under **# Settings → (Credentials)**; which credentials reach the machine follows its [trust level](#trust-levels).
 
 ## GitHub Actions and Vercel Sandbox
 
-- **GitHub Actions:** save the output of `coder server workflow` as `.github/workflows/coder-agent.yml` on the repository's default branch, and save it again after each Coder upgrade. Its token needs Actions read and write on that repository. Job logs appear after GitHub archives them.
-- **Vercel Sandbox:** supply the team and project IDs, or the server's `VERCEL_TEAM_ID` and `VERCEL_PROJECT_ID`. Logs stream while the task runs.
+- **GitHub Actions:** owners and admins can use the repository's GitHub connection; anyone else adds a token with Actions, Contents and Workflows write. Adding the runner commits `.github/workflows/coder-runner.yml`. Only the run Coder dispatched can get the task's token. Anyone with write access to the repository can change what that run does. Logs appear once GitHub archives the job.
+- **Vercel Sandbox:** a token scoped to the team. An empty team is the account's default; an empty project is `vercel-sandbox-default-project`, created when missing. Logs stream while the task runs.

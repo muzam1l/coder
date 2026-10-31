@@ -1,6 +1,7 @@
 import { CoderError } from '../core/errors';
 import type { Access } from '../core/types';
 import type {
+  RunnerKind,
   RunnerSpec,
   RunnerPairing,
   RunnerInput,
@@ -450,6 +451,11 @@ export class ServerClient<D extends ClientTypes = ClientTypes> {
     add: (input: RunnerInput): Promise<D['runner']> => this.post('/admin/runners', input),
     pair: (input: { name?: string; scope: RunnerInput['scope'] }): Promise<RunnerPairing> =>
       this.post('/admin/runners/pair', input),
+    /** The choices a kind's listed fields offer for the values typed so far. */
+    options: (input: {
+      kind: RunnerKind;
+      config: Record<string, string>;
+    }): Promise<Record<string, string[]>> => this.post('/admin/runners/options', input),
     update: (id: string, input: RunnerUpdate): Promise<D['runner']> =>
       this.request(`/admin/runners/${encodeURIComponent(id)}`, {
         method: 'PATCH',

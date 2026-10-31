@@ -9,6 +9,7 @@ import { Badge } from '@/comps/ui/badge';
 import { iPlus } from '@/comps/ui/icons';
 import { Button, IconButton } from '@/comps/ui/button';
 import { Select } from '@/comps/ui/select';
+import { SecretInput } from '@/comps/ui/field';
 import { Row } from './list';
 import type { ConnectionRow } from '@coder/client/types';
 import { SCOPES } from '@/app/dash/[org]/settings/model-options';
@@ -89,14 +90,12 @@ export function TaskSecrets({
                           });
                         }}
                       >
-                        <input
+                        <SecretInput
                           name="key"
-                          type="password"
                           aria-label={`New value for ${row.env ?? row.name}`}
                           placeholder="New value"
-                          autocomplete="off"
                           aria-busy={busy}
-                          ref={input => input?.focus()}
+                          inputRef={input => input?.focus()}
                         />
                         <Button type="submit" loading={busy}>
                           Save
@@ -169,12 +168,10 @@ export function TaskSecrets({
                 spellcheck={false}
                 required
               />
-              <input
+              <SecretInput
                 name="key"
-                type="password"
                 aria-label="Secret value"
                 placeholder="Value"
-                autocomplete="off"
                 aria-busy={busy}
                 required
               />

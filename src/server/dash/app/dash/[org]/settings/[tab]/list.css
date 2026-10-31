@@ -63,16 +63,13 @@ dialog.modal.add-modal {
 .add-form .select:has([aria-label="Scope"]) {
   min-width: 150px;
 }
-/* the model id is the row's wide field, and its status hint never resizes or wraps it */
-.add-grid > .field:has(> input[name='model']) {
+/* the model id is the row's wide field; its status row is kept, so a probe never resizes or wraps it */
+.add-grid > .field:has(input[name='model']) {
   flex: 3 1 260px;
+  grid-template-rows: auto auto 1lh;
   min-width: 0;
 }
-.add-grid > .field:has(> input[name='model']) > span:first-child {
-  flex-wrap: nowrap;
-  height: 1lh;
-}
-.add-grid > .field:has(> input[name='model']) small {
+.add-grid > .field:has(input[name='model']) small {
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;

@@ -8,7 +8,7 @@ import { useRef, useState } from 'preact/hooks';
 import { useSearchParams } from '@wular/pnext/navigation/client';
 
 import { Card, Loading } from '@/comps/ui/card';
-import { Field } from '@/comps/ui/field';
+import { Field, SecretInput } from '@/comps/ui/field';
 import { Badge } from '@/comps/ui/badge';
 import { Button, LinkButton } from '@/comps/ui/button';
 import { Icon } from '@/comps/ui/icon';
@@ -219,10 +219,8 @@ function CustomFields({
             </>
           }
         >
-          <input
+          <SecretInput
             name="key"
-            type="password"
-            autocomplete="off"
             placeholder={
               saved(envKey) ? 'Leave empty to use the saved key' : `${preset.name} API key`
             }

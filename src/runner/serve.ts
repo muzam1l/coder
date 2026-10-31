@@ -1,5 +1,5 @@
 /** A runner on this machine: listen locally, then register with a server as its `http` runner. */
-import { randomBytes, createHmac } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
@@ -11,10 +11,10 @@ import { coderHome, serverTasksDir } from '../core/state';
 import { LocalRunner } from '../server/runners/kinds/local';
 import type { RunnerRow } from '../client/types';
 import { bodyLimit, limitBody, nodeListener } from '../server/routes/http';
-import { safeEqual } from '../utils/crypto';
 import type { AgentTask } from '../agent/types';
 import type { Runner } from '../server/runners';
 import type { InboxEntry } from '../server/tasks/queue';
+import { SIGNATURE_WINDOW_MS, taskEnv, verify } from './protocol';
 
 type Saved = Record<string, { id?: string; organizationId?: string; secret: string }>;
 
@@ -173,8 +173,6 @@ export async function serveRunner(options: RunnerServeOptions = {}): Promise<Run
   };
 }
 
-const WINDOW_MS = 5 * 60 * 1000;
-
 const json = (body: unknown, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
@@ -188,25 +186,18 @@ export function runnerController(options: {
   const now = options.now ?? Date.now;
   const seen = new Map<string, number>();
 
-  const verify = (req: Request, raw: string): boolean => {
-    const timestamp = req.headers.get('x-coder-timestamp') ?? '';
-    const nonce = req.headers.get('x-coder-nonce') ?? '';
-    const given = req.headers.get('x-coder-signature') ?? '';
-    const at = Number(timestamp);
-    if (!nonce || !Number.isFinite(at) || Math.abs(now() - at) > WINDOW_MS) return false;
-    const expected = createHmac('sha256', options.secret)
-      .update(`${raw}.${timestamp}.${nonce}`)
-      .digest('base64url');
-    if (!safeEqual(given, expected)) return false;
+  const fresh = (req: Request, raw: string): boolean => {
+    const signed = verify(options.secret, req, raw, now());
+    if (!signed) return false;
     for (const [key, until] of seen) if (until < now()) seen.delete(key);
-    if (seen.has(nonce)) return false;
-    seen.set(nonce, at + WINDOW_MS);
+    if (seen.has(signed.nonce)) return false;
+    seen.set(signed.nonce, signed.at + SIGNATURE_WINDOW_MS);
     return true;
   };
 
   return async (req: Request): Promise<Response> => {
     const raw = req.method === 'GET' ? '' : await req.text();
-    if (!verify(req, raw)) return json({ error: 'Unauthorized' }, 401);
+    if (!fresh(req, raw)) return json({ error: 'Unauthorized' }, 401);
     const url = new URL(req.url);
     const [, action, handle] = url.pathname.split('/').map(decodeURIComponent);
     try {
@@ -214,17 +205,14 @@ export function runnerController(options: {
         const body = JSON.parse(raw) as { task?: string; env?: Record<string, string> };
         if (typeof body.task !== 'string' || !body.env)
           return json({ error: 'Invalid start' }, 400);
-        const token = body.env.CODER_TASK_TOKEN;
-        if (typeof token !== 'string') return json({ error: 'Invalid start' }, 400);
+        if (typeof body.env.CODER_TASK_TOKEN !== 'string')
+          return json({ error: 'Invalid start' }, 400);
         // Tasks only ever call back to the server this runner registered with.
-        const env = {
+        const env = taskEnv({
+          ...body.env,
           CODER_SERVER: options.server,
-          CODER_TASK_TOKEN: token,
           CODER_INBOX_MODE: options.runner.push ? 'push' : 'poll',
-          ...(body.env.CODER_LOGIN === 'claude' || body.env.CODER_LOGIN === 'codex'
-            ? { CODER_LOGIN: body.env.CODER_LOGIN }
-            : {}),
-        };
+        });
         return json({ handle: await options.runner.start({ id: body.task } as AgentTask, env) });
       }
       if (req.method === 'GET' && action === 'health' && !handle) return json({ ok: true });

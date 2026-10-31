@@ -79,7 +79,7 @@ export const bodyLimit = (path: string): number =>
       ? 4 * 1024 * 1024
       : 1024 * 1024;
 
-async function readLimited(
+export async function readLimited(
   body: AsyncIterable<Uint8Array>,
   declared: string | number | undefined,
   limit: number,

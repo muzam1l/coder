@@ -12,7 +12,7 @@ import { resolveTaskOptions } from '../../core/dispatch';
 import { modelProblem, personalOnly, resolveModels } from '../settings/credentials';
 import { json } from '../routes/http';
 import { prepareAgent } from './catalog';
-import { chooseRunner } from '../runners/select';
+import { chooseRunner, runnerAccess } from '../runners/select';
 import { CoderError } from '../../core/errors';
 import type { AppSync } from '../../client/types';
 import type { AgentUsage } from '../../agent/types';
@@ -54,7 +54,7 @@ async function publishedApps(ctx: ServerContext, version: AgentVersionRecord): P
   });
 }
 
-/** An agent's settings in the shape they are saved in: engine, model and effort resolved from its model spec or saved split, refused unless a workspace credential runs them or when its runner is unknown. */
+/** An agent's settings in the shape they are saved in: engine, model and effort resolved from its model spec or saved split, refused unless a workspace credential runs them, when its runner is unknown, or when its runner is not the workspace's. */
 export async function agentSettings(ctx: ServerContext, slug: string, body: unknown) {
   const usage = body && typeof body === 'object' ? usageEntry(body as AgentUsage) : body;
   const parsed = parseAgentsUsage({ [slug]: usage })[slug];
@@ -72,8 +72,16 @@ export async function agentSettings(ctx: ServerContext, slug: string, body: unkn
   }
   const problem = await modelProblem(ctx, parsed, Boolean(ctx.taskPrincipal), ctx.session?.user.id);
   if (problem) throw new Error(problem);
-  if (parsed.runner)
-    await chooseRunner(ctx, { requestedBy: ctx.session?.user.id, agent: parsed.runner });
+  if (parsed.runner) {
+    const chosen = await chooseRunner(ctx, {
+      requestedBy: ctx.session?.user.id,
+      agent: parsed.runner,
+    });
+    const denied =
+      chosen.runnerId &&
+      runnerAccess(ctx, await ctx.store.get('runner', chosen.runnerId), 'assign');
+    if (denied) throw new Error(denied.error);
+  }
 
   return parsed;
 }

@@ -175,12 +175,11 @@
   grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1fr) auto;
   gap: 8px;
 }
-/* hints sit under their labels, and a row's selects line up */
+/* labels, controls and hints each share a row, so a row's selects line up */
 .vpanel .fields > .field {
-  grid-row: span 2;
+  grid-row: span 3;
   grid-template-rows: subgrid;
 }
-.vpanel .fields > .field > span:first-child,
 .vpanel .fields .instructions-head > span {
   display: flex;
   font-weight: 500;

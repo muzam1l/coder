@@ -3,6 +3,7 @@ import { checkCpuMinutes, CpuMinutesError, usageLimits } from './usage';
 import { scoped, type ServerContext } from '../context';
 import { loadedStore } from '../store/primed';
 import { firstModel, machineFirewall } from './context';
+import { createClaim } from './access';
 import type { ClaimedTask, RunningTask, TaskFence } from './queue';
 import type { Runner } from '../runners';
 import { taskRunner } from '../runners/select';
@@ -361,6 +362,7 @@ async function run(ctx: ServerContext, sweep: boolean, knownWork: boolean): Prom
           timeoutMs,
           waitUntil: taskCtx.waitUntil,
           ...(firewall ? { hosts: firewall.hosts, brokered: firewall.brokered } : {}),
+          claim: () => createClaim(taskCtx, claimed.token),
         },
       );
       handle = await deadline(start, taskCtx.runnerTimeoutMs ?? 30_000, 'runner start').catch(

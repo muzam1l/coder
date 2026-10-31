@@ -6,7 +6,9 @@ import { PACKAGE_ROOT } from '../../core/runtime';
 import type { ServerContext } from '../context';
 import { notFound } from '../routes/http';
 
-export const RUNNER_IMAGE = 'ghcr.io/muzam1l/coder-runner:latest';
+/** The runner image pinned by digest, which no rebuild can change; a new image updates it here. */
+export const RUNNER_IMAGE =
+  'ghcr.io/muzam1l/coder-runner@sha256:8628b766c5f55c6bcabcbbe30123ca99ef68f5b43ea6b15304f12317dd2b2f75';
 export function runnerHash(): string {
   const bundled = new URL('./runner.json', import.meta.url);
   const { hash } = JSON.parse(
@@ -63,7 +65,7 @@ export function startCommand(tools = '', preflight = '', runtime = 'bun'): strin
   const extract = [
     'rm -rf .coder-runner/package && tar -xzf .coder-runner/package.tgz -C .coder-runner',
     'mkdir -p .coder-runner/bin',
-    `printf '#!/bin/sh\nexec ${runtime} "$(dirname "$0")/../package/bin/coder.mjs" "$@"\n' > .coder-runner/bin/coder`,
+    `printf '#!/bin/sh\\nexec ${runtime} "$(dirname "$0")/../package/bin/coder.mjs" "$@"\\n' > .coder-runner/bin/coder`,
     'chmod +x .coder-runner/bin/coder',
   ].join(' && ');
   const verified = `node -e 'const fs=require("fs"),crypto=require("crypto");process.exit(/^[a-f0-9]{64}$/.test(process.env.CODER_RUNNER_HASH||"")&&crypto.createHash("sha256").update(fs.readFileSync(".coder-runner/package.tgz")).digest("hex")===process.env.CODER_RUNNER_HASH?0:1)'`;

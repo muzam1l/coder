@@ -19,7 +19,7 @@ import { AddConnection, returning, useAdd, type Pick } from './connection-add';
 import { PlatformStep } from '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/platform-step';
 import type { Step as StepData } from '@/app/dash/[org]/agents/[slug]/(tabs)/platforms/platform-state';
 import { Modal } from '@/comps/ui/modal';
-import { Badge } from '@/comps/ui/badge';
+import { SecretInput } from '@/comps/ui/field';
 
 /** The built-in agents, each with its step on every platform it uses. */
 export type Builtins = Array<{ id: string; name: string; steps: Record<string, StepData> }>;
@@ -222,12 +222,9 @@ export function ConnectionsList({
         </Button>
       </>
     ) : (
-      <>
-        <Badge>not set up</Badge>
-        <Button size="sm" onClick={() => setPerAgent(info)}>
-          Set up {info.name}
-        </Button>
-      </>
+      <Button size="sm" onClick={() => setPerAgent(info)}>
+        Set up {info.name}
+      </Button>
     );
   };
 
@@ -495,13 +492,11 @@ function NewKey({
         );
       }}
     >
-      <input
+      <SecretInput
         name="key"
-        type="password"
         aria-label={`New key for ${row.name}`}
         placeholder={`New key for ${row.name}, then Enter`}
-        ref={input}
-        autocomplete="off"
+        inputRef={input}
         required
       />
       <Button type="submit" loading={busy}>

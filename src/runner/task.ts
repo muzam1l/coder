@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import { createHash } from 'node:crypto';
 
 import { processTiming } from '../utils/process';
+import { redeemClaim } from './protocol';
 
 import {
   AGENT_TASK_PREFIX,
@@ -742,6 +743,7 @@ async function landing<T>(send: () => Promise<T>): Promise<T> {
 }
 
 export async function runTask(id: string, root: string): Promise<unknown> {
+  if (process.env.CODER_TASK_CLAIM) process.env.CODER_TASK_TOKEN = await redeemClaim(id);
   const auth = taskServer();
   processTiming('runner.credentials.start');
   const remote = await landing(() => taskRequest<RemoteTask>(auth.server, auth.token, id)).catch(

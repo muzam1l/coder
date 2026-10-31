@@ -362,6 +362,9 @@ function specManifest(publicUrl: string, spec: AppSpec, isPublic?: boolean): Git
         : {}),
       // The membership webhooks need it; task tokens never carry it.
       members: 'read',
+      // The github-actions runner dispatches its workflow and adds the file; task tokens never carry them.
+      actions: 'write',
+      workflows: 'write',
     },
     events: githubAppEvents(events),
     isPublic,
@@ -531,7 +534,7 @@ export const githubApp: IntegrationApp = {
 async function mintInstallationToken(
   config: { appId: string; privateKey: string },
   installationId: string | number,
-  scope: { permissions?: Record<string, string> } = {},
+  scope: ReturnType<typeof githubTokenScope> = {},
   request?: typeof fetch,
 ): Promise<{ token: string; expiresAt: number }> {
   const client = await octokit(
@@ -542,6 +545,7 @@ async function mintInstallationToken(
     type: 'installation',
     installationId,
     ...(scope.permissions ? { permissions: scope.permissions } : {}),
+    ...(scope.repositoryNames ? { repositoryNames: scope.repositoryNames } : {}),
   })) as { token: string; expiresAt: string };
 
   return { token, expiresAt: Date.parse(expiresAt) };
@@ -556,19 +560,33 @@ export async function installationToken(
 /** The app key and the exact scope; an omitted part differs from an empty one. */
 function githubReuseKey(credentials: unknown, bound?: TokenBound): string {
   const { appId, privateKey } = credentials as GithubAppCredentials;
-  const { permissions } = githubTokenScope(bound);
+  const { permissions, repositoryNames } = githubTokenScope(bound);
   return createHash('sha256')
     .update(
-      JSON.stringify([appId, privateKey, permissions ? Object.entries(permissions).sort() : null]),
+      JSON.stringify([
+        appId,
+        privateKey,
+        permissions ? Object.entries(permissions).sort() : null,
+        ...(repositoryNames ? [repositoryNames] : []),
+      ]),
     )
     .digest('base64url');
 }
 
-/** The narrowest token for a bound: the permissions its tools need, on every repository of the installation. */
-export function githubTokenScope(bound: TokenBound = {}): { permissions?: Record<string, string> } {
-  if (bound.purpose === 'checks') return { permissions: { metadata: 'read', checks: 'write' } };
+/** The narrowest token for a bound: the permissions its tools need, on every repository of the installation unless it names one. */
+export function githubTokenScope(bound: TokenBound = {}): {
+  permissions?: Record<string, string>;
+  repositoryNames?: string[];
+} {
+  const one = bound.repository ? { repositoryNames: [bound.repository] } : {};
+  if (bound.purpose === 'checks')
+    return { permissions: { metadata: 'read', checks: 'write' }, ...one };
   if (bound.purpose === 'members') return { permissions: { members: 'read' } };
   if (bound.purpose === 'contents') return { permissions: { metadata: 'read', contents: 'read' } };
+  if (bound.purpose === 'actions')
+    return { permissions: { metadata: 'read', actions: 'write' }, ...one };
+  if (bound.purpose === 'workflows')
+    return { permissions: { metadata: 'read', contents: 'write', workflows: 'write' }, ...one };
 
   return bound.tools ? { permissions: githubAppPermissions(bound.tools) } : {};
 }

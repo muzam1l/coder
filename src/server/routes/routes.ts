@@ -46,6 +46,7 @@ import {
   sendReaction,
   sendReply,
 } from '../tasks/callbacks';
+import { redeemClaim } from '../tasks/access';
 import { listHistory, readHistory, saveHistory } from '../tasks/logs';
 import {
   answerLogin,
@@ -63,6 +64,7 @@ import {
   listRunners,
   pairRunner,
   registerRunner,
+  runnerOptions,
   updateRunner,
 } from '../settings/runners';
 import {
@@ -173,6 +175,7 @@ const authRoutes = [
 
 const callbacksRoutes = [
   ...group('/tasks', [
+    route('POST', '/:id/claim', redeemClaim),
     route('GET', '/:id/messages', readMessages, { guard: inboxGuard }),
     route('POST', '/:id/ack', ackMessages, { guard: inboxGuard }),
     route('POST', '/:id/heartbeat', heartbeat, { guard: inboxGuard }),
@@ -323,6 +326,7 @@ const runnersRoutes = [
   route('GET', '/runners', listRunners, { approvalPolicy: 'allow' }),
   route('POST', '/runners', createRunner),
   route('POST', '/runners/pair', pairRunner),
+  route('POST', '/runners/options', runnerOptions),
   route('POST', '/runners/:id/test', checkRunner),
   route('PATCH', '/runners/:id', updateRunner, {
     approvalPolicy: 'ask',

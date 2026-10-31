@@ -4,7 +4,11 @@ import { type Approval } from '../../core/types';
 import { effectiveSettings } from '../../agent/definition';
 import { type TaskStatus, type TaskLogLine } from '../store/types';
 import { type ServerContext } from '../context';
-import { taskContext, taskEngineCredentials, uninstall } from './context';
+import { installationToken, taskContext, taskEngineCredentials, uninstall } from './context';
+import { decryptSecret } from '../store/secrets';
+import { checkCodexAuth, parseCredentialId } from '../settings/credentials';
+import { taskGrants } from './grants';
+import { turnStarter } from './access';
 import { effectiveConfig, taskConfig } from '../settings/config';
 import { splitEngineSpec } from '../../core/config';
 import { writeBackCodexAuth } from '../settings/credentials';
@@ -76,6 +80,24 @@ type TaskCallback = {
   credential?: string;
   fallbacks?: TaskStatus['fallbacks'];
 };
+
+/** What a runner's report may carry: the task's own row only. A claim about shared state (`installationRevoked`) is checked with the platform here before it lands; nothing else is accepted. */
+const TASK_OWNED_FIELDS = new Set<keyof TaskCallback>([
+  'status',
+  'result',
+  'error',
+  'tokens',
+  'approval',
+  'approvals',
+  'answer',
+  'diff',
+  'postedMessages',
+  'installationRevoked',
+  'machine',
+  'model',
+  'credential',
+  'fallbacks',
+]);
 
 export type CallbackContext = ServerContext & {
   callbackTask?: TaskStatus;
@@ -210,6 +232,7 @@ export async function reportResult(
   if (
     !body?.status ||
     !['running', 'waiting', 'completed', 'failed', 'cancelled'].includes(body.status) ||
+    Object.keys(body).some(key => !TASK_OWNED_FIELDS.has(key as keyof TaskCallback)) ||
     (body.installationRevoked !== undefined && body.installationRevoked !== true) ||
     (body.machine !== undefined && body.machine !== true) ||
     (body.approvals !== undefined &&
@@ -312,14 +335,8 @@ export async function reportResult(
   );
 
   const event = authorized.task.event;
-  if (
-    completed &&
-    body.status === 'failed' &&
-    body.installationRevoked &&
-    event &&
-    ctx.integrations[event.integration]?.isUninstalled
-  )
-    await uninstall(ctx.store, `${event.appId}:${event.installationId}`, now);
+  if (completed && body.status === 'failed' && body.installationRevoked && event)
+    await verifyRevoked(ctx, event, now);
 
   if (completed && body.machine) {
     const { reportTaskFailure } = await import('./events');
@@ -339,6 +356,35 @@ export async function reportResult(
     );
 
   return json({ ok: true });
+}
+
+/** A runner's claim that the event's installation was revoked: retired only once the platform, asked on a read token minted here, says so too. */
+async function verifyRevoked(
+  ctx: CallbackContext,
+  event: NonNullable<TaskStatus['task']['event']>,
+  now: number,
+): Promise<void> {
+  const integration = ctx.integrations[event.integration];
+  const id = `${event.appId}:${event.installationId}`;
+  if (!integration?.isUninstalled) return;
+  const [app, installation] = await Promise.all([
+    ctx.store.get('app', event.appId),
+    ctx.store.get('installation', id),
+  ]);
+  if (!app || !installation || installation.deletedAt) return;
+  try {
+    const token = await installationToken(
+      ctx,
+      integration,
+      installation,
+      decryptSecret(ctx.config, app.credentials),
+      { tools: integration.tools.presets['read-only'] },
+    );
+    if ((await integration.installed?.(token, ctx.fetch)) !== false) return;
+  } catch (error) {
+    if (!integration.isUninstalled(error)) return;
+  }
+  await uninstall(ctx.store, id, now);
 }
 
 /** After the runner has its answer: syncs the conversation with the task's approvals the report carried. */
@@ -462,16 +508,24 @@ export async function refreshCredential(
     credentialId?: unknown;
   };
   const credentialId = body.credentialId;
+  const { writeBack } = taskGrants(authorized.task);
+  // A rotated auth.json lands only on a credential the runner is granted to rewrite, and only once it works upstream.
+  const allowed =
+    typeof credentialId === 'string' &&
+    (writeBack === 'granted' ||
+      (writeBack === 'asker' &&
+        parseCredentialId(credentialId).owner === turnStarter(authorized.task)));
   if (
     typeof body.authJson !== 'string' ||
-    typeof credentialId !== 'string' ||
+    !allowed ||
     !(
       await taskEngineCredentials(
         ctx,
         authorized.task,
         effectiveConfig(ctx, await taskConfig(ctx.store)),
       )
-    ).some(row => row.id === credentialId)
+    ).some(row => row.id === credentialId) ||
+    !(await checkCodexAuth(body.authJson, ctx.fetch))
   )
     return json({ error: 'Invalid credential update' }, 400);
 

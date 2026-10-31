@@ -6,10 +6,11 @@ import { decodeJson, encodeJson, sha256 } from '../../../utils/crypto';
 import type { AgentTask } from '../../../agent/types';
 import { RunnerCheckError, type Runner } from '..';
 import { toolInstalls } from './local';
-import { runnerHash, runnerTarball, startCommand, SETUP_FAILED } from '../package';
+import { startCommand, SETUP_FAILED } from '../package';
 import { INTEGRATIONS } from '../../../integrations';
 import { INBOX_COMMAND, INBOX_SOCKET } from '../../../runner/task';
 import type { InboxEntry, InboxAck } from '../../tasks/queue';
+import { startEnv } from '../../../runner/protocol';
 import type { Store } from '../../store/types';
 
 type Command = {
@@ -563,12 +564,7 @@ export class VercelSandboxRunner implements Runner {
       brokered?: BrokerRule[];
     } = {},
   ): Promise<string> {
-    env = {
-      ...env,
-      [MACHINE_SANDBOX_ENV]: '1',
-      CODER_RUNNER_TARBALL_URL: runnerTarball(env.CODER_SERVER!),
-      CODER_RUNNER_HASH: runnerHash(),
-    };
+    env = { ...startEnv(env), [MACHINE_SANDBOX_ENV]: '1' };
     const policy = machinePolicy(env, credential, options);
     const command = (env: Record<string, string>) => ({
       cmd: 'sh',
@@ -682,6 +678,118 @@ export class VercelSandboxRunner implements Runner {
       this.sandboxes.delete(name);
     }
   }
+}
+
+/** The project `npx sandbox` creates, so Coder and the Sandbox CLI share one. */
+export const DEFAULT_PROJECT = 'vercel-sandbox-default-project';
+
+type VercelTeam = {
+  id: string;
+  slug: string;
+  name?: string | null;
+  updatedAt?: number;
+  membership?: { role?: string };
+  billing?: { plan?: string };
+};
+type VercelProject = { id: string; name: string };
+
+class VercelError extends Error {
+  constructor(readonly status: number) {
+    super(`Vercel answered HTTP ${status}`);
+  }
+}
+
+function vercelApi(token: string, request: typeof fetch) {
+  return async <T>(path: string, init: { method?: string; body?: string } = {}): Promise<T> => {
+    const response = await request(`https://api.vercel.com${path}`, {
+      ...init,
+      signal: AbortSignal.timeout(10_000),
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    });
+    if (!response.ok) throw new VercelError(response.status);
+    return (await response.json()) as T;
+  };
+}
+type VercelApi = ReturnType<typeof vercelApi>;
+
+const teamQuery = (team: string) =>
+  `${team.startsWith('team_') ? 'teamId' : 'slug'}=${encodeURIComponent(team)}`;
+
+/** The teams `npx sandbox` tries, in its order: the default team, then hobby teams the user owns, the personal one first; a token scoped to teams has only those. */
+async function teamCandidates(api: VercelApi, teams: VercelTeam[]): Promise<string[]> {
+  const user = await api<{ user: { defaultTeamId?: string | null; username?: string } }>(
+    '/v2/user',
+  ).catch(() => undefined);
+  const username = user?.user.username;
+  const owned = teams
+    .filter(team => team.membership?.role === 'OWNER' && team.billing?.plan === 'hobby')
+    .sort(
+      (a, b) =>
+        Number(b.slug === username) - Number(a.slug === username) ||
+        (b.updatedAt ?? 0) - (a.updatedAt ?? 0),
+    );
+  const defaultTeam = user?.user.defaultTeamId;
+  const ordered = [
+    ...new Set([...(defaultTeam ? [defaultTeam] : []), ...owned.map(team => team.id)]),
+  ];
+
+  return ordered.length ? ordered : teams.map(team => team.id);
+}
+
+async function defaultProject(api: VercelApi, team: string): Promise<string> {
+  try {
+    await api(`/v2/projects/${DEFAULT_PROJECT}?${teamQuery(team)}`);
+  } catch (error) {
+    if (!(error instanceof VercelError && error.status === 404)) throw error;
+    await api(`/v11/projects?${teamQuery(team)}`, {
+      method: 'POST',
+      body: JSON.stringify({ name: DEFAULT_PROJECT }),
+    });
+  }
+
+  return DEFAULT_PROJECT;
+}
+
+/** The team slugs a token reaches and the project names of `team`, or of the team an empty one becomes. */
+export async function vercelOptions(
+  config: Record<string, string>,
+  request: typeof fetch,
+): Promise<Record<string, string[]>> {
+  const api = vercelApi(config.token!, request);
+  const { teams } = await api<{ teams: VercelTeam[] }>('/v2/teams?limit=100');
+  const team = config.team || (await teamCandidates(api, teams))[0];
+  const listed = team
+    ? await api<{ projects: VercelProject[] } | VercelProject[]>(
+        `/v10/projects?${teamQuery(team)}&limit=100`,
+      )
+    : [];
+
+  return {
+    team: teams.map(each => each.slug),
+    projectId: (Array.isArray(listed) ? listed : listed.projects).map(project => project.name),
+  };
+}
+
+/** Fills an empty team and project the way `npx sandbox` does: the first team that can hold the default project, created when missing; nothing to fill gives undefined. */
+export async function resolveVercelScope(
+  config: Record<string, string>,
+  request: typeof fetch,
+): Promise<{ team: string; projectId: string } | undefined> {
+  if (config.team?.startsWith('team_') && config.projectId) return undefined;
+  const api = vercelApi(config.token!, request);
+  const { teams } = await api<{ teams: VercelTeam[] }>('/v2/teams?limit=100');
+  // A picked slug is stored as its id, the form auto-resolving gives.
+  const picked = config.team && (teams.find(team => team.slug === config.team)?.id ?? config.team);
+  const candidates = picked ? [picked] : await teamCandidates(api, teams);
+  for (const team of candidates)
+    try {
+      return { team, projectId: config.projectId || (await defaultProject(api, team)) };
+    } catch (error) {
+      if (config.team || !(error instanceof VercelError && [402, 403].includes(error.status)))
+        throw error;
+    }
+
+  throw new Error('None of this token’s teams can create sandboxes. Pick a team.');
 }
 
 export async function checkVercelSandbox(

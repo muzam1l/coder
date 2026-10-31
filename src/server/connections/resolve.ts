@@ -29,6 +29,7 @@ import { refreshFailure, tokenFingerprint } from '../../core/oauth';
 import { publicFetch } from '../outbound';
 import { createHash } from 'node:crypto';
 import type { Store, TaskStatus } from '../store/types';
+import { connectionGranted, taskGrants } from '../tasks/grants';
 
 function nativeSecretValues(stored: string): string[] {
   try {
@@ -81,6 +82,7 @@ export async function resolveConnections(
   handles: Record<string, string> = {},
   actAs?: (connection: Connection) => Promise<string | undefined>,
   turn?: Awaited<ReturnType<typeof turnConnections>>,
+  grants = taskGrants(task),
 ) {
   const mcp: Record<string, McpServerSpec> = {};
   const env: Record<string, string> = {};
@@ -124,7 +126,12 @@ export async function resolveConnections(
     try {
       if (result.status === 'rejected') throw result.reason;
       ({ id, value: connection } = result.value);
-      if (!connection || (connection.owner && connection.owner !== asker)) continue;
+      if (!connection) continue;
+      if (!connectionGranted(grants, connection, asker)) {
+        if (!connection.owner)
+          warnings.push(`${connection.name} is the workspace's; your runner does not receive it.`);
+        continue;
+      }
       if (
         connection.provider === 'env' &&
         (connection.auth !== 'key' ||
@@ -418,7 +425,12 @@ export async function connectionToken(
 ): Promise<{ token?: string; name?: string }> {
   const connection = found ?? (await findConnection(ctx, id, taskAsker(task)));
   const key = connection?.auth === 'key' && connection.owner && connection.provider === 'mcp';
-  if (!connection || (connection.auth !== 'oauth' && !key) || connection.broken)
+  if (
+    !connection ||
+    !connectionGranted(taskGrants(task), connection, taskAsker(task)) ||
+    (connection.auth !== 'oauth' && !key) ||
+    connection.broken
+  )
     return { name: connection?.name };
   const secrets: string[] = [];
   const token = key
@@ -437,6 +449,7 @@ export async function resolvedTaskConnections(
   status: TaskStatus,
   handles: Record<string, string>,
   actAs?: (connection: Connection) => Promise<string | undefined>,
+  grants = taskGrants(status.task),
 ) {
   const turn = await turnConnections(ctx, status.task);
   if (!turn.ids.length)
@@ -456,7 +469,7 @@ export async function resolvedTaskConnections(
         saved: true,
       };
   }
-  const resolved = await resolveConnections(ctx, status.task, handles, actAs, turn);
+  const resolved = await resolveConnections(ctx, status.task, handles, actAs, turn, grants);
   if (!resolved.warnings.length)
     await ctx.store.withAppLock(`connections:${status.task.id}`, async store => {
       const current = await store.get('task', status.task.id);

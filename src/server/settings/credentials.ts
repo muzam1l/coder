@@ -24,6 +24,7 @@ import { effectiveConfig, shownConfig } from './config';
 import type { ResolvedTaskOptions } from '../../core/types';
 import type { ModelAttempt } from '../../agent/types';
 import { type LoginEngine } from './logins';
+import { credentialOwners, GRANTS, type Grants } from '../tasks/grants';
 
 /** Engine credentials for a workspace or a member, one per variable or subscription in each scope; every row change goes through `store.withCredential`. */
 
@@ -151,13 +152,14 @@ export function credentialNames(
   return [(entry && isEndpointModel(entry) && entry.envKey) || ENGINE_KEYS.codex];
 }
 
-/** The rows that serve `names`: the asker's own, then the workspace's, each in name order; turns no member pays for use the workspace's only. */
+/** The rows that serve `names`: the asker's own, then the workspace's where the runner is granted them, each in name order; turns no member pays for use the workspace's only. */
 export function pickCredentials<T extends { id: string }>(
   rows: T[],
   names: string[],
   asker?: string,
+  grants: Grants = GRANTS.workspace,
 ): T[] {
-  return (asker ? [asker, undefined] : [undefined]).flatMap(owner =>
+  return credentialOwners(grants, asker).flatMap(owner =>
     names.flatMap(name => rows.filter(row => row.id === credentialId(owner, name))),
   );
 }
@@ -247,15 +249,23 @@ export async function agentModels(
   };
 }
 
-/** A task's attempts in order: each model on each of its credentials; a model with none runs once on the machine's logins when `machine` allows it, else it is skipped. */
-export function modelAttempts(models: ModelRun[], machine = false): ModelAttempt[] {
-  return models.flatMap(run =>
-    run.credentials.length
-      ? run.credentials.map(credential => ({ model: run.model, credential }))
+/** A task's attempts in order: each model on each of its credentials, only those of `owners` when given; a model with none runs once on the machine's logins when `machine` allows it, else it is skipped. */
+export function modelAttempts(
+  models: ModelRun[],
+  machine = false,
+  owners?: Array<string | undefined>,
+): ModelAttempt[] {
+  return models.flatMap(run => {
+    const credentials = owners
+      ? run.credentials.filter(id => owners.includes(parseCredentialId(id).owner))
+      : run.credentials;
+
+    return credentials.length
+      ? credentials.map(credential => ({ model: run.model, credential }))
       : run.machine || machine
         ? [{ model: run.model }]
-        : [],
-  );
+        : [];
+  });
 }
 
 const ENGINE_NAMES: Record<string, string> = { claude: 'Claude', codex: 'Codex', custom: 'Custom' };
@@ -453,6 +463,39 @@ const codexAccount = (authJson: string) => {
     return undefined;
   }
 };
+
+/** The ChatGPT account an access token was issued to. */
+const tokenAccount = (token: string) => {
+  try {
+    const payload = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString()) as {
+      'https://api.openai.com/auth'?: { chatgpt_account_id?: string };
+    };
+    return payload['https://api.openai.com/auth']?.chatgpt_account_id;
+  } catch {
+    return undefined;
+  }
+};
+
+/** Whether a rotated Codex `auth.json` works upstream in the mode it stores: ChatGPT tokens issued to the account they claim, else a bare API key; anything mixed or unparseable fails. */
+export async function checkCodexAuth(authJson: string, request?: typeof fetch): Promise<boolean> {
+  let value: { OPENAI_API_KEY?: string; tokens?: { access_token?: string; account_id?: string } };
+  try {
+    value = JSON.parse(authJson);
+  } catch {
+    return false;
+  }
+  const token = value.tokens?.access_token;
+  if (
+    token ? tokenAccount(token) !== value.tokens?.account_id : value.tokens || !value.OPENAI_API_KEY
+  )
+    return false;
+  const env = { OPENAI_API_KEY: token ?? value.OPENAI_API_KEY! };
+
+  return checkCredential({ engine: 'codex', env }, request).then(
+    () => true,
+    () => false,
+  );
+}
 
 /** A task's rotated Codex `auth.json`; kept only for the same account and when its `last_refresh` is newer than the stored one. */
 export function writeBackCodexAuth(

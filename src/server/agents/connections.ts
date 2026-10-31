@@ -452,6 +452,14 @@ async function listRepositories(
 }
 
 export async function adminRepositories(ctx: ServerContext, refresh = false): Promise<Response> {
+  return json(await workspaceRepositories(ctx, refresh));
+}
+
+/** Every repository the workspace's installations reach, each once, a missing snapshot read first. */
+export async function workspaceRepositories(
+  ctx: ServerContext,
+  refresh = false,
+): Promise<Array<{ repo: string; integration: string }>> {
   const seen = new Map<string, { repo: string; integration: string }>();
   const rows = (await ctx.store.list('installation', { active: true })).filter(
     ({ value }) => ctx.integrations[value.integration]?.repos,
@@ -481,5 +489,5 @@ export async function adminRepositories(ctx: ServerContext, refresh = false): Pr
       if (!seen.has(repo)) seen.set(repo, { repo, integration: installation.integration });
   }
 
-  return json([...seen.values()].sort((a, b) => a.repo.localeCompare(b.repo)));
+  return [...seen.values()].sort((a, b) => a.repo.localeCompare(b.repo));
 }

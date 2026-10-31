@@ -7,12 +7,12 @@ export const commandServerWorkflow = command({
   name: 'workflow',
   description: 'print the GitHub Actions workflow for RUNNER=github-actions',
   usage:
-    'Print the workflow the github-actions runner dispatches. Save it as .github/workflows/coder-agent.yml in every repo the agent runs on, and set RUNNER=github-actions on the server.',
+    'Print the workflow the github-actions runner dispatches. Save it as .github/workflows/coder-runner.yml in every repo the agent runs on, and set RUNNER=github-actions on the server.',
   access: 'read',
   approvalPolicy: 'deny',
   globalFlags: { json: false, cwd: false },
   cli: {
-    examples: ['coder server workflow > .github/workflows/coder-agent.yml  # add it to a repo'],
+    examples: ['coder server workflow > .github/workflows/coder-runner.yml  # add it to a repo'],
   },
   run: async () => {
     const { actionsWorkflow } = await import('../../server/runners/kinds/github-actions');
