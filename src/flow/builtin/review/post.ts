@@ -145,7 +145,7 @@ export function reviewBody(review: ReviewPost, threads: Map<string, string> = ne
     const file = thread ? finding.file.split('/').pop() : finding.file;
     const failure = thread ? '' : `\n\n  ${finding.failure_scenario.trim().replace(/\n/g, '\n  ')}`;
 
-    return `- ${links.images === undefined ? `**${capital(finding.severity)}**` : picture(links.images, `sev-${finding.severity}`, capital(finding.severity))} ${heading} <sub>${codeSpan(`${file}:${finding.start_line ? `${finding.start_line}-` : ''}${finding.line}`)}</sub>${failure}`;
+    return `- ${links.images === undefined ? `**${capital(finding.severity)}**` : picture(links.images, `sev-${finding.severity}`, capital(finding.severity))} ${heading} ${codeSpan(`${file}:${finding.start_line ? `${finding.start_line}-` : ''}${finding.line}`)}${failure}`;
   });
   const list = findings.length
     ? [

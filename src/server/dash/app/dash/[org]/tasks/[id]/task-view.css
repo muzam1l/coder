@@ -144,6 +144,23 @@ pre.json {
 .turn.change > summary::-webkit-details-marker {
   display: none;
 }
+.change-end {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  align-self: center;
+}
+.change-chev {
+  visibility: hidden;
+  color: var(--dim);
+}
+.turn.change > summary:hover .change-chev,
+.turn.change[open] .change-chev {
+  visibility: visible;
+}
+.turn.change[open] .change-chev {
+  rotate: 180deg;
+}
 .turn.change > pre {
   margin-top: 8px;
   max-height: 320px;

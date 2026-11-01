@@ -678,9 +678,12 @@ export function TaskView({
                               {message.text}
                             </PlatformLink>
                           </span>
-                          {index === 0 ? (
-                            <span class="fact-dim">{formatDate(task.createdAt, tz, true)}</span>
-                          ) : null}
+                          <span class="change-end">
+                            {index === 0 ? (
+                              <span class="fact-dim">{formatDate(task.createdAt, tz, true)}</span>
+                            ) : null}
+                            <Icon d={iDown} class="change-chev" />
+                          </span>
                         </summary>
                         <pre class="body json">{JSON.stringify(message.payload, null, 2)}</pre>
                       </details>

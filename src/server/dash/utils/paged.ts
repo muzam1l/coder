@@ -29,6 +29,7 @@ export function usePaged<T>({
   initial,
   root,
   fetchPage,
+  paused = false,
 }: {
   name: string;
   /** What the rows are filtered by. */
@@ -40,6 +41,8 @@ export function usePaged<T>({
   root?: () => Element | null;
   /** For APIs with their own paging shape. */
   fetchPage: (cursor: string) => Promise<Paged<T>>;
+  /** Loads no more pages while the list is folded. */
+  paused?: boolean;
 }) {
   const firstPages = useRef(
     new Map<string, { page: Paged<unknown>; at: number }>([
@@ -133,7 +136,7 @@ export function usePaged<T>({
 
   useEffect(() => {
     const mark = sentinel.current;
-    if (!mark || !state.next || error) return;
+    if (!mark || !state.next || error || paused) return;
     const observer = new IntersectionObserver(
       ([seen]) => {
         if (seen?.isIntersecting && live.current.next && live.current.query === query)
@@ -143,7 +146,7 @@ export function usePaged<T>({
     );
     observer.observe(mark);
     return () => observer.disconnect();
-  }, [state.next, state.rows.length, query, error]);
+  }, [state.next, state.rows.length, query, error, paused]);
 
   return {
     rows: state.rows as T[],
