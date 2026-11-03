@@ -21,7 +21,7 @@ import {
   waitForAgentTask,
 } from '../agent/exec';
 import { INTEGRATIONS } from '../integrations';
-import { nativeToolEnvironment, tokenEnvName, type ReplyEndpoint } from '../agent/mcp';
+import { tokenEnvName } from '../agent/mcp';
 import type { AgentTask, ModelAttempt } from '../agent/types';
 import { effectiveSettings } from '../agent/definition';
 import type { EngineCredential } from '../server/store/types';
@@ -51,14 +51,15 @@ import { listApprovals } from '../core/approvals';
 import {
   answerTaskApproval,
   askTask,
-  heldConnections,
+  liveConnections,
+  serverConnections,
   steerTask,
   stopTask,
   type ConnectionResolver,
 } from '../core/task/actions';
 import { addTokens, SKIPPED } from '../core/task/view';
-import { readResultJson, resolveMcpServers, resolveTaskOptions, waitTask } from '../core/dispatch';
-import { connectionEnvironment, connectionVariables } from '../core/connections';
+import { readResultJson, resolveTaskOptions, waitTask } from '../core/dispatch';
+import { connectionVariables } from '../core/connections';
 import type { InboxEntry, InboxAck } from '../server/tasks/queue';
 import { nodeListener } from '../server/routes/http';
 import { askWorker, serveMailbox, mailboxId, type MailboxKey } from '../core/mailbox';
@@ -598,40 +599,6 @@ export function requestInboxControl(
   );
 }
 
-/** A live run's next turn: the connections the task's server resolves for it now, its grants and the asker's personal ones, as a fresh run gets them. */
-export function serverConnections(endpoint: ReplyEndpoint): ConnectionResolver {
-  return async () => {
-    const response = await fetch(endpoint.url, {
-      headers: { authorization: `Bearer ${endpoint.token}` },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!response.ok) throw new Error(`Coder server answered ${response.status}`);
-    const remote = (await response.json()) as RemoteTask;
-    const connected = connectionEnvironment(remote.connections ?? {}, remote.connectionEnv);
-    const native = nativeToolEnvironment(remote.task, remote.tokens, {
-      ...endpoint,
-      ...(remote.dashboard ? { dashboard: remote.dashboard } : {}),
-    });
-
-    return { mcp: connected.mcp, env: { ...connected.env, ...native.env }, warnings: [] };
-  };
-}
-
-/** A runner task's next turn asks its server through the conversation endpoint; without one it keeps what its task resolved. */
-export function liveConnections(task: Task): ConnectionResolver {
-  return async granted => {
-    const reply = resolveMcpServers(task.mcp, process.env).find(
-      server => server.name === 'conversation',
-    )?.env;
-
-    return (
-      reply?.CODER_REPLY_URL && reply.CODER_REPLY_TOKEN
-        ? serverConnections({ url: reply.CODER_REPLY_URL, token: reply.CODER_REPLY_TOKEN })
-        : heldConnections(task.mcp)
-    )(granted);
-  };
-}
-
 /** A steer's model and access, as its sender gave them. */
 function turnOverrides(value: Record<string, unknown> | undefined): { model?: string; access?: Access } {
   return {
@@ -1102,6 +1069,10 @@ async function runCheckedOutTask(
             links: reviewLinks(auth.server, remote.task.taskUrl, remote.reviewAssets),
             onModel: onFlowModel,
             stop: timeout,
+            resolveConnections: serverConnections({
+              url: `${auth.server}/tasks/${encodeURIComponent(id)}`,
+              token: auth.token,
+            }),
           })
             .catch(error => console.error(`coder runner: ${call.tool} ${call.runId} failed`, error))
             .finally(() => driving.delete(work));

@@ -351,6 +351,7 @@ export async function claudeTurn(
     let stderr = '';
     const protocolErrors: string[] = [];
     let resultEvent: any = null;
+    let errorCode: string | undefined;
     let streamSessionId = sessionId;
     let steerServer: Awaited<ReturnType<typeof startClaudeSteerServer>> | null = null;
     let settled = false;
@@ -410,6 +411,7 @@ export async function claudeTurn(
         // command apart from prose without parsing the message back out.
         const usage =
           event.type === 'assistant' ? normalizeClaudeUsage(event.message?.usage) : null;
+        if (event.type === 'assistant' && event.error && !event.parent_tool_use_id) errorCode = String(event.error);
         if (event.type === 'assistant' && !event.parent_tool_use_id) {
           if (!requestId || requestId !== event.message?.id) requestUsage = null;
           requestId = event.message?.id;
@@ -497,7 +499,7 @@ export async function claudeTurn(
               : String(event.result ?? '').trim(),
           error:
             event.is_error || protocolErrors.length
-              ? { message: protocolErrors[0] || String(event.result ?? '') }
+              ? { message: protocolErrors[0] || String(event.result ?? ''), code: errorCode }
               : null,
         });
         if (event.session_id) {
@@ -650,6 +652,7 @@ export async function claudeTurn(
           ? {
               message:
                 protocolErrors[0] || finalMessage || stderr.trim() || `claude exited ${code}`,
+              code: errorCode,
             }
           : null,
       });

@@ -5,7 +5,7 @@ import process from 'node:process';
 import { WORKER_ENV } from '../dispatch';
 import { tokenEnvName } from '../../agent/mcp';
 import { loadTask, readTurnResults, resolveTaskDir } from '../state';
-import { heldConnections, steerTask } from './actions';
+import { liveConnections, steerTask, type ConnectionResolver } from './actions';
 import type { Task } from '../types';
 import { readJsonFile, withFileLock, writeJsonFileAtomic } from '../../utils/fsx';
 import { drivePreparedRun, pidAlive, prepareRun, stopFlowTasks } from '../../flow/executor';
@@ -155,6 +155,7 @@ export async function driveAsyncTool(
     links?: ReviewLinks;
     onModel: FlowHooks['onModel'];
     stop: AbortSignal;
+    resolveConnections?: ConnectionResolver;
   },
 ): Promise<void> {
   const taskDir = resolveTaskDir(cwd, taskId);
@@ -260,10 +261,12 @@ export async function driveAsyncTool(
     task.cwd ?? cwd,
     task,
     text,
-    // A runner's task resumes with the connections it already resolved.
-    (task.connectionSource ?? (task.connections ? 'server' : undefined)) === 'server'
-      ? { resolveConnections: heldConnections(task.mcp) }
-      : {},
+    // A server's task resumes with the connections its server resolves now.
+    runner?.resolveConnections
+      ? { resolveConnections: runner.resolveConnections }
+      : (task.connectionSource ?? (task.connections ? 'server' : undefined)) === 'server'
+        ? { resolveConnections: liveConnections(task) }
+        : {},
   );
   await mark({
     delivered: true,

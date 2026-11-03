@@ -90,7 +90,7 @@ export interface TurnCaptureState {
   lastAgentMessage: string;
   reasoningSummary: string[];
   reasoningStartedAt: Map<string, number>;
-  error: { message?: string } | null;
+  error: { message?: string; codexErrorInfo?: unknown } | null;
   fileChanges: TurnItem[];
   commandExecutions: TurnItem[];
   // threadId -> latest cumulative token usage reported for that thread.
@@ -588,6 +588,22 @@ function clearCompletionTimer(state: TurnCaptureState) {
     clearTimeout(state.completionTimer);
     state.completionTimer = null;
   }
+}
+
+// One string per Codex error kind: the enum value, or an object variant's key and HTTP status.
+function codexErrorCode(info: unknown): string | undefined {
+  if (typeof info === 'string') return info;
+  const [key, value] = Object.entries(info ?? {})[0] ?? [];
+  const status = (value as { httpStatusCode?: number | null } | null)?.httpStatusCode;
+
+  return key && (status ? `${key}:${status}` : key);
+}
+
+function turnError(state: TurnCaptureState): TurnResult['error'] {
+  const error = state.error ?? (state.finalTurn?.error as TurnCaptureState['error']) ?? null;
+  const code = codexErrorCode(error?.codexErrorInfo);
+
+  return error && (code ? { ...error, code } : error);
 }
 
 function completeTurn(state: TurnCaptureState, turn: Turn | null = null) {
@@ -1166,7 +1182,7 @@ export async function threadTurn(
       threadId,
       turnId: turnState.turnId,
       finalMessage: turnState.lastAgentMessage,
-      error: turnState.error ?? (turnState.finalTurn?.error as TurnCaptureState['error']) ?? null,
+      error: turnError(turnState),
     });
   } finally {
     options.signal?.removeEventListener('abort', interrupt);
@@ -1180,7 +1196,7 @@ export async function threadTurn(
     finalMessage: turnState.lastAgentMessage,
     reasoningSummary: turnState.reasoningSummary,
     turn: turnState.finalTurn,
-    error: turnState.error ?? (turnState.finalTurn?.error as TurnCaptureState['error']) ?? null,
+    error: turnError(turnState),
     stderr: cleanCodexStderr(client.stderr),
     fileChanges: turnState.fileChanges,
     tokens: collectTokenUsage(turnState),

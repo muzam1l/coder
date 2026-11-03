@@ -69,6 +69,8 @@ import {
   waitForTaskAttention,
 } from '../dispatch';
 import { connectionEnvironment, localConnections } from '../connections';
+import { nativeToolEnvironment, type ReplyEndpoint } from '../../agent/mcp';
+import type { AgentTask } from '../../agent/types';
 import {
   isEndpointModel,
   loadConfig,
@@ -140,6 +142,46 @@ export function heldConnections(
     ),
     warnings: [],
   });
+}
+
+/** A live run's next turn: the connections the task's server resolves for it now, its grants and the asker's personal ones, as a fresh run gets them. */
+export function serverConnections(endpoint: ReplyEndpoint): ConnectionResolver {
+  return async () => {
+    const response = await fetch(endpoint.url, {
+      headers: { authorization: `Bearer ${endpoint.token}` },
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!response.ok) throw new Error(`Coder server answered ${response.status}`);
+    const remote = (await response.json()) as {
+      task: Pick<AgentTask, 'tools' | 'event'>;
+      tokens: Record<string, string>;
+      dashboard?: string;
+      connections?: Record<string, McpServerSpec>;
+      connectionEnv?: Record<string, string>;
+    };
+    const connected = connectionEnvironment(remote.connections ?? {}, remote.connectionEnv);
+    const native = nativeToolEnvironment(remote.task, remote.tokens, {
+      ...endpoint,
+      ...(remote.dashboard ? { dashboard: remote.dashboard } : {}),
+    });
+
+    return { mcp: connected.mcp, env: { ...connected.env, ...native.env }, warnings: [] };
+  };
+}
+
+/** A runner task's next turn asks its server through the conversation endpoint; without one it keeps what its task resolved. */
+export function liveConnections(task: Task): ConnectionResolver {
+  return async granted => {
+    const reply = resolveMcpServers(task.mcp, process.env).find(
+      server => server.name === 'conversation',
+    )?.env;
+
+    return (
+      reply?.CODER_REPLY_URL && reply.CODER_REPLY_TOKEN
+        ? serverConnections({ url: reply.CODER_REPLY_URL, token: reply.CODER_REPLY_TOKEN })
+        : heldConnections(task.mcp)
+    )(granted);
+  };
 }
 
 /** A next turn's servers: the task's own, each connection-bound one taking its value from `connections`, plus the turn's new connections. */

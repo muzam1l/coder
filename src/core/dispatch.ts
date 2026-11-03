@@ -73,11 +73,41 @@ import type { AgentPromptParts } from './task/context/system';
 import type { RunnerKind } from '../client/types';
 
 const STARTUP_ERROR_PATTERN =
-  /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|not available|\bat capacity\b|ENOENT/i;
+  /usage|quota|rate.?limit|429|401|unauthorized|not authenticated|login|insufficient|exhausted|spend cap|out of credits|not available|\bat capacity\b|ENOENT/i;
+
+// Engine error codes where the account or provider cannot serve; any other code is the task's own failure.
+const FALLBACK_CODES = new Set([
+  'usageLimitExceeded',
+  'rateLimitExceeded',
+  'unauthorized',
+  'serverOverloaded',
+  'flexUnavailable',
+  'internalServerError',
+  'responseTooManyFailedAttempts',
+  'billing_error',
+  'rate_limit',
+  'authentication_failed',
+  'oauth_org_not_allowed',
+  'account_on_hold',
+  'verification_required',
+  'cloud_credential_error',
+  'overloaded',
+  'server_error',
+]);
 
 // An engine that could not start. A model the account lacks is the caller's
 // choice to fix, not a reason to switch engines.
-function isStartupError(message: string): boolean {
+function isStartupError({ message = '', code }: { message?: string; code?: string }): boolean {
+  // Codex codes I/O errors, such as a ChatGPT workspace's 401, as the catch-all `other`.
+  if (code && code !== 'other' && code !== 'unknown') {
+    const status = Number(code.split(':')[1]);
+    return (
+      FALLBACK_CODES.has(code) ||
+      [401, 402, 403, 429, 529].includes(status) ||
+      (status >= 500 && status < 600)
+    );
+  }
+
   return STARTUP_ERROR_PATTERN.test(message) && !isUnsupportedModelError(message);
 }
 
@@ -747,7 +777,10 @@ async function attemptOnce(
     if (isSandboxFailure(resolved.access, detail)) {
       throw new CoderError('read-only-unavailable', detail);
     }
-    if (isStartupError(detail) && !turnHasSideEffects(result, toolUsed)) {
+    if (
+      isStartupError({ message: detail, code: result?.error?.code }) &&
+      !turnHasSideEffects(result, toolUsed)
+    ) {
       throw new FallbackSignal(resolved.engine, detail);
     }
     throw new CoderError('startup-failed', detail, { taskId: taskId });
@@ -922,7 +955,7 @@ function turnHasSideEffects(result: TurnResult | null, toolUsed = false): boolea
 export function turnMayFallBack(cwd: string, waited: TaskResult): boolean {
   if (waited.status !== 'failed') return false;
   const r = waited.result;
-  if (!r || !isStartupError(r.error?.message ?? '')) return false;
+  if (!r || !isStartupError(r.error ?? {})) return false;
   const since = Date.parse(
     waited.turns.at(-2)?.at ?? waited.task.resumedAt ?? waited.task.createdAt,
   );

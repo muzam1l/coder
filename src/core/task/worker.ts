@@ -437,10 +437,7 @@ export function scratchEnvironment(task: Pick<Task, 'id' | 'engine'>): Record<st
 /** A runner task's follow-up turn takes the connections its server resolves for it now. */
 async function followUpServers(task: Task): Promise<Pick<Task, 'mcp' | 'mcpBindings'>> {
   if (process.env.CODER_MCP_MODE !== 'cloud' || !task.name?.startsWith('agent:')) return {};
-  const [{ liveConnections }, { turnServers }] = await Promise.all([
-    import('../../runner/task'),
-    import('./actions'),
-  ]);
+  const { liveConnections, turnServers } = await import('./actions');
   const connected = await liveConnections(task)(task.connections ?? []);
   for (const name of Object.keys(process.env))
     if (name.startsWith('CODER_CONNECTION_')) delete process.env[name];

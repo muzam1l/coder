@@ -194,7 +194,7 @@ export interface ClaudeTurnResult extends TurnResult {
   threadId: string;
   turnId: string | null;
   finalMessage: string;
-  error: { message: string } | null;
+  error: { message: string; code?: string } | null;
 }
 
 /** Claude Code's name for an MCP server or tool: every character outside `[A-Za-z0-9_-]` becomes `_`. */

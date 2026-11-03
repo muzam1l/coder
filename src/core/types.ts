@@ -220,7 +220,8 @@ export interface TurnResult {
   contextTokens?: number;
   /** The model that ran the turn (tokens are only comparable per model). */
   model?: string | null;
-  error?: { message?: string } | null;
+  /** `code` is the engine's error kind (Codex `codexErrorInfo`, Claude assistant `error`). */
+  error?: { message?: string; code?: string } | null;
   [key: string]: unknown;
 }
 
