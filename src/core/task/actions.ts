@@ -28,6 +28,7 @@ import {
   tailSteps,
   type TaskLogEntry,
   archiveTask,
+  archiveTasks,
   removeTaskDir,
   ageMs,
   STALL_MS,
@@ -689,15 +690,15 @@ export interface ListOptions {
 
 // Archive stopped tasks before collecting the recent view.
 export function recentTasks(cwd: string): Task[] {
-  const tasks = listTasks(cwd).filter(task => {
-    if (!TERMINAL_STATUSES.includes(task.status)) return true;
-    if (!archiveDue(Date.parse(task.completedAt ?? task.updatedAt ?? task.createdAt ?? '')))
-      return true;
-    archiveTask(cwd, task, { auto: true });
-    return false;
-  });
+  const tasks = listTasks(cwd);
+  const due = tasks.filter(
+    task =>
+      TERMINAL_STATUSES.includes(task.status) &&
+      archiveDue(Date.parse(task.completedAt ?? task.updatedAt ?? task.createdAt ?? '')),
+  );
+  archiveTasks(cwd, due, { auto: true });
 
-  return tasks;
+  return tasks.filter(task => !due.includes(task));
 }
 
 // Print-free core: gather the tasks the CLI (and SDK) list, applying the
@@ -1510,7 +1511,7 @@ export async function archive(id?: string, opts: TaskOptions & { allStopped?: bo
   }
   if (opts.allStopped) {
     const targets = listTasks(cwd).filter(task => TERMINAL_STATUSES.includes(task.status));
-    for (const task of targets) archiveTask(cwd, task);
+    archiveTasks(cwd, targets);
     return { archived: targets.map(task => task.id), count: targets.length };
   }
   if (!id)

@@ -138,8 +138,27 @@ export function resolveTaskDir(cwd: string, taskId: string): string {
   return globalDir;
 }
 
-// Active workers keep their files in place until they stop.
 export function archiveTask(cwd: string, task: Task, opts: { auto?: boolean } = {}): Task {
+  return archiveTasks(cwd, [task], opts)[0]!;
+}
+
+// Archives the tasks, then their stopped Codex threads in one batch.
+export function archiveTasks(cwd: string, tasks: Task[], opts: { auto?: boolean } = {}): Task[] {
+  const archived = tasks.map(task => moveToArchive(cwd, task, opts));
+  const stopped = tasks.filter(
+    task => !ACTIVE_STATUSES.includes(task.status) && task.engine !== 'claude',
+  );
+  if (stopped.length)
+    void Promise.all([import('./engines/codex/sessions'), import('./engines/history')]).then(
+      ([{ archiveCodexThreads }, { conversationIds }]) =>
+        archiveCodexThreads(cwd, stopped.flatMap(conversationIds)),
+    );
+
+  return archived;
+}
+
+// Active workers keep their files in place until they stop.
+function moveToArchive(cwd: string, task: Task, opts: { auto?: boolean }): Task {
   const active = ACTIVE_STATUSES.includes(task.status);
   if (!active) {
     const from = resolveTaskDir(cwd, task.id);
@@ -160,10 +179,6 @@ export function archiveTask(cwd: string, task: Task, opts: { auto?: boolean } = 
         },
         { touch: !opts.auto },
       );
-  if (!active && task.engine !== 'claude' && task.threadId)
-    void import('./engines/codex/sessions').then(({ archiveCodexSession }) =>
-      archiveCodexSession(cwd, task.threadId!),
-    );
 
   return next;
 }
@@ -350,6 +365,11 @@ function scanTasks(dir: string, seen = new Set<string>()): Task[] {
       return [];
     }
   });
+}
+
+/** Stored tasks that may still be running, read without reconciling. */
+export function runningTasks(cwd: string): Task[] {
+  return scanTasks(resolveTasksDir(cwd)).filter(task => ACTIVE_STATUSES.includes(task.status));
 }
 
 /** Task folders for background readers, without loading every archived record. */

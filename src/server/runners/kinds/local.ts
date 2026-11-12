@@ -14,7 +14,7 @@ import type { InboxEntry, InboxAck } from '../../tasks/queue';
 import { checkoutCache, releaseCheckout, inboxSocket, sendInbox } from '../../../runner/task';
 import { assertValidId, loadTask } from '../../../core/state';
 import { deleteTask } from '../../../core/task/actions';
-import { archiveCodexSession } from '../../../core/engines/codex/sessions';
+import { archiveCodexThreads } from '../../../core/engines/codex/sessions';
 import { conversationIds } from '../../../core/engines/history';
 import { readJsonFile } from '../../../utils/fsx';
 
@@ -144,7 +144,7 @@ export class LocalRunner implements Runner {
     const engine = engineTask(this.taskDir(taskId));
     if (!engine || engine.task.engine === 'claude') return;
 
-    await Promise.all(conversationIds(engine.task).map(id => archiveCodexSession(engine.cwd, id)));
+    await archiveCodexThreads(engine.cwd, conversationIds(engine.task));
   }
 
   private taskDir(taskId: string): string {

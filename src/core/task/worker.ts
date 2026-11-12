@@ -6,13 +6,16 @@ import process from 'node:process';
 import { processTiming } from '../../utils/process';
 
 import {
+  AUTO_ARCHIVE_MS,
   appendTaskLog,
   claimSteers,
   clearPendingSteers,
   withTaskAdmission,
   LIVE_STEER,
   loadTask,
+  resolveStateDir,
   resolveTaskDir,
+  runningTasks,
   scratchDir,
   touchActivity,
   writeTask,
@@ -23,6 +26,8 @@ import { createJsonlTail, writeJsonFileAtomic } from '../../utils/fsx';
 import { logEntry } from './view';
 import { runTurn } from '../engines/codex';
 import { runClaudeTurn } from '../engines/claude';
+import { archiveIdleCoderThreads } from '../engines/codex/sessions';
+import { conversationIds } from '../engines/history';
 import { SIMULATE_APPROVAL_ENV, codexApprovalHandler, escalate } from '../approvals';
 import {
   ACCESS_MODES,
@@ -535,4 +540,22 @@ export async function runWorker(cwd: string, task: Task): Promise<void> {
     });
     await inbox?.close();
   }
+  if (task.engine !== 'claude')
+    await archiveIdleCodexThreads(cwd).catch(error =>
+      console.error('coder: Codex thread cleanup failed', error),
+    );
+}
+
+// Once per auto-archive window per machine, so a failed archive is retried.
+async function archiveIdleCodexThreads(cwd: string): Promise<void> {
+  const stamp = path.join(resolveStateDir(cwd), 'codex-archive-sweep');
+  const lastRun = fs.statSync(stamp, { throwIfNoEntry: false })?.mtimeMs ?? 0;
+  if (Date.now() - lastRun < AUTO_ARCHIVE_MS) return;
+
+  fs.writeFileSync(stamp, '');
+  await archiveIdleCoderThreads(
+    cwd,
+    new Set(runningTasks(cwd).flatMap(conversationIds)),
+    AUTO_ARCHIVE_MS,
+  );
 }
